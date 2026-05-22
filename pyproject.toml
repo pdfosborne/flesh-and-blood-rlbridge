@@ -36,10 +36,10 @@ dev = [
 ]
 
 [project.entry-points."rlbridge.environments"]
-flesh-and-blood = "flesh_and_blood_rlip:register_environments"
+flesh-and-blood = "flesh_and_blood_rlbridge:register_environments"
 
 [project.entry-points."rlbridge.environment_mcp_tools"]
-flesh-and-blood = "flesh_and_blood_rlip:register_mcp_tools"
+flesh-and-blood = "flesh_and_blood_rlbridge:register_mcp_tools"
 
 [project.urls]
 Homepage = "https://github.com/pdfosborne/flesh-and-blood-rlbridge"
@@ -47,7 +47,7 @@ Repository = "https://github.com/pdfosborne/flesh-and-blood-rlbridge"
 Issues = "https://github.com/pdfosborne/flesh-and-blood-rlbridge/issues"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/flesh_and_blood_rlip"]
+packages = ["src/flesh_and_blood_rlbridge"]
 
 [tool.hatch.build.targets.sdist]
 include = ["src/", "README.md", "pyproject.toml"]

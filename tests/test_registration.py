@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from rlbridge.environments.registry import EnvironmentRegistry
 
-from flesh_and_blood_rlip import ALL_FAB_FACTORIES, register_environments
+from flesh_and_blood_rlbridge import ALL_FAB_FACTORIES, register_environments
 
 
 def test_register_environments() -> None:

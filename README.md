@@ -61,10 +61,10 @@ When installed, the rlbridge MCP plugin exposes FaB-specific tools:
 
 ## Card database
 
-Card and hero metadata live in `src/flesh_and_blood_rlip/card_db/`. To refresh from upstream exports:
+Card and hero metadata live in `src/flesh_and_blood_rlbridge/card_db/`. To refresh from upstream exports:
 
 ```bash
-cd src/flesh_and_blood_rlip/card_db
+cd src/flesh_and_blood_rlbridge/card_db
 python import_from_talishar.py --source /path/to/upstream_cards.json --out cards.json
 ```
 

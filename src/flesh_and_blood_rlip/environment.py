@@ -44,7 +44,7 @@ from rlbridge.protocol.messages import (
     SuggestedHyperparameters,
     TextSpace,
 )
-from rlbridge.environments.base import RLIPEnvironment, RLIPEnvironmentFactory
+from rlbridge.environments.base import rlbridgeEnvironment, rlbridgeEnvironmentFactory
 
 
 _FAB_DB_DIR = Path(__file__).with_name("card_db")
@@ -167,7 +167,7 @@ def _load_heroes() -> dict[str, Hero]:
     return heroes
 
 
-class FleshAndBloodEnvironment(RLIPEnvironment):
+class FleshAndBloodEnvironment(rlbridgeEnvironment):
     """Talishar-inspired RL simulator for Flesh and Blood gameplay loops."""
 
     def __init__(
@@ -1439,7 +1439,7 @@ class FleshAndBloodEnvironment(RLIPEnvironment):
         return "\n".join(lines)
 
 
-class FleshAndBloodFactory(RLIPEnvironmentFactory):
+class FleshAndBloodFactory(rlbridgeEnvironmentFactory):
     def __init__(
         self,
         env_id: str,
