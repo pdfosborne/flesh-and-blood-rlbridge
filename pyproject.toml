@@ -1,0 +1,60 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "flesh-and-blood-rlip"
+version = "0.1.0"
+description = "Talishar-inspired Flesh and Blood TCG environments for RLIP"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "RLIP Contributors" }]
+keywords = ["reinforcement-learning", "rlip", "flesh-and-blood", "tcg", "card-game"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Games/Entertainment :: Board Games",
+]
+
+dependencies = [
+    "rlip>=0.1.0",
+    "numpy>=1.24.0",
+    "pillow>=10.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "ruff>=0.4.0",
+]
+
+[project.entry-points."rlip.environments"]
+flesh-and-blood = "flesh_and_blood_rlip:register_environments"
+
+[project.entry-points."rlip.environment_mcp_tools"]
+flesh-and-blood = "flesh_and_blood_rlip:register_mcp_tools"
+
+[project.urls]
+Homepage = "https://github.com/your-org/flesh-and-blood-rlip"
+Repository = "https://github.com/your-org/flesh-and-blood-rlip"
+Issues = "https://github.com/your-org/flesh-and-blood-rlip/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/flesh_and_blood_rlip"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/", "README.md", "pyproject.toml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
