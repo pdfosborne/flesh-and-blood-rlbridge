@@ -1,4 +1,4 @@
-"""Flesh and Blood TCG environments for RLIP."""
+"""Flesh and Blood TCG environments for RL Bridge."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ __all__ = [
 def register_environments(registry: Any = None) -> int:
     """Register FaB environment factories with an RLIP registry."""
     if registry is None:
-        from rlip.environments.registry import registry as default_registry
+        from rlbridge.environments.registry import registry as default_registry
 
         registry = default_registry
 

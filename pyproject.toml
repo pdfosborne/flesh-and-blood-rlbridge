@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "flesh-and-blood-rlip"
 version = "0.1.0"
-description = "Talishar-inspired Flesh and Blood TCG environments for RLIP"
+description = "Talishar-inspired Flesh and Blood TCG environments for RL Bridge"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -24,7 +24,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "rlip>=0.1.0",
+    "rlbridge>=0.1.0",
     "numpy>=1.24.0",
     "pillow>=10.0.0",
 ]
@@ -35,16 +35,16 @@ dev = [
     "ruff>=0.4.0",
 ]
 
-[project.entry-points."rlip.environments"]
+[project.entry-points."rlbridge.environments"]
 flesh-and-blood = "flesh_and_blood_rlip:register_environments"
 
-[project.entry-points."rlip.environment_mcp_tools"]
+[project.entry-points."rlbridge.environment_mcp_tools"]
 flesh-and-blood = "flesh_and_blood_rlip:register_mcp_tools"
 
 [project.urls]
-Homepage = "https://github.com/your-org/flesh-and-blood-rlip"
-Repository = "https://github.com/your-org/flesh-and-blood-rlip"
-Issues = "https://github.com/your-org/flesh-and-blood-rlip/issues"
+Homepage = "https://github.com/pdfosborne/flesh-and-blood-rlip"
+Repository = "https://github.com/pdfosborne/flesh-and-blood-rlip"
+Issues = "https://github.com/pdfosborne/flesh-and-blood-rlip/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/flesh_and_blood_rlip"]

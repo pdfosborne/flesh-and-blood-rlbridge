@@ -12,9 +12,16 @@ This package is **not** bundled with RLIP. Install it separately when you want F
 | `FleshAndBlood-SelfPlay-v0` | Single policy controls both heroes |
 | `FleshAndBlood-DeckBuild-v0` | Two-phase deck selection before play |
 
-## Install (local development)
+## Install
 
-Install RLIP first, then this package in editable mode from a sibling checkout:
+Install RLIP first, then this package from GitHub:
+
+```bash
+pip install rlbridge
+pip install git+https://github.com/pdfosborne/flesh-and-blood-rlip.git
+```
+
+For local development from a checkout:
 
 ```bash
 cd /path/to/RL-IP
@@ -24,12 +31,12 @@ cd /path/to/flesh-and-blood
 pip install -e .
 ```
 
-RLIP discovers installed environments through the `rlip.environments` entry point and registers FaB-specific MCP tools through `rlip.environment_mcp_tools`.
+RL Bridge discovers installed environments through the `rlbridge.environments` entry point and registers FaB-specific MCP tools through `rlbridge.environment_mcp_tools`.
 
 ## Usage with RLIP
 
 ```python
-from rlip.environments.registry import registry
+from rlbridge.environments.registry import registry
 
 env = registry.create("FleshAndBlood-Talishar-v0", format="silver_age")
 result = env.reset(seed=0)
@@ -61,18 +68,6 @@ cd src/flesh_and_blood_rlip/card_db
 python import_from_talishar.py --source /path/to/upstream_cards.json --out cards.json
 ```
 
-## Publishing to GitHub
+## Repository
 
-```bash
-git init
-git add .
-git commit -m "Initial Flesh and Blood RLIP environments package"
-git remote add origin git@github.com:your-org/flesh-and-blood-rlip.git
-git push -u origin main
-```
-
-After publishing, users can install with:
-
-```bash
-pip install git+https://github.com/your-org/flesh-and-blood-rlip.git
-```
+https://github.com/pdfosborne/flesh-and-blood-rlip

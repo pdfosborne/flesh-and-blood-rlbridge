@@ -4,7 +4,7 @@
   "decks": [
     {
       "id": "fab_ira_crimson_haze_sage_aggro",
-      "name": "Ira, Crimson Haze – SAGE Aggro",
+      "name": "Ira, Crimson Haze - SAGE Aggro",
       "description": "hoski's Ira tournament deck (Silver Age). Ninja aggro with Pouncing Qi chains and tempo attacks.",
       "hero_id": "hero_ira_crimson_haze",
       "format": "silver_age",
@@ -39,7 +39,7 @@
     },
     {
       "id": "fab_fai_sage_chain",
-      "name": "Fai, Rising Rebellion – SAGE Phoenix Chain",
+      "name": "Fai, Rising Rebellion - SAGE Phoenix Chain",
       "description": "Fai blitz deck chaining rising phoenix attacks with Biting Breeze and Be Like Water tempo.",
       "hero_id": "hero_fai",
       "format": "silver_age",
@@ -65,7 +65,7 @@
     },
     {
       "id": "fab_dorinthea_sage_aggro",
-      "name": "Dorinthea – SAGE Warrior Aggro",
+      "name": "Dorinthea - SAGE Warrior Aggro",
       "description": "Dorinthea blitz deck built around Express Lightning chains and Valiant Thrust finishing turns.",
       "hero_id": "hero_dorinthea",
       "format": "silver_age",
@@ -90,7 +90,7 @@
     },
     {
       "id": "fab_dorinthea_qs_sage_aggro",
-      "name": "Dorinthea, Quicksilver Prodigy – SAGE Swords Aggro",
+      "name": "Dorinthea, Quicksilver Prodigy - SAGE Swords Aggro",
       "description": "Quicksilver Prodigy variant optimised for on-hit weapon triggers and wide attacks.",
       "hero_id": "hero_dorinthea_quicksilver_prodigy",
       "format": "silver_age",
@@ -115,7 +115,7 @@
     },
     {
       "id": "fab_bravo_sage_control",
-      "name": "Bravo – SAGE Guardian Control",
+      "name": "Bravo - SAGE Guardian Control",
       "description": "Bravo blitz control leaning on Thunder Quake and Macho Grande to win long games.",
       "hero_id": "hero_bravo",
       "format": "silver_age",
@@ -140,7 +140,7 @@
     },
     {
       "id": "fab_kayo_sage_aggro",
-      "name": "Kayo, Berserker Runt – SAGE Brute Aggro",
+      "name": "Kayo, Berserker Runt - SAGE Brute Aggro",
       "description": "Kayo hyper-aggro blitz deck, swinging Wrecker Romp and Deadwood Rumbler through defenses.",
       "hero_id": "hero_kayo_berserker_runt",
       "format": "silver_age",
@@ -165,7 +165,7 @@
     },
     {
       "id": "fab_kayo_sa_aggro2",
-      "name": "Kayo – SAGE Brute Wide Aggro",
+      "name": "Kayo - SAGE Brute Wide Aggro",
       "description": "Standard Kayo blitz list maximising combat damage each turn with generic support package.",
       "hero_id": "hero_kayo",
       "format": "silver_age",
@@ -189,7 +189,7 @@
     },
     {
       "id": "fab_dash_sage_combo",
-      "name": "Dash – SAGE Mechanologist Combo",
+      "name": "Dash - SAGE Mechanologist Combo",
       "description": "Dash blitz combo: heavy-hitter attacks backed by Firewall and Blessing of Ingenuity defenses.",
       "hero_id": "hero_dash",
       "format": "silver_age",
@@ -214,7 +214,7 @@
     },
     {
       "id": "fab_azalea_sage_control",
-      "name": "Azalea – SAGE Ranger Control",
+      "name": "Azalea - SAGE Ranger Control",
       "description": "Azalea blitz arrow deck using Chilling Icevein and Buzz Bolt with reactive traps.",
       "hero_id": "hero_azalea",
       "format": "silver_age",
@@ -239,7 +239,7 @@
     },
     {
       "id": "fab_lexi_sage_ice",
-      "name": "Lexi – SAGE Ranger Ice Control",
+      "name": "Lexi - SAGE Ranger Ice Control",
       "description": "Lexi blitz ice arrows deck, freezing opponent with Chilling Icevein and Cold Wave.",
       "hero_id": "hero_lexi",
       "format": "silver_age",
@@ -264,7 +264,7 @@
     },
     {
       "id": "fab_briar_sage_aggro",
-      "name": "Briar – SAGE Runeblade Aggro",
+      "name": "Briar - SAGE Runeblade Aggro",
       "description": "Briar blitz Runeblade generating runechants with Splintering Deadwood and Vantom Banshee.",
       "hero_id": "hero_briar",
       "format": "silver_age",
@@ -288,7 +288,7 @@
     },
     {
       "id": "fab_dromai_sage_tempo",
-      "name": "Dromai – SAGE Illusionist Dragon Tempo",
+      "name": "Dromai - SAGE Illusionist Dragon Tempo",
       "description": "Dromai blitz dragon token engine generating pressure with Spectral Rider and Herald cycle.",
       "hero_id": "hero_dromai",
       "format": "silver_age",
@@ -313,7 +313,7 @@
     },
     {
       "id": "fab_dorinthea_ironsong_cc_aggro",
-      "name": "Dorinthea Ironsong – Classic Constructed Aggro",
+      "name": "Dorinthea Ironsong - Classic Constructed Aggro",
       "description": "Dorinthea Ironsong CC deck pushing maximum Dawnblade on-hit damage every turn.",
       "hero_id": "hero_dorinthea_ironsong",
       "format": "classic_constructed",
@@ -337,7 +337,7 @@
     },
     {
       "id": "fab_chane_cc_shadow",
-      "name": "Chane, Bound by Shadow – Classic Constructed Shadow",
+      "name": "Chane, Bound by Shadow - Classic Constructed Shadow",
       "description": "Chane CC shadow Runeblade building deep runechant stacks with Vantom Banshee and Amplify.",
       "hero_id": "hero_chane_bound_by_shadow",
       "format": "classic_constructed",
@@ -361,7 +361,7 @@
     },
     {
       "id": "fab_kayo_armed_cc_aggro",
-      "name": "Kayo, Armed and Dangerous – Classic Constructed Brute Aggro",
+      "name": "Kayo, Armed and Dangerous - Classic Constructed Brute Aggro",
       "description": "Kayo CC brute maximising Wrecker Romp and Deadwood Rumbler with deep generic support.",
       "hero_id": "hero_kayo_armed_and_dangerous",
       "format": "classic_constructed",

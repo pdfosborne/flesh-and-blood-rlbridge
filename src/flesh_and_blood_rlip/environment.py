@@ -36,7 +36,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any, Optional
 
-from rlip.protocol.messages import (
+from rlbridge.protocol.messages import (
     EnvironmentInfo,
     RenderResult,
     ResetResult,
@@ -44,7 +44,7 @@ from rlip.protocol.messages import (
     SuggestedHyperparameters,
     TextSpace,
 )
-from rlip.environments.base import RLIPEnvironment, RLIPEnvironmentFactory
+from rlbridge.environments.base import RLIPEnvironment, RLIPEnvironmentFactory
 
 
 _FAB_DB_DIR = Path(__file__).with_name("card_db")
@@ -343,7 +343,7 @@ class FleshAndBloodEnvironment(RLIPEnvironment):
         parsed = self._normalize_action(action)
         if parsed not in legal:
             if legal == ["pass"]:
-                # Only pass is legal — coerce so policies never deadlock.
+                # Only pass is legal - coerce so policies never deadlock.
                 parsed = "pass"
             elif isinstance(action, int) and legal:
                 # RL agents emit integer indices; treat them as indices into the
@@ -1557,7 +1557,7 @@ def register_mcp_tools(
 
     def _build_agent(agent_type: str, hyperparams: dict[str, Any]) -> Any:
         if agent_type == "tabular_q":
-            mod = importlib.import_module("rlip.rl_agents.tabular_q")
+            mod = importlib.import_module("rlbridge.rl_agents.tabular_q")
             return mod.TabularQAgent(
                 alpha=float(hyperparams.get("alpha", 0.1)),
                 gamma=float(hyperparams.get("gamma", 0.99)),
@@ -1567,7 +1567,7 @@ def register_mcp_tools(
                 seed=hyperparams.get("seed"),
             )
         if agent_type == "dqn":
-            mod = importlib.import_module("rlip.rl_agents.dqn")
+            mod = importlib.import_module("rlbridge.rl_agents.dqn")
             return mod.DQNAgent(
                 hidden_size=int(hyperparams.get("hidden_size", 64)),
                 lr=float(hyperparams.get("lr", 1e-3)),
@@ -1581,7 +1581,7 @@ def register_mcp_tools(
                 seed=hyperparams.get("seed"),
             )
         if agent_type == "ppo":
-            mod = importlib.import_module("rlip.rl_agents.ppo")
+            mod = importlib.import_module("rlbridge.rl_agents.ppo")
             return mod.PPOAgent(
                 hidden_size=int(hyperparams.get("hidden_size", 64)),
                 lr_actor=float(hyperparams.get("lr_actor", 1e-3)),
@@ -2043,7 +2043,7 @@ def register_mcp_tools(
         Args:
             fabrary_url: Full fabrary.net deck URL, e.g.
                 "https://fabrary.net/decks/01KR40W4Z2ZS9EQPT6VT6CDSPE".
-            side: Descriptive context – "agent" or "opponent". Does not affect
+            side: Descriptive context - "agent" or "opponent". Does not affect
                 resolution but is included in response for clarity.
             format_name: FaB format (silver_age, classic_constructed, cc, sa, blitz).
                 Defaults to silver_age. The deck is verified against this format's

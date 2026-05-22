@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from rlip.environments.registry import EnvironmentRegistry
+from rlbridge.environments.registry import EnvironmentRegistry
 
 from flesh_and_blood_rlip import ALL_FAB_FACTORIES, register_environments
 
