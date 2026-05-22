@@ -1,6 +1,6 @@
 # Flesh and Blood Card Database
 
-This directory contains the packaged card metadata used by the RLIP
+This directory contains the packaged card metadata used by the rlbridge
 Talishar-inspired simulation environment.
 
 ## Files

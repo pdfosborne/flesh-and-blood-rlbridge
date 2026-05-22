@@ -1,8 +1,8 @@
-# Flesh and Blood RLIP Environments
+# Flesh and Blood rlbridge Environments
 
-Talishar-inspired [Flesh and Blood](https://fabtcg.com/) TCG simulation environments for [RLIP](https://github.com/your-org/rlip).
+Talishar-inspired [Flesh and Blood](https://fabtcg.com/) TCG simulation environments for [rlbridge](https://github.com/your-org/rlbridge).
 
-This package is **not** bundled with RLIP. Install it separately when you want FaB training, evaluation, or MCP tooling.
+This package is **not** bundled with rlbridge. Install it separately when you want FaB training, evaluation, or MCP tooling.
 
 ## Environments
 
@@ -14,11 +14,11 @@ This package is **not** bundled with RLIP. Install it separately when you want F
 
 ## Install
 
-Install RLIP first, then this package from GitHub:
+Install rlbridge first, then this package from GitHub:
 
 ```bash
 pip install rlbridge
-pip install git+https://github.com/pdfosborne/flesh-and-blood-rlip.git
+pip install git+https://github.com/pdfosborne/flesh-and-blood-rlbridge.git
 ```
 
 For local development from a checkout:
@@ -33,7 +33,7 @@ pip install -e .
 
 RL Bridge discovers installed environments through the `rlbridge.environments` entry point and registers FaB-specific MCP tools through `rlbridge.environment_mcp_tools`.
 
-## Usage with RLIP
+## Usage with rlbridge
 
 ```python
 from rlbridge.environments.registry import registry
@@ -51,7 +51,7 @@ registry.list_environments(namespace="flesh_and_blood")
 
 ## MCP tools
 
-When installed, the RLIP MCP plugin exposes FaB-specific tools:
+When installed, the rlbridge MCP plugin exposes FaB-specific tools:
 
 - `fab_list_deck_options`
 - `fab_estimate_win_probabilities`
@@ -70,4 +70,4 @@ python import_from_talishar.py --source /path/to/upstream_cards.json --out cards
 
 ## Repository
 
-https://github.com/pdfosborne/flesh-and-blood-rlip
+https://github.com/pdfosborne/flesh-and-blood-rlbridge

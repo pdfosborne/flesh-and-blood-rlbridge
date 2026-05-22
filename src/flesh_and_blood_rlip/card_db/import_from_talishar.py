@@ -1,4 +1,4 @@
-"""Build RLIP Flesh and Blood card/hero DB from a comprehensive upstream feed.
+"""Build rlbridge Flesh and Blood card/hero DB from a comprehensive upstream feed.
 
 Usage:
     python import_from_talishar.py --out-cards cards.json --out-heroes heroes.json
@@ -250,7 +250,7 @@ def derive_heroes(cards_raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Import card data into RLIP Flesh and Blood card_db format")
+    parser = argparse.ArgumentParser(description="Import card data into rlbridge Flesh and Blood card_db format")
     parser.add_argument("--source", default="", help="Path to source cards JSON file")
     parser.add_argument("--source-url", default=DEFAULT_SOURCE, help="URL to source cards JSON feed")
     parser.add_argument("--out-cards", required=True, help="Path to output cards.json file")

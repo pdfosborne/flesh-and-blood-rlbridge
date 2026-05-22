@@ -27,7 +27,7 @@ __all__ = [
 
 
 def register_environments(registry: Any = None) -> int:
-    """Register FaB environment factories with an RLIP registry."""
+    """Register FaB environment factories with an rlbridge registry."""
     if registry is None:
         from rlbridge.environments.registry import registry as default_registry
 

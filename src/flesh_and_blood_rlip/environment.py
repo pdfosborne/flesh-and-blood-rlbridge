@@ -1,5 +1,5 @@
 """
-RLIP Flesh and Blood Environment (Talishar-Inspired)
+rlbridge Flesh and Blood Environment (Talishar-Inspired)
 ====================================================
 A turn-based TCG simulator inspired by Talishar-style gameplay loops.
 

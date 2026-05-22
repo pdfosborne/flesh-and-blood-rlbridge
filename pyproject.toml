@@ -3,14 +3,14 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "flesh-and-blood-rlip"
+name = "flesh-and-blood-rlbridge"
 version = "0.1.0"
 description = "Talishar-inspired Flesh and Blood TCG environments for RL Bridge"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-authors = [{ name = "RLIP Contributors" }]
-keywords = ["reinforcement-learning", "rlip", "flesh-and-blood", "tcg", "card-game"]
+authors = [{ name = "rlbridge Contributors" }]
+keywords = ["reinforcement-learning", "rlbridge", "flesh-and-blood", "tcg", "card-game"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -42,9 +42,9 @@ flesh-and-blood = "flesh_and_blood_rlip:register_environments"
 flesh-and-blood = "flesh_and_blood_rlip:register_mcp_tools"
 
 [project.urls]
-Homepage = "https://github.com/pdfosborne/flesh-and-blood-rlip"
-Repository = "https://github.com/pdfosborne/flesh-and-blood-rlip"
-Issues = "https://github.com/pdfosborne/flesh-and-blood-rlip/issues"
+Homepage = "https://github.com/pdfosborne/flesh-and-blood-rlbridge"
+Repository = "https://github.com/pdfosborne/flesh-and-blood-rlbridge"
+Issues = "https://github.com/pdfosborne/flesh-and-blood-rlbridge/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/flesh_and_blood_rlip"]

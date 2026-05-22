@@ -1,4 +1,4 @@
-"""Smoke tests for flesh-and-blood-rlip registration."""
+"""Smoke tests for flesh-and-blood-rlbridge registration."""
 
 from __future__ import annotations
 

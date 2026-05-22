@@ -1,5 +1,5 @@
 {
-  "_comment": "Static Flesh and Blood deck database sourced from fabrary.net public links. Card names are matched to the RLIP card DB at load time; any card not found in the DB or illegal for its format is silently dropped. If the expanded deck exceeds format size limits the excess is randomly trimmed; if it falls short, generic filler cards are appended.",
+  "_comment": "Static Flesh and Blood deck database sourced from fabrary.net public links. Card names are matched to the rlbridge card DB at load time; any card not found in the DB or illegal for its format is silently dropped. If the expanded deck exceeds format size limits the excess is randomly trimmed; if it falls short, generic filler cards are appended.",
   "version": "1.1",
   "decks": [
     {
