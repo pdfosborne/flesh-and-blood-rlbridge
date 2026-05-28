@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import difflib
 import json
 import re
 import sys
@@ -53,6 +54,68 @@ def _card_name_key(name: str) -> str:
     text = text.replace("||", "//")
     text = text.replace(" // ", "//")
     return text.lower()
+
+
+def _canonical_name_key(name: str) -> str:
+    text = _card_name_key(name)
+    # Remove pitch/color hints and set markers that often vary by source.
+    text = re.sub(r"\((red|yellow|blue)\)", "", text)
+    text = re.sub(r"\[(red|yellow|blue)\]", "", text)
+    text = re.sub(r"\(([^)]*)\)", "", text)
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return " ".join(text.split()).strip()
+
+
+def _name_similarity_score(left_name_key: str, right_name_key: str) -> float:
+    left = _canonical_name_key(left_name_key)
+    right = _canonical_name_key(right_name_key)
+    if not left or not right:
+        return 0.0
+    if left == right:
+        return 1.0
+    ratio = difflib.SequenceMatcher(a=left, b=right).ratio()
+    left_tokens = set(left.split())
+    right_tokens = set(right.split())
+    overlap = len(left_tokens & right_tokens) / max(1, len(left_tokens | right_tokens))
+    # Weighted blend: sequence similarity + token overlap.
+    return 0.7 * ratio + 0.3 * overlap
+
+
+def _resolve_missing_name_aliases(
+    missing_name_keys: set[str],
+    candidate_name_keys: set[str],
+) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    if not missing_name_keys or not candidate_name_keys:
+        return aliases
+
+    candidate_by_canonical: dict[str, str] = {}
+    for cand in candidate_name_keys:
+        canonical = _canonical_name_key(cand)
+        if canonical and canonical not in candidate_by_canonical:
+            candidate_by_canonical[canonical] = cand
+
+    for missing in missing_name_keys:
+        if missing in candidate_name_keys:
+            aliases[missing] = missing
+            continue
+
+        canonical = _canonical_name_key(missing)
+        if canonical and canonical in candidate_by_canonical:
+            aliases[missing] = candidate_by_canonical[canonical]
+            continue
+
+        best_match = ""
+        best_score = 0.0
+        for cand in candidate_name_keys:
+            score = _name_similarity_score(missing, cand)
+            if score > best_score:
+                best_score = score
+                best_match = cand
+        if best_match and best_score >= 0.88:
+            aliases[missing] = best_match
+
+    return aliases
 
 
 def _as_int(value: Any, default: int = 0) -> int:
@@ -356,6 +419,7 @@ def main() -> int:
     needed_card_ids: set[str] = set(card_id_by_key.values())
     detail_records_by_key: dict[tuple[str, int], dict[str, Any]] = {}
     unresolved_missing: list[str] = []
+    fuzzy_aliases: dict[str, str] = {}
     detail_workers = max(1, int(args.detail_workers))
     progress.stage(f"Fetching detailed card records for {len(needed_card_ids)} card ids (workers={detail_workers})")
 
@@ -374,6 +438,20 @@ def main() -> int:
                 continue
             key, local_record = record
             detail_records_by_key[key] = local_record
+
+    detail_name_keys = {key[0] for key in detail_records_by_key.keys()}
+    fuzzy_aliases = _resolve_missing_name_aliases(missing_name_keys, detail_name_keys)
+    # Add alias keys so downstream lookups can reuse matched detail records.
+    if fuzzy_aliases:
+        alias_records: dict[tuple[str, int], dict[str, Any]] = {}
+        for missing_key, candidate_key in fuzzy_aliases.items():
+            for key, rec in detail_records_by_key.items():
+                if key[0] == candidate_key:
+                    alias_key = (missing_key, key[1])
+                    if alias_key not in detail_records_by_key:
+                        alias_records[alias_key] = rec
+        if alias_records:
+            detail_records_by_key.update(alias_records)
 
     for name_key in sorted(missing_name_keys):
         found = any(key[0] == name_key for key in detail_records_by_key.keys())
@@ -420,6 +498,8 @@ def main() -> int:
     print(f"Official card records matched: {len(detail_records_by_key)}")
     print(f"Cards added: {len(added_cards)}")
     print(f"Legality rows updated: {legality_updates}")
+    if fuzzy_aliases:
+        print(f"Fuzzy name aliases resolved: {len(fuzzy_aliases)}")
     if unresolved_missing:
         preview = ", ".join(unresolved_missing[:10])
         extra = f" (+{len(unresolved_missing)-10} more)" if len(unresolved_missing) > 10 else ""

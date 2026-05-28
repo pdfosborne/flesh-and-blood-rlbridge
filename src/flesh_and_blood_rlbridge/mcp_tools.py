@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import importlib
 import json
 import math
+import pickle
 import random
 import re
 import subprocess
@@ -15,8 +17,12 @@ from .environment_factory import FleshAndBloodFactory
 _FAB_DB_DIR = Path(__file__).with_name("card_db")
 _FABRARY_DECKS_PATH = _FAB_DB_DIR / "fabrary_decks.json"
 _UPDATE_CARDS_SCRIPT_PATH = _FAB_DB_DIR / "update_cards_db_from_fabtcg.py"
+_FAB_AGENT_CACHE_DIR = _FAB_DB_DIR / "agent_cache"
 
 _FAB_CUSTOM_TOOLS_REGISTERED = False
+_FAB_REGISTERED_MATCHUP_ENVS: set[str] = set()
+_FAB_CURRENT_AGENT_KEY: Optional[str] = None
+_FAB_CURRENT_AGENT: Any = None
 
 
 def register_mcp_tools(
@@ -200,10 +206,86 @@ def register_mcp_tools(
         finally:
             env.close()
 
+    def _cache_paths(matchup_cache_key: str) -> tuple[Path, Path]:
+        digest = hashlib.sha1(matchup_cache_key.encode("utf-8")).hexdigest()
+        return (
+            _FAB_AGENT_CACHE_DIR / f"{digest}.pkl",
+            _FAB_AGENT_CACHE_DIR / f"{digest}.json",
+        )
+
+    def _load_cached_matchup_entry(matchup_cache_key: str) -> tuple[dict[str, Any], Any, bool]:
+        global _FAB_CURRENT_AGENT_KEY, _FAB_CURRENT_AGENT
+
+        agent_path, meta_path = _cache_paths(matchup_cache_key)
+        metadata: dict[str, Any] = {}
+        if meta_path.exists():
+            try:
+                raw = json.loads(meta_path.read_text(encoding="utf-8"))
+                if isinstance(raw, dict):
+                    metadata = raw
+            except Exception:
+                metadata = {}
+
+        if _FAB_CURRENT_AGENT_KEY != matchup_cache_key:
+            _FAB_CURRENT_AGENT_KEY = None
+            _FAB_CURRENT_AGENT = None
+
+        if _FAB_CURRENT_AGENT_KEY == matchup_cache_key and _FAB_CURRENT_AGENT is not None:
+            return metadata, _FAB_CURRENT_AGENT, True
+
+        if not agent_path.exists():
+            return metadata, None, False
+
+        try:
+            with agent_path.open("rb") as fh:
+                agent = pickle.load(fh)  # noqa: S301
+        except Exception:
+            return metadata, None, False
+
+        _FAB_CURRENT_AGENT_KEY = matchup_cache_key
+        _FAB_CURRENT_AGENT = agent
+        return metadata, agent, True
+
+    def _save_cached_matchup_entry(matchup_cache_key: str, *, metadata: dict[str, Any], agent: Any) -> None:
+        global _FAB_CURRENT_AGENT_KEY, _FAB_CURRENT_AGENT
+
+        _FAB_AGENT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        agent_path, meta_path = _cache_paths(matchup_cache_key)
+
+        with agent_path.open("wb") as fh:
+            pickle.dump(agent, fh)
+        meta_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+
+        _FAB_CURRENT_AGENT_KEY = matchup_cache_key
+        _FAB_CURRENT_AGENT = agent
+
+    def _list_cached_agent_entries() -> list[dict[str, Any]]:
+        if not _FAB_AGENT_CACHE_DIR.exists():
+            return []
+        entries: list[dict[str, Any]] = []
+        for meta_path in sorted(_FAB_AGENT_CACHE_DIR.glob("*.json")):
+            try:
+                raw = json.loads(meta_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if not isinstance(raw, dict):
+                continue
+            cache_key = str(raw.get("cache_key", ""))
+            if not cache_key:
+                continue
+            agent_path, _ = _cache_paths(cache_key)
+            item = dict(raw)
+            item["agent_file_exists"] = agent_path.exists()
+            item["metadata_file"] = str(meta_path)
+            entries.append(item)
+        return entries
+
     def _evaluate_deck_vs_matchup(
         *,
         deck_option: dict[str, Any],
         matchup_option: dict[str, Any],
+        deck_key: str,
+        matchup_key: str,
         format_name: str,
         inner_agent_type: str,
         inner_train_episodes: int,
@@ -211,6 +293,21 @@ def register_mcp_tools(
         inner_max_steps: int,
         seed: Optional[int],
     ) -> dict[str, Any]:
+        matchup_cache_key = "|".join(
+            [
+                str(format_name),
+                str(inner_agent_type),
+                str(deck_key),
+                str(matchup_key),
+                str(deck_option.get("hero_id", "")),
+                str(matchup_option.get("hero_id", "")),
+                str(deck_option.get("style", "balanced")),
+                str(matchup_option.get("style", "balanced")),
+                str(int(deck_option.get("deck_size", 40) or 40)),
+            ]
+        )
+        cached_metadata, cached_agent, used_cached_agent = _load_cached_matchup_entry(matchup_cache_key)
+
         env_kwargs: dict[str, Any] = {
             "render_mode": None,
             "format": format_name,
@@ -221,17 +318,26 @@ def register_mcp_tools(
             "opponent_deck_style": str(matchup_option.get("style", "balanced")),
         }
 
-        agent = _build_agent(inner_agent_type, {})
-        train_env = registry.create("FleshAndBlood-Talishar-v0", **env_kwargs)
-        try:
-            train_result = agent.train(
-                train_env,
-                n_episodes=inner_train_episodes,
-                max_steps=inner_max_steps,
-                seed=seed,
-            )
-        finally:
-            train_env.close()
+        train_result: Any = None
+        if cached_agent is not None and bool(cached_metadata.get("converged", False)):
+            agent = cached_agent
+            trained_now = False
+        else:
+            agent = cached_agent if cached_agent is not None else _build_agent(inner_agent_type, {})
+            train_env = registry.create("FleshAndBlood-Talishar-v0", **env_kwargs)
+            try:
+                prior_eps = int(cached_metadata.get("total_train_episodes", 0))
+                seed_offset = 0 if seed is None else int(seed)
+                train_seed = seed_offset + prior_eps
+                train_result = agent.train(
+                    train_env,
+                    n_episodes=inner_train_episodes,
+                    max_steps=inner_max_steps,
+                    seed=train_seed,
+                )
+            finally:
+                train_env.close()
+            trained_now = True
 
         eval_env = registry.create("FleshAndBlood-Talishar-v0", **env_kwargs)
         eval_scores: list[float] = []
@@ -250,10 +356,52 @@ def register_mcp_tools(
             eval_env.close()
 
         win_rate = (sum(eval_scores) / len(eval_scores)) if eval_scores else 0.5
+        previous_win_rate = float(cached_metadata.get("last_win_rate", 0.5))
+        delta = abs(float(win_rate) - previous_win_rate)
+        stable_rounds = int(cached_metadata.get("stable_rounds", 0))
+        if delta < 0.01:
+            stable_rounds += 1
+        else:
+            stable_rounds = 0
+        total_train_episodes = int(cached_metadata.get("total_train_episodes", 0)) + (
+            inner_train_episodes if trained_now else 0
+        )
+        converged = stable_rounds >= 3 and total_train_episodes >= max(inner_train_episodes * 3, 30)
+
+        if trained_now and train_result is not None:
+            train_mean_reward = float(train_result.mean_reward)
+            train_best_reward = float(train_result.best_reward)
+        else:
+            train_mean_reward = float(cached_metadata.get("last_train_mean_reward", 0.0))
+            train_best_reward = float(cached_metadata.get("last_train_best_reward", 0.0))
+
+        cache_record = {
+            "cache_key": matchup_cache_key,
+            "format_name": format_name,
+            "last_win_rate": float(win_rate),
+            "stable_rounds": stable_rounds,
+            "total_train_episodes": total_train_episodes,
+            "converged": converged,
+            "deck_key": deck_key,
+            "matchup_key": matchup_key,
+            "env_kwargs": dict(env_kwargs),
+            "inner_agent_type": inner_agent_type,
+            "last_train_mean_reward": train_mean_reward,
+            "last_train_best_reward": train_best_reward,
+        }
+        _save_cached_matchup_entry(matchup_cache_key, metadata=cache_record, agent=agent)
+
         return {
             "win_rate": float(win_rate),
-            "train_mean_reward": float(train_result.mean_reward),
-            "train_best_reward": float(train_result.best_reward),
+            "train_mean_reward": train_mean_reward,
+            "train_best_reward": train_best_reward,
+            "cached_agent_key": matchup_cache_key,
+            "used_cached_agent": used_cached_agent,
+            "trained_now": trained_now,
+            "total_train_episodes": total_train_episodes,
+            "converged": converged,
+            "convergence_delta": float(delta),
+            "stable_rounds": stable_rounds,
             "_agent": agent,
             "_train_result": train_result,
         }
@@ -349,6 +497,8 @@ def register_mcp_tools(
             stats = _evaluate_deck_vs_matchup(
                 deck_option=deck_option,
                 matchup_option=matchup_option,
+                deck_key=deck_key,
+                matchup_key=matchup_key,
                 format_name=format_name,
                 inner_agent_type=inner_agent_type,
                 inner_train_episodes=inner_train_episodes,
@@ -380,13 +530,16 @@ def register_mcp_tools(
         # If the plugin passed a trained_agents store, register the agent so
         # rl_render_policy can replay the policy directly.
         if trained_agents is not None and _trained_agent is not None:
-            import uuid as _uuid  # noqa: PLC0415
-
-            _agent_id = _uuid.uuid4().hex[:12]
-            _registered_env_id = f"FleshAndBlood-matchup-{_agent_id}"
-
             # Register a factory baked with this matchup's hero / format so
             # rl_render_policy can recreate the exact environment.
+            _key_digest = hashlib.sha1(
+                (
+                    f"{format_name}|{inner_agent_type}|{deck_key}|{matchup_key}|"
+                    f"{deck_option.get('hero_id', '')}|{matchup_option.get('hero_id', '')}"
+                ).encode("utf-8")
+            ).hexdigest()[:12]
+            _agent_id = f"fabm_{_key_digest}"
+            _registered_env_id = f"FleshAndBlood-matchup-{_key_digest}"
             matchup_factory = FleshAndBloodFactory(
                 _registered_env_id,
                 agent_hero_id=str(deck_option.get("hero_id", "hero_dorinthea_ironsong")),
@@ -394,7 +547,9 @@ def register_mcp_tools(
                 deck_size=int(deck_option.get("deck_size", 40) or 40),
                 format=format_name,
             )
-            registry.register(matchup_factory)
+            if _registered_env_id not in _FAB_REGISTERED_MATCHUP_ENVS:
+                registry.register(matchup_factory)
+                _FAB_REGISTERED_MATCHUP_ENVS.add(_registered_env_id)
 
             trained_agents[_agent_id] = {
                 "agent": _trained_agent,
@@ -409,6 +564,8 @@ def register_mcp_tools(
                     "seed": seed,
                     "deck_key": deck_key,
                     "matchup_key": matchup_key,
+                    "cached_agent_key": result.get("cached_agent_key"),
+                    "converged": bool(result.get("converged", False)),
                 },
             }
 
@@ -463,6 +620,8 @@ def register_mcp_tools(
                 stats = _evaluate_deck_vs_matchup(
                     deck_option=deck_option,
                     matchup_option=matchup,
+                    deck_key=deck_key,
+                    matchup_key=str(matchup.get("key", "")),
                     format_name=format_name,
                     inner_agent_type=inner_agent_type,
                     inner_train_episodes=inner_train_episodes,
@@ -732,5 +891,56 @@ def register_mcp_tools(
             indent=2,
         )
 
+    @mcp.tool()
+    def fab_cached_opponent_agents(
+        deck_key: Optional[str] = None,
+        matchup_key: Optional[str] = None,
+        format_name: str = "silver_age",
+        inner_agent_type: str = "tabular_q",
+        use_if_available: bool = True,
+        limit: int = 50,
+    ) -> str:
+        """List cached matchup opponent agents and optionally load one for immediate use."""
+        entries = _list_cached_agent_entries()
+
+        filtered = [
+            e
+            for e in entries
+            if (deck_key is None or str(e.get("deck_key", "")) == str(deck_key))
+            and (matchup_key is None or str(e.get("matchup_key", "")) == str(matchup_key))
+            and (format_name is None or str(e.get("format_name", "")) == str(format_name))
+            and (inner_agent_type is None or str(e.get("inner_agent_type", "")) == str(inner_agent_type))
+        ]
+
+        filtered.sort(
+            key=lambda e: (
+                bool(e.get("converged", False)),
+                float(e.get("last_win_rate", 0.0)),
+                int(e.get("total_train_episodes", 0)),
+            ),
+            reverse=True,
+        )
+        if int(limit) > 0:
+            filtered = filtered[: int(limit)]
+
+        loaded_cache_key: Optional[str] = None
+        loaded_successfully = False
+        if use_if_available and filtered:
+            target_key = str(filtered[0].get("cache_key", ""))
+            if target_key:
+                _, loaded_agent, used_cached = _load_cached_matchup_entry(target_key)
+                loaded_cache_key = target_key
+                loaded_successfully = bool(used_cached and loaded_agent is not None)
+
+        result = {
+            "cache_dir": str(_FAB_AGENT_CACHE_DIR),
+            "total_cached_entries": len(entries),
+            "matched_entries": len(filtered),
+            "loaded_cache_key": loaded_cache_key,
+            "loaded_successfully": loaded_successfully,
+            "entries": filtered,
+        }
+        return json.dumps(result, indent=2)
+
     _FAB_CUSTOM_TOOLS_REGISTERED = True
-    return 6
+    return 7
