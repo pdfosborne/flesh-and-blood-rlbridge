@@ -762,7 +762,7 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             return self._card_vault_cards_cache
 
         try:
-            importer = importlib.import_module("flesh_and_blood_rlip.card_db.import_from_talishar")
+            importer = importlib.import_module("flesh_and_blood_rlbridge.card_db.import_from_talishar")
         except Exception:
             self._card_vault_cards_cache = []
             return self._card_vault_cards_cache
@@ -810,7 +810,7 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             return 0
 
         try:
-            importer = importlib.import_module("flesh_and_blood_rlip.card_db.import_from_talishar")
+            importer = importlib.import_module("flesh_and_blood_rlbridge.card_db.import_from_talishar")
             normalize_record = getattr(importer, "normalize_record", None)
             if normalize_record is None:
                 return 0
