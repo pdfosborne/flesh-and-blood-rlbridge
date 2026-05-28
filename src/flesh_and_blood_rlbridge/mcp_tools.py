@@ -280,6 +280,21 @@ def register_mcp_tools(
             entries.append(item)
         return entries
 
+    def _resolve_supported_formats(format_names_csv: Optional[str]) -> list[str]:
+        if format_names_csv:
+            requested = [f.strip() for f in str(format_names_csv).split(",") if f.strip()]
+        else:
+            requested = ["silver_age", "classic_constructed"]
+
+        supported: list[str] = []
+        for fmt in requested:
+            try:
+                _ = _get_deck_options(fmt, seed=None)
+                supported.append(fmt)
+            except Exception:
+                continue
+        return supported
+
     def _evaluate_deck_vs_matchup(
         *,
         deck_option: dict[str, Any],
@@ -942,5 +957,137 @@ def register_mcp_tools(
         }
         return json.dumps(result, indent=2)
 
+    @mcp.tool()
+    def fab_full_matchup_win_summary(
+        format_names_csv: Optional[str] = None,
+        inner_agent_type: str = "tabular_q",
+        inner_train_episodes: int = 25,
+        inner_eval_episodes: int = 5,
+        inner_max_steps: int = 200,
+        max_decks_per_format: Optional[int] = None,
+        seed: Optional[int] = None,
+    ) -> str:
+        """Return full directed deck-vs-deck win% summaries for each supported format."""
+        formats = _resolve_supported_formats(format_names_csv)
+        if not formats:
+            return json.dumps(
+                {
+                    "error": "No supported formats were found for summary generation.",
+                    "requested_formats": format_names_csv,
+                },
+                indent=2,
+            )
+
+        all_formats: list[dict[str, Any]] = []
+        for fmt in formats:
+            try:
+                options = _get_deck_options(fmt, seed)
+            except Exception as exc:
+                all_formats.append(
+                    {
+                        "format": fmt,
+                        "error": f"Failed to load deck options: {exc}",
+                        "decks_count": 0,
+                        "directed_matchups": 0,
+                        "matchups": [],
+                        "deck_summaries": [],
+                    }
+                )
+                continue
+
+            if max_decks_per_format is not None and int(max_decks_per_format) > 0:
+                options = options[: int(max_decks_per_format)]
+
+            matchups: list[dict[str, Any]] = []
+            deck_summaries: list[dict[str, Any]] = []
+
+            for i, deck_option in enumerate(options):
+                deck_key = str(deck_option.get("key", ""))
+                deck_label = str(deck_option.get("label", deck_key))
+
+                row_scores: list[float] = []
+                row_errors = 0
+                for j, matchup_option in enumerate(options):
+                    matchup_key = str(matchup_option.get("key", ""))
+                    if i == j or deck_key == matchup_key:
+                        continue
+
+                    try:
+                        stats = _evaluate_deck_vs_matchup(
+                            deck_option=deck_option,
+                            matchup_option=matchup_option,
+                            deck_key=deck_key,
+                            matchup_key=matchup_key,
+                            format_name=fmt,
+                            inner_agent_type=inner_agent_type,
+                            inner_train_episodes=inner_train_episodes,
+                            inner_eval_episodes=inner_eval_episodes,
+                            inner_max_steps=inner_max_steps,
+                            seed=seed,
+                        )
+                        win_rate = float(stats.get("win_rate", 0.5))
+                        row_scores.append(win_rate)
+                        matchups.append(
+                            {
+                                "deck_key": deck_key,
+                                "deck_label": deck_label,
+                                "matchup_key": matchup_key,
+                                "matchup_label": str(matchup_option.get("label", matchup_key)),
+                                "win_rate": round(win_rate, 4),
+                                "converged": bool(stats.get("converged", False)),
+                                "total_train_episodes": int(stats.get("total_train_episodes", 0)),
+                                "used_cached_agent": bool(stats.get("used_cached_agent", False)),
+                                "error": None,
+                            }
+                        )
+                    except Exception as exc:
+                        row_errors += 1
+                        matchups.append(
+                            {
+                                "deck_key": deck_key,
+                                "deck_label": deck_label,
+                                "matchup_key": matchup_key,
+                                "matchup_label": str(matchup_option.get("label", matchup_key)),
+                                "win_rate": 0.5,
+                                "converged": False,
+                                "total_train_episodes": 0,
+                                "used_cached_agent": False,
+                                "error": str(exc),
+                            }
+                        )
+
+                deck_summaries.append(
+                    {
+                        "deck_key": deck_key,
+                        "deck_label": deck_label,
+                        "matchups_evaluated": len(row_scores) + row_errors,
+                        "mean_win_rate": round(sum(row_scores) / len(row_scores), 4) if row_scores else 0.5,
+                        "errors": row_errors,
+                    }
+                )
+
+            all_formats.append(
+                {
+                    "format": fmt,
+                    "error": None,
+                    "decks_count": len(options),
+                    "directed_matchups": len(matchups),
+                    "matchups": matchups,
+                    "deck_summaries": deck_summaries,
+                }
+            )
+
+        result = {
+            "requested_formats": format_names_csv,
+            "resolved_formats": formats,
+            "inner_agent_type": inner_agent_type,
+            "inner_train_episodes": int(inner_train_episodes),
+            "inner_eval_episodes": int(inner_eval_episodes),
+            "inner_max_steps": int(inner_max_steps),
+            "max_decks_per_format": max_decks_per_format,
+            "formats": all_formats,
+        }
+        return json.dumps(result, indent=2)
+
     _FAB_CUSTOM_TOOLS_REGISTERED = True
-    return 7
+    return 8

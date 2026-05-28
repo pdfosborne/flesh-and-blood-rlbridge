@@ -57,13 +57,22 @@ def _card_name_key(name: str) -> str:
 
 
 def _canonical_name_key(name: str) -> str:
-    text = _card_name_key(name)
+    raw = str(name or "").strip()
+    # Handle importer-style names like "bear-hug-1---Bear Hug".
+    if "---" in raw:
+        raw = raw.rsplit("---", 1)[-1]
+
+    text = _card_name_key(raw)
     # Remove pitch/color hints and set markers that often vary by source.
     text = re.sub(r"\((red|yellow|blue)\)", "", text)
     text = re.sub(r"\[(red|yellow|blue)\]", "", text)
     text = re.sub(r"\(([^)]*)\)", "", text)
     text = re.sub(r"[^a-z0-9]+", " ", text)
-    return " ".join(text.split()).strip()
+    tokens = [tok for tok in text.split() if tok]
+    # Remove common non-card suffix tokens from deck exports.
+    while tokens and tokens[-1] in {"blitz", "cc", "constructed"}:
+        tokens.pop()
+    return " ".join(tokens).strip()
 
 
 def _name_similarity_score(left_name_key: str, right_name_key: str) -> float:
@@ -84,6 +93,8 @@ def _name_similarity_score(left_name_key: str, right_name_key: str) -> float:
 def _resolve_missing_name_aliases(
     missing_name_keys: set[str],
     candidate_name_keys: set[str],
+    *,
+    min_score: float = 0.88,
 ) -> dict[str, str]:
     aliases: dict[str, str] = {}
     if not missing_name_keys or not candidate_name_keys:
@@ -112,10 +123,73 @@ def _resolve_missing_name_aliases(
             if score > best_score:
                 best_score = score
                 best_match = cand
-        if best_match and best_score >= 0.88:
+        if best_match and best_score >= float(min_score):
             aliases[missing] = best_match
 
     return aliases
+
+
+def _title_case_from_key(name_key: str) -> str:
+    parts = [p for p in str(name_key).split(" ") if p]
+    return " ".join(p.capitalize() for p in parts)
+
+
+def _missing_name_query_variants(name_key: str) -> list[str]:
+    canonical = _canonical_name_key(name_key)
+    if not canonical:
+        return []
+
+    variants: list[str] = []
+    seen: set[str] = set()
+
+    def _add(value: str) -> None:
+        text = str(value or "").strip()
+        if not text:
+            return
+        lowered = text.lower()
+        if lowered in seen:
+            return
+        seen.add(lowered)
+        variants.append(text)
+
+    _add(_title_case_from_key(canonical))
+    _add(canonical)
+    _add(canonical.replace(" ", ""))
+    _add(canonical.replace(" ", "-"))
+
+    tokens = canonical.split()
+    if tokens and tokens[-1] in {"blitz", "cc", "constructed"}:
+        trimmed = " ".join(tokens[:-1]).strip()
+        if trimmed:
+            _add(_title_case_from_key(trimmed))
+            _add(trimmed)
+            _add(trimmed.replace(" ", ""))
+            _add(trimmed.replace(" ", "-"))
+
+    if tokens and tokens[0] != "the":
+        with_the = "the " + canonical
+        _add(_title_case_from_key(with_the))
+        _add(with_the)
+
+    return variants
+
+
+def _ingest_find_cards_rows(response: Any, card_id_by_key: dict[tuple[str, str], str]) -> int:
+    if not isinstance(response, list):
+        return 0
+    added = 0
+    for row in response:
+        if not isinstance(row, dict):
+            continue
+        raw_name = str(row.get("name", "")).strip()
+        raw_color = str(row.get("color", "")).strip().lower()
+        raw_card_id = str(row.get("card_id", "")).strip()
+        if raw_name and raw_card_id:
+            key = (_card_name_key(raw_name), raw_color)
+            if key not in card_id_by_key:
+                added += 1
+            card_id_by_key[key] = raw_card_id
+    return added
 
 
 def _as_int(value: Any, default: int = 0) -> int:
@@ -363,9 +437,16 @@ def main() -> int:
     local_cards: list[dict[str, Any]] = [rec for rec in local_cards_raw if isinstance(rec, dict)]
 
     deck_names = _read_deck_card_names(decks_path)
+    display_name_by_key = {_card_name_key(name): name for name in sorted(deck_names)}
     local_name_keys = {_card_name_key(rec.get("name", "")) for rec in local_cards if isinstance(rec, dict)}
-    missing_name_keys = {_card_name_key(name) for name in deck_names if _card_name_key(name) not in local_name_keys}
+    local_canonical_name_keys = {_canonical_name_key(name_key) for name_key in local_name_keys if name_key}
+    missing_name_keys = {
+        _card_name_key(name)
+        for name in deck_names
+        if _canonical_name_key(name) not in local_canonical_name_keys
+    }
     deck_name_keys = {_card_name_key(name) for name in deck_names}
+    deck_canonical_name_keys = {_canonical_name_key(name) for name in deck_names}
     progress.stage(f"Loaded {len(local_cards)} local cards and {len(deck_names)} unique deck card names")
 
     lookup_payload: list[dict[str, str]] = []
@@ -377,7 +458,7 @@ def main() -> int:
         key_to_local_cards.setdefault(key, []).append(rec)
         if args.legality_scope == "all":
             local_keys_to_refresh.add(key)
-        elif key[0] in deck_name_keys:
+        elif key[0] in deck_name_keys or _canonical_name_key(key[0]) in deck_canonical_name_keys:
             local_keys_to_refresh.add(key)
 
     for name_key, pitch in sorted(local_keys_to_refresh):
@@ -405,16 +486,7 @@ def main() -> int:
     for batch_idx, batch in enumerate(lookup_batches, start=1):
         progress.tick("Lookup batch", batch_idx, len(lookup_batches), every=1)
         response = _http_json_post(API_FIND_CARDS_URL, batch)
-        if not isinstance(response, list):
-            continue
-        for row in response:
-            if not isinstance(row, dict):
-                continue
-            raw_name = str(row.get("name", "")).strip()
-            raw_color = str(row.get("color", "")).strip().lower()
-            raw_card_id = str(row.get("card_id", "")).strip()
-            if raw_name and raw_card_id:
-                card_id_by_key[(_card_name_key(raw_name), raw_color)] = raw_card_id
+        _ingest_find_cards_rows(response, card_id_by_key)
 
     needed_card_ids: set[str] = set(card_id_by_key.values())
     detail_records_by_key: dict[tuple[str, int], dict[str, Any]] = {}
@@ -440,7 +512,13 @@ def main() -> int:
             detail_records_by_key[key] = local_record
 
     detail_name_keys = {key[0] for key in detail_records_by_key.keys()}
-    fuzzy_aliases = _resolve_missing_name_aliases(missing_name_keys, detail_name_keys)
+    # Second-pass: allow aliases against both newly fetched names and existing local names.
+    alias_candidates = set(detail_name_keys) | set(local_name_keys)
+    fuzzy_aliases = _resolve_missing_name_aliases(
+        missing_name_keys,
+        alias_candidates,
+        min_score=0.82,
+    )
     # Add alias keys so downstream lookups can reuse matched detail records.
     if fuzzy_aliases:
         alias_records: dict[tuple[str, int], dict[str, Any]] = {}
@@ -453,8 +531,76 @@ def main() -> int:
         if alias_records:
             detail_records_by_key.update(alias_records)
 
+    unresolved_pre_fallback = sorted(
+        [
+            name_key
+            for name_key in missing_name_keys
+            if not any(key[0] == name_key for key in detail_records_by_key.keys())
+            and name_key not in fuzzy_aliases
+        ]
+    )
+    fallback_new_rows = 0
+    fallback_new_details = 0
+    if unresolved_pre_fallback:
+        fallback_payload: list[dict[str, str]] = []
+        for name_key in unresolved_pre_fallback:
+            display_name = display_name_by_key.get(name_key, _title_case_from_key(name_key))
+            for variant in _missing_name_query_variants(display_name):
+                fallback_payload.append({"name": variant, "color": ""})
+
+        fallback_batches = list(_batched(fallback_payload, size=100))
+        progress.stage(
+            f"Fallback lookup for unresolved names in {len(fallback_batches)} batches ({len(unresolved_pre_fallback)} names)"
+        )
+        for batch_idx, batch in enumerate(fallback_batches, start=1):
+            progress.tick("Fallback lookup batch", batch_idx, len(fallback_batches), every=1)
+            response = _http_json_post(API_FIND_CARDS_URL, batch)
+            fallback_new_rows += _ingest_find_cards_rows(response, card_id_by_key)
+
+        new_needed_ids = sorted(needed_card_ids.symmetric_difference(set(card_id_by_key.values())))
+        new_needed_ids = [cid for cid in new_needed_ids if cid not in needed_card_ids]
+        if new_needed_ids:
+            progress.stage(
+                f"Fetching {len(new_needed_ids)} additional detail records from fallback lookup (workers={detail_workers})"
+            )
+            with ThreadPoolExecutor(max_workers=detail_workers) as executor:
+                future_to_card_id = {executor.submit(_fetch_card_detail_record, card_id): card_id for card_id in new_needed_ids}
+                for idx, future in enumerate(as_completed(future_to_card_id), start=1):
+                    progress.tick("Fallback detail fetch", idx, len(new_needed_ids), every=25)
+                    card_id = future_to_card_id[future]
+                    try:
+                        record = future.result()
+                    except Exception as exc:
+                        print(f"Warning: fallback detail fetch failed for {card_id}: {exc}", file=sys.stderr)
+                        continue
+                    if record is None:
+                        continue
+                    key, local_record = record
+                    if key not in detail_records_by_key:
+                        fallback_new_details += 1
+                    detail_records_by_key[key] = local_record
+                    needed_card_ids.add(card_id)
+
+            detail_name_keys = {key[0] for key in detail_records_by_key.keys()}
+            alias_candidates = set(detail_name_keys) | set(local_name_keys)
+            fuzzy_aliases = _resolve_missing_name_aliases(
+                missing_name_keys,
+                alias_candidates,
+                min_score=0.82,
+            )
+            if fuzzy_aliases:
+                alias_records: dict[tuple[str, int], dict[str, Any]] = {}
+                for missing_key, candidate_key in fuzzy_aliases.items():
+                    for key, rec in detail_records_by_key.items():
+                        if key[0] == candidate_key:
+                            alias_key = (missing_key, key[1])
+                            if alias_key not in detail_records_by_key:
+                                alias_records[alias_key] = rec
+                if alias_records:
+                    detail_records_by_key.update(alias_records)
+
     for name_key in sorted(missing_name_keys):
-        found = any(key[0] == name_key for key in detail_records_by_key.keys())
+        found = any(key[0] == name_key for key in detail_records_by_key.keys()) or name_key in fuzzy_aliases
         if not found:
             unresolved_missing.append(name_key)
     progress.stage(f"Matched {len(detail_records_by_key)} card records; unresolved missing names: {len(unresolved_missing)}")
@@ -498,6 +644,16 @@ def main() -> int:
     print(f"Official card records matched: {len(detail_records_by_key)}")
     print(f"Cards added: {len(added_cards)}")
     print(f"Legality rows updated: {legality_updates}")
+    if unresolved_pre_fallback:
+        print(f"Fallback unresolved lookup names: {len(unresolved_pre_fallback)}")
+        print(f"Fallback lookup rows matched: {fallback_new_rows}")
+        print(f"Fallback detail records added: {fallback_new_details}")
+    fixed_unresolved_count = max(0, len(missing_name_keys) - len(unresolved_missing))
+    print(f"Fixed unresolved missing names: {fixed_unresolved_count}")
+    if fuzzy_aliases:
+        fixed_preview = ", ".join(sorted(fuzzy_aliases.keys())[:10])
+        fixed_extra = f" (+{len(fuzzy_aliases)-10} more)" if len(fuzzy_aliases) > 10 else ""
+        print(f"Fixed missing names (alias/fuzzy): {fixed_preview}{fixed_extra}")
     if fuzzy_aliases:
         print(f"Fuzzy name aliases resolved: {len(fuzzy_aliases)}")
     if unresolved_missing:
