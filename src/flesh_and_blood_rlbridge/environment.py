@@ -31,6 +31,8 @@ import importlib
 import json
 import math
 import random
+import subprocess
+import sys
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -51,6 +53,7 @@ _FAB_DB_DIR = Path(__file__).with_name("card_db")
 _CARDS_PATH = _FAB_DB_DIR / "cards.json"
 _HEROES_PATH = _FAB_DB_DIR / "heroes.json"
 _FABRARY_DECKS_PATH = _FAB_DB_DIR / "fabrary_decks.json"
+_UPDATE_CARDS_SCRIPT_PATH = _FAB_DB_DIR / "update_cards_db_from_fabtcg.py"
 _CARD_VAULT_FEED_URL_CANDIDATES = (
     "https://cards.fabtcg.com/data/cards.json",
     "https://cards.fabtcg.com/cards.json",
@@ -2275,5 +2278,81 @@ def register_mcp_tools(
                 "deck_id_from_url": deck_id if match else None,
             }, indent=2)
 
+    @mcp.tool()
+    def fab_update_cards_db_from_fabtcg(
+        legality_scope: str = "all",
+        dry_run: bool = True,
+        detail_workers: int = 8,
+        cards_path: Optional[str] = None,
+        decks_path: Optional[str] = None,
+    ) -> str:
+        """Run the Card Vault sync script for Flesh and Blood cards DB.
+
+        This MCP tool wraps ``card_db/update_cards_db_from_fabtcg.py`` so callers
+        can trigger card legality refreshes and missing-card imports without
+        shell access.
+        """
+        if legality_scope not in {"all", "decks"}:
+            return json.dumps(
+                {"error": "legality_scope must be one of: all, decks"},
+                indent=2,
+            )
+
+        if int(detail_workers) < 1:
+            return json.dumps(
+                {"error": "detail_workers must be >= 1"},
+                indent=2,
+            )
+
+        if not _UPDATE_CARDS_SCRIPT_PATH.exists():
+            return json.dumps(
+                {"error": f"Update script not found at {_UPDATE_CARDS_SCRIPT_PATH}"},
+                indent=2,
+            )
+
+        cmd: list[str] = [
+            sys.executable,
+            str(_UPDATE_CARDS_SCRIPT_PATH),
+            "--legality-scope",
+            legality_scope,
+            "--detail-workers",
+            str(int(detail_workers)),
+        ]
+        if dry_run:
+            cmd.append("--dry-run")
+        if cards_path:
+            cmd.extend(["--cards", str(cards_path)])
+        if decks_path:
+            cmd.extend(["--decks", str(decks_path)])
+
+        try:
+            run = subprocess.run(  # noqa: S603
+                cmd,
+                cwd=str(_FAB_DB_DIR),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except Exception as exc:
+            log.exception("fab_update_cards_db_from_fabtcg error")
+            return json.dumps(
+                {"error": f"Failed to execute card DB updater: {exc}", "command": cmd},
+                indent=2,
+            )
+
+        return json.dumps(
+            {
+                "success": run.returncode == 0,
+                "exit_code": run.returncode,
+                "command": cmd,
+                "dry_run": bool(dry_run),
+                "legality_scope": legality_scope,
+                "detail_workers": int(detail_workers),
+                "stdout": run.stdout.strip(),
+                "stderr": run.stderr.strip(),
+            },
+            indent=2,
+        )
+
     _FAB_CUSTOM_TOOLS_REGISTERED = True
-    return 5
+    return 6

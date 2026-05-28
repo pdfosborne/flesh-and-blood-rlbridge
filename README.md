@@ -58,6 +58,7 @@ When installed, the rlbridge MCP plugin exposes FaB-specific tools:
 - `fab_evaluate_deck_matchup`
 - `fab_meta_reward_for_deck`
 - `fab_resolve_deck_from_url`
+- `fab_update_cards_db_from_fabtcg`
 
 ## Card database
 
