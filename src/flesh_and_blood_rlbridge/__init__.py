@@ -5,22 +5,28 @@ from __future__ import annotations
 from typing import Any
 
 from .environment import (
+    FleshAndBloodEnvironment,
+    register_mcp_tools,
+)
+from .environment_factory import (
     ALL_FAB_FACTORIES,
     FLESH_AND_BLOOD_DECKBUILD_V0,
     FLESH_AND_BLOOD_SELFPLAY_V0,
     FLESH_AND_BLOOD_TALISHAR_V0,
-    FleshAndBloodEnvironment,
     FleshAndBloodFactory,
-    register_mcp_tools,
 )
+from .deck_builder_environment import FleshAndBloodDeckBuilderEnvironment
+from .gameplay_environment import FleshAndBloodGameplayEnvironment
 
 __all__ = [
     "ALL_FAB_FACTORIES",
     "FLESH_AND_BLOOD_DECKBUILD_V0",
     "FLESH_AND_BLOOD_SELFPLAY_V0",
     "FLESH_AND_BLOOD_TALISHAR_V0",
+    "FleshAndBloodDeckBuilderEnvironment",
     "FleshAndBloodEnvironment",
     "FleshAndBloodFactory",
+    "FleshAndBloodGameplayEnvironment",
     "register_environments",
     "register_mcp_tools",
 ]
