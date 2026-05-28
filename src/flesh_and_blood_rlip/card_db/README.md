@@ -8,6 +8,7 @@ Talishar-inspired simulation environment.
 - `cards.json`: card definitions used for deck construction and simulation rules.
 - `heroes.json`: hero metadata (life, intellect, and class bindings).
 - `import_from_talishar.py`: converter for importing full upstream card exports.
+- `update_cards_db_from_fabtcg.py`: standalone updater for missing deck cards and legality from FAB card-vault endpoints.
 
 ## Card Record Schema
 
@@ -39,4 +40,13 @@ To import a larger card export:
 
 ```bash
 python import_from_talishar.py --source /path/to/upstream_cards.json --out cards.json
+```
+
+To sync missing deck cards + legality from the official FAB Card Vault API
+(`https://cardvault.fabtcg.com/` / `https://api.cardvault.fabtcg.com/`):
+
+```bash
+python update_cards_db_from_fabtcg.py
+python update_cards_db_from_fabtcg.py --dry-run
+python update_cards_db_from_fabtcg.py --legality-scope decks
 ```

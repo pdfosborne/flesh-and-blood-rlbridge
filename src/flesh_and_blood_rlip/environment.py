@@ -51,6 +51,14 @@ _FAB_DB_DIR = Path(__file__).with_name("card_db")
 _CARDS_PATH = _FAB_DB_DIR / "cards.json"
 _HEROES_PATH = _FAB_DB_DIR / "heroes.json"
 _FABRARY_DECKS_PATH = _FAB_DB_DIR / "fabrary_decks.json"
+_CARD_VAULT_FEED_URL_CANDIDATES = (
+    "https://cards.fabtcg.com/data/cards.json",
+    "https://cards.fabtcg.com/cards.json",
+    "https://cardvault.fabtcg.com/data/cards.json",
+    "https://cardvault.fabtcg.com/cards.json",
+    # Fallback mirror of official card-vault-compatible card records.
+    "https://raw.githubusercontent.com/the-fab-cube/flesh-and-blood-cards/master/json/english/card.json",
+)
 
 _FORMAT_ALIASES = {
     "cc": "classic_constructed",
@@ -114,6 +122,14 @@ class CombatState:
     attack_card_id: str
     attack_power: int
     blocks: list[tuple[int, str, int]]
+
+
+def _card_name_key(name: str) -> str:
+    """Normalize card names for robust DB matching."""
+    text = " ".join(str(name or "").strip().split())
+    text = text.replace("||", "//")
+    text = text.replace(" // ", "//")
+    return text.lower()
 
 
 def _load_cards() -> dict[str, Card]:
@@ -215,6 +231,7 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         self._selection_stage = False
         self._selected_deck_option: Optional[dict[str, Any]] = None
         self._selected_opponent_deck_option: Optional[dict[str, Any]] = None
+        self._card_vault_cards_cache: Optional[list[dict[str, Any]]] = None
 
     def reset(
         self,
@@ -463,7 +480,8 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
 
         obs = self._observation()
         p_agent, p_opp = self._estimate_win_probabilities(obs)
-        width, height = 1200, 720
+        canvas_width, canvas_height = 1200, 720
+        width, height = 1280, 720  # 720p output
         bg = (18, 24, 33)
         panel = (30, 40, 54)
         panel_alt = (41, 53, 69)
@@ -473,7 +491,7 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         enemy = (240, 103, 103)
         ally = (96, 214, 138)
 
-        img = Image.new("RGB", (width, height), bg)
+        img = Image.new("RGB", (canvas_width, canvas_height), bg)
         draw = ImageDraw.Draw(img)
 
         try:
@@ -493,6 +511,14 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         def _text(x: int, y: int, msg: str, font: Any, fill: tuple[int, int, int]) -> None:
             draw.text((x, y), msg, fill=fill, font=font)
 
+        def _encode_image(image: Any) -> str:
+            if image.size != (width, height):
+                resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS")
+                image = image.resize((width, height), resample=resampling)
+            buf = BytesIO()
+            image.save(buf, format="PNG")
+            return base64.b64encode(buf.getvalue()).decode("ascii")
+
         if obs.get("stage") == "deck_selection":
             _text(24, 20, "Flesh and Blood (Talishar-inspired)", font_title, fg)
             _text(24, 58, f"Format: {obs['format']} | Stage: deck_selection", font_subtitle, sub)
@@ -502,9 +528,7 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
                 _text(40, 170 + i * 34, f"[{i}] {item['label']} ({item['deck_size']} cards)", font_text, fg)
             legal = ", ".join(obs.get("legal_actions", [])[:12])
             _text(40, 640, f"Legal actions: {legal}", font_small, sub)
-            buf = BytesIO()
-            img.save(buf, format="PNG")
-            b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+            b64 = _encode_image(img)
             return RenderResult(mode="rgb_array", data=b64, width=width, height=height)
 
         _text(24, 20, "Flesh and Blood (Talishar-inspired)", font_title, fg)
@@ -585,9 +609,7 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         legal = ", ".join(obs.get("legal_actions", [])[:12])
         _text(40, 676, f"Legal actions: {legal}", font_small, sub)
 
-        buf = BytesIO()
-        img.save(buf, format="PNG")
-        b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+        b64 = _encode_image(img)
         return RenderResult(mode="rgb_array", data=b64, width=width, height=height)
 
     def _new_player(self, hero: Hero, hero_slot: int, deck_style: str = "balanced", deck_ids: Optional[list[str]] = None) -> PlayerState:
@@ -734,6 +756,108 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         except Exception:
             return []
 
+    def _load_card_vault_feed(self) -> list[dict[str, Any]]:
+        """Load raw card records from the official card vault (or fallback mirror)."""
+        if self._card_vault_cards_cache is not None:
+            return self._card_vault_cards_cache
+
+        try:
+            importer = importlib.import_module("flesh_and_blood_rlip.card_db.import_from_talishar")
+        except Exception:
+            self._card_vault_cards_cache = []
+            return self._card_vault_cards_cache
+
+        load_cards = getattr(importer, "load_cards", None)
+        if load_cards is None:
+            self._card_vault_cards_cache = []
+            return self._card_vault_cards_cache
+
+        for source_url in _CARD_VAULT_FEED_URL_CANDIDATES:
+            try:
+                records = load_cards(path=None, source_url=source_url)
+                if isinstance(records, list) and records:
+                    self._card_vault_cards_cache = records
+                    return records
+            except Exception:
+                continue
+
+        self._card_vault_cards_cache = []
+        return self._card_vault_cards_cache
+
+    def _import_missing_cards_from_card_vault(self, card_names: list[str]) -> int:
+        """Append missing cards to cards.json by scanning card-vault data."""
+        targets = {_card_name_key(name) for name in card_names if str(name).strip()}
+        if not targets:
+            return 0
+
+        raw_records = self._load_card_vault_feed()
+        if not raw_records:
+            return 0
+
+        by_name: dict[str, list[dict[str, Any]]] = {}
+        for rec in raw_records:
+            if not isinstance(rec, dict):
+                continue
+            key = _card_name_key(rec.get("name", ""))
+            if not key:
+                continue
+            by_name.setdefault(key, []).append(rec)
+
+        selected: list[dict[str, Any]] = []
+        for key in sorted(targets):
+            selected.extend(by_name.get(key, []))
+        if not selected:
+            return 0
+
+        try:
+            importer = importlib.import_module("flesh_and_blood_rlip.card_db.import_from_talishar")
+            normalize_record = getattr(importer, "normalize_record", None)
+            if normalize_record is None:
+                return 0
+        except Exception:
+            return 0
+
+        try:
+            current_cards = json.loads(_CARDS_PATH.read_text(encoding="utf-8"))
+            if not isinstance(current_cards, list):
+                return 0
+        except Exception:
+            return 0
+
+        existing_ids = {str(rec.get("id", "")) for rec in current_cards if isinstance(rec, dict)}
+        normalized_new: list[dict[str, Any]] = []
+        for rec in selected:
+            try:
+                norm = normalize_record(rec)
+            except Exception:
+                continue
+            card_id = str(norm.get("id", ""))
+            if not card_id or card_id in existing_ids:
+                continue
+            existing_ids.add(card_id)
+            normalized_new.append(norm)
+
+        if not normalized_new:
+            return 0
+
+        current_cards.extend(normalized_new)
+        _CARDS_PATH.write_text(json.dumps(current_cards, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+        self._cards = _load_cards()
+        return len(normalized_new)
+
+    def _build_name_lookup(self, hero: Hero) -> dict[str, list[Card]]:
+        """Build normalized card-name lookup restricted to hero and format legality."""
+        by_name: dict[str, list[Card]] = {}
+        for card in self._cards.values():
+            if not self._is_card_legal_for_format(card.id):
+                continue
+            if not self._is_deck_candidate(card):
+                continue
+            if not self._is_card_compatible_with_hero(card, hero):
+                continue
+            by_name.setdefault(_card_name_key(card.name), []).append(card)
+        return by_name
+
     def _resolve_fabrary_deck(self, deck_entry: dict[str, Any]) -> list[str]:
         """Map a fabrary deck entry to a list of card IDs legal for the current format.
 
@@ -751,15 +875,17 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         hero = self._heroes[hero_id]
 
         # Build name → [Card, ...] lookup restricted to this hero + format.
-        by_name: dict[str, list[Card]] = {}
-        for card in self._cards.values():
-            if not self._is_card_legal_for_format(card.id):
-                continue
-            if not self._is_deck_candidate(card):
-                continue
-            if not self._is_card_compatible_with_hero(card, hero):
-                continue
-            by_name.setdefault(card.name.lower(), []).append(card)
+        by_name = self._build_name_lookup(hero)
+
+        missing_names: list[str] = []
+        for entry in deck_entry.get("cards", []):
+            raw_name = str(entry.get("name", "")).strip()
+            if raw_name and _card_name_key(raw_name) not in by_name:
+                missing_names.append(raw_name)
+        if missing_names:
+            imported = self._import_missing_cards_from_card_vault(missing_names)
+            if imported > 0:
+                by_name = self._build_name_lookup(hero)
 
         copy_limit = 2 if self._format == "silver_age" else 3
         deck: list[str] = []
@@ -767,7 +893,7 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         for entry in deck_entry.get("cards", []):
             raw_name = str(entry.get("name", "")).strip()
             count = max(1, int(entry.get("count", 1)))
-            matches = by_name.get(raw_name.lower(), [])
+            matches = by_name.get(_card_name_key(raw_name), [])
             if not matches:
                 continue  # card not in DB or not legal/compatible for this hero+format
             per_copy = min(count, copy_limit)

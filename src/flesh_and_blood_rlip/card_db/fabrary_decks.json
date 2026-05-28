@@ -1,5 +1,5 @@
 {
-  "_comment": "Static Flesh and Blood deck database sourced from fabrary.net public links. Card names are matched to the rlbridge card DB at load time; any card not found in the DB or illegal for its format is silently dropped. If the expanded deck exceeds format size limits the excess is randomly trimmed; if it falls short, generic filler cards are appended.",
+  "_comment": "Static Flesh and Blood deck database sourced from fabrary.net public links. Card names are matched to the rlbridge card DB at load time; any card not found in the DB or illegal for its format check using update_cards_db_from_fabtcg.py. If the expanded deck exceeds format size limits the excess is randomly trimmed; if it falls short, generic filler cards are appended.",
   "version": "1.1",
   "decks": [
     {
@@ -309,6 +309,276 @@
         {"name": "Fluster Fist",           "count": 2},
         {"name": "Cut Through",            "count": 2},
         {"name": "Flying Kick",            "count": 2}
+      ]
+    },
+    {
+      "id": "fab_precon_sage_ch1_kayo",
+      "name": "Kayo Silver Age Deck (Precon)",
+      "description": "Official Silver Age Chapter 1 preconstructed deck for Kayo.",
+      "hero_id": "hero_kayo",
+      "format": "silver_age",
+      "style": "aggro",
+      "source_url": "https://fabtcg.com/decklists/silver-age-chapter-1-kayo/",
+      "cards": [
+        {"name": "Bare Fangs", "count": 4}, {"name": "Buckwild", "count": 4}, {"name": "Clash of Agility", "count": 2},
+        {"name": "Clash of Might", "count": 3}, {"name": "High Pitched Howl", "count": 2}, {"name": "Pulping", "count": 2},
+        {"name": "Rough Up", "count": 2}, {"name": "Savage Feast", "count": 2}, {"name": "Strongest Survive", "count": 6},
+        {"name": "Test of Might", "count": 2}, {"name": "Wild Ride", "count": 4}, {"name": "Agile Windup", "count": 2},
+        {"name": "Bear Hug", "count": 2}, {"name": "Rally the Coast Guard", "count": 2}, {"name": "Reincarnate", "count": 2},
+        {"name": "Run Roughshod", "count": 2}, {"name": "Smash Instinct", "count": 2}, {"name": "Unexpected Backhand", "count": 2}
+      ]
+    },
+    {
+      "id": "fab_precon_sage_ch1_viserai",
+      "name": "Viserai Silver Age Deck (Precon)",
+      "description": "Official Silver Age Chapter 1 preconstructed deck for Viserai.",
+      "hero_id": "hero_viserai",
+      "format": "silver_age",
+      "style": "balanced",
+      "source_url": "https://fabtcg.com/decklists/silver-age-chapter-1-viserai/",
+      "cards": [
+        {"name": "Amplify the Arknight", "count": 2}, {"name": "Condemn to Slaughter", "count": 4}, {"name": "Hit the High Notes", "count": 2},
+        {"name": "Malefic Incantation", "count": 4}, {"name": "Mauvrion Skies", "count": 4}, {"name": "Read the Runes", "count": 2},
+        {"name": "Reduce to Runechant", "count": 2}, {"name": "Rune Flash", "count": 2}, {"name": "Runerager Swarm", "count": 2},
+        {"name": "Runic Fellingsong", "count": 2}, {"name": "Shrill of Skullform", "count": 6}, {"name": "Sigil of Suffering", "count": 2},
+        {"name": "Spellblade Assault", "count": 4}, {"name": "Flying High", "count": 2}, {"name": "Sigil of Silphidae", "count": 2},
+        {"name": "Trot Along", "count": 2}, {"name": "Vexing Malice", "count": 2}
+      ]
+    },
+    {
+      "id": "fab_precon_sage_ch1_iyslander",
+      "name": "Iyslander Silver Age Deck (Precon)",
+      "description": "Official Silver Age Chapter 1 preconstructed deck for Iyslander.",
+      "hero_id": "hero_iyslander",
+      "format": "silver_age",
+      "style": "control",
+      "source_url": "https://fabtcg.com/decklists/silver-age-chapter-1-iyslander/",
+      "cards": [
+        {"name": "Absorb in Aether", "count": 2}, {"name": "Aether Icevein", "count": 6}, {"name": "Fyendal's Fighting Spirit", "count": 2},
+        {"name": "Ice Bolt", "count": 4}, {"name": "Look Tuff", "count": 1}, {"name": "On the Horizon", "count": 2},
+        {"name": "Polar Cap", "count": 2}, {"name": "Wounded Bull", "count": 2}, {"name": "Aether Hail", "count": 2},
+        {"name": "Arcane Twining", "count": 2}, {"name": "Brain Freeze", "count": 2}, {"name": "Brothers in Arms", "count": 2},
+        {"name": "Cold Snap", "count": 2}, {"name": "Emeritus Scolding", "count": 2}, {"name": "Frosting", "count": 2},
+        {"name": "Frost Spike", "count": 2}, {"name": "Ice Eternal", "count": 2}, {"name": "Photon Splicing", "count": 2},
+        {"name": "Pyroglyphic Protection", "count": 1}, {"name": "Stir the Aetherwinds", "count": 1},
+        {"name": "Voltic Bolt", "count": 2}, {"name": "Winter's Bite", "count": 2}
+      ]
+    },
+    {
+      "id": "fab_precon_sage_ch1_dash",
+      "name": "Dash Silver Age Deck (Precon)",
+      "description": "Official Silver Age Chapter 1 preconstructed deck for Dash.",
+      "hero_id": "hero_dash",
+      "format": "silver_age",
+      "style": "balanced",
+      "source_url": "https://fabtcg.com/decklists/silver-age-chapter-1-dash/",
+      "cards": [
+        {"name": "Boom Grenade", "count": 2}, {"name": "Crankshaft", "count": 4}, {"name": "Fender Bender", "count": 2},
+        {"name": "Hyper Driver", "count": 1}, {"name": "Jump Start", "count": 6}, {"name": "Out Pace", "count": 2},
+        {"name": "Overblast", "count": 2}, {"name": "Re-Charge!", "count": 2}, {"name": "Rev Up", "count": 2},
+        {"name": "Throttle", "count": 4}, {"name": "Under Loop", "count": 2}, {"name": "Zero to Sixty", "count": 6},
+        {"name": "Zipper Hit", "count": 6}, {"name": "Big Bertha", "count": 2}, {"name": "Teklo Trebuchet 2000", "count": 2}
+      ]
+    },
+    {
+      "id": "fab_precon_sage_ch1_bravo_flattering_showman",
+      "name": "Bravo, Flattering Showman Silver Age Deck (Precon)",
+      "description": "Official Silver Age Chapter 1 preconstructed deck for Bravo, Flattering Showman.",
+      "hero_id": "hero_bravo_flattering_showman",
+      "format": "silver_age",
+      "style": "control",
+      "source_url": "https://fabtcg.com/decklists/silver-age-chapter-1-bravo-flattering-showman/",
+      "cards": [
+        {"name": "Boulder Drop", "count": 4}, {"name": "Buckling Blow", "count": 4}, {"name": "Cartilage Crush", "count": 2},
+        {"name": "Chokeslam", "count": 4}, {"name": "Crash and Bash", "count": 2}, {"name": "Debilitate", "count": 4},
+        {"name": "Fault Line", "count": 2}, {"name": "Pummel", "count": 2}, {"name": "Staunch Response", "count": 2},
+        {"name": "Zealous Belting", "count": 2}, {"name": "Clash of Vigor", "count": 2}, {"name": "Crush the Weak", "count": 2},
+        {"name": "Disable", "count": 2}, {"name": "Edge of Their Seats", "count": 2}, {"name": "Flatten the Field", "count": 2},
+        {"name": "Macho Grande", "count": 2}, {"name": "The Suspense is Killing Me", "count": 2}, {"name": "Thunder Quake", "count": 2}
+      ]
+    },
+    {
+      "id": "fab_precon_sage_ch2_enigma",
+      "name": "Enigma Silver Age Deck (Precon)",
+      "description": "Official Silver Age Chapter 2 preconstructed deck for Enigma.",
+      "hero_id": "hero_enigma",
+      "format": "silver_age",
+      "style": "control",
+      "source_url": "https://fabtcg.com/decklists/silver-age-chapter-2-enigma/",
+      "cards": [
+        {"name": "Astral Etchings", "count": 2}, {"name": "Enigma Chimera", "count": 4}, {"name": "Look Tuff", "count": 2},
+        {"name": "Oasis Respite", "count": 2}, {"name": "On the Horizon", "count": 2}, {"name": "Spectral Manifestations", "count": 2},
+        {"name": "Test of Strength", "count": 2}, {"name": "Unmovable", "count": 4}, {"name": "Waning Vengeance", "count": 2},
+        {"name": "Waxing Specter", "count": 2}, {"name": "Springboard Somersault", "count": 2}, {"name": "A Drop in the Ocean", "count": 1},
+        {"name": "Big Blue Sky", "count": 2}, {"name": "Fluid Motion", "count": 2}, {"name": "Homage to Ancestors", "count": 1},
+        {"name": "Manifest Muscle", "count": 2}, {"name": "Pass Over", "count": 1}, {"name": "Phantasmal Haze", "count": 2},
+        {"name": "Preserve Tradition", "count": 1}, {"name": "Put in Context", "count": 2},
+        {"name": "Rising Sun, Setting Moon", "count": 1}, {"name": "Second Tenet of Chi: Wind", "count": 2},
+        {"name": "Spears of Surreality", "count": 2}, {"name": "Spectral Rider", "count": 2}
+      ]
+    },
+    {
+      "id": "fab_precon_sage_ch2_fai",
+      "name": "Fai Silver Age Deck (Precon)",
+      "description": "Official Silver Age Chapter 2 preconstructed deck for Fai.",
+      "hero_id": "hero_fai",
+      "format": "silver_age",
+      "style": "aggro",
+      "source_url": "https://fabtcg.com/decklists/silver-age-chapter-2-fai/",
+      "cards": [
+        {"name": "Arcane Polarity", "count": 1}, {"name": "Art of the Dragon: Fire", "count": 1}, {"name": "Blaze Headlong", "count": 2},
+        {"name": "Brand with Cinderclaw", "count": 6}, {"name": "Display Loyalty", "count": 2}, {"name": "Enflame the Firebrand", "count": 2},
+        {"name": "Fire Tenet: Strike First", "count": 2}, {"name": "Fire that Burns Within", "count": 2}, {"name": "Flamecall Awakening", "count": 2},
+        {"name": "Hot on Their Heels", "count": 2}, {"name": "Lava Burst", "count": 2}, {"name": "Mounting Anger", "count": 2},
+        {"name": "Phoenix Flame", "count": 2}, {"name": "Rise from the Ashes", "count": 2}, {"name": "Rising Resentment", "count": 2},
+        {"name": "Ronin Renegade", "count": 2}, {"name": "Scar for a Scar", "count": 2}, {"name": "Snatch", "count": 2},
+        {"name": "Wax On", "count": 1}, {"name": "Salt the Wound", "count": 1}, {"name": "Cinderskin Devotion", "count": 2},
+        {"name": "Dragon Power", "count": 2}, {"name": "Energy Potion", "count": 1}, {"name": "Nip at the Heels", "count": 2}
+      ]
+    },
+    {
+      "id": "fab_precon_sage_ch2_dorinthea",
+      "name": "Dorinthea Silver Age Deck (Precon)",
+      "description": "Official Silver Age Chapter 2 preconstructed deck for Dorinthea.",
+      "hero_id": "hero_dorinthea",
+      "format": "silver_age",
+      "style": "aggro",
+      "source_url": "https://fabtcg.com/decklists/silver-age-chapter-2-dorinthea/",
+      "cards": [
+        {"name": "Agile Engagement", "count": 2}, {"name": "Ironsong Response", "count": 4}, {"name": "Lead with Speed", "count": 2},
+        {"name": "Oasis Respite", "count": 2}, {"name": "Out for Blood", "count": 2}, {"name": "Overpower", "count": 4},
+        {"name": "Puncture", "count": 3}, {"name": "Scar for a Scar", "count": 2}, {"name": "Sharpen Steel", "count": 2},
+        {"name": "Stroke of Foresight", "count": 2}, {"name": "Warrior's Valor", "count": 6}, {"name": "Wreck Havoc", "count": 2},
+        {"name": "Run Through", "count": 1}, {"name": "Springboard Somersault", "count": 2}, {"name": "Energy Potion", "count": 1},
+        {"name": "Goblet of Bloodrun Wine", "count": 2}, {"name": "Hit and Run", "count": 2}, {"name": "Nip at the Heels", "count": 2},
+        {"name": "Put in Context", "count": 2}, {"name": "Trot Along", "count": 2}
+      ]
+    },
+    {
+      "id": "fab_precon_sage_ch2_arakni_web_of_deceit",
+      "name": "Arakni, Web of Deceit Silver Age Deck (Precon)",
+      "description": "Official Silver Age Chapter 2 preconstructed deck for Arakni, Web of Deceit.",
+      "hero_id": "hero_arakni_web_of_deceit",
+      "format": "silver_age",
+      "style": "control",
+      "source_url": "https://fabtcg.com/decklists/silver-age-chapter-2-arakni-web-of-deceit/",
+      "cards": [
+        {"name": "Art of Desire: Body", "count": 2}, {"name": "Concoct Disorder", "count": 2}, {"name": "Den of the Spider", "count": 2},
+        {"name": "Frailty Trap", "count": 2}, {"name": "Hyper Inflation", "count": 2}, {"name": "Inertia Trap", "count": 2},
+        {"name": "Infect", "count": 2}, {"name": "Lair of the Spider", "count": 2}, {"name": "Mark of the Black Widow", "count": 4},
+        {"name": "Mark of the Funnel Web", "count": 2}, {"name": "Mark the Prey", "count": 2}, {"name": "Orb-Weaver Spinneret", "count": 2},
+        {"name": "Pick Up the Point", "count": 2}, {"name": "Scar Tissue", "count": 2}, {"name": "Spike with Bloodrot", "count": 2},
+        {"name": "Stains of the Redback", "count": 2}, {"name": "Two Sides to the Blade", "count": 2}, {"name": "Up Sticks and Run", "count": 2},
+        {"name": "Art of Desire: Mind", "count": 2}, {"name": "Night's Embrace", "count": 2}, {"name": "Reaper's Call", "count": 2},
+        {"name": "Shred", "count": 2}
+      ]
+    },
+    {
+      "id": "fab_precon_sage_ch2_azalea",
+      "name": "Azalea Silver Age Deck (Precon)",
+      "description": "Official Silver Age Chapter 2 preconstructed deck for Azalea.",
+      "hero_id": "hero_azalea",
+      "format": "silver_age",
+      "style": "aggro",
+      "source_url": "https://fabtcg.com/decklists/silver-age-chapter-2-azalea/",
+      "cards": [
+        {"name": "Bolt'n' Shot", "count": 2}, {"name": "Call in the Big Guns", "count": 2}, {"name": "Drill Shot", "count": 2},
+        {"name": "Drop the Anchor", "count": 2}, {"name": "Dry Powder Shot", "count": 2}, {"name": "Entangling Shot", "count": 2},
+        {"name": "Infecting Shot", "count": 4}, {"name": "Lace with Bloodrot", "count": 2}, {"name": "Lace with Frailty", "count": 2},
+        {"name": "Lace with Inertia", "count": 2}, {"name": "Murkmire Grapnel", "count": 2}, {"name": "Nimblism", "count": 2},
+        {"name": "Ravenous Rabble", "count": 2}, {"name": "Read the Glide Path", "count": 2}, {"name": "Release the Tension", "count": 2},
+        {"name": "Ridge Rider Shot", "count": 2}, {"name": "Scout the Periphery", "count": 2}, {"name": "Searing Shot", "count": 2},
+        {"name": "Swift Shot", "count": 2}, {"name": "Take Aim", "count": 2}, {"name": "Memorial Ground", "count": 1},
+        {"name": "Spire Sniping", "count": 2}, {"name": "Widowmaker", "count": 2}
+      ]
+    },
+    {
+      "id": "fab_precon_sage_ch3_gravy_bones",
+      "name": "Gravy Bones Silver Age Deck (Precon)",
+      "description": "Official Silver Age Chapter 3 preconstructed deck for Gravy Bones.",
+      "hero_id": "hero_gravy_bones",
+      "format": "silver_age",
+      "style": "balanced",
+      "source_url": "https://fabtcg.com/decklists/silver-age-chapter-3-gravy-bones/",
+      "cards": [
+        {"name": "Battalion Barque", "count": 2}, {"name": "Golden Tipple", "count": 6}, {"name": "Saltwater Swell", "count": 4},
+        {"name": "Swiftwater Sloop", "count": 4}, {"name": "Barnacle", "count": 2}, {"name": "Cutty Shark, Quick Clip", "count": 2},
+        {"name": "Limpit, Hop-a-long", "count": 2}, {"name": "Oysten, Heart of Gold", "count": 2}, {"name": "Riggermortis", "count": 2},
+        {"name": "Swabbie", "count": 2}, {"name": "Avast Ye!", "count": 2}, {"name": "Back Alley Breakline", "count": 1},
+        {"name": "Flying High", "count": 2}, {"name": "Jittery Bones", "count": 2}, {"name": "Loot the Arsenal", "count": 2},
+        {"name": "Loot the Hold", "count": 2}, {"name": "Murderous Rabble", "count": 2}, {"name": "Portside Exchange", "count": 2},
+        {"name": "Throw Caution to the Wind", "count": 2}, {"name": "Timesnap Potion", "count": 1}, {"name": "Yo Ho Ho!", "count": 1}
+      ]
+    },
+    {
+      "id": "fab_precon_sage_ch3_briar",
+      "name": "Briar Silver Age Deck (Precon)",
+      "description": "Official Silver Age Chapter 3 preconstructed deck for Briar.",
+      "hero_id": "hero_briar",
+      "format": "silver_age",
+      "style": "aggro",
+      "source_url": "https://fabtcg.com/decklists/silver-age-chapter-3-briar/",
+      "cards": [
+        {"name": "Arcane Polarity", "count": 2}, {"name": "Arcane Seeds // Life", "count": 2}, {"name": "Arcanic Shockwave", "count": 2},
+        {"name": "Burn Up // Shock", "count": 2}, {"name": "Cloud Cover", "count": 2}, {"name": "Entwine Lightning", "count": 2},
+        {"name": "Fry", "count": 2}, {"name": "Jack Be Quick", "count": 2}, {"name": "Lightning Press", "count": 2},
+        {"name": "Lightning Surge", "count": 2}, {"name": "Nimblism", "count": 4}, {"name": "Path of Same Ends", "count": 2},
+        {"name": "Ravenous Rabble", "count": 2}, {"name": "Rush of Power", "count": 2}, {"name": "Scar for a Scar", "count": 2},
+        {"name": "Second Strike", "count": 2}, {"name": "Sigil of Suffering", "count": 2}, {"name": "Sizzle", "count": 2},
+        {"name": "Snatch", "count": 2}, {"name": "Sprout Strength", "count": 2}, {"name": "Static Shock", "count": 2},
+        {"name": "Weave Lightning", "count": 2}
+      ]
+    },
+    {
+      "id": "fab_precon_sage_ch3_boltyn",
+      "name": "Boltyn Silver Age Deck (Precon)",
+      "description": "Official Silver Age Chapter 3 preconstructed deck for Boltyn.",
+      "hero_id": "hero_boltyn",
+      "format": "silver_age",
+      "style": "aggro",
+      "source_url": "https://fabtcg.com/decklists/silver-age-chapter-3-boltyn/",
+      "cards": [
+        {"name": "Beaming Bravado", "count": 4}, {"name": "Bolt of Courage", "count": 4}, {"name": "Courageous Steelhand", "count": 2},
+        {"name": "Duty Bound Blitz", "count": 4}, {"name": "Edict of Steel", "count": 2}, {"name": "Engulfing Light", "count": 4},
+        {"name": "Glisten", "count": 2}, {"name": "Illuminate", "count": 2}, {"name": "Light the Way", "count": 4},
+        {"name": "Snatch", "count": 2}, {"name": "Take Flight", "count": 4}, {"name": "Toe the Line", "count": 2},
+        {"name": "Banneret of Salvation", "count": 2}, {"name": "Roaring Beam", "count": 2}, {"name": "Springboard Somersault", "count": 2},
+        {"name": "Valiant Thrust", "count": 2}, {"name": "V of the Vanguard", "count": 2}
+      ]
+    },
+    {
+      "id": "fab_precon_sage_ch3_lyath_goldmane",
+      "name": "Lyath Goldmane Silver Age Deck (Precon)",
+      "description": "Official Silver Age Chapter 3 preconstructed deck for Lyath Goldmane.",
+      "hero_id": "hero_lyath_goldmane",
+      "format": "silver_age",
+      "style": "midrange",
+      "source_url": "https://fabtcg.com/decklists/silver-age-chapter-3-lyath-goldmane/",
+      "cards": [
+        {"name": "Act of Glory", "count": 2}, {"name": "Drag Down", "count": 2}, {"name": "Edge of Their Seats", "count": 4},
+        {"name": "Mocking Blow", "count": 6}, {"name": "Oasis Respite", "count": 2}, {"name": "Prime the Crowd", "count": 2},
+        {"name": "Sadistic Scowl", "count": 2}, {"name": "Tension in the Air", "count": 2}, {"name": "Villainous Pose", "count": 2},
+        {"name": "Short Shrift", "count": 2}, {"name": "Walk in My Shoes", "count": 2}, {"name": "Wee Wrecking Ball", "count": 2},
+        {"name": "Booze!", "count": 2}, {"name": "Brothers in Arms", "count": 2}, {"name": "Concealed Object", "count": 2},
+        {"name": "Full of Bravado", "count": 2}, {"name": "Goon Beatdown", "count": 2}, {"name": "Goon Tactics", "count": 2},
+        {"name": "Power Play", "count": 2}, {"name": "The Suspense is Killing Me", "count": 2}
+      ]
+    },
+    {
+      "id": "fab_precon_sage_ch3_blaze_firemind",
+      "name": "Blaze, Firemind Silver Age Deck (Precon)",
+      "description": "Official Silver Age Chapter 3 preconstructed deck for Blaze, Firemind.",
+      "hero_id": "hero_blaze_firemind",
+      "format": "silver_age",
+      "style": "control",
+      "source_url": "https://fabtcg.com/decklists/silver-age-chapter-3-blaze/",
+      "cards": [
+        {"name": "Absorb in Aether", "count": 2}, {"name": "Aether Spindle", "count": 4}, {"name": "Arcane Polarity", "count": 2},
+        {"name": "Cindering Foresight", "count": 6}, {"name": "Emeritus Scolding", "count": 6}, {"name": "Fyendal's Fighting Spirit", "count": 2},
+        {"name": "Look Tuff", "count": 2}, {"name": "Snapback", "count": 2}, {"name": "Turn to Mindfire", "count": 2},
+        {"name": "Voltic Bolt", "count": 4}, {"name": "Whisper of the Oracle", "count": 6}, {"name": "Wounded Bull", "count": 2},
+        {"name": "Aether Quickening", "count": 2}, {"name": "Arcane Twining", "count": 2}, {"name": "Open the Flood Gates", "count": 2},
+        {"name": "Photon Splicing", "count": 2}
       ]
     },
     {
