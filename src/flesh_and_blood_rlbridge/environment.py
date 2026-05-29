@@ -39,6 +39,7 @@ import json
 import math
 import random
 import re
+import dataclasses
 from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
@@ -46,6 +47,8 @@ from typing import Any, Optional
 
 from rlbridge.protocol.messages import RenderResult, ResetResult, StepResult, TextSpace
 from rlbridge.environments.base import rlbridgeEnvironment
+
+from . import effects
 
 
 _FAB_DB_DIR = Path(__file__).with_name("card_db")
@@ -101,6 +104,36 @@ class Hero:
     weapon_name: str
     weapon_attack: int
     weapon_cost: int
+    ability_text: str = ""
+
+
+# ClassState-style per-player counters (mirrors Talishar's ClassState bag).
+# Per-turn counters reset at the start of each turn; the rest persist.
+_PER_TURN_COUNTERS: tuple[str, ...] = (
+    "NumCardsPlayed",
+    "NumActionsPlayed",
+    "NumAttacks",
+    "NumNonAttackCards",
+    "NumLightningPlayed",
+    "NumRedPlayed",
+    "NumYellowPlayed",
+    "NumBluePlayed",
+    "NumFusedLightning",
+    "NumFusedIce",
+    "NumFusedEarth",
+    "DamageDealt",
+    "ArcaneDamageDealt",
+    "HitCounter",
+    "NumCardsDrawn",
+    "NextNAACardGoAgain",
+    "NextAttackPower",
+    "NextAttackPowerMaxCost",
+)
+_GAME_COUNTERS: tuple[str, ...] = ("DamageTaken",)
+
+
+def _new_class_state() -> dict[str, int]:
+    return {key: 0 for key in (_PER_TURN_COUNTERS + _GAME_COUNTERS)}
 
 
 @dataclass
@@ -113,6 +146,15 @@ class PlayerState:
     hand: list[str]
     discard: list[str]
     pitch_zone: list[str] = field(default_factory=list)
+    class_state: dict[str, int] = field(default_factory=_new_class_state)
+    # Arena zones: equipment by slot, weapon, one-card arsenal.
+    equipment: list[str] = field(default_factory=list)  # card ids (head/chest/arms/legs)
+    weapon_id: Optional[str] = None                      # real weapon card (else hero basic)
+    arsenal: list[str] = field(default_factory=list)     # 0..1 stashed card id
+    weapon_used: bool = False                            # weapon attacked this turn
+    # Arena sources used this turn (equipment-block / activated abilities),
+    # keyed by source token ("equip:<id>", "hero").
+    arena_used: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -125,7 +167,10 @@ class CombatState:
     attack_bonus: int = 0
     go_again: bool = False
     dominate: bool = False
+    fused: bool = False
     reaction_cards: list[str] = field(default_factory=list)
+    is_weapon: bool = False     # attack came from the hero weapon (not discarded)
+    source_name: str = ""       # display name of the attack source (weapon)
 
 
 def _card_name_key(name: str) -> str:
@@ -179,6 +224,45 @@ def _reveal_requirement(text: str) -> tuple[Optional[str], bool]:
     # "you may reveal" / "Fusion - reveal" are optional bonuses, not gates.
     optional = "may" in pre or "fusion" in pre
     return token, not optional
+
+
+@functools.lru_cache(maxsize=4096)
+def _fusion_element(text: str) -> Optional[str]:
+    """Return the element a Fusion card must reveal (e.g. ``"lightning"``)."""
+    match = re.search(r"\b([a-z]+)\s+fusion\b", str(text or "").lower())
+    return match.group(1) if match else None
+
+
+@functools.lru_cache(maxsize=8192)
+def _parse_action_damage(text: str, power: int, is_attack: bool) -> tuple[int, bool]:
+    """Damage an action deals when played, and whether it is arcane.
+
+    Attack actions use printed power (physical, blockable). Non-attack actions
+    fall back to parsing a "deal N [arcane] damage" clause from rules text.
+    """
+    body = str(text or "").lower()
+    if is_attack:
+        return int(power or 0), False
+    if power and power > 0:
+        return int(power), "arcane" in body
+    match = re.search(r"deal (\d+)\s+(arcane\s+)?damage", body)
+    if match:
+        return int(match.group(1)), bool(match.group(2)) or "arcane damage" in body
+    return 0, False
+
+
+_EQUIP_SLOTS: tuple[str, ...] = ("head", "chest", "arms", "legs")
+
+
+def _equipment_slot(card: "Card") -> Optional[str]:
+    """Return the gear slot ('head'/'chest'/'arms'/'legs') for an equipment card."""
+    line = (card.type_line or "").lower()
+    if "equipment" not in line:
+        return None
+    for slot in _EQUIP_SLOTS:
+        if slot in line:
+            return slot
+    return None
 
 
 def _load_cards() -> dict[str, Card]:
@@ -255,6 +339,7 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
     ) -> None:
         self._cards = _load_cards()
         self._heroes = _load_heroes()
+        self._attach_hero_abilities()
         self._rng = random.Random(seed)
 
         if agent_hero_id not in self._heroes:
@@ -278,6 +363,10 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         self._pending_combat: Optional[CombatState] = None
         self._initialized = False
         self._last_event = ""
+        self._notices: list[str] = []
+        self._pending_optionals: list[dict[str, Any]] = []
+        self._optional_resume: Optional[str] = None
+        self._optional_ctx: dict[str, Any] = {}
         self._render_mode = render_mode
         self._self_play = self_play
         self._opponent_type = self._normalize_opponent_type(opponent_type)
@@ -436,6 +525,7 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
                 )
 
         reward = 0.0
+        self._notices = []
 
         if self._self_play:
             reward += self._step_self_play(parsed)
@@ -447,17 +537,27 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
                 elif parsed.startswith("pitch "):
                     reward += self._do_pitch(0, int(parsed.split(" ")[1]))
                 elif parsed.startswith("play "):
-                    reward += self._do_play_attack(0, int(parsed.split(" ")[1]))
+                    reward += self._do_play_card(0, int(parsed.split(" ")[1]), 0)
+                elif parsed == "weapon":
+                    reward += self._do_weapon_attack(0, 0)
+                elif parsed.startswith("ability "):
+                    reward += self._do_ability(0, int(parsed.split(" ")[1]), 0)
+                elif parsed.startswith("stash "):
+                    reward += self._do_stash(0, int(parsed.split(" ")[1]))
             elif self._phase == "defense":
                 if parsed == "pass":
                     self._pass_defense(0)
                 elif parsed.startswith("block "):
                     reward += self._do_block(0, int(parsed.split(" ")[1]))
+                elif parsed.startswith("blockgear "):
+                    reward += self._do_block_gear(0, int(parsed.split(" ")[1]))
             elif self._phase == "reaction":
                 if parsed == "pass":
                     reward += self._resolve_and_advance(0)
                 elif parsed.startswith("reaction "):
                     reward += self._do_reaction(0, int(parsed.split(" ")[1]))
+            elif self._phase == "optional":
+                reward += self._do_optional(parsed == "use_optional")
             # Drive the scripted opponent until the agent must decide again.
             reward += self._auto_advance()
 
@@ -682,6 +782,8 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             deck=deck,
             hand=[],
             discard=[],
+            equipment=self._select_equipment(hero),
+            weapon_id=self._select_weapon(hero),
         )
 
     def _build_deck(self, hero: Hero, deck_style: str = "balanced") -> list[str]:
@@ -735,21 +837,45 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         deck: list[str] = []
         counts: dict[str, int] = {}
 
-        while len(deck) < self._deck_size:
-            added_this_pass = False
-            for card in ranked:
-                cid = card.id
-                if counts.get(cid, 0) >= copy_limit:
-                    continue
-                deck.append(cid)
-                counts[cid] = counts.get(cid, 0) + 1
-                added_this_pass = True
-                if len(deck) >= self._deck_size:
+        def _fill_from(seq: list[Card], limit: int) -> None:
+            for card in seq:
+                if len(deck) >= limit:
                     break
-            if not added_this_pass:
-                deck.append(self._rng.choice(ranked).id)
+                while counts.get(card.id, 0) < copy_limit and len(deck) < limit:
+                    deck.append(card.id)
+                    counts[card.id] = counts.get(card.id, 0) + 1
+
+        # Reserve a share of the deck for combination cards so those
+        # interactions actually come up instead of the deck filling with only
+        # the highest-power vanilla attacks. Fusion gets its own quota because
+        # it is lower-power and would otherwise always be crowded out.
+        fusion_ranked = [c for c in ranked if "fusion" in set(c.keywords)]
+        bolt_ranked = [
+            c
+            for c in ranked
+            if "fusion" not in set(c.keywords) and self._is_combo_candidate(c)
+        ]
+        if fusion_ranked:
+            _fill_from(fusion_ranked, int(self._deck_size * 0.2))
+        if bolt_ranked:
+            _fill_from(bolt_ranked, int(self._deck_size * 0.3))
+        _fill_from(ranked, self._deck_size)
+        while len(deck) < self._deck_size:
+            deck.append(self._rng.choice(ranked).id)
 
         return deck[: self._deck_size]
+
+    def _is_combo_candidate(self, card: Card) -> bool:
+        """Cards that enable multi-card interactions worth reserving deck space."""
+        keywords = set(card.keywords)
+        if "fusion" in keywords or "go_again" in keywords:
+            return True
+        if "attack_reaction" in card.card_types:
+            return True
+        if "utility_action" in card.card_types:
+            damage, _ = _parse_action_damage(card.text, card.power, False)
+            return damage > 0
+        return False
 
     def _normalize_format(self, fmt: str) -> str:
         normalized = _FORMAT_ALIASES.get(str(fmt).strip().lower())
@@ -926,6 +1052,7 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         current_cards.extend(normalized_new)
         _CARDS_PATH.write_text(json.dumps(current_cards, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
         self._cards = _load_cards()
+        self._attach_hero_abilities()
         return len(normalized_new)
 
     def _build_name_lookup(self, hero: Hero) -> dict[str, list[Card]]:
@@ -1080,6 +1207,14 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             return False
         if "attack_action" in card.card_types:
             return True
+        # Non-attack actions and reactions enable combinations (fusion, arcane
+        # bolts, attack/defense reactions) so they belong in the deck too.
+        if "utility_action" in card.card_types:
+            return True
+        if "attack_reaction" in card.card_types:
+            return True
+        if "defense_reaction" in card.card_types:
+            return True
         if card.defense > 0:
             return True
         return False
@@ -1096,6 +1231,105 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             return False
 
         return True
+
+    def _select_equipment(self, hero: Hero) -> list[str]:
+        """Pick one compatible piece for each gear slot at game setup.
+
+        Prefers higher-defense pieces and avoids self-destroying gear
+        (battleworn / blade break) so the loadout survives a few blocks.
+        """
+        by_slot: dict[str, list[Card]] = {s: [] for s in _EQUIP_SLOTS}
+        for card in self._cards.values():
+            slot = _equipment_slot(card)
+            if slot is None:
+                continue
+            if not self._is_card_legal_for_format(card.id):
+                continue
+            if not self._is_card_compatible_with_hero(card, hero):
+                continue
+            by_slot[slot].append(card)
+
+        loadout: list[str] = []
+        for slot in _EQUIP_SLOTS:
+            options = by_slot[slot]
+            if not options:
+                continue
+            options.sort(
+                key=lambda c: (
+                    c.defense,
+                    0 if ({"battleworn", "blade_break"} & set(c.keywords)) else 1,
+                    -c.cost,
+                ),
+                reverse=True,
+            )
+            loadout.append(options[0].id)
+        return loadout
+
+    @staticmethod
+    def _is_weapon_card(card: Card) -> bool:
+        return "weapon" in (card.type_line or "").lower() and "utility_item" in card.card_types
+
+    def _weapon_swing_cost(self, card: Card) -> int:
+        """Resource cost of a weapon's printed attack ability ({r} count)."""
+        for ability in effects.parse_activated_abilities(card.text):
+            if "attack" in ability.raw.lower():
+                return ability.cost
+        return 0
+
+    def _select_weapon(self, hero: Hero) -> Optional[str]:
+        """Pick a real weapon card for the hero (else fall back to basic weapon).
+
+        Prefers higher attack power, and rewards weapons that also carry an
+        activated ability we can resolve (e.g. an arcane staff).
+        """
+        best: Optional[Card] = None
+        best_score = float("-inf")
+        hero_class = (hero.hero_class or "Generic").strip().upper()
+        for card in self._cards.values():
+            if not self._is_weapon_card(card):
+                continue
+            if not self._is_card_legal_for_format(card.id):
+                continue
+            if not self._is_card_compatible_with_hero(card, hero):
+                continue
+            has_ability = any(
+                a.implemented for a in effects.parse_activated_abilities(card.text)
+            )
+            class_specific = (card.card_class or "Generic").strip().upper() == hero_class
+            swing_cost = self._weapon_swing_cost(card)
+            # Favor a thematic class weapon, then a weapon the hero can actually
+            # swing (low resource cost), then attack power, then a usable ability.
+            score = (
+                (10 if class_specific else 0)
+                + (card.power if card.power > 0 else 0)
+                - swing_cost * 2
+                + (3 if has_ability else 0)
+            )
+            if score > best_score:
+                best_score, best = score, card
+        return best.id if best is not None else None
+
+    def _weapon_stats(self, player_idx: int) -> tuple[str, int, int, Optional[Card]]:
+        """Return (name, attack, swing_cost, weapon_card) for a player's weapon."""
+        p = self._players[player_idx]
+        if p.weapon_id is not None:
+            card = self._cards[p.weapon_id]
+            return card.name, card.power, self._weapon_swing_cost(card), card
+        hero = p.hero
+        return hero.weapon_name, hero.weapon_attack, hero.weapon_cost, None
+
+    def _attach_hero_abilities(self) -> None:
+        """Populate each hero's special-ability text from its hero card."""
+        index: dict[str, str] = {}
+        for card in self._cards.values():
+            if "hero" in card.card_types and card.text:
+                index.setdefault(_card_name_key(card.name), card.text)
+        for hid, hero in list(self._heroes.items()):
+            if hero.ability_text:
+                continue
+            text = index.get(_card_name_key(hero.name), "")
+            if text:
+                self._heroes[hid] = dataclasses.replace(hero, ability_text=text)
 
     def _hero_pool_for_format(self) -> list[Hero]:
         heroes = list(self._heroes.values())
@@ -1127,6 +1361,7 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         if not p.deck:
             return False
         p.hand.append(p.deck.pop())
+        p.class_state["NumCardsDrawn"] += 1
         return True
 
     def _draw_up(self, player_idx: int) -> None:
@@ -1139,6 +1374,15 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         p = self._players[player_idx]
         p.resources = 0
         p.action_points = 1
+        for key in _PER_TURN_COUNTERS:
+            p.class_state[key] = 0
+        # Reset per-turn arena usage; weapons and equipment refresh each turn.
+        p.weapon_used = False
+        p.arena_used = set()
+        # A card stashed in the arsenal last turn returns to hand on your turn.
+        if p.arsenal:
+            p.hand.extend(p.arsenal)
+            p.arsenal = []
         self._active_player = player_idx
         self._phase = "action"
 
@@ -1179,9 +1423,33 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             return f"{card.name} requires revealing a {token} card from hand"
         return None
 
-    def _fusion_bonus_available(self, player_idx: int, hand_idx: int, card: Card) -> bool:
-        """Fusion grants its bonus when a same-talent card can be revealed."""
-        return self._reveal_available(player_idx, hand_idx, (card.talent or "").lower())
+    def _fusion_state(self, player_idx: int, hand_idx: int, card: Card) -> tuple[Optional[str], bool]:
+        """Return the card's fusion element and whether it can be fused.
+
+        Fusion cards (e.g. "Lightning Fusion") may reveal a card of the matching
+        element from hand for a bonus; here we model that bonus as "go again"
+        so the lightning-fuse chaining combination is mechanically rewarded.
+        """
+        if "fusion" not in set(card.keywords):
+            return None, False
+        element = _fusion_element(card.text)
+        if not element:
+            return None, False
+        return element, self._reveal_available(player_idx, hand_idx, element)
+
+    def _is_playable_action(self, card: Card) -> bool:
+        """Whether a card can be played from the action phase in this engine."""
+        if "attack_action" in card.card_types:
+            return True
+        if "utility_action" not in card.card_types:
+            return False
+        # Only surface non-attack actions we can meaningfully resolve: those
+        # that deal damage, chain (go again), or enable a fusion reveal.
+        keywords = set(card.keywords)
+        if "go_again" in keywords or "fusion" in keywords:
+            return True
+        damage, _ = _parse_action_damage(card.text, card.power, False)
+        return damage > 0
 
     # ------------------------------------------------------------------
     # Legal-move helpers (shared by the engine and observation)
@@ -1193,7 +1461,7 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         plays: list[int] = []
         for i, cid in enumerate(actor.hand):
             card = self._cards[cid]
-            if "attack_action" not in card.card_types:
+            if not self._is_playable_action(card):
                 continue
             if card.cost > actor.resources:
                 continue
@@ -1224,6 +1492,89 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
                 reactions.append(i)
         return reactions
 
+    def _can_weapon_attack(self, actor_idx: int) -> bool:
+        actor = self._players[actor_idx]
+        _, attack, cost, _ = self._weapon_stats(actor_idx)
+        return (
+            attack > 0
+            and not actor.weapon_used
+            and actor.action_points > 0
+            and actor.resources >= cost
+        )
+
+    def _ability_list(self, actor_idx: int) -> list[dict[str, Any]]:
+        """Ordered activated abilities available from this player's arena.
+
+        Each entry exposes a stable index used by the ``ability <i>`` action.
+        Equipment slots come first (in slot order), then the hero ability.
+        Only abilities whose effect we can resolve faithfully are listed.
+        """
+        actor = self._players[actor_idx]
+        entries: list[dict[str, Any]] = []
+        for cid in actor.equipment:
+            card = self._cards[cid]
+            ability = next(
+                (a for a in effects.parse_activated_abilities(card.text) if a.implemented),
+                None,
+            )
+            if ability is not None:
+                entries.append({"token": f"equip:{cid}", "name": card.name, "ability": ability})
+        if actor.weapon_id is not None:
+            weapon = self._cards[actor.weapon_id]
+            wab = next(
+                (a for a in effects.parse_activated_abilities(weapon.text) if a.implemented),
+                None,
+            )
+            if wab is not None:
+                entries.append({"token": f"weapon:{actor.weapon_id}", "name": weapon.name, "ability": wab})
+        hero_ability = next(
+            (a for a in effects.parse_activated_abilities(actor.hero.ability_text) if a.implemented),
+            None,
+        )
+        if hero_ability is not None:
+            entries.append({"token": "hero", "name": f"{actor.hero.name} (hero)", "ability": hero_ability})
+        return entries
+
+    def _ability_usable(self, actor_idx: int, entry: dict[str, Any]) -> bool:
+        actor = self._players[actor_idx]
+        ability = entry["ability"]
+        if ability.cost > actor.resources:
+            return False
+        if ability.uses_action_point and actor.action_points <= 0:
+            return False
+        if ability.once_per_turn and entry["token"] in actor.arena_used:
+            return False
+        return True
+
+    def _legal_abilities(self, actor_idx: int) -> list[int]:
+        entries = self._ability_list(actor_idx)
+        return [i for i, e in enumerate(entries) if self._ability_usable(actor_idx, e)]
+
+    def _legal_stash(self, actor_idx: int) -> list[int]:
+        """Hand indices that may be stashed face-down into the arsenal."""
+        actor = self._players[actor_idx]
+        if actor.arsenal:
+            return []
+        return list(range(len(actor.hand)))
+
+    def _legal_gear_blocks(self, defender_idx: int) -> list[int]:
+        """Equipment indices that can still block the pending attack."""
+        combat = self._pending_combat
+        if combat is None:
+            return []
+        if combat.dominate and any(b[0] == defender_idx for b in combat.blocks):
+            return []
+        defender = self._players[defender_idx]
+        usable: list[int] = []
+        for i, cid in enumerate(defender.equipment):
+            card = self._cards[cid]
+            if card.defense <= 0:
+                continue
+            if f"equip:{cid}" in defender.arena_used:
+                continue
+            usable.append(i)
+        return usable
+
     # ------------------------------------------------------------------
     # Low-level state mutators (used by both human/agent and opponent)
     # ------------------------------------------------------------------
@@ -1239,17 +1590,191 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         self._last_event = f"P{player_idx} pitches {card.name} (+{card.pitch} resources)"
         return 0.0
 
-    def _do_play_attack(self, player_idx: int, hand_idx: int) -> float:
-        attacker = self._players[player_idx]
-        card = self._cards[attacker.hand[hand_idx]]
+    @staticmethod
+    def _play_suffix(fused: bool, element: Optional[str], go_again: bool) -> str:
+        if fused:
+            return f" [fused: {element}]"
+        if go_again:
+            return " [go again]"
+        return ""
 
-        if "attack_action" not in card.card_types:
-            self._last_event = f"{card.name} is not an attack action"
+    def _note(self, message: str) -> None:
+        """Record a player-facing notice (e.g. an unimplemented interaction)."""
+        if message not in self._notices:
+            self._notices.append(message)
+
+    def _event_append(self, message: str) -> None:
+        """Append a positive trigger result to the current event line."""
+        self._last_event = f"{self._last_event} | {message}" if self._last_event else message
+
+    def _record_play_counters(
+        self, player_idx: int, card: Card, is_attack: bool, is_utility: bool, fused: bool, element: Optional[str]
+    ) -> None:
+        cs = self._players[player_idx].class_state
+        cs["NumCardsPlayed"] += 1
+        if is_attack:
+            cs["NumActionsPlayed"] += 1
+            cs["NumAttacks"] += 1
+        elif is_utility:
+            cs["NumActionsPlayed"] += 1
+            cs["NumNonAttackCards"] += 1
+        if "lightning" in (card.name + " " + card.text).lower():
+            cs["NumLightningPlayed"] += 1
+        color = {1: "NumRedPlayed", 2: "NumYellowPlayed", 3: "NumBluePlayed"}.get(card.pitch)
+        if color:
+            cs[color] += 1
+        if fused and element:
+            fkey = {"lightning": "NumFusedLightning", "ice": "NumFusedIce", "earth": "NumFusedEarth"}.get(element)
+            if fkey:
+                cs[fkey] += 1
+
+    def _apply_effect(
+        self,
+        player_idx: int,
+        card: Card,
+        effect: "effects.Effect",
+        combat: Optional[CombatState],
+        perspective_idx: int,
+    ) -> float:
+        """Apply one parsed effect; return signed reward from any damage dealt."""
+        if not effect.implemented:
+            self._note(f"{card.name}: interaction not implemented yet (\"{effect.raw[:60]}\")")
+            return 0.0
+
+        actor = self._players[player_idx]
+        defender = self._players[1 - player_idx]
+
+        if effect.kind == "go_again":
+            actor.action_points += 1
+            if combat is not None:
+                combat.go_again = True
+            return 0.0
+        if effect.kind == "next_naa_go_again":
+            actor.class_state["NextNAACardGoAgain"] = 1
+            return 0.0
+        if effect.kind == "next_attack_power":
+            actor.class_state["NextAttackPower"] = effect.amount
+            actor.class_state["NextAttackPowerMaxCost"] = effect.max_cost
+            return 0.0
+        if effect.kind == "banish_combo":
+            if combat is not None:
+                target = effect.banish_name.lower()
+                for j, cid in enumerate(actor.discard):
+                    if target in self._cards[cid].name.lower():
+                        banished = self._cards[cid].name
+                        actor.discard.pop(j)
+                        combat.attack_bonus += effect.amount
+                        if effect.go_again:
+                            combat.go_again = True
+                        extra = ", go again" if effect.go_again else ""
+                        self._event_append(f"banished {banished} (+{effect.amount} power{extra})")
+                        break
+            return 0.0
+        if effect.kind == "power":
+            if combat is not None:
+                combat.attack_bonus += effect.amount
+            return 0.0
+        if effect.kind == "draw":
+            for _ in range(effect.amount):
+                self._draw_card(player_idx)
+            actor.class_state["NumCardsDrawn"] += effect.amount
+            return 0.0
+        if effect.kind in ("damage", "arcane_damage"):
+            defender.life -= effect.amount
+            key = "DamageDealt" if effect.kind == "damage" else "ArcaneDamageDealt"
+            actor.class_state[key] += effect.amount
+            defender.class_state["DamageTaken"] += effect.amount
+            r = float(effect.amount) * 0.01
+            return r if perspective_idx == player_idx else -r
+        return 0.0
+
+    def _run_triggers(
+        self,
+        player_idx: int,
+        card: Card,
+        when: str,
+        combat: Optional[CombatState],
+        perspective_idx: int,
+        fused: bool,
+    ) -> float:
+        reward = 0.0
+        for trig in effects.parse_triggers(card.text):
+            if trig.when != when:
+                continue
+            # Don't fire a fused-gated effect when the card wasn't fused.
+            if when != "when_fused" and not fused and "fused" in trig.raw.lower():
+                continue
+            eff = trig.effect
+            # Optional ("you may") effects become a player decision instead of
+            # auto-resolving -- queue them if they could do something now.
+            if eff.implemented and eff.optional:
+                if self._optional_available(player_idx, eff):
+                    self._pending_optionals.append(
+                        {"player": player_idx, "card_id": card.id, "effect": eff, "perspective": perspective_idx}
+                    )
+                continue
+            reward += self._apply_effect(player_idx, card, eff, combat, perspective_idx)
+        return reward
+
+    def _optional_available(self, player_idx: int, effect: "effects.Effect") -> bool:
+        """Whether an optional effect could actually do something if taken."""
+        if effect.kind == "banish_combo":
+            target = effect.banish_name.lower()
+            return any(target in self._cards[c].name.lower() for c in self._players[player_idx].discard)
+        return True
+
+    def _do_optional(self, accept: bool) -> float:
+        """Resolve the next pending optional decision (use it or decline)."""
+        if not self._pending_optionals:
+            self._resume_after_optional()
+            return 0.0
+        opt = self._pending_optionals.pop(0)
+        reward = 0.0
+        card = self._cards[opt["card_id"]]
+        if accept:
+            reward = self._apply_effect(opt["player"], card, opt["effect"], self._pending_combat, opt["perspective"])
+        else:
+            self._event_append(f"declined {card.name} optional")
+        if not self._pending_optionals:
+            self._resume_after_optional()
+        return reward
+
+    def _resume_after_optional(self) -> None:
+        tag, self._optional_resume = self._optional_resume, None
+        if tag == "defense":
+            self._enter_defense()
+        elif tag == "advance":
+            self._finish_combat_advance()
+        else:
+            self._phase = "action"
+
+    def _finish_combat_advance(self) -> None:
+        ctx = self._optional_ctx
+        self._optional_ctx = {}
+        attacker = self._players[ctx["attacker"]]
+        if ctx.get("go_again"):
+            attacker.action_points += 1
+        if not self._is_terminal():
+            if attacker.action_points > 0:
+                self._phase = "action"
+                self._active_player = ctx["attacker"]
+            else:
+                self._end_turn(ctx["attacker"])
+                self._start_turn(ctx["defender"])
+
+    def _do_play_card(self, player_idx: int, hand_idx: int, perspective_idx: int = 0) -> float:
+        actor = self._players[player_idx]
+        card = self._cards[actor.hand[hand_idx]]
+
+        is_attack = "attack_action" in card.card_types
+        is_utility = "utility_action" in card.card_types
+        if not (is_attack or is_utility):
+            self._last_event = f"{card.name} is not an action you can play"
             return -0.05
-        if attacker.action_points <= 0:
+        if actor.action_points <= 0:
             self._last_event = "No action points remaining"
             return -0.05
-        if attacker.resources < card.cost:
+        if actor.resources < card.cost:
             self._last_event = f"Need {card.cost} resources (pitch cards first)"
             return -0.05
         reason = self._play_blocked_reason(player_idx, hand_idx, card)
@@ -1258,28 +1783,112 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             return -0.05
 
         keywords = set(card.keywords)
+        element, fused = self._fusion_state(player_idx, hand_idx, card)
         go_again = "go_again" in keywords
-        fused = "fusion" in keywords and self._fusion_bonus_available(player_idx, hand_idx, card)
-        if fused:
+        # Consume a pending "next non-attack action gains go again" buff.
+        if is_utility and actor.class_state.get("NextNAACardGoAgain", 0) > 0:
             go_again = True
+            actor.class_state["NextNAACardGoAgain"] = 0
+        damage, arcane = _parse_action_damage(card.text, card.power, is_attack)
 
-        attacker.resources -= card.cost
-        attacker.action_points -= 1
-        attacker.hand.pop(hand_idx)
+        actor.resources -= card.cost
+        actor.action_points -= 1
+        actor.hand.pop(hand_idx)
+        self._record_play_counters(player_idx, card, is_attack, is_utility, fused, element)
 
-        self._pending_combat = CombatState(
-            attacker=player_idx,
-            defender=1 - player_idx,
-            attack_card_id=card.id,
-            attack_power=card.power,
-            blocks=[],
-            go_again=go_again,
-            dominate=("dominate" in keywords),
+        # Physical attacks go through the combat chain (blocks + reactions).
+        # Arcane damage and non-attack actions cannot be blocked normally, so
+        # they resolve immediately.
+        if is_attack and not arcane:
+            combat = CombatState(
+                attacker=player_idx,
+                defender=1 - player_idx,
+                attack_card_id=card.id,
+                attack_power=damage,
+                blocks=[],
+                go_again=go_again,
+                dominate=("dominate" in keywords),
+                fused=fused,
+            )
+            self._pending_combat = combat
+            suffix = self._play_suffix(fused, element, go_again)
+            self._last_event = f"P{player_idx} attacks with {card.name} ({damage}){suffix}"
+            # Consume a pending "next attack gets +power" buff (e.g. Nimblism).
+            cs = actor.class_state
+            pending_power = cs.get("NextAttackPower", 0)
+            if pending_power > 0:
+                max_cost = cs.get("NextAttackPowerMaxCost", -1)
+                if max_cost < 0 or card.cost <= max_cost:
+                    combat.attack_bonus += pending_power
+                    self._event_append(f"+{pending_power} power from prior effect")
+                    cs["NextAttackPower"] = 0
+                    cs["NextAttackPowerMaxCost"] = 0
+            trig_reward = self._run_triggers(player_idx, card, "on_play", combat, perspective_idx, fused)
+            if fused:
+                trig_reward += self._run_triggers(player_idx, card, "when_fused", combat, perspective_idx, fused)
+            trig_reward += self._run_triggers(player_idx, card, "on_attack", combat, perspective_idx, fused)
+            # Optional triggers pause for a decision before blocks are declared.
+            if self._pending_optionals:
+                self._optional_resume = "defense"
+                self._phase = "optional"
+                self._active_player = player_idx
+            else:
+                self._enter_defense()
+            return trig_reward
+
+        return self._resolve_direct(
+            player_idx, card, damage, arcane, go_again, fused, element, perspective_idx
         )
-        suffix = " [fused]" if fused else (" [go again]" if go_again else "")
-        self._last_event = f"P{player_idx} attacks with {card.name} ({card.power}){suffix}"
-        self._enter_defense()
-        return 0.0
+
+    def _resolve_direct(
+        self,
+        player_idx: int,
+        card: Card,
+        damage: int,
+        arcane: bool,
+        go_again: bool,
+        fused: bool,
+        element: Optional[str],
+        perspective_idx: int,
+    ) -> float:
+        """Resolve a non-blockable play (arcane bolt or non-attack action)."""
+        actor = self._players[player_idx]
+        defender = self._players[1 - player_idx]
+        defender.life -= damage
+        actor.discard.append(card.id)
+
+        if damage > 0:
+            kind = "arcane damage" if arcane else "damage"
+            verb = f"deals {damage} {kind} to P{1 - player_idx}"
+            actor.class_state["ArcaneDamageDealt" if arcane else "DamageDealt"] += damage
+            actor.class_state["HitCounter"] += 1
+            defender.class_state["DamageTaken"] += damage
+        else:
+            verb = "resolves"
+        suffix = self._play_suffix(fused, element, go_again)
+        self._last_event = f"P{player_idx} plays {card.name} ({verb}){suffix}"
+
+        reward = 0.0
+        reward += self._run_triggers(player_idx, card, "on_play", None, perspective_idx, fused)
+        if fused:
+            reward += self._run_triggers(player_idx, card, "when_fused", None, perspective_idx, fused)
+        if damage > 0:
+            reward += self._run_triggers(player_idx, card, "on_hit", None, perspective_idx, fused)
+
+        if go_again:
+            actor.action_points += 1
+
+        if not self._is_terminal():
+            if actor.action_points > 0:
+                self._phase = "action"
+                self._active_player = player_idx
+            else:
+                self._end_turn(player_idx)
+                self._start_turn(1 - player_idx)
+
+        if damage > 0:
+            reward += float(damage) * 0.01 if perspective_idx == player_idx else -float(damage) * 0.01
+        return reward
 
     def _do_block(self, defender_idx: int, hand_idx: int) -> float:
         combat = self._pending_combat
@@ -1295,6 +1904,40 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         blocker.discard.append(card.id)
         combat.blocks.append((defender_idx, card.id, card.defense))
         self._last_event = f"P{defender_idx} blocks with {card.name} (+{card.defense} defense)"
+        return 0.0
+
+    def _do_block_gear(self, defender_idx: int, equip_idx: int) -> float:
+        combat = self._pending_combat
+        if combat is None:
+            self._last_event = "No attack to defend"
+            return -0.05
+        defender = self._players[defender_idx]
+        if equip_idx < 0 or equip_idx >= len(defender.equipment):
+            self._last_event = "No such equipment"
+            return -0.05
+        cid = defender.equipment[equip_idx]
+        card = self._cards[cid]
+        if card.defense <= 0:
+            self._last_event = f"{card.name} cannot block"
+            return -0.05
+        if f"equip:{cid}" in defender.arena_used:
+            self._last_event = f"{card.name} already blocked this turn"
+            return -0.05
+        combat.blocks.append((defender_idx, cid, card.defense))
+        defender.arena_used.add(f"equip:{cid}")
+        # Battleworn / blade break gear is destroyed after blocking.
+        fragile = {"battleworn", "blade_break"} & set(card.keywords)
+        if fragile:
+            defender.equipment.pop(equip_idx)
+            defender.discard.append(cid)
+            self._last_event = (
+                f"P{defender_idx} blocks with {card.name} (+{card.defense} defense), destroyed"
+            )
+        else:
+            self._last_event = f"P{defender_idx} blocks with {card.name} (+{card.defense} defense)"
+        # Surface any on-block ability text we don't model.
+        if card.text and "when" in card.text.lower() and "block" in card.text.lower():
+            self._note(f"{card.name}: on-block effect not implemented yet")
         return 0.0
 
     def _do_reaction(self, attacker_idx: int, hand_idx: int) -> float:
@@ -1317,6 +1960,108 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         if "go_again" in card.keywords:
             combat.go_again = True
         self._last_event = f"P{attacker_idx} boosts with {card.name} (+{card.power} power)"
+        return 0.0
+
+    def _do_weapon_attack(self, player_idx: int, perspective_idx: int = 0) -> float:
+        actor = self._players[player_idx]
+        if not self._can_weapon_attack(player_idx):
+            self._last_event = "Cannot attack with weapon right now"
+            return -0.05
+        name, attack, cost, weapon_card = self._weapon_stats(player_idx)
+        actor.resources -= cost
+        actor.action_points -= 1
+        actor.weapon_used = True
+        keywords = set(weapon_card.keywords) if weapon_card else set()
+        combat = CombatState(
+            attacker=player_idx,
+            defender=1 - player_idx,
+            attack_card_id=weapon_card.id if weapon_card else "",
+            attack_power=attack,
+            blocks=[],
+            go_again=("go_again" in keywords),
+            dominate=("dominate" in keywords),
+            is_weapon=True,
+            source_name=name,
+        )
+        self._pending_combat = combat
+        self._last_event = f"P{player_idx} attacks with {name} ({attack})"
+        # A pending "next attack +power" buff also applies to weapon swings.
+        cs = actor.class_state
+        pending_power = cs.get("NextAttackPower", 0)
+        if pending_power > 0:
+            max_cost = cs.get("NextAttackPowerMaxCost", -1)
+            if max_cost < 0 or cost <= max_cost:
+                combat.attack_bonus += pending_power
+                self._event_append(f"+{pending_power} power from prior effect")
+                cs["NextAttackPower"] = 0
+                cs["NextAttackPowerMaxCost"] = 0
+        # Weapon on-attack triggers (on-hit fire later in _resolve_and_advance).
+        reward = 0.0
+        if weapon_card is not None:
+            reward += self._run_triggers(player_idx, weapon_card, "on_attack", combat, perspective_idx, False)
+        if self._pending_optionals:
+            self._optional_resume = "defense"
+            self._phase = "optional"
+            self._active_player = player_idx
+        else:
+            self._enter_defense()
+        return reward
+
+    def _do_stash(self, player_idx: int, hand_idx: int) -> float:
+        actor = self._players[player_idx]
+        if actor.arsenal:
+            self._last_event = "Arsenal already holds a card"
+            return -0.05
+        if hand_idx < 0 or hand_idx >= len(actor.hand):
+            self._last_event = "No such card to stash"
+            return -0.05
+        card = self._cards[actor.hand.pop(hand_idx)]
+        actor.arsenal.append(card.id)
+        self._last_event = f"P{player_idx} stashes {card.name} in arsenal"
+        return 0.0
+
+    def _do_ability(self, player_idx: int, ability_idx: int, perspective_idx: int = 0) -> float:
+        entries = self._ability_list(player_idx)
+        if ability_idx < 0 or ability_idx >= len(entries):
+            self._last_event = "No such ability"
+            return -0.05
+        entry = entries[ability_idx]
+        if not self._ability_usable(player_idx, entry):
+            self._last_event = f"Cannot use {entry['name']} ability now"
+            return -0.05
+        actor = self._players[player_idx]
+        ability = entry["ability"]
+        actor.resources -= ability.cost
+        if ability.uses_action_point:
+            actor.action_points -= 1
+        if ability.once_per_turn:
+            actor.arena_used.add(entry["token"])
+        self._last_event = f"P{player_idx} activates {entry['name']}"
+        return self._apply_ability_effect(player_idx, entry["name"], ability.effect, perspective_idx)
+
+    def _apply_ability_effect(
+        self, player_idx: int, source_name: str, effect: "effects.Effect", perspective_idx: int
+    ) -> float:
+        """Resolve an activated-ability effect (no combat chain attached)."""
+        actor = self._players[player_idx]
+        defender = self._players[1 - player_idx]
+        if effect.kind == "go_again":
+            actor.action_points += 1
+            return 0.0
+        if effect.kind == "draw":
+            for _ in range(effect.amount):
+                self._draw_card(player_idx)
+            return 0.0
+        if effect.kind in ("damage", "arcane_damage"):
+            defender.life -= effect.amount
+            key = "DamageDealt" if effect.kind == "damage" else "ArcaneDamageDealt"
+            actor.class_state[key] += effect.amount
+            actor.class_state["HitCounter"] += 1
+            defender.class_state["DamageTaken"] += effect.amount
+            kind = "arcane damage" if effect.kind == "arcane_damage" else "damage"
+            self._event_append(f"{source_name} deals {effect.amount} {kind}")
+            r = float(effect.amount) * 0.01
+            return r if perspective_idx == player_idx else -r
         return 0.0
 
     # ------------------------------------------------------------------
@@ -1356,30 +2101,41 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         damage = max(0, total_power - total_block)
         defender.life -= damage
 
-        attacker.discard.append(combat.attack_card_id)
+        # Weapons stay in the arena; action attacks (and reactions) go to discard.
+        fused = combat.fused
+        attack_card = self._cards.get(combat.attack_card_id) if combat.attack_card_id else None
+        if not combat.is_weapon and combat.attack_card_id:
+            attacker.discard.append(combat.attack_card_id)
         attacker.discard.extend(combat.reaction_cards)
         go_again = combat.go_again
-        self._pending_combat = None
         self._last_event = (
             f"P{attacker_idx} hits P{defender_idx} for {damage} "
             f"(power {total_power} vs block {total_block})"
         )
 
-        if go_again:
-            attacker.action_points += 1
+        reward = 0.0
+        if damage > 0:
+            attacker.class_state["DamageDealt"] += damage
+            attacker.class_state["HitCounter"] += 1
+            defender.class_state["DamageTaken"] += damage
+            # On-hit triggers fire only when the attack connects.
+            if attack_card is not None:
+                reward += self._run_triggers(attacker_idx, attack_card, "on_hit", None, perspective_idx, fused)
 
-        if not self._is_terminal():
-            if attacker.action_points > 0:
-                self._phase = "action"
-                self._active_player = attacker_idx
-            else:
-                self._end_turn(attacker_idx)
-                self._start_turn(defender_idx)
+        self._pending_combat = None
+        self._optional_ctx = {"attacker": attacker_idx, "defender": defender_idx, "go_again": go_again}
 
-        if damage <= 0:
-            return 0.0
-        reward = float(damage) * 0.01
-        return reward if perspective_idx == attacker_idx else -reward
+        # An optional on-hit trigger pauses for a decision before advancing.
+        if self._pending_optionals:
+            self._optional_resume = "advance"
+            self._phase = "optional"
+            self._active_player = attacker_idx
+        else:
+            self._finish_combat_advance()
+
+        if damage > 0:
+            reward += float(damage) * 0.01 if perspective_idx == attacker_idx else -float(damage) * 0.01
+        return reward
 
     # ------------------------------------------------------------------
     # Self-play transition (single policy controls the active player)
@@ -1395,7 +2151,13 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             if parsed.startswith("pitch "):
                 return self._do_pitch(player, int(parsed.split(" ")[1]))
             if parsed.startswith("play "):
-                return self._do_play_attack(player, int(parsed.split(" ")[1]))
+                return self._do_play_card(player, int(parsed.split(" ")[1]), player)
+            if parsed == "weapon":
+                return self._do_weapon_attack(player, player)
+            if parsed.startswith("ability "):
+                return self._do_ability(player, int(parsed.split(" ")[1]), player)
+            if parsed.startswith("stash "):
+                return self._do_stash(player, int(parsed.split(" ")[1]))
             return 0.0
 
         if self._phase == "defense":
@@ -1404,6 +2166,8 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
                 return 0.0
             if parsed.startswith("block "):
                 return self._do_block(player, int(parsed.split(" ")[1]))
+            if parsed.startswith("blockgear "):
+                return self._do_block_gear(player, int(parsed.split(" ")[1]))
             return 0.0
 
         if self._phase == "reaction":
@@ -1412,6 +2176,9 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             if parsed.startswith("reaction "):
                 return self._do_reaction(player, int(parsed.split(" ")[1]))
             return 0.0
+
+        if self._phase == "optional":
+            return self._do_optional(parsed == "use_optional")
 
         return 0.0
 
@@ -1428,8 +2195,10 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             if self._active_player == 0:
                 if phase == "action":
                     return accum
+                if phase == "optional":
+                    return accum
                 if phase == "defense":
-                    if self._legal_blocks(0):
+                    if self._legal_blocks(0) or self._legal_gear_blocks(0):
                         return accum
                     self._pass_defense(0)
                     continue
@@ -1443,6 +2212,8 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             # Opponent (player 1) to act.
             if phase == "action":
                 accum += self._opponent_action()
+            elif phase == "optional":
+                accum += self._do_optional(True)
             elif phase == "defense":
                 self._opponent_block()
             elif phase == "reaction":
@@ -1482,11 +2253,21 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             self._opponent_type = "preset_logic"
             self._opponent_policy = self._build_opponent_policy(self._opponent_type)
             idx = self._opponent_policy.select_attack_index(self)
-        if idx is None or idx < 0 or idx >= len(opp.hand):
+        # Guard against an unplayable pick (e.g. unmet requirement) so the
+        # opponent never stalls the action phase.
+        if (
+            idx is None
+            or idx < 0
+            or idx >= len(opp.hand)
+            or idx not in self._legal_plays(1)
+        ):
+            # No worthwhile card play: swing with the weapon if able, else pass.
+            if self._can_weapon_attack(1):
+                return self._do_weapon_attack(1, 0)
             self._last_event = "Opponent passed"
             self._pass_action(1)
             return 0.0
-        return self._do_play_attack(1, idx)
+        return self._do_play_card(1, idx, 0)
 
     def _opponent_block(self) -> None:
         combat = self._pending_combat
@@ -1511,6 +2292,17 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             if bidx is None or bidx < 0 or bidx >= len(defender.hand):
                 break
             self._do_block(1, bidx)
+        # Soak remaining damage with equipment before taking the hit.
+        guard = 0
+        while combat is self._pending_combat and guard < 8:
+            guard += 1
+            remaining = combat.attack_power + combat.attack_bonus - sum(b[2] for b in combat.blocks)
+            if remaining <= 0:
+                break
+            gear = self._legal_gear_blocks(1)
+            if not gear:
+                break
+            self._do_block_gear(1, gear[0])
         self._pass_defense(1)
 
     def _legal_actions(self) -> list[str]:
@@ -1529,6 +2321,10 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             actions = ["pass"]
             actions.extend(f"pitch {i}" for i in self._legal_pitches(actor_idx))
             actions.extend(f"play {i}" for i in self._legal_plays(actor_idx))
+            if self._can_weapon_attack(actor_idx):
+                actions.append("weapon")
+            actions.extend(f"ability {i}" for i in self._legal_abilities(actor_idx))
+            actions.extend(f"stash {i}" for i in self._legal_stash(actor_idx))
             return actions
 
         if self._phase == "defense":
@@ -1536,6 +2332,7 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
                 return ["pass"]
             actions = ["pass"]
             actions.extend(f"block {i}" for i in self._legal_blocks(actor_idx))
+            actions.extend(f"blockgear {i}" for i in self._legal_gear_blocks(actor_idx))
             return actions
 
         if self._phase == "reaction":
@@ -1545,7 +2342,79 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             actions.extend(f"reaction {i}" for i in self._legal_reactions(actor_idx))
             return actions
 
+        if self._phase == "optional":
+            if not self._pending_optionals or self._pending_optionals[0]["player"] != actor_idx:
+                return ["pass"]
+            return ["use_optional", "pass"]
+
         return ["pass"]
+
+    def _arena_view(self, player_idx: int, reveal: bool) -> dict[str, Any]:
+        """Equipment / weapon / hero / arsenal zones for the observation."""
+        p = self._players[player_idx]
+        equipment = []
+        for cid in p.equipment:
+            c = self._cards[cid]
+            equipment.append(
+                {
+                    "id": c.id,
+                    "name": c.name,
+                    "slot": _equipment_slot(c),
+                    "defense": c.defense,
+                    "keywords": list(c.keywords),
+                    "text": c.text,
+                    "used": f"equip:{cid}" in p.arena_used,
+                }
+            )
+        hero_ability = next(
+            (a for a in effects.parse_activated_abilities(p.hero.ability_text) if a.implemented),
+            None,
+        )
+        wname, wattack, wcost, wcard = self._weapon_stats(player_idx)
+        arena = {
+            "equipment": equipment,
+            "weapon": {
+                "name": wname,
+                "attack": wattack,
+                "cost": wcost,
+                "used": p.weapon_used,
+                "text": wcard.text if wcard else "",
+            },
+            "hero_ability_text": p.hero.ability_text,
+            "hero_ability_usable": bool(hero_ability),
+            "arsenal_size": len(p.arsenal),
+        }
+        if reveal:
+            arena["abilities"] = [
+                {"index": i, "source": e["name"], "summary": e["ability"].effect.raw or e["ability"].raw}
+                for i, e in enumerate(self._ability_list(player_idx))
+            ]
+            arena["arsenal"] = [self._cards[cid].name for cid in p.arsenal]
+        return arena
+
+    def _optional_decision_view(self) -> Optional[dict[str, Any]]:
+        """Describe the pending optional decision for the agent, if any."""
+        if self._phase != "optional" or not self._pending_optionals:
+            return None
+        opt = self._pending_optionals[0]
+        if opt["player"] != 0:
+            return None
+        eff = opt["effect"]
+        card = self._cards[opt["card_id"]]
+        if eff.kind == "banish_combo":
+            rider = f"+{eff.amount} power" + (" and go again" if eff.go_again else "")
+            desc = f"banish {eff.banish_name} from your graveyard for {rider}"
+        elif eff.kind in ("damage", "arcane_damage"):
+            desc = f"deal {eff.amount} {'arcane ' if eff.kind == 'arcane_damage' else ''}damage"
+        elif eff.kind == "power":
+            desc = f"give +{eff.amount} power"
+        elif eff.kind == "draw":
+            desc = f"draw {eff.amount}"
+        elif eff.kind == "go_again":
+            desc = "gain go again"
+        else:
+            desc = eff.raw
+        return {"card": card.name, "description": desc}
 
     def _is_terminal(self) -> bool:
         if not self._players:
@@ -1556,6 +2425,8 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         if self._selection_stage and isinstance(action, str):
             return action.strip().lower()
         if isinstance(action, int):
+            if self._phase == "optional":
+                return "use_optional" if action == 0 else "pass"
             if self._phase == "action":
                 return f"play {action}"
             if self._phase == "defense":
@@ -1565,7 +2436,9 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         text = str(action).strip().lower()
         if text in {"pass", "end", "end turn"}:
             return "pass"
-        for verb in ("play", "block", "pitch", "reaction"):
+        if text in {"weapon", "attack weapon", "weapon attack"}:
+            return "weapon"
+        for verb in ("play", "block", "pitch", "reaction", "ability", "stash", "blockgear"):
             if text.startswith(verb):
                 parts = text.split()
                 if len(parts) == 2 and parts[1].isdigit():
@@ -1594,6 +2467,9 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         hand_view = []
         for i, cid in enumerate(agent.hand):
             c = self._cards[cid]
+            is_attack = "attack_action" in c.card_types
+            damage, arcane = _parse_action_damage(c.text, c.power, is_attack)
+            element, fusable = self._fusion_state(0, i, c)
             hand_view.append(
                 {
                     "index": i,
@@ -1606,17 +2482,24 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
                     "card_types": list(c.card_types),
                     "keywords": list(c.keywords),
                     "text": c.text,
+                    "damage": damage,
+                    "arcane": arcane,
+                    "fusion_element": element,
+                    "fusable": fusable,
                 }
             )
 
         pending = None
         if self._pending_combat is not None:
             pc = self._pending_combat
-            attack_card = self._cards[pc.attack_card_id]
+            if pc.is_weapon or not pc.attack_card_id:
+                attack_name = pc.source_name or "Weapon"
+            else:
+                attack_name = self._cards[pc.attack_card_id].name
             pending = {
                 "attacker": pc.attacker,
                 "defender": pc.defender,
-                "attack_card": attack_card.name,
+                "attack_card": attack_name,
                 "attack_power": pc.attack_power + pc.attack_bonus,
                 "attack_bonus": pc.attack_bonus,
                 "total_block": sum(b[2] for b in pc.blocks),
@@ -1641,6 +2524,8 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
                 "deck": len(agent.deck),
                 "discard": len(agent.discard),
                 "hand": hand_view,
+                "class_state": dict(agent.class_state),
+                "arena": self._arena_view(0, reveal=True),
             },
             "opponent": {
                 "hero": opp.hero.name,
@@ -1650,10 +2535,14 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
                 "deck": len(opp.deck),
                 "discard": len(opp.discard),
                 "hand_size": len(opp.hand),
+                "class_state": dict(opp.class_state),
+                "arena": self._arena_view(1, reveal=False),
             },
             "pending_combat": pending,
+            "optional_decision": self._optional_decision_view(),
             "legal_actions": self._legal_actions(),
             "last_event": self._last_event,
+            "notices": list(self._notices),
         }
 
     def _estimate_win_probabilities(self, obs: Optional[dict[str, Any]] = None) -> tuple[float, float]:

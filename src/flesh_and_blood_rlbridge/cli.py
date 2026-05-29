@@ -16,6 +16,7 @@ import pickle
 from pathlib import Path
 from typing import Any, Optional
 
+from . import effects
 from .gameplay_environment import FleshAndBloodGameplayEnvironment
 
 _CACHE_DIR = Path(__file__).with_name("card_db") / "agent_cache"
@@ -313,30 +314,138 @@ def _clean_text(text: Any) -> str:
     return "\n".join(line for line in lines if line)
 
 
+def _effect_hints(text: Any) -> list[str]:
+    """Short summaries of the implementable triggered effects on a card."""
+    hints: list[str] = []
+    for trig in effects.parse_triggers(str(text or "")):
+        e = trig.effect
+        if not e.implemented:
+            continue
+        if e.kind == "next_attack_power":
+            cap = f" (cost<={e.max_cost})" if 0 <= e.max_cost < 99 else ""
+            hints.append(f"next attack +{e.amount} power{cap}")
+        elif e.kind == "banish_combo":
+            rider = f"+{e.amount} power" + (" & go again" if e.go_again else "")
+            hints.append(f"may banish {e.banish_name}: {rider}")
+        elif e.kind in ("damage", "arcane_damage"):
+            kind = "arcane " if e.kind == "arcane_damage" else ""
+            hints.append(f"{trig.when.replace('_', ' ')}: deal {e.amount} {kind}dmg")
+        elif e.kind == "power":
+            hints.append(f"{trig.when.replace('_', ' ')}: +{e.amount} power")
+        elif e.kind == "draw":
+            hints.append(f"{trig.when.replace('_', ' ')}: draw {e.amount}")
+    return hints
+
+
 def _describe_action(action: str, obs: dict[str, Any]) -> str:
     """Turn a raw legal action string into a natural-language description."""
     phase = obs.get("phase")
+    decision = obs.get("optional_decision") if isinstance(obs.get("optional_decision"), dict) else None
+    if action == "use_optional":
+        if decision:
+            return f'Use optional - {decision.get("description")}'
+        return "Use optional effect"
     if action == "pass":
+        if phase == "optional":
+            return "Decline - skip this optional effect"
         if phase == "defense":
             return "Pass - take the attack unblocked (no more blocks)"
         if phase == "reaction":
             return "Pass - resolve the attack (play no reactions)"
         return "Pass - end your turn (let the opponent act)"
 
+    arena = obs.get("agent", {}).get("arena") if isinstance(obs.get("agent"), dict) else None
+    arena = arena if isinstance(arena, dict) else {}
+
+    if action == "weapon":
+        w = arena.get("weapon", {})
+        return f'Attack with {_clean_name(w.get("name"))} - {w.get("attack", 0)} damage (cost {w.get("cost", 0)})'
+
     parts = action.split()
+    if len(parts) == 2 and parts[1].isdigit():
+        idx = int(parts[1])
+        if parts[0] == "ability":
+            abilities = arena.get("abilities") or []
+            entry = next((a for a in abilities if a.get("index") == idx), None)
+            if entry is not None:
+                return f'Activate {_clean_name(entry.get("source"))} - {_clean_text(entry.get("summary"))}'
+            return action
+        if parts[0] == "stash":
+            card = _hand_by_index(obs).get(idx)
+            name = _clean_name(card.get("name")) if card else f"card {idx}"
+            return f'Stash "{name}" in arsenal - keep it for next turn'
+        if parts[0] == "blockgear":
+            equipment = arena.get("equipment") or []
+            piece = equipment[idx] if 0 <= idx < len(equipment) else None
+            if piece is not None:
+                fragile = " (destroyed after blocking)" if {"battleworn", "blade_break"} & set(piece.get("keywords") or []) else ""
+                return f'Block with {_clean_name(piece.get("name"))} [{piece.get("slot")}] - prevents {piece.get("defense", 0)} damage{fragile}'
+            return action
+
     if len(parts) == 2 and parts[0] in {"play", "block", "pitch", "reaction"} and parts[1].isdigit():
         card = _hand_by_index(obs).get(int(parts[1]))
         if card is None:
             return action
         name = _clean_name(card.get("name"))
         if parts[0] == "play":
-            return f'Play "{name}" - attack for {card.get("power", 0)} (cost {card.get("cost", 0)})'
+            cost = card.get("cost", 0)
+            damage = card.get("damage", card.get("power", 0))
+            is_attack = "attack_action" in (card.get("card_types") or [])
+            if damage and card.get("arcane"):
+                effect = f"deal {damage} arcane damage"
+            elif damage:
+                effect = f"attack for {damage}" if is_attack else f"deal {damage} damage"
+            else:
+                effect = "play action"
+            extras = []
+            if card.get("fusion_element"):
+                state = "ready" if card.get("fusable") else f"needs a {card['fusion_element']} card"
+                extras.append(f"fusion: {state}")
+            if "go_again" in (card.get("keywords") or []):
+                extras.append("go again")
+            extras.extend(_effect_hints(card.get("text")))
+            tag = f" [{', '.join(extras)}]" if extras else ""
+            return f'Play "{name}" - {effect} (cost {cost}){tag}'
         if parts[0] == "pitch":
             return f'Pitch "{name}" - gain {card.get("pitch", 0)} resources'
         if parts[0] == "reaction":
             return f'React with "{name}" - +{card.get("power", 0)} attack (cost {card.get("cost", 0)})'
         return f'Block with "{name}" - prevents {card.get("defense", 0)} damage'
     return action
+
+
+def _arena_lines(arena: dict[str, Any], reveal: bool) -> list[str]:
+    """Render the equipment / weapon / hero / arsenal zones."""
+    if not isinstance(arena, dict):
+        return []
+    out: list[str] = []
+    equipment = arena.get("equipment") or []
+    if equipment:
+        pieces = []
+        for e in equipment:
+            mark = "*" if e.get("used") else ""
+            pieces.append(f"{e.get('slot')}: {_clean_name(e.get('name'))} (def {e.get('defense', 0)}){mark}")
+        out.append("  Equipment: " + "  |  ".join(pieces))
+    weapon = arena.get("weapon") or {}
+    if weapon.get("name"):
+        used = " [used]" if weapon.get("used") else ""
+        out.append(
+            f"  Weapon: {_clean_name(weapon.get('name'))} - attack {weapon.get('attack', 0)}, "
+            f"cost {weapon.get('cost', 0)}{used}"
+        )
+    if arena.get("hero_ability_text"):
+        ability = _clean_text(arena.get("hero_ability_text"))
+        first = ability.split("\n")[0]
+        flag = " [activatable]" if arena.get("hero_ability_usable") else ""
+        out.append(f"  Hero ability: {first}{flag}")
+    if reveal:
+        for ab in arena.get("abilities") or []:
+            out.append(f"    > ability {ab.get('index')}: {_clean_name(ab.get('source'))} - {_clean_text(ab.get('summary'))}")
+        arsenal = arena.get("arsenal") or []
+        out.append(f"  Arsenal: {', '.join(_clean_name(n) for n in arsenal) if arsenal else '(empty)'}")
+    else:
+        out.append(f"  Arsenal: {arena.get('arsenal_size', 0)} card(s) (hidden)")
+    return out
 
 
 def _render_board(obs: dict[str, Any], win_agent: float, win_opp: float) -> str:
@@ -349,6 +458,11 @@ def _render_board(obs: dict[str, Any], win_agent: float, win_opp: float) -> str:
     ]
     if obs.get("last_event"):
         lines.append(f"Last: {obs['last_event']}")
+    for notice in obs.get("notices") or []:
+        lines.append(f"  (!) {notice}")
+    decision = obs.get("optional_decision")
+    if isinstance(decision, dict):
+        lines.append(f"  (?) Optional: {decision.get('card')} - may {decision.get('description')}")
 
     lines.append("-" * 64)
     lines.append(f"OPPONENT - {opp.get('hero', '?')}")
@@ -357,6 +471,7 @@ def _render_board(obs: dict[str, Any], win_agent: float, win_opp: float) -> str:
         f"Deck {opp.get('deck', 0)}  |  Discard {opp.get('discard', 0)}  |  "
         f"Resources {opp.get('resources', 0)}  |  AP {opp.get('action_points', 0)}"
     )
+    lines.extend(_arena_lines(opp.get("arena") or {}, reveal=False))
 
     pending = obs.get("pending_combat")
     if isinstance(pending, dict):
@@ -380,6 +495,7 @@ def _render_board(obs: dict[str, Any], win_agent: float, win_opp: float) -> str:
         f"Discard {agent.get('discard', 0)}  |  Resources {agent.get('resources', 0)}  |  "
         f"AP {agent.get('action_points', 0)}"
     )
+    lines.extend(_arena_lines(agent.get("arena") or {}, reveal=True))
     lines.append("  Your hand:")
     hand = agent.get("hand") if isinstance(agent.get("hand"), list) else []
     if not hand:
