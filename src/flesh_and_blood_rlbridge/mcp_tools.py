@@ -480,7 +480,7 @@ def register_mcp_tools(
         deck_key: str,
         matchup_key: str,
         format_name: str = "silver_age",
-        inner_agent_type: str = "tabular_q",
+        inner_agent_type: str = "ppo",
         inner_train_episodes: int = 50,
         inner_eval_episodes: int = 10,
         inner_max_steps: int = 200,
@@ -593,7 +593,7 @@ def register_mcp_tools(
     def fab_meta_reward_for_deck(
         deck_key: str,
         format_name: str = "silver_age",
-        inner_agent_type: str = "tabular_q",
+        inner_agent_type: str = "ppo",
         inner_train_episodes: int = 50,
         inner_eval_episodes: int = 10,
         matchups_per_deck: int = 3,
@@ -911,7 +911,7 @@ def register_mcp_tools(
         deck_key: Optional[str] = None,
         matchup_key: Optional[str] = None,
         format_name: str = "silver_age",
-        inner_agent_type: str = "tabular_q",
+        inner_agent_type: str = "ppo",
         use_if_available: bool = True,
         limit: int = 50,
     ) -> str:
@@ -960,7 +960,7 @@ def register_mcp_tools(
     @mcp.tool()
     def fab_full_matchup_win_summary(
         format_names_csv: Optional[str] = None,
-        inner_agent_type: str = "tabular_q",
+        inner_agent_type: str = "ppo",
         inner_train_episodes: int = 25,
         inner_eval_episodes: int = 5,
         inner_max_steps: int = 200,

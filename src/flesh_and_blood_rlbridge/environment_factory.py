@@ -57,7 +57,7 @@ class FleshAndBloodFactory(rlbridgeEnvironmentFactory):
             render_modes=["ansi", "rgb_array"],
             max_episode_steps=self._max_turns,
             suggested_hyperparameters=SuggestedHyperparameters(
-                agent_type="tabular_q",
+                agent_type="ppo",
                 n_episodes=300,
                 max_steps=self._max_turns,
                 alpha=0.1,

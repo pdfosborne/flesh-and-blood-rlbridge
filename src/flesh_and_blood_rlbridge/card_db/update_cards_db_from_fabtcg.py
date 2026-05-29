@@ -56,6 +56,28 @@ def _card_name_key(name: str) -> str:
     return text.lower()
 
 
+# Keyword tokens recognized in rules text (kept in sync with environment.py).
+_KEYWORD_PATTERNS: dict[str, str] = {
+    "go_again": r"\bgo again\b",
+    "dominate": r"\bdominate\b",
+    "overpower": r"\boverpower\b",
+    "intimidate": r"\bintimidate\b",
+    "ward": r"\bward\b",
+    "fusion": r"\bfusion\b",
+    "battleworn": r"\bbattleworn\b",
+    "blade_break": r"\bblade break\b",
+    "arcane_barrier": r"\barcane barrier\b",
+    "temper": r"\btemper\b",
+}
+
+
+def _derive_keywords(text: str) -> list[str]:
+    body = str(text or "").lower()
+    if not body:
+        return []
+    return [kw for kw, pat in _KEYWORD_PATTERNS.items() if re.search(pat, body)]
+
+
 def _canonical_name_key(name: str) -> str:
     raw = str(name or "").strip()
     # Handle importer-style names like "bear-hug-1---Bear Hug".
@@ -380,7 +402,7 @@ def _build_local_record_from_card_detail(detail_entry: dict[str, Any]) -> Option
         "talent": talent,
         "rarity": str(rarity or "Common"),
         "set": _extract_set_code_from_print_id(print_id),
-        "keywords": [],
+        "keywords": _derive_keywords(text),
         "text": text,
         "legality": _normalize_legality(detail_entry.get("card_legality")),
     }
@@ -610,10 +632,12 @@ def main() -> int:
     existing_ids = {str(rec.get("id", "")) for rec in local_cards if str(rec.get("id", ""))}
     existing_keys = {_card_match_key(rec) for rec in local_cards}
 
-    # Update legality on existing cards using matched official entries.
-    progress.stage("Refreshing legality for existing local cards")
+    # Update legality (and backfill missing rules text) on existing cards
+    # using matched official entries.
+    text_backfills = 0
+    progress.stage("Refreshing legality and rules text for existing local cards")
     for idx, rec in enumerate(local_cards, start=1):
-        progress.tick("Legality refresh", idx, len(local_cards), every=200)
+        progress.tick("Legality/text refresh", idx, len(local_cards), every=200)
         matched = detail_records_by_key.get(_card_match_key(rec))
         if not matched:
             continue
@@ -622,6 +646,14 @@ def main() -> int:
         if isinstance(new_legality, dict) and new_legality and old_legality != new_legality:
             rec["legality"] = new_legality
             legality_updates += 1
+        matched_text = str(matched.get("text", "")).strip()
+        if matched_text and not str(rec.get("text", "")).strip():
+            rec["text"] = matched_text
+            text_backfills += 1
+        if not rec.get("keywords"):
+            derived = _derive_keywords(rec.get("text", ""))
+            if derived:
+                rec["keywords"] = derived
 
     # Add missing cards discovered from official API.
     progress.stage("Collecting newly discovered cards")
@@ -644,6 +676,7 @@ def main() -> int:
     print(f"Official card records matched: {len(detail_records_by_key)}")
     print(f"Cards added: {len(added_cards)}")
     print(f"Legality rows updated: {legality_updates}")
+    print(f"Text fields backfilled: {text_backfills}")
     if unresolved_pre_fallback:
         print(f"Fallback unresolved lookup names: {len(unresolved_pre_fallback)}")
         print(f"Fallback lookup rows matched: {fallback_new_rows}")

@@ -35,6 +35,9 @@ dev = [
     "ruff>=0.4.0",
 ]
 
+[project.scripts]
+fab-play = "flesh_and_blood_rlbridge.cli:main"
+
 [project.entry-points."rlbridge.environments"]
 flesh-and-blood = "flesh_and_blood_rlbridge:register_environments"
 
