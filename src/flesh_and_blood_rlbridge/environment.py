@@ -17,11 +17,17 @@ This environment models the core Flesh and Blood gameplay loop:
     * After player 0's opening phase: both players draw to full hand.
     * Player 1 opening action phase: attack; player 1 draws at end of that phase.
     * Thereafter each player turn is: defend during the opponent's attack phase,
-      then your attack phase, optional arsenal stash (one card face-down), then
-      draw to intellect at the end of your attack phase (no draw at phase start).
-- Combat chain reaction windows per link:
-    * Defense phase: the defender may block with multiple cards.
-    * Reaction phase: the attacker may play attack reactions to boost power.
+      then your attack phase, optional arsenal stash (one card face-down into an
+      empty arsenal), then draw to intellect at the end of your attack phase (no
+      draw at phase start). Arsenal cards persist until played or removed by an
+      effect; only one card may occupy arsenal at a time.
+- Combat chain windows per link (FAB defend / reaction / damage flow):
+    * Defense step: the defender declares blocks from hand and equipment.
+    * Attack-reaction step: the attacker may play attack reactions.
+    * Defense-reaction step: the defender may play defense reactions.
+    * Damage resolves, then the chain link closes (go again / next link).
+- Instant cards (and play-as-instant grants) may be played during combat
+  by either player whenever they are legal.
 - Keyword effects derived from card text: ``go again``, ``dominate`` (one hand
   block), ``overpower`` (one action block), ``intimidate`` (face-down banish
   on hit), ``ward`` (destroy permanent to prevent), plus fusion/reveal hooks.
@@ -74,6 +80,9 @@ _CARD_VAULT_FEED_URL_CANDIDATES = (
     # Fallback mirror of official card-vault-compatible card records.
     "https://raw.githubusercontent.com/the-fab-cube/flesh-and-blood-cards/master/json/english/card.json",
 )
+
+# Sub-phases while a combat chain link is open (after an attack is played).
+_COMBAT_CHAIN_PHASES: tuple[str, ...] = ("defense", "attack_reaction", "defense_reaction")
 
 _FORMAT_ALIASES = {
     "cc": "classic_constructed",
@@ -145,13 +154,22 @@ _PER_TURN_COUNTERS: tuple[str, ...] = (
     "NextAttackWeaponOnly",
     "StealthHitThisTurn",
     "LastChainAttackPitch",
+    "ComboLastAttackDraconic",
+    "LastChainAttackName",
+    "AurasPlayedOrCreatedThisTurn",
+    "ArcanePlusOneTurn",
+    "BlockArcaneFromSource",
+    "PendingHitRider",
+    "NextAttackHitRider",
     "NextGuardianAttackCostReduction",
     "NextPlayCostReduction",
     "NextDefenseBonus",
     "NextAbilityCostReduction",
+    "NextWeaponSwingCostReduction",
     "BonusHitDamage",
     "ScrappedThisPlay",
     "LastPitchPayCount",
+    "RevealGradeBonus",
     "LastHitDamage",
     "ChargedYellowThisPlay",
     "CardsBanishedThisTurn",
@@ -167,11 +185,29 @@ _PER_TURN_COUNTERS: tuple[str, ...] = (
     "BloodDebtPlayedThisTurn",
     "WeaponAttacksThisTurn",
     "WeaponHitsThisTurn",
+    "AttacksStartedThisTurn",
     "PhantasmDestroyedThisTurn",
     "BlockPowerGainThisTurn",
+    "BlockGoldGainTurn",
+    "BlockOpponentHitEffectsTurn",
+    "BlockDefenseReactionsTurn",
+    "TauntActive",
+    "LosePhantasmNextIllusionistAttack",
+    "PreventionReductionTurn",
     "AttacksTargetingYouPenalty",
+    "LastVariableBanishCount",
+    "BlockZeroCostUntilTurn",
+    "NextDefendReactionPenalty",
+    "NextDefendEquipmentPenalty",
+    "NextDefendActionPenalty",
+    "BlockPitchColorUntilTurn",
     "DrawFromActionThisTurn",
     "YellowSoulThisTurn",
+    "ChargedThisTurn",
+    "TranscendedThisTurn",
+    "ChiPitchedThisPlay",
+    "SuspenseAurasLeftThisTurn",
+    "PitchedAttackAndNonattack",
     "WageredThisChain",
 )
 _GAME_COUNTERS: tuple[str, ...] = ("DamageTaken",)
@@ -219,12 +255,20 @@ class PlayerState:
     weapon_attacks_blocked: bool = False
     extra_attack_targets: int = 0
     class_state: dict[str, int] = field(default_factory=_new_class_state)
-    hand_from_arsenal: set[str] = field(default_factory=set)  # hand cards stashed from arsenal this turn
+    hand_from_arsenal: set[str] = field(default_factory=set)  # legacy; unused after arsenal persistence fix
     deck_top_play_class: str = ""  # hero passive: class filter for top-of-deck item play
     deck_top_play_extra_cost: int = 0  # additional {r} cost for deck-top item play
     deck_top_play_used: bool = False  # once per turn
     may_play_grants: list[dict[str, Any]] = field(default_factory=list)
     hero_may_play_grants: list[dict[str, Any]] = field(default_factory=list)
+    face_down_permanents: set[str] = field(default_factory=set)
+    face_down_banished: set[str] = field(default_factory=set)
+    face_down_discard: set[str] = field(default_factory=set)
+    face_up_arsenal: set[str] = field(default_factory=set)
+    tapped_permanents: set[str] = field(default_factory=set)
+    named_card: str = ""
+    redirect_shield: Optional[dict[str, Any]] = None
+    blocked_pitch_values: set[int] = field(default_factory=set)
     # Arena zones: equipment by slot, weapon, one-card arsenal.
     equipment: list[str] = field(default_factory=list)  # card ids (head/chest/arms/legs)
     weapon_id: Optional[str] = None                      # real weapon card (else hero basic)
@@ -257,6 +301,7 @@ class CombatState:
     defense_reactions_blocked: bool = False
     is_weapon: bool = False     # attack came from the hero weapon (not discarded)
     source_name: str = ""       # display name of the attack source (weapon)
+    draconic_links: int = 0     # chain links on this combat chain that were Draconic
 
 
 def _card_name_key(name: str) -> str:
@@ -345,9 +390,12 @@ def _parse_action_damage(text: str, power: int, is_attack: bool) -> tuple[int, b
         return int(power or 0), False
     if power and power > 0:
         return int(power), "arcane" in body
-    match = re.search(r"deal (\d+)\s+(arcane\s+)?damage", body)
-    if match:
-        return int(match.group(1)), bool(match.group(2)) or "arcane damage" in body
+    for match in re.finditer(r"deal (\d+)\s+(arcane\s+)?damage", body):
+        start = max(body.rfind(".", 0, match.start()), body.rfind("{br}", 0, match.start()))
+        if re.search(r"\bif\b", body[start:match.start()]):
+            continue
+        tail = body[match.start(): match.end() + 24]
+        return int(match.group(1)), bool(match.group(2)) or "arcane damage" in tail
     return 0, False
 
 
@@ -480,6 +528,8 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         self._pending_die_roll: Optional[dict[str, Any]] = None
         self._optional_post_ctx: dict[str, Any] = {}
         self._play_resume_ctx: dict[str, Any] = {}
+        self._pending_instant_pay: dict[str, Any] = {}
+        self._pending_pitch_pay: dict[str, Any] = {}
         self._render_mode = render_mode
         self._self_play = self_play
         self._opponent_type = self._normalize_opponent_type(opponent_type)
@@ -488,6 +538,9 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         self._selected_deck_option: Optional[dict[str, Any]] = None
         self._selected_opponent_deck_option: Optional[dict[str, Any]] = None
         self._card_vault_cards_cache: Optional[list[dict[str, Any]]] = None
+        self._stolen_until_phase_end: list[tuple[int, int, str]] = []
+        self._play_restriction_kind: str = ""
+        self._play_restriction_clear_at_turn: int = 0
 
     def reset(
         self,
@@ -513,6 +566,8 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         self._deck_size = max(min_cards, min(self._deck_size, max_cards))
 
         self._pending_combat = None
+        self._pending_instant_pay = {}
+        self._pending_pitch_pay = {}
         self._selected_deck_option = None
         self._selected_opponent_deck_option = None
 
@@ -651,6 +706,8 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
                     reward += self._do_pitch(0, int(parsed.split(" ")[1]))
                 elif parsed.startswith("play "):
                     reward += self._do_play_card(0, int(parsed.split(" ")[1]), 0)
+                elif parsed.startswith("arsenalplay"):
+                    reward += self._do_play_arsenal(0, 0)
                 elif parsed.startswith("banishplay "):
                     reward += self._do_play_banished(0, int(parsed.split(" ")[1]), 0)
                 elif parsed.startswith("gyplay "):
@@ -659,27 +716,52 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
                     reward += self._do_weapon_attack(0, 0)
                 elif parsed.startswith("ability "):
                     reward += self._do_ability(0, int(parsed.split(" ")[1]), 0)
+                elif parsed.startswith("instant "):
+                    reward += self._do_instant_play(0, int(parsed.split(" ")[1]), 0)
+                elif parsed == "deckplay":
+                    reward += self._do_play_deck_top(0, 0)
+                elif parsed.startswith("mayplay "):
+                    parts = parsed.split(" ")
+                    reward += self._do_may_play(0, parts[1], int(parts[2]), 0)
             elif self._phase == "arsenal":
                 if parsed == "pass":
                     self._pass_arsenal(0)
                 elif parsed.startswith("stash "):
                     reward += self._do_stash(0, int(parsed.split(" ")[1]))
             elif self._phase == "defense":
-                if parsed == "pass":
-                    self._pass_defense(0)
-                elif parsed.startswith("block "):
-                    reward += self._do_block(0, int(parsed.split(" ")[1]))
-                elif parsed.startswith("blockgear "):
-                    reward += self._do_block_gear(0, int(parsed.split(" ")[1]))
-                elif parsed.startswith("instant "):
-                    reward += self._do_instant_play(0, int(parsed.split(" ")[1]), 0)
-            elif self._phase == "reaction":
-                if parsed == "pass":
-                    reward += self._resolve_and_advance(0)
-                elif parsed.startswith("reaction "):
-                    reward += self._do_reaction(0, int(parsed.split(" ")[1]))
-                elif parsed.startswith("instant "):
-                    reward += self._do_instant_play(0, int(parsed.split(" ")[1]), 0)
+                if self._active_player == 0:
+                    if parsed == "pass":
+                        self._pass_defense(0)
+                    elif parsed.startswith("block "):
+                        reward += self._do_block(0, int(parsed.split(" ")[1]))
+                    elif parsed.startswith("blockgear "):
+                        reward += self._do_block_gear(0, int(parsed.split(" ")[1]))
+                    elif parsed == "trapdefend":
+                        reward += self._do_trap_defend(0, 0)
+                    else:
+                        reward += self._agent_combat_instant_step(parsed, 0)
+                elif parsed != "pass":
+                    reward += self._agent_combat_instant_step(parsed, 0)
+            elif self._phase == "attack_reaction":
+                if self._active_player == 0:
+                    if parsed == "pass":
+                        self._pass_attack_reaction()
+                    elif parsed.startswith("reaction "):
+                        reward += self._do_reaction(0, int(parsed.split(" ")[1]))
+                    else:
+                        reward += self._agent_combat_instant_step(parsed, 0)
+                elif parsed != "pass":
+                    reward += self._agent_combat_instant_step(parsed, 0)
+            elif self._phase == "defense_reaction":
+                if self._active_player == 0:
+                    if parsed == "pass":
+                        reward += self._pass_defense_reaction(0)
+                    elif parsed.startswith("defreact "):
+                        reward += self._do_defense_reaction(0, int(parsed.split(" ")[1]))
+                    else:
+                        reward += self._agent_combat_instant_step(parsed, 0)
+                elif parsed != "pass":
+                    reward += self._agent_combat_instant_step(parsed, 0)
             elif self._phase == "optional":
                 reward += self._do_optional(parsed == "use_optional")
             elif self._phase == "choice":
@@ -692,6 +774,16 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
                     self._do_opt_choice(0, to_bottom=True)
                 elif parsed == "opt_top":
                     self._do_opt_choice(0, to_bottom=False)
+            elif self._phase == "instant_pay":
+                if parsed == "pass":
+                    self._cancel_instant_pay()
+                elif parsed.startswith("pitch "):
+                    reward += self._do_pitch(0, int(parsed.split(" ")[1]))
+            elif self._phase == "pitch_pay":
+                if parsed == "pass":
+                    reward += self._pass_pitch_pay()
+                elif parsed.startswith("pitch "):
+                    reward += self._do_pitch(0, int(parsed.split(" ")[1]))
             # Drive the scripted opponent until the agent must decide again.
             reward += self._auto_advance()
 
@@ -1345,6 +1437,7 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         self._flow_stage = "p0_opening"
         self._combat_chain_links = 0
         self._action_phase_player = 0
+        self._stolen_until_phase_end = []
         self._last_event = "Game start — both players draw opening hands"
         self._draw_up(0)
         self._draw_up(1)
@@ -1422,6 +1515,60 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
     @staticmethod
     def _is_weapon_card(card: Card) -> bool:
         return "weapon" in (card.type_line or "").lower() and "utility_item" in card.card_types
+
+    @staticmethod
+    def _is_dagger_card(card: Card) -> bool:
+        line = (card.type_line or "").lower()
+        name = card.name.lower()
+        return "dagger" in line or ("weapon" in line and "dagger" in name)
+
+    def _dagger_ids_controlled(self, player_idx: int) -> list[str]:
+        actor = self._players[player_idx]
+        ids: list[str] = []
+        if actor.weapon_id:
+            weapon = self._cards.get(actor.weapon_id)
+            if weapon and self._is_dagger_card(weapon):
+                ids.append(actor.weapon_id)
+        for cid in actor.equipment:
+            card = self._cards.get(cid)
+            if card and self._is_dagger_card(card):
+                ids.append(cid)
+        return ids
+
+    def _daggers_on_chain(self, combat: CombatState) -> set[str]:
+        on_chain: set[str] = set()
+        attack = self._cards.get(combat.attack_card_id)
+        if attack and self._is_dagger_card(attack):
+            on_chain.add(combat.attack_card_id)
+        if combat.is_weapon:
+            weapon_id = self._players[combat.attacker].weapon_id
+            if weapon_id:
+                on_chain.add(weapon_id)
+        for cid in combat.reaction_cards:
+            card = self._cards.get(cid)
+            if card and self._is_dagger_card(card):
+                on_chain.add(cid)
+        return on_chain
+
+    def _destroy_controlled_dagger(
+        self,
+        player_idx: int,
+        dagger_id: str,
+        perspective_idx: int,
+    ) -> None:
+        actor = self._players[player_idx]
+        if dagger_id == actor.weapon_id:
+            actor.weapon_id = None
+        elif dagger_id in actor.equipment:
+            actor.equipment.remove(dagger_id)
+        else:
+            return
+        actor.discard.append(dagger_id)
+        card = self._cards[dagger_id]
+        self._fire_on_destroy_triggers(player_idx, dagger_id, perspective_idx)
+        self._fire_controlled_destroy_triggers(player_idx, card, perspective_idx)
+        self._fire_on_leave_triggers(player_idx, dagger_id, perspective_idx)
+        self._event_append(f"destroyed {card.name}")
 
     def _weapon_swing_cost(self, card: Card) -> int:
         """Resource cost of a weapon's printed attack ability ({r} count)."""
@@ -1606,10 +1753,26 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         tl = (card.type_line or "").lower()
         if "arrow" not in tl and "arrow" not in card.name.lower():
             return False
+        return self._put_deck_top_in_arsenal(player_idx, face_up=True, require_arrow=True)
+
+    def _put_deck_top_in_arsenal(
+        self, player_idx: int, *, face_up: bool = False, require_arrow: bool = False
+    ) -> bool:
+        actor = self._players[player_idx]
+        if actor.arsenal or not actor.deck:
+            return False
+        top = actor.deck[-1]
+        card = self._cards[top]
+        if require_arrow:
+            tl = (card.type_line or "").lower()
+            if "arrow" not in tl and "arrow" not in card.name.lower():
+                return False
         cid = actor.deck.pop()
         actor.arsenal.append(cid)
-        self._event_append(f"put {card.name} face-up in arsenal from deck")
-        self._fire_arrow_from_deck_triggers(player_idx, cid)
+        face = "face-up" if face_up else "face-down"
+        self._event_append(f"put {card.name} {face} in arsenal from deck")
+        if require_arrow or "arrow" in (card.type_line or "").lower():
+            self._fire_arrow_from_deck_triggers(player_idx, cid)
         return True
 
     def _do_beat_chest(self, player_idx: int, perspective_idx: int = 0) -> float:
@@ -1631,6 +1794,15 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
     ) -> int:
         if effect.target == "attacking_hero" and combat is not None:
             return combat.attacker
+        if effect.target == "permanent_controller":
+            controller = self._players[player_idx].class_state.get(
+                "LastSteamRemovedController", player_idx
+            )
+            return int(controller)
+        if effect.target == "defender" and combat is not None:
+            return combat.defender
+        if effect.target == "attacked" and combat is not None:
+            return combat.defender
         if effect.target in ("opponent", "ally"):
             return 1 - player_idx
         if effect.target == "self":
@@ -1639,7 +1811,10 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
 
     def _draw_up(self, player_idx: int) -> None:
         p = self._players[player_idx]
-        while len(p.hand) < p.hero.intellect:
+        target = p.class_state.pop("_EndPhaseDrawTarget", None)
+        if target is None:
+            target = p.hero.intellect
+        while len(p.hand) < target:
             if not self._draw_card(player_idx):
                 break
 
@@ -1680,10 +1855,15 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         self._process_token_upkeep(player_idx)
         self._fire_turn_start_triggers(player_idx)
         self._fire_action_phase_triggers(player_idx)
-        if p.arsenal:
-            p.hand_from_arsenal.update(p.arsenal)
-            p.hand.extend(p.arsenal)
-            p.arsenal = []
+        if self._play_restriction_kind and self._turn >= self._play_restriction_clear_at_turn:
+            self._play_restriction_kind = ""
+            self._play_restriction_clear_at_turn = 0
+            self._event_append("Proclamation of Combat restriction ended")
+        if p.class_state.get("BlockZeroCostUntilTurn", 0) and self._turn > p.class_state["BlockZeroCostUntilTurn"]:
+            p.class_state["BlockZeroCostUntilTurn"] = 0
+        if p.blocked_pitch_values and self._turn > p.class_state.get("BlockPitchColorUntilTurn", 0):
+            p.blocked_pitch_values = set()
+            p.class_state["BlockPitchColorUntilTurn"] = 0
         self._active_player = player_idx
         self._action_phase_player = player_idx
         self._phase = "action"
@@ -1714,7 +1894,22 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             self._event_append("silence ended")
         self._clear_chain_may_play_grants(0)
         self._clear_chain_may_play_grants(1)
+        for owner_idx, thief_idx, cid in self._stolen_until_phase_end:
+            thief = self._players[thief_idx]
+            owner = self._players[owner_idx]
+            if cid in thief.equipment:
+                thief.equipment.remove(cid)
+                owner.equipment.append(cid)
+                self._event_append(f"returned {self._cards[cid].name} to P{owner_idx}")
+        self._stolen_until_phase_end = []
         p.may_play_grants = list(p.hero_may_play_grants)
+        delta = p.class_state.pop("EndPhaseIntellectDelta", 0)
+        if delta:
+            p.class_state["_EndPhaseDrawTarget"] = max(0, p.hero.intellect + delta)
+            self._event_append(
+                f"P{player_idx} intellect {delta:+d} during end phase "
+                f"(draw to {p.class_state['_EndPhaseDrawTarget']})"
+            )
         self._fire_end_phase_triggers(player_idx)
         self._combat_chain_links = 0
         self._turn += 1
@@ -1764,9 +1959,17 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             atk, dfn = self._pending_combat.attacker, self._pending_combat.defender
             link = self._combat_chain_links
             chain = f" (combat chain link {link})" if link > 1 else ""
-            return f"P{dfn} defending vs P{atk}'s attack{chain}"
-        if self._phase == "reaction" and self._pending_combat is not None:
-            return f"P{self._pending_combat.attacker} attack reactions (combat chain link {self._combat_chain_links})"
+            return f"P{dfn} defend step vs P{atk}'s attack{chain}"
+        if self._phase == "attack_reaction" and self._pending_combat is not None:
+            return (
+                f"P{self._pending_combat.attacker} attack-reaction step "
+                f"(combat chain link {self._combat_chain_links})"
+            )
+        if self._phase == "defense_reaction" and self._pending_combat is not None:
+            return (
+                f"P{self._pending_combat.defender} defense-reaction step "
+                f"(combat chain link {self._combat_chain_links})"
+            )
         if self._phase == "arsenal":
             player = self._action_phase_player
             if self._flow_stage == "p0_opening":
@@ -1780,6 +1983,30 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             if self._flow_stage == "p1_opening":
                 return "P1 opening attack phase (no draw)"
             return f"P{self._action_phase_player} attack phase (draw after)"
+        if self._phase == "instant_pay":
+            ctx = self._pending_instant_pay
+            card_id = ctx.get("card_id", "")
+            card = self._cards.get(card_id)
+            name = card.name if card else "instant"
+            cost = ctx.get("cost", 0)
+            actor = self._players[ctx.get("player", 0)]
+            return f"P{ctx.get('player', 0)} pitching to pay {cost} for {name} ({actor.resources}/{cost})"
+        if self._phase == "pitch_pay":
+            ctx = self._pending_pitch_pay
+            card = self._cards.get(ctx.get("card_id", ""))
+            name = card.name if card else "effect"
+            cost = ctx.get("cost", 0)
+            actor = self._players[ctx.get("player", 0)]
+            if ctx.get("variable"):
+                paid = actor.resources - ctx.get("resources_at_start", actor.resources)
+                return (
+                    f"P{ctx.get('player', 0)} pitching up to {cost} for {name} "
+                    f"({paid}/{cost} committed, pass when done)"
+                )
+            return (
+                f"P{ctx.get('player', 0)} pitching to pay {cost} for {name} "
+                f"({actor.resources}/{cost})"
+            )
         return self._phase
 
     # ------------------------------------------------------------------
@@ -1801,11 +2028,25 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
                 return True
         return False
 
-    def _play_blocked_reason(self, player_idx: int, hand_idx: int, card: Card) -> Optional[str]:
+    def _card_requires_arsenal(self, card: Card) -> bool:
+        for mod in effects.parse_play_modifiers(card.text):
+            if mod.condition == "play_zone:arsenal_only":
+                return True
+        return False
+
+    def _play_blocked_reason(
+        self,
+        player_idx: int,
+        hand_idx: int,
+        card: Card,
+        *,
+        from_arsenal: bool = False,
+    ) -> Optional[str]:
         """Return a reason string if a mandatory play requirement is unmet."""
-        token, hard = _reveal_requirement(card.text)
-        if token and hard and not self._reveal_available(player_idx, hand_idx, token):
-            return f"{card.name} requires revealing a {token} card from hand"
+        if not from_arsenal:
+            token, hard = _reveal_requirement(card.text)
+            if token and hard and not self._reveal_available(player_idx, hand_idx, token):
+                return f"{card.name} requires revealing a {token} card from hand"
         actor = self._players[player_idx]
         if (
             "attack_action" in card.card_types
@@ -1821,11 +2062,19 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
                 player_idx, mod.condition
             ):
                 return f"{card.name}: play requirement not met ({mod.raw[:60]})"
-            if mod.condition == "play_zone:arsenal_only":
-                if card.id not in actor.hand_from_arsenal and card.id not in actor.arsenal:
-                    return f"{card.name} can only be played from arsenal"
-        if actor.arsenal_play_blocked and card.id in actor.arsenal:
+            if mod.condition == "play_zone:arsenal_only" and not from_arsenal:
+                return f"{card.name} can only be played from arsenal"
+        if from_arsenal and actor.arsenal_play_blocked:
             return f"{card.name} blocked: cannot play face-up cards from arsenal this turn"
+        if self._play_restriction_kind == "weapon_attack_only":
+            if "attack_action" not in card.card_types:
+                return (
+                    f"{card.name} blocked: only weapon and attack actions may be played "
+                    "(Proclamation of Combat)"
+                )
+        if actor.class_state.get("BlockZeroCostUntilTurn", 0) and self._turn <= actor.class_state["BlockZeroCostUntilTurn"]:
+            if card.cost <= 0:
+                return f"{card.name} blocked: cannot play cards with base cost 0 this turn"
         return None
 
     def _count_equipped_evos(self, player_idx: int) -> int:
@@ -1846,20 +2095,135 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             if "blood_debt" in self._cards[cid].keywords
         )
 
+    def _count_earth_in_banish(self, player_idx: int) -> int:
+        actor = self._players[player_idx]
+        return sum(
+            1
+            for cid in actor.banished
+            if (self._cards[cid].talent or "").strip().lower() == "earth"
+            or "earth" in (self._cards[cid].type_line or "").lower()
+        )
+
+    def _card_is_draconic(
+        self,
+        card: Optional[Card],
+        player_idx: int,
+        *,
+        consume_pending: bool = False,
+    ) -> bool:
+        if card is None:
+            return False
+        if (card.talent or "").lower() == "draconic":
+            return True
+        actor = self._players[player_idx]
+        if actor.class_state.get("NextChainAttackDraconic", 0):
+            if consume_pending:
+                actor.class_state["NextChainAttackDraconic"] = 0
+            return True
+        return False
+
     def _draconic_chain_links(self) -> int:
         """Chain links on the current combat chain with Draconic cards (approximation)."""
         combat = self._pending_combat
         if combat is None:
             return 0
-        count = 0
+        count = combat.draconic_links
         attack = self._cards.get(combat.attack_card_id)
-        if attack and (attack.talent or "").lower() == "draconic":
+        if self._card_is_draconic(attack, combat.attacker):
             count += 1
         for _, cid, _ in combat.blocks:
             block = self._cards.get(cid)
             if block and (block.talent or "").lower() == "draconic":
                 count += 1
         return count
+
+    def _mark_attack_started(self, player_idx: int) -> None:
+        actor = self._players[player_idx]
+        actor.class_state["AttacksStartedThisTurn"] = (
+            actor.class_state.get("AttacksStartedThisTurn", 0) + 1
+        )
+        actor.class_state["NextFirstAttackExtraCost"] = 0
+
+    def _effective_attack_base_power(self, player_idx: int, card: Card) -> int:
+        base = card.power
+        actor = self._players[player_idx]
+        if (
+            actor.class_state.get("HalveFirstAttackBaseNextTurn", 0)
+            and actor.class_state.get("AttacksStartedThisTurn", 0) == 0
+            and "attack_action" in card.card_types
+        ):
+            base = (base + 1) // 2
+            actor.class_state["HalveFirstAttackBaseNextTurn"] = 0
+            self._event_append(f"{card.name} base power halved to {base}")
+        return base
+
+    def _first_attack_extra_cost(self, player_idx: int, *, is_attack: bool) -> int:
+        if not is_attack:
+            return 0
+        actor = self._players[player_idx]
+        if actor.class_state.get("AttacksStartedThisTurn", 0) > 0:
+            return 0
+        return max(0, actor.class_state.get("NextFirstAttackExtraCost", 0))
+
+    def _apply_chain_defend(
+        self,
+        player_idx: int,
+        card: Card,
+        effect: "effects.Effect",
+        combat: Optional[CombatState],
+    ) -> None:
+        if combat is None:
+            self._event_append("no active chain link to defend")
+            return
+        rider = (effect.banish_name or "").lower()
+        defender_idx = combat.defender
+        defender = self._players[defender_idx]
+        defense_override = effect.amount if effect.amount > 0 else None
+        if rider == "arsenal":
+            if not defender.arsenal:
+                if not effect.optional:
+                    self._event_append("no card in arsenal to defend with")
+                return
+            cid = defender.arsenal.pop()
+            defender.face_up_arsenal.discard(cid)
+            block_card = self._cards[cid]
+            defense = defense_override if defense_override is not None else block_card.defense
+            combat.blocks.append((defender_idx, cid, defense))
+            self._event_append(
+                f"added {block_card.name} from arsenal as defending (+{defense})"
+            )
+            if self._is_trap_card(block_card):
+                self._fire_trap_triggered(
+                    defender_idx, block_card, combat, player_idx
+                )
+            return
+        if rider == "self":
+            defense = defense_override
+            if defense is None:
+                defense = self._effective_equipment_defense(
+                    player_idx, card.id, card.defense
+                )
+            combat.blocks.append((player_idx, card.id, defense))
+            actor = self._players[player_idx]
+            actor.arena_used.add(f"equip:{card.id}")
+            self._event_append(f"{card.name} added as defending (+{defense})")
+            return
+        if rider == "hand_actions":
+            added = 0
+            for cid in list(defender.hand):
+                if "action" not in self._cards[cid].card_types:
+                    continue
+                defender.hand.remove(cid)
+                defender.banished.append(cid)
+                block_card = self._cards[cid]
+                defense = block_card.defense
+                combat.blocks.append((defender_idx, cid, defense))
+                added += 1
+            if added:
+                self._event_append(f"banished {added} action(s) from hand as defending")
+            else:
+                self._event_append("no action cards in hand to banish as defending")
+            return
 
     def _play_gate_met(self, player_idx: int, gate: str) -> bool:
         """Evaluate a parsed play_gate:kind:arg condition."""
@@ -1985,6 +2349,10 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
     # ------------------------------------------------------------------
     # Legal-move helpers (shared by the engine and observation)
     # ------------------------------------------------------------------
+    def _is_ally_card(self, card: Card) -> bool:
+        tl = (card.type_line or "").lower()
+        return " ally" in tl or tl.endswith("ally")
+
     def _is_arena_permanent(self, card: Card) -> bool:
         """True when a played action stays in the arena (item, aura, ally)."""
         tl = (card.type_line or "").lower()
@@ -2139,8 +2507,39 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         self._event_append(f"galvanize: +{bonus} defense on next block ({self._cards[card_id].name})")
 
     def _effective_equipment_defense(self, player_idx: int, card_id: str, base_defense: int) -> int:
-        penalty = self._permanent_counters(player_idx, card_id).get("defense_penalty", 0)
-        return max(0, base_defense - penalty)
+        counters = self._permanent_counters(player_idx, card_id)
+        bonus = counters.get("defense", 0)
+        penalty = counters.get("defense_penalty", 0)
+        return max(0, base_defense + bonus - penalty)
+
+    def _effective_weapon_swing_cost(
+        self, player_idx: int, base_cost: int, *, consume: bool = False
+    ) -> int:
+        reduction = self._players[player_idx].class_state.get("NextWeaponSwingCostReduction", 0)
+        cost = max(0, base_cost - reduction)
+        if consume and reduction > 0 and base_cost > 0:
+            self._players[player_idx].class_state["NextWeaponSwingCostReduction"] = 0
+        return cost
+
+    def _defend_penalty_for_block(
+        self, defender_idx: int, card: Card, *, is_equipment: bool = False
+    ) -> int:
+        cs = self._players[defender_idx].class_state
+        penalty = 0
+        if cs.get("NextDefendReactionPenalty", 0) and "defense_reaction" in card.card_types:
+            penalty = 1
+            cs["NextDefendReactionPenalty"] = 0
+        elif cs.get("NextDefendEquipmentPenalty", 0) and is_equipment:
+            penalty = 1
+            cs["NextDefendEquipmentPenalty"] = 0
+        elif (
+            cs.get("NextDefendActionPenalty", 0)
+            and "attack_action" in card.card_types
+            and not is_equipment
+        ):
+            penalty = 1
+            cs["NextDefendActionPenalty"] = 0
+        return penalty
 
     def _apply_equipment_defense_debuff(self, player_idx: int, amount: int = 1) -> None:
         actor = self._players[player_idx]
@@ -2166,6 +2565,15 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             return
         if cs.get("NextAttackWeaponOnly", 0) and not is_weapon:
             return
+        if cs.get("NextAttackWeaponClass", ""):
+            want = str(cs["NextAttackWeaponClass"]).lower()
+            card_name = card.name.lower()
+            weapon_id = actor.weapon_id
+            weapon_name = (
+                self._cards[weapon_id].name.lower() if weapon_id and is_weapon else ""
+            )
+            if want not in card_name and want not in weapon_name:
+                return
         base_power = card_power if card_power is not None else card.power
         min_base = cs.get("NextAttackMinBase", 0)
         if min_base and base_power < min_base:
@@ -2183,6 +2591,10 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         cs["NextAttackPowerMaxCost"] = 0
         cs["NextAttackMinBase"] = 0
         cs["NextAttackWeaponOnly"] = 0
+        cs["NextAttackWeaponClass"] = ""
+        hit_rider = cs.pop("NextAttackHitRider", "")
+        if hit_rider:
+            cs["PendingHitRider"] = hit_rider
         self._apply_named_power_bonuses(player_idx, card, combat)
 
     def _apply_combat_power_bonus(
@@ -2223,6 +2635,8 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             card = self._cards[cid]
             if not self._is_playable_action(card):
                 continue
+            if self._card_requires_arsenal(card):
+                continue
             if self._effective_card_cost(actor_idx, card) > actor.resources:
                 continue
             if self._play_blocked_reason(actor_idx, i, card):
@@ -2230,27 +2644,47 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             plays.append(i)
         return plays
 
-    def _legal_instant_plays(self, actor_idx: int) -> list[int]:
-        """Non-attack actions playable as instant while play_as_instant is set."""
+    def _legal_arsenal_plays(self, actor_idx: int) -> list[int]:
+        """Arsenal index (always 0 when legal) for the single stashed card."""
         actor = self._players[actor_idx]
-        if not actor.play_as_instant:
+        if actor.action_points <= 0 or not actor.arsenal:
+            return []
+        card = self._cards[actor.arsenal[0]]
+        if not self._is_playable_action(card):
+            return []
+        if self._effective_card_cost(actor_idx, card) > actor.resources:
+            return []
+        if self._play_blocked_reason(actor_idx, -1, card, from_arsenal=True):
+            return []
+        return [0]
+
+    def _in_combat_chain(self) -> bool:
+        return self._pending_combat is not None and self._phase in _COMBAT_CHAIN_PHASES
+
+    def _legal_instant_plays(self, actor_idx: int) -> list[int]:
+        """Instant cards and play-as-instant utility actions legal right now."""
+        actor = self._players[actor_idx]
+        in_combat = self._in_combat_chain()
+        in_action = self._phase == "action" and self._action_phase_player == actor_idx
+        if not in_combat and not in_action:
             return []
         legal: list[int] = []
         for i, cid in enumerate(actor.hand):
-            card = self._cards[cid]
-            if "attack_action" in card.card_types:
-                continue
-            if "utility_action" not in card.card_types:
-                continue
-            cls_filter = actor.instant_class_filter
-            if cls_filter and cls_filter not in (card.card_class or "").lower():
-                continue
-            if self._effective_card_cost(actor_idx, card) > actor.resources:
-                continue
-            if self._play_blocked_reason(actor_idx, i, card):
+            if not self._instant_playable(actor_idx, i, in_action=in_action):
                 continue
             legal.append(i)
         return legal
+
+    def _combat_instant_actions_for(self, player_idx: int) -> list[str]:
+        """Instant/may-play actions available to a player during an open combat link."""
+        if not self._in_combat_chain():
+            return []
+        actions: list[str] = []
+        actions.extend(f"instant {i}" for i in self._legal_instant_plays(player_idx))
+        actions.extend(self._legal_may_plays(player_idx))
+        if self._can_deck_top_play_now(player_idx):
+            actions.append("deckplay")
+        return actions
 
     def _legal_banished_plays(self, actor_idx: int) -> list[int]:
         actor = self._players[actor_idx]
@@ -2284,9 +2718,395 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             legal.append(i)
         return legal
 
-    def _legal_pitches(self, actor_idx: int) -> list[int]:
+    def _legal_pitches(
+        self,
+        actor_idx: int,
+        *,
+        exclude_card_ids: Optional[set[str]] = None,
+    ) -> list[int]:
         actor = self._players[actor_idx]
-        return [i for i, cid in enumerate(actor.hand) if self._cards[cid].pitch > 0]
+        blocked = set(actor.arsenal)
+        if exclude_card_ids:
+            blocked |= exclude_card_ids
+        return [
+            i
+            for i, cid in enumerate(actor.hand)
+            if self._cards[cid].pitch > 0
+            and cid not in blocked
+            and self._cards[cid].pitch not in actor.blocked_pitch_values
+        ]
+
+    def _pitchable_total(
+        self,
+        player_idx: int,
+        *,
+        exclude_card_ids: Optional[set[str]] = None,
+    ) -> int:
+        actor = self._players[player_idx]
+        blocked = set(actor.arsenal)
+        if exclude_card_ids:
+            blocked |= exclude_card_ids
+        return sum(
+            self._cards[cid].pitch
+            for cid in actor.hand
+            if self._cards[cid].pitch > 0 and cid not in blocked
+        )
+
+    def _can_pitch_to_afford(
+        self,
+        player_idx: int,
+        cost: int,
+        *,
+        exclude_card_ids: Optional[set[str]] = None,
+    ) -> bool:
+        actor = self._players[player_idx]
+        if cost <= 0 or actor.resources >= cost:
+            return True
+        return actor.resources + self._pitchable_total(
+            player_idx, exclude_card_ids=exclude_card_ids
+        ) >= cost
+
+    def _instant_playable(self, player_idx: int, hand_idx: int, *, in_action: bool) -> bool:
+        actor = self._players[player_idx]
+        card = self._cards[actor.hand[hand_idx]]
+        if "attack_action" in card.card_types:
+            return False
+        is_instant_card = "instant" in card.card_types
+        is_grant_utility = actor.play_as_instant and "utility_action" in card.card_types
+        if not is_instant_card and not is_grant_utility:
+            return False
+        cls_filter = actor.instant_class_filter
+        if cls_filter and cls_filter not in (card.card_class or "").lower():
+            return False
+        cost = self._effective_card_cost(player_idx, card)
+        if not self._can_pitch_to_afford(player_idx, cost, exclude_card_ids={card.id}):
+            return False
+        if in_action and self._play_blocked_reason(player_idx, hand_idx, card):
+            return False
+        return True
+
+    def _begin_instant_pay(
+        self,
+        player_idx: int,
+        hand_idx: int,
+        perspective_idx: int,
+        cost: int,
+    ) -> float:
+        card = self._cards[self._players[player_idx].hand[hand_idx]]
+        self._pending_instant_pay = {
+            "player": player_idx,
+            "card_id": card.id,
+            "perspective": perspective_idx,
+            "cost": cost,
+            "resume_phase": self._phase,
+            "resume_active": self._active_player,
+        }
+        self._phase = "instant_pay"
+        self._active_player = player_idx
+        self._last_event = (
+            f"P{player_idx} must pitch for {cost} resources to play {card.name} as instant"
+        )
+        return 0.0
+
+    def _cancel_instant_pay(self) -> None:
+        ctx = self._pending_instant_pay
+        self._pending_instant_pay = {}
+        if not ctx:
+            return
+        self._phase = ctx.get("resume_phase", "action")
+        self._active_player = ctx.get("resume_active", self._active_player)
+        self._last_event = "Cancelled instant"
+
+    def _try_complete_instant_pay(self) -> float:
+        ctx = self._pending_instant_pay
+        if not ctx:
+            return 0.0
+        player_idx = ctx["player"]
+        actor = self._players[player_idx]
+        cost = ctx["cost"]
+        if actor.resources < cost:
+            return 0.0
+        hand_idx = next(
+            (i for i, cid in enumerate(actor.hand) if cid == ctx["card_id"]),
+            None,
+        )
+        if hand_idx is None:
+            self._cancel_instant_pay()
+            self._last_event = "Instant card no longer in hand"
+            return -0.05
+        perspective = ctx["perspective"]
+        resume_phase = ctx["resume_phase"]
+        resume_active = ctx["resume_active"]
+        self._pending_instant_pay = {}
+        self._phase = resume_phase
+        self._active_player = resume_active
+        return self._finish_instant_play(player_idx, hand_idx, perspective)
+
+    @staticmethod
+    def _pitch_pay_is_variable(effect: "effects.Effect") -> bool:
+        return "up to" in (effect.raw or "").lower()
+
+    def _effect_from_pitch_pay_ctx(self, ctx: dict[str, Any]) -> "effects.Effect":
+        e = ctx["effect"]
+        return effects.Effect(
+            kind=e.get("kind", "pitch_pay"),
+            amount=int(e.get("amount", 0)),
+            max_cost=int(e.get("max_cost", -1)),
+            banish_name=str(e.get("banish_name", "")),
+            token_name=str(e.get("token_name", "")),
+            optional=bool(e.get("optional", False)),
+            raw=str(e.get("raw", "")),
+        )
+
+    def _serialize_pitch_pay_effect(self, effect: "effects.Effect") -> dict[str, Any]:
+        return {
+            "kind": effect.kind,
+            "amount": effect.amount,
+            "max_cost": effect.max_cost,
+            "banish_name": effect.banish_name,
+            "token_name": effect.token_name,
+            "optional": effect.optional,
+            "raw": effect.raw,
+        }
+
+    def _can_pay_pitch_cost(self, player_idx: int, cost: int, *, variable: bool) -> bool:
+        actor = self._players[player_idx]
+        if variable:
+            return actor.resources >= 1 or self._pitchable_total(player_idx) > 0
+        return self._can_pitch_to_afford(player_idx, cost)
+
+    def _begin_pitch_pay(
+        self,
+        player_idx: int,
+        card: Card,
+        effect: "effects.Effect",
+        perspective_idx: int,
+        *,
+        optional_resume: Optional[str] = None,
+    ) -> float:
+        """Enter a pitch step to pay a {r} asset-cost (CR 1.14.2d)."""
+        actor = self._players[player_idx]
+        variable = self._pitch_pay_is_variable(effect)
+        cost = max(1, effect.amount or 1)
+
+        if not self._can_pay_pitch_cost(player_idx, cost, variable=variable):
+            self._event_append("cannot afford pitch cost")
+            return -0.05 if not effect.optional else 0.0
+
+        if not variable and actor.resources >= cost:
+            actor.resources -= cost
+            actor.class_state["LastPitchPayCount"] = cost
+            if card.id:
+                actor.class_state[f"AdditionalCostPaid:{card.id}"] = 1
+            reward = self._resolve_pitch_pay_rider(
+                player_idx, card, effect, cost, self._pending_combat, perspective_idx
+            )
+            self._continue_after_pitch_pay(
+                {"optional_resume": optional_resume},
+                cancelled=False,
+            )
+            return reward
+
+        self._pending_pitch_pay = {
+            "player": player_idx,
+            "card_id": card.id,
+            "perspective": perspective_idx,
+            "cost": cost,
+            "variable": variable,
+            "resources_at_start": actor.resources,
+            "resume_phase": self._phase,
+            "resume_active": self._active_player,
+            "optional_resume": optional_resume,
+            "effect": self._serialize_pitch_pay_effect(effect),
+        }
+        self._phase = "pitch_pay"
+        self._active_player = player_idx
+        if variable:
+            self._last_event = (
+                f"P{player_idx} may pitch up to {cost} resources for {card.name} "
+                f"(pass when done, {actor.resources} ready)"
+            )
+        else:
+            self._last_event = (
+                f"P{player_idx} must pitch for {cost} resources to pay for {card.name} "
+                f"({actor.resources}/{cost})"
+            )
+        return 0.0
+
+    def _cancel_pitch_pay(self) -> float:
+        ctx = self._pending_pitch_pay
+        self._pending_pitch_pay = {}
+        if not ctx:
+            return 0.0
+        self._phase = ctx.get("resume_phase", "action")
+        self._active_player = ctx.get("resume_active", self._active_player)
+        self._last_event = "Declined pitch cost"
+        self._continue_after_pitch_pay(ctx, cancelled=True)
+        return 0.0
+
+    def _pass_pitch_pay(self) -> float:
+        ctx = self._pending_pitch_pay
+        if not ctx:
+            return 0.0
+        player_idx = ctx["player"]
+        actor = self._players[player_idx]
+        cost = ctx["cost"]
+        if ctx.get("variable"):
+            paid = actor.resources - ctx.get("resources_at_start", actor.resources)
+            if paid < 1:
+                return self._cancel_pitch_pay()
+            return self._finish_pitch_pay(min(paid, cost))
+        if actor.resources >= cost:
+            return self._finish_pitch_pay(cost)
+        return self._cancel_pitch_pay()
+
+    def _try_complete_pitch_pay(self) -> float:
+        ctx = self._pending_pitch_pay
+        if not ctx or ctx.get("variable"):
+            return 0.0
+        actor = self._players[ctx["player"]]
+        cost = ctx["cost"]
+        if actor.resources < cost:
+            return 0.0
+        return self._finish_pitch_pay(cost)
+
+    def _finish_pitch_pay(self, paid: int) -> float:
+        ctx = self._pending_pitch_pay
+        if not ctx:
+            return 0.0
+        player_idx = ctx["player"]
+        actor = self._players[player_idx]
+        paid = max(0, min(paid, ctx["cost"]))
+        if paid <= 0:
+            return self._cancel_pitch_pay()
+        card = self._cards[ctx["card_id"]]
+        effect = self._effect_from_pitch_pay_ctx(ctx)
+        if actor.resources < paid:
+            return self._cancel_pitch_pay()
+        actor.resources -= paid
+        actor.class_state["LastPitchPayCount"] = paid
+        if card.id:
+            actor.class_state[f"AdditionalCostPaid:{card.id}"] = 1
+        perspective = ctx["perspective"]
+        resume_phase = ctx.get("resume_phase", self._phase)
+        resume_active = ctx.get("resume_active", self._active_player)
+        optional_resume = ctx.get("optional_resume")
+        self._pending_pitch_pay = {}
+        self._phase = resume_phase
+        self._active_player = resume_active
+        reward = self._resolve_pitch_pay_rider(
+            player_idx, card, effect, paid, self._pending_combat, perspective
+        )
+        self._continue_after_pitch_pay(
+            {"optional_resume": optional_resume},
+            cancelled=False,
+        )
+        return reward
+
+    def _continue_after_pitch_pay(self, ctx: dict[str, Any], *, cancelled: bool) -> None:
+        if cancelled:
+            self._event_append("declined pitch cost")
+        if self._pending_optionals:
+            self._phase = "optional"
+            self._active_player = self._pending_optionals[0]["player"]
+            return
+        tag = ctx.get("optional_resume")
+        if tag:
+            self._optional_resume = tag
+            self._resume_after_optional()
+
+    def _resolve_pitch_pay_rider(
+        self,
+        player_idx: int,
+        card: Card,
+        effect: "effects.Effect",
+        paid: int,
+        combat: Optional[CombatState],
+        perspective_idx: int,
+    ) -> float:
+        """Apply the rider after a pitch_pay asset-cost is paid."""
+        actor = self._players[player_idx]
+        rider = (effect.banish_name or "").lower()
+        if paid <= 0:
+            self._event_append("declined pitch cost")
+            return 0.0
+        self._event_append(f"paid {paid} resources")
+        if rider == "intimidate":
+            target_idx = 1 - player_idx
+            for _ in range(paid):
+                self._do_intimidate(target_idx)
+        elif rider == "defense":
+            bonus = max(1, effect.max_cost if effect.max_cost > 0 else 2)
+            if combat is not None and combat.blocks:
+                idx = len(combat.blocks) - 1
+                d_idx, b_cid, val = combat.blocks[idx]
+                if d_idx == player_idx:
+                    combat.blocks[idx] = (d_idx, b_cid, val + bonus)
+                    self._event_append(f"pitch pay: +{bonus} defense on block")
+            else:
+                actor.class_state["NextDefenseBonus"] = (
+                    actor.class_state.get("NextDefenseBonus", 0) + bonus
+                )
+                self._event_append(f"pitch pay: next defend +{bonus}")
+        elif rider == "power":
+            bonus = max(1, effect.max_cost if effect.max_cost > 0 else 1)
+            if combat is not None:
+                self._apply_combat_power_bonus(
+                    combat,
+                    player_idx,
+                    bonus,
+                    reason=f"pitch pay: +{bonus} power",
+                )
+        elif rider == "power_overpower":
+            bonus = max(1, effect.max_cost if effect.max_cost > 0 else 1)
+            if combat is not None:
+                self._apply_combat_power_bonus(
+                    combat,
+                    player_idx,
+                    bonus,
+                    reason=f"pitch pay: +{bonus} power and overpower",
+                )
+                combat.overpower = True
+        elif rider == "extra_target":
+            actor.extra_attack_targets += 1
+            self._event_append("pitch pay: extra attack target")
+        elif effect.token_name:
+            self._create_token(player_idx, effect.token_name, paid)
+        elif rider == "destroy_draw":
+            if card.id in actor.equipment:
+                actor.equipment.remove(card.id)
+            elif card.id == actor.weapon_id:
+                actor.weapon_id = None
+            if card.id not in actor.discard:
+                actor.discard.append(card.id)
+                self._fire_on_leave_triggers(player_idx, card.id, perspective_idx)
+                self._event_append(f"destroyed {card.name}")
+            self._draw_card(player_idx)
+        elif rider == "aim_counter":
+            arrow_id = actor.class_state.get("LastArrowFromDeckId")
+            if not arrow_id and actor.arsenal:
+                arrow_id = actor.arsenal[-1]
+            if arrow_id:
+                self._add_permanent_counter(player_idx, arrow_id, "aim", 1)
+                self._event_append(f"put aim counter on {self._cards[arrow_id].name}")
+        elif rider.startswith("gain_resources:"):
+            gain = int(rider.split(":", 1)[1])
+            actor.resources += gain
+            self._event_append(f"pitch pay: gained {gain} resources")
+        elif rider.startswith("choose_name:"):
+            names_str = rider.split(":", 1)[1]
+            names = [part.strip() for part in re.split(r", or |, ", names_str) if part.strip()]
+            if names:
+                chosen = names[self._rng.randrange(len(names))]
+                self._permanent_counters(player_idx, card.id)["display_name"] = chosen
+                self._event_append(f"{card.name} becomes {chosen}")
+        elif rider == "arcane_plus_one":
+            actor.class_state["ArcanePlusOneThisPlay"] = 1
+            actor.class_state["DestroyMetacarpusEndPhase"] = 1
+            self._event_append(
+                "arcane damage +1 this play; Metacarpus Node destroys at end phase"
+            )
+        return 0.0
 
     def _is_hand_block(self, defender: PlayerState, card_id: str) -> bool:
         return card_id not in defender.equipment and card_id not in defender.arsenal
@@ -2314,6 +3134,9 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             card = self._cards[cid]
             if card.defense <= 0:
                 continue
+            # Defense reactions are played in the defense-reaction step (CR 8.1.3).
+            if "defense_reaction" in card.card_types:
+                continue
             if combat.defense_reactions_blocked and "defense_reaction" in card.card_types:
                 continue
             # Overpower (CR 8.3.22): at most one defending action card.
@@ -2331,11 +3154,51 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
                 reactions.append(i)
         return reactions
 
+    def _legal_defense_reactions(self, defender_idx: int) -> list[int]:
+        """Defense reaction cards playable during the defense-reaction step."""
+        combat = self._pending_combat
+        if combat is None or combat.defender != defender_idx:
+            return []
+        if combat.defense_reactions_blocked:
+            return []
+        if self._players[defender_idx].class_state.get("BlockDefenseReactionsTurn", 0):
+            return []
+        hand_blocks = self._defender_hand_blocks(combat, defender_idx)
+        if combat.dominate and hand_blocks:
+            return []
+        action_blocked = any(
+            fab_rules.is_action_card(self._cards[b[1]].card_types) for b in hand_blocks
+        )
+        defender = self._players[defender_idx]
+        legal: list[int] = []
+        for i, cid in enumerate(defender.hand):
+            card = self._cards[cid]
+            if "defense_reaction" not in card.card_types:
+                continue
+            if self._card_requires_arsenal(card):
+                continue
+            cost = self._effective_card_cost(defender_idx, card) + defender.extra_defense_reaction_cost
+            if cost > defender.resources:
+                continue
+            if card.defense <= 0:
+                has_defend_effect = any(
+                    trig.when == "on_defend" and trig.effect.implemented
+                    for trig in effects.parse_triggers(card.text)
+                )
+                if not has_defend_effect:
+                    continue
+            if combat.overpower and action_blocked and fab_rules.is_action_card(card.card_types):
+                continue
+            legal.append(i)
+        return legal
+
     def _can_weapon_attack(self, actor_idx: int) -> bool:
         actor = self._players[actor_idx]
         _, attack, cost, _ = self._weapon_stats(actor_idx)
         extra = actor.class_state.get("ExtraWeaponAttacks", 0)
-        if attack <= 0 or actor.action_points <= 0 or actor.resources < cost:
+        swing_extra = self._first_attack_extra_cost(actor_idx, is_attack=True)
+        eff_cost = self._effective_weapon_swing_cost(actor_idx, cost, consume=False)
+        if attack <= 0 or actor.action_points <= 0 or actor.resources < eff_cost + swing_extra:
             return False
         if actor.weapon_used and extra <= 0:
             return False
@@ -2386,8 +3249,14 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
     def _ability_usable(self, actor_idx: int, entry: dict[str, Any]) -> bool:
         actor = self._players[actor_idx]
         ability = entry["ability"]
+        if self._play_restriction_kind == "weapon_attack_only" and ability.effect.kind != "attack":
+            return False
         reduction = actor.class_state.get("NextAbilityCostReduction", 0)
         eff_cost = max(0, ability.cost - reduction)
+        if ability.effect.kind == "attack" and entry.get("card_id"):
+            item = self._cards.get(entry["card_id"])
+            if item and item.power > 0 and entry["card_id"] in actor.equipment:
+                eff_cost += self._first_attack_extra_cost(actor_idx, is_attack=True)
         if eff_cost > actor.resources:
             return False
         if ability.uses_action_point and actor.action_points <= 0:
@@ -2427,6 +3296,35 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             usable.append(i)
         return usable
 
+    def _is_trap_card(self, card: Card) -> bool:
+        return "trap" in (card.type_line or "").lower()
+
+    def _can_defend_from_arsenal(self, card: Card) -> bool:
+        """Ambush / trap cards in arsenal may defend during the defend step (CR 8.3.28)."""
+        if card.defense <= 0:
+            return False
+        if self._is_trap_card(card):
+            return True
+        return "ambush" in card.keywords
+
+    def _legal_trap_defense(self, defender_idx: int) -> bool:
+        combat = self._pending_combat
+        if combat is None or combat.defender != defender_idx:
+            return False
+        defender = self._players[defender_idx]
+        if not defender.arsenal:
+            return False
+        card = self._cards[defender.arsenal[0]]
+        if not self._can_defend_from_arsenal(card):
+            return False
+        hand_blocks = self._defender_hand_blocks(combat, defender_idx)
+        action_blocked = any(
+            fab_rules.is_action_card(self._cards[b[1]].card_types) for b in hand_blocks
+        )
+        if combat.overpower and action_blocked and fab_rules.is_action_card(card.card_types):
+            return False
+        return True
+
     # ------------------------------------------------------------------
     # Low-level state mutators (used by both human/agent and opponent)
     # ------------------------------------------------------------------
@@ -2456,13 +3354,30 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
 
     def _do_pitch(self, player_idx: int, hand_idx: int) -> float:
         p = self._players[player_idx]
+        if hand_idx < 0 or hand_idx >= len(p.hand):
+            self._last_event = "No such card to pitch"
+            return -0.05
         card = self._cards[p.hand[hand_idx]]
+        if card.id in p.arsenal:
+            self._last_event = f"{card.name} cannot be pitched from arsenal"
+            return -0.05
         if card.pitch <= 0:
             self._last_event = f"{card.name} cannot be pitched"
+            return -0.05
+        if card.pitch in p.blocked_pitch_values:
+            color = {1: "red", 2: "yellow", 3: "blue"}.get(card.pitch, "that color")
+            self._last_event = f"{card.name} cannot be pitched ({color} blocked)"
             return -0.05
         p.hand.pop(hand_idx)
         p.pitch_zone.append(card.id)
         p.resources += card.pitch
+        if (
+            p.class_state.get("PitchBonusLightPlusOne")
+            and p.class_state.get("SoulCardThisTurn", 0) > 0
+            and (card.talent or "").lower() == "light"
+        ):
+            p.resources += 1
+            self._event_append("Vestige of Sol: +1 resource")
         self._record_opponent_pitch(player_idx, card)
         self._last_event = f"P{player_idx} pitches {card.name} (+{card.pitch} resources)"
         if card.power >= 6:
@@ -2472,6 +3387,10 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             if trig.when != "on_pitched":
                 continue
             reward += self._apply_effect(player_idx, card, trig.effect, None, player_idx)
+        if self._pending_instant_pay:
+            reward += self._try_complete_instant_pay()
+        if self._pending_pitch_pay:
+            reward += self._try_complete_pitch_pay()
         return reward
 
     @staticmethod
@@ -2585,7 +3504,15 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         target.intimidated.append(cid)
         self._event_append(f"P{target_idx} intimidated: {self._cards[cid].name} face-down")
 
-    def _do_clash(self, player_idx: int, token_name: str = "", *, loser_debuff: bool = False) -> None:
+    def _do_clash(
+        self,
+        player_idx: int,
+        token_name: str = "",
+        *,
+        loser_debuff: bool = False,
+        routine: str = "",
+        source_card: Optional[Card] = None,
+    ) -> None:
         """Clash — reveal deck tops, highest power wins (CR 8.5.45)."""
         opponent_idx = 1 - player_idx
         a_top = self._deck_top_card_id(player_idx)
@@ -2599,6 +3526,20 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         result = fab_rules.resolve_clash(a_power, d_power)
         if result.tie:
             self._event_append("clash tied")
+            return
+        routine = (routine or "").lower()
+        if routine == "hit_hero_routine":
+            if result.attacker_wins:
+                self._destroy_top_of_deck(opponent_idx, 1)
+            else:
+                if source_card is not None and source_card.id:
+                    counters = self._permanent_counters(player_idx, source_card.id)
+                    counters["power"] = counters.get("power", 0) - 1
+                    self._event_append(f"-1 power counter on {source_card.name}")
+            return
+        if routine == "destroy_top_loser":
+            loser_idx = opponent_idx if result.attacker_wins else player_idx
+            self._destroy_top_of_deck(loser_idx, 1)
             return
         if loser_debuff:
             loser_idx = opponent_idx if result.attacker_wins else player_idx
@@ -2778,6 +3719,11 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             ap = roll // 2
             actor.action_points += ap
             self._event_append(f"rolled {roll}: gained {ap} action point(s)")
+        elif kind == "gain_resources_half":
+            actor = self._players[controller]
+            res = roll // 2
+            actor.resources += res
+            self._event_append(f"rolled {roll}: gained {res} resource(s)")
         elif kind == "prevent_d6":
             target = self._players[controller]
             target.prevent_damage += roll
@@ -2794,11 +3740,23 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         chooser_idx: int,
     ) -> None:
         target = self._players[target_idx]
-        if card_id not in target.hand:
-            return
-        target.hand.remove(card_id)
         parts = (rider or "").lower().split(":")
         action = parts[0] if parts else ""
+        if action == "banish_same_name":
+            limit = int(parts[1]) if len(parts) > 1 else 3
+            self._banish_same_name_cards(target_idx, card_id, limit)
+            target.revealed_hand = []
+            return
+        if card_id not in target.hand and action != "destroy_permanent":
+            return
+        if action == "destroy_permanent":
+            if card_id in target.equipment:
+                target.equipment.remove(card_id)
+                target.discard.append(card_id)
+                self._fire_on_leave_triggers(target_idx, card_id, chooser_idx)
+                self._event_append(f"destroyed {self._cards[card_id].name}")
+            return
+        target.hand.remove(card_id)
         if action == "put_bottom":
             target.deck.insert(0, card_id)
             self._event_append(f"put {self._cards[card_id].name} on bottom of deck")
@@ -2886,6 +3844,10 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             return int(actor.class_state.get("SoulBanishedThisChain", 0))
         if pick == "pick:blue_pitched":
             return sum(1 for cid in actor.pitch_zone if self._cards[cid].pitch == 3)
+        if pick == "pick:fixed:2":
+            return 2
+        if pick == "pick:random:1":
+            return 1
         if pick.startswith("pick:played_blue_other:"):
             parts = pick.split(":")
             hi, lo = int(parts[2]), int(parts[3])
@@ -2958,6 +3920,42 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
                 out.append(
                     effects.Effect(
                         "banish_graveyard",
+                        int(fields[1]),
+                        target=fields[2],
+                    )
+                )
+            elif kind == "equip_inventory":
+                out.append(
+                    effects.Effect(
+                        "equip_inventory",
+                        banish_name=fields[2] if len(fields) > 2 else "",
+                    )
+                )
+            elif kind == "modular_equip":
+                out.append(effects.Effect("modular_equip"))
+            elif kind == "destroy_hand" and len(fields) >= 2:
+                payload = part.split(":", 1)[1]
+                amt_s, rest = payload.split(":", 1)
+                name, tgt = rest.rsplit(":", 1)
+                out.append(
+                    effects.Effect(
+                        "destroy_hand",
+                        int(amt_s),
+                        banish_name=name,
+                        target=tgt,
+                    )
+                )
+            elif kind == "banish_arsenal" and len(fields) >= 3:
+                out.append(
+                    effects.Effect(
+                        "banish_arsenal",
+                        target=fields[2],
+                    )
+                )
+            elif kind == "banish_top" and len(fields) >= 3:
+                out.append(
+                    effects.Effect(
+                        "banish_top",
                         int(fields[1]),
                         target=fields[2],
                     )
@@ -3043,11 +4041,18 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         combat: Optional[CombatState],
     ) -> bool:
         pick_any = (effect.condition or "") == "pick:any"
+        pick_random = (effect.condition or "") == "pick:random:1"
         picks = self._mode_pick_count(effect, chooser_idx, card)
-        if not pick_any and picks <= 0:
+        if not pick_any and not pick_random and picks <= 0:
             return False
         mode_specs = self._decode_mode_specs(effect.banish_name or "")
         if len(mode_specs) < 2:
+            return False
+        if pick_random:
+            idx = self._rng.randrange(len(mode_specs))
+            self._apply_mode_spec(
+                chooser_idx, card, mode_specs[idx], combat, perspective_idx
+            )
             return False
         labels = (effect.token_name or "").split("|")
         options = [
@@ -3224,6 +4229,23 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         self._event_append("search found no matching card")
         return False
 
+    def _search_deck_to_top(self, player_idx: int, *, card_type: str = "") -> bool:
+        actor = self._players[player_idx]
+        if actor.deck:
+            self._rng.shuffle(actor.deck)
+        ctype = card_type.lower().strip()
+        for i in range(len(actor.deck) - 1, -1, -1):
+            cid = actor.deck[i]
+            card = self._cards[cid]
+            if ctype and ctype not in card.card_types:
+                continue
+            cid = actor.deck.pop(i)
+            actor.deck.append(cid)
+            self._event_append(f"searched deck: put {card.name} on top")
+            return True
+        self._event_append("search found no matching card for deck top")
+        return False
+
     def _return_from_gy_to_deck(
         self, player_idx: int, name_pattern: str, *, to_bottom: bool = False
     ) -> bool:
@@ -3287,6 +4309,11 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
     ) -> None:
         """Queue optional Heave / Scrap / additional-pay before on-play triggers."""
         for eff in effects.parse_play_costs(card.text):
+            if not eff.optional:
+                self._apply_effect(
+                    player_idx, card, eff, self._pending_combat, perspective_idx
+                )
+                continue
             if self._optional_available(player_idx, eff):
                 self._pending_optionals.append(
                     {
@@ -3331,6 +4358,14 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         if penalty:
             combat.opposing_power_mod -= penalty
 
+    def _count_ice_markers(self, player_idx: int) -> int:
+        target = self._players[player_idx]
+        count = target.tokens.get("frostbite", 0)
+        for key, val in target.class_state.items():
+            if val and key.startswith("Frozen"):
+                count += 1
+        return count
+
     def _apply_damage_floor(self, attacker_idx: int, damage: int) -> int:
         actor = self._players[attacker_idx]
         threshold = actor.class_state.get("DamageFloorThreshold", 0)
@@ -3345,11 +4380,23 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
     def _mark_once_per_turn_used(self, player_idx: int, card: Card) -> None:
         self._players[player_idx].class_state[f"OncePerTurn:{card.id}"] = 1
 
-    def _mitigate_damage(self, defender_idx: int, damage: int, *, arcane: bool = False) -> int:
+    def _mitigate_damage(
+        self,
+        defender_idx: int,
+        damage: int,
+        *,
+        arcane: bool = False,
+        source_idx: Optional[int] = None,
+    ) -> int:
         """Apply Ward equipment, then prevent layers, before life loss."""
         if damage <= 0:
             return 0
         defender = self._players[defender_idx]
+        block_arcane = (
+            arcane
+            and source_idx is not None
+            and defender.class_state.get("BlockArcaneFromSource") == source_idx
+        )
         remaining = damage
         while remaining > 0 and self._has_soul_pay_equipment(defender_idx) and defender.soul:
             soul_id = defender.soul.pop()
@@ -3376,20 +4423,27 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             self._fire_on_leave_triggers(defender_idx, cid)
             self._event_append(f"ward on {card.name} prevented {absorbed} (destroyed)")
         if defender.prevent_damage_charges > 0 and defender.prevent_damage_per_hit > 0 and remaining > 0:
-            absorbed = min(defender.prevent_damage_per_hit, remaining)
-            remaining -= absorbed
-            defender.prevent_damage_charges -= 1
-            if absorbed:
-                self._event_append(
-                    f"prevented {absorbed} damage ({defender.prevent_damage_charges} preventions left)"
-                )
-        if defender.prevent_damage > 0 and remaining > 0:
-            absorbed = min(defender.prevent_damage, remaining)
+            if block_arcane:
+                pass
+            else:
+                absorbed = min(defender.prevent_damage_per_hit, remaining)
+                remaining -= absorbed
+                defender.prevent_damage_charges -= 1
+                if absorbed:
+                    self._event_append(
+                        f"prevented {absorbed} damage ({defender.prevent_damage_charges} preventions left)"
+                    )
+        if defender.prevent_damage > 0 and remaining > 0 and not block_arcane:
+            prevent_pool = defender.prevent_damage
+            if defender.class_state.get("PreventionReductionTurn", 0):
+                prevent_pool = max(0, prevent_pool - 1)
+                defender.class_state["PreventionReductionTurn"] = 0
+            absorbed = min(prevent_pool, remaining)
             defender.prevent_damage -= absorbed
             remaining -= absorbed
             if absorbed:
                 self._event_append(f"prevented {absorbed} damage")
-        if arcane and remaining > 0 and defender.arcane_barrier > 0:
+        if arcane and remaining > 0 and defender.arcane_barrier > 0 and not block_arcane:
             while remaining > 0 and defender.arcane_barrier > 0 and defender.resources > 0:
                 defender.resources -= 1
                 defender.arcane_barrier -= 1
@@ -3473,6 +4527,47 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             actor.banished.append(cid)
             self._event_append(f"banished {self._cards[cid].name} from graveyard")
 
+    def _banish_same_name_cards(
+        self, target_idx: int, chosen_id: str, limit: int
+    ) -> None:
+        target = self._players[target_idx]
+        needle = self._cards[chosen_id].name.lower().strip()
+        if not needle:
+            return
+        banished = 0
+
+        def _matches(cid: str) -> bool:
+            return self._cards[cid].name.lower().strip() == needle
+
+        for cid in list(target.hand):
+            if banished >= limit:
+                break
+            if _matches(cid):
+                target.hand.remove(cid)
+                target.banished.append(cid)
+                banished += 1
+        for i in range(len(target.deck) - 1, -1, -1):
+            if banished >= limit:
+                break
+            cid = target.deck[i]
+            if _matches(cid):
+                target.deck.pop(i)
+                target.banished.append(cid)
+                banished += 1
+        for i in range(len(target.discard) - 1, -1, -1):
+            if banished >= limit:
+                break
+            cid = target.discard[i]
+            if _matches(cid):
+                target.discard.pop(i)
+                target.banished.append(cid)
+                banished += 1
+        if target.deck:
+            self._rng.shuffle(target.deck)
+        self._event_append(
+            f"banished {banished} card(s) named {self._cards[chosen_id].name} from P{target_idx}"
+        )
+
     def _fire_controlled_hit_triggers(
         self, attacker_idx: int, perspective_idx: int, fused: bool
     ) -> float:
@@ -3545,6 +4640,19 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
                 self._apply_effect(player_idx, card, trig.effect, self._pending_combat, player_idx)
 
     def _fire_whenever_contract_triggers(self, player_idx: int, perspective_idx: int) -> float:
+        return self._fire_when_triggers(
+            player_idx, "whenever_contract", perspective_idx, hero=True, equipment=True
+        )
+
+    def _fire_when_triggers(
+        self,
+        player_idx: int,
+        when: str,
+        perspective_idx: int,
+        *,
+        hero: bool = True,
+        equipment: bool = True,
+    ) -> float:
         reward = 0.0
         actor = self._players[player_idx]
         proxy: Optional[Card] = None
@@ -3553,31 +4661,77 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         elif actor.equipment:
             proxy = self._cards[actor.equipment[0]]
         texts: list[tuple[Optional[Card], str]] = []
-        if actor.hero.ability_text:
+        if hero and actor.hero.ability_text:
             texts.append((proxy, actor.hero.ability_text))
-        for cid in actor.equipment:
-            card = self._cards[cid]
-            texts.append((card, card.text))
+        if equipment:
+            for cid in actor.equipment:
+                card = self._cards[cid]
+                texts.append((card, card.text))
         for card, text in texts:
             if not text.strip() or card is None:
                 continue
             for trig in effects.parse_triggers(text):
-                if trig.when != "whenever_contract":
+                if trig.when != when:
                     continue
-                if trig.effect.optional:
-                    if self._optional_available(player_idx, trig.effect):
+                eff = trig.effect
+                if eff.condition and not self._effect_condition_met(
+                    player_idx, eff.condition, card, combat=self._pending_combat
+                ):
+                    continue
+                if eff.optional:
+                    if self._optional_available(player_idx, eff):
                         self._pending_optionals.append(
                             {
                                 "player": player_idx,
                                 "card_id": card.id,
-                                "effect": trig.effect,
+                                "effect": eff,
                                 "perspective": perspective_idx,
                             }
                         )
                     continue
                 reward += self._apply_effect(
-                    player_idx, card, trig.effect, self._pending_combat, perspective_idx
+                    player_idx, card, eff, self._pending_combat, perspective_idx
                 )
+        return reward
+
+    def _fire_whenever_play_from_hand_triggers(
+        self, player_idx: int, perspective_idx: int
+    ) -> float:
+        return self._fire_when_triggers(
+            player_idx, "whenever_play_from_hand", perspective_idx, hero=True, equipment=False
+        )
+
+    def _fire_whenever_gain_gold_triggers(
+        self, player_idx: int, perspective_idx: int
+    ) -> float:
+        if self._active_player != player_idx:
+            return 0.0
+        return self._fire_when_triggers(
+            player_idx, "whenever_gain_gold", perspective_idx, hero=True, equipment=False
+        )
+
+    def _fire_whenever_trap_triggers(
+        self, player_idx: int, perspective_idx: int
+    ) -> float:
+        return self._fire_when_triggers(
+            player_idx, "whenever_trap_triggers", perspective_idx, hero=True, equipment=True
+        )
+
+    def _fire_trap_triggered(
+        self,
+        defender_idx: int,
+        card: Card,
+        combat: CombatState,
+        perspective_idx: int,
+    ) -> float:
+        reward = self._run_triggers(
+            defender_idx, card, "on_defend", combat, perspective_idx, False
+        )
+        if "defense_reaction" in card.card_types:
+            reward += self._run_triggers(
+                defender_idx, card, "on_play", combat, perspective_idx, False
+            )
+        reward += self._fire_whenever_trap_triggers(defender_idx, perspective_idx)
         return reward
 
     def _fire_on_random_discard_triggers(
@@ -3629,6 +4783,9 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
     def _fire_end_phase_triggers(self, player_idx: int) -> None:
         """Fire end-of-turn triggers on arena permanents."""
         actor = self._players[player_idx]
+        if actor.class_state.get("EndPhaseDeckTopArsenal"):
+            actor.class_state["EndPhaseDeckTopArsenal"] = 0
+            self._put_deck_top_in_arsenal(player_idx, face_up=True)
         if actor.class_state.get("DestroyMetacarpusEndPhase", 0):
             for i, cid in enumerate(list(actor.equipment)):
                 if "metacarpus" in self._cards[cid].name.lower():
@@ -3682,11 +4839,11 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         if grants:
             self._event_append("hero may-play abilities active")
 
-    def _mark_played_from_arsenal(self, player_idx: int, card_id: str) -> None:
-        actor = self._players[player_idx]
-        if card_id in actor.hand_from_arsenal:
-            actor.class_state["PlayedFromArsenal"] = 1
-            actor.hand_from_arsenal.discard(card_id)
+    def _mark_played_from_arsenal(
+        self, player_idx: int, card_id: str, *, from_arsenal: bool = False
+    ) -> None:
+        if from_arsenal:
+            self._players[player_idx].class_state["PlayedFromArsenal"] = 1
 
     def _deck_top_playable_card(self, player_idx: int) -> Optional[str]:
         actor = self._players[player_idx]
@@ -3715,7 +4872,7 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             return False
         if self._phase == "action" and self._active_player == player_idx:
             return True
-        if self._phase in ("defense", "reaction") and self._active_player == player_idx:
+        if self._phase in _COMBAT_CHAIN_PHASES:
             return True
         return False
 
@@ -3800,12 +4957,12 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         if grant.get("chain_only"):
             if self._pending_combat is None:
                 return False
-            if self._phase not in ("defense", "reaction", "action"):
+            if self._phase not in (*_COMBAT_CHAIN_PHASES, "action"):
                 return False
             return True
         if grant.get("not_own_turn"):
             return not self._is_own_action_phase(player_idx)
-        if self._phase in ("defense", "reaction"):
+        if self._phase in _COMBAT_CHAIN_PHASES:
             return True
         if self._phase == "action" and self._active_player == player_idx:
             return True
@@ -3919,7 +5076,6 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             self._consume_cost_reduction(player_idx, card, cost)
         if zone == "hand":
             actor.hand.pop(actor.hand.index(cid))
-            self._mark_played_from_arsenal(player_idx, cid)
         elif zone == "arsenal":
             actor.arsenal.remove(cid)
             self._players[player_idx].class_state["PlayedFromArsenal"] = 1
@@ -3985,7 +5141,15 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         return reward
 
     def _record_play_counters(
-        self, player_idx: int, card: Card, is_attack: bool, is_utility: bool, fused: bool, element: Optional[str]
+        self,
+        player_idx: int,
+        card: Card,
+        is_attack: bool,
+        is_utility: bool,
+        fused: bool,
+        element: Optional[str],
+        *,
+        from_hand: bool = True,
     ) -> None:
         cs = self._players[player_idx].class_state
         if "runeblade" in (card.card_class or "").lower() and cs.get("NumNonAttackCards", 0) > 0:
@@ -4012,6 +5176,8 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
                 self._fire_equipment_triggers(player_idx, "on_ice_fuse", player_idx)
         if "contract" in card.keywords or re.search(r"\bcontract\b", card.text, re.I):
             self._fire_whenever_contract_triggers(player_idx, player_idx)
+        if from_hand:
+            self._fire_whenever_play_from_hand_triggers(player_idx, player_idx)
         if "blood_debt" in card.keywords:
             cs["BloodDebtPlayedThisTurn"] = cs.get("BloodDebtPlayedThisTurn", 0) + 1
         if "wax on" in card.name.lower():
@@ -4061,6 +5227,18 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         actor = self._players[player_idx]
         actor.tokens[key] = actor.tokens.get(key, 0) + amount
         actor.tokens_controlled_turn.add(key)
+        if "aura" in token_name.lower() or key in (
+            "runechant",
+            "might",
+            "vigor",
+            "agility",
+            "fealty",
+            "confidence",
+            "toughness",
+        ):
+            actor.class_state["AurasPlayedOrCreatedThisTurn"] = (
+                actor.class_state.get("AurasPlayedOrCreatedThisTurn", 0) + amount
+            )
         label = token_name.strip() or key
         suffix = f"x{amount} " if amount > 1 else ""
         self._event_append(f"created {suffix}{label} token")
@@ -4111,6 +5289,14 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             if not str(key).startswith("NamedPower:") or not bonus:
                 continue
             pattern = str(key).split(":", 1)[1]
+            if pattern == "this_chain":
+                self._apply_combat_power_bonus(
+                    combat,
+                    player_idx,
+                    int(bonus),
+                    reason=f"+{bonus} power (named card this chain)",
+                )
+                continue
             if pattern in card_low:
                 self._apply_combat_power_bonus(
                     combat,
@@ -4139,6 +5325,8 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         cost = max(0, cost - play_reduction)
         cost = max(0, cost - self._token_play_cost_reduction(player_idx, card))
         cost += actor.extra_play_cost
+        if "attack_action" in card.card_types:
+            cost += self._first_attack_extra_cost(player_idx, is_attack=True)
         if "defense_reaction" in card.card_types:
             cost += actor.extra_defense_reaction_cost
         return cost
@@ -4161,7 +5349,11 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         pitched = 0
         for _ in range(max(0, count)):
             idx = next(
-                (i for i, cid in enumerate(actor.hand) if self._cards[cid].pitch > 0),
+                (
+                    i
+                    for i, cid in enumerate(actor.hand)
+                    if self._cards[cid].pitch > 0 and cid not in actor.arsenal
+                ),
                 None,
             )
             if idx is None:
@@ -4266,6 +5458,19 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             return cs.get("LastChainAttackPitch", 0) == 2
         if condition == "combo_blue":
             return cs.get("LastChainAttackPitch", 0) == 3
+        if condition == "combo_draconic":
+            return cs.get("ComboLastAttackDraconic", 0) > 0
+        if condition.startswith("combo_named:"):
+            want = condition.split(":", 1)[1].strip().lower()
+            last = str(cs.get("LastChainAttackName", "")).lower()
+            return want in last or last.endswith(want)
+        if condition.startswith("auras_ge:"):
+            return cs.get("AurasPlayedOrCreatedThisTurn", 0) >= int(condition.split(":", 1)[1])
+        if condition.startswith("controls_ge:"):
+            parts = condition.split(":")
+            token = parts[1] if len(parts) > 1 else "aura"
+            need = int(parts[2]) if len(parts) > 2 else 1
+            return actor.tokens.get(token_defs.normalize_token_name(token), 0) >= need
         if condition == "cheered_this_turn":
             return actor.cheered_this_turn
         if condition.startswith("hand_ge:"):
@@ -4278,6 +5483,10 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             return cs.get("WaxOnPlayedThisTurn", 0) > 0
         if condition == "naa_played_this_turn":
             return cs.get("NumNonAttackCards", 0) > 0
+        if condition == "empty_arsenal":
+            return not actor.arsenal
+        if condition == "pitch_ge:6":
+            return card is not None and card.pitch >= 6
         if condition.startswith("weapon_attacks_ge:"):
             return cs.get("WeaponAttacksThisTurn", 0) >= int(condition.split(":", 1)[1])
         if condition == "once_per_turn":
@@ -4288,8 +5497,14 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             return actor.gold > opponent.gold
         if condition == "scrapped_this_play":
             return actor.class_state.get("ScrappedThisPlay", 0) > 0
+        if condition == "additional_cost_paid":
+            return actor.class_state.get(f"AdditionalCostPaid:{card.id if card else ''}", 0) > 0
         if condition == "power_ge_6":
             return card is not None and card.power >= 6
+        if condition == "power_ge_10":
+            return card is not None and card.power >= 10
+        if condition.startswith("attacks_lt:"):
+            return cs.get("WeaponAttacksThisTurn", 0) < int(condition.split(":", 1)[1])
         if condition == "chain_link_ge":
             threshold = int(condition_arg or "1")
             return self._combat_chain_links + 1 >= threshold
@@ -4316,6 +5531,16 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             return cs.get("Rolled6ThisTurn", 0) > 0
         if condition.startswith("hyper_drivers_ge:"):
             return cs.get("LastHyperDriversTurned", 0) >= int(condition.split(":", 1)[1])
+        if condition == "revealed_attack_reaction":
+            for cid in opponent.revealed_hand or opponent.hand:
+                if "attack_reaction" in self._cards[cid].card_types:
+                    return True
+            return False
+        if condition == "royal_hero":
+            if combat is None:
+                return False
+            defender = self._players[combat.defender]
+            return "royal" in defender.hero.name.lower()
         if condition == "no_soul":
             return not actor.soul
         if condition == "light_hero":
@@ -4345,6 +5570,10 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
                 if "off-hand" in line and "guardian" in cls:
                     return True
             return False
+        if condition == "defends_alone":
+            if combat is None:
+                return False
+            return len(combat.blocks) == 1
         if condition == "attack_power_gt_base":
             if combat is None or not combat.attack_card_id:
                 return False
@@ -4376,6 +5605,38 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             if combat is None:
                 return False
             return combat.attack_reactions_played > 0
+        if condition.startswith("attack_reactions_ge:"):
+            if combat is None:
+                return False
+            threshold = int(condition.split(":", 1)[1])
+            return combat.attack_reactions_played >= threshold
+        if condition == "charged_this_turn":
+            return cs.get("ChargedThisTurn", 0) > 0
+        if condition == "transcended_this_turn":
+            return cs.get("TranscendedThisTurn", 0) > 0
+        if condition == "chi_pitched":
+            return cs.get("ChiPitchedThisPlay", 0) > 0
+        if condition.startswith("suspense_left_ge:"):
+            return cs.get("SuspenseAurasLeftThisTurn", 0) >= int(condition.split(":", 1)[1])
+        if condition == "defending_attack_power_le:2":
+            if combat is None:
+                return False
+            return combat.attack_power <= 2
+        if condition.startswith("pitched_attack_and_nonattack"):
+            return cs.get("PitchedAttackAndNonattack", 0) > 0
+        if condition == "other_hero:life_less":
+            return actor.life > self._players[1 - player_idx].life
+        if condition == "dealt_hero_damage":
+            return actor.class_state.get("LastArcaneHeroDamage", 0) > 0 or (
+                combat is None and actor.class_state.get("ArcaneDamageDealt", 0) > 0
+            )
+        if condition == "soul_this_turn":
+            return actor.class_state.get("SoulCardThisTurn", 0) > 0
+        if condition == "earth_pitched_weapon":
+            return any(
+                (self._cards[cid].talent or "").lower() == "earth"
+                for cid in actor.pitch_zone
+            )
         if condition == "hero_thief":
             hero = (actor.hero.hero_class or actor.hero.name or "").lower()
             return "thief" in hero
@@ -4418,6 +5679,14 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             return any(self._cards[cid].pitch == 2 for cid in actor.discard) or any(
                 self._cards[cid].pitch == 2 for cid in self._players[1 - player_idx].discard
             )
+        if condition == "discarded_power6_turn":
+            return cs.get("DiscardedPower6ThisTurn", 0) > 0
+        if condition.startswith("earth_banish_ge:"):
+            threshold = int(condition.split(":", 1)[1])
+            return self._count_earth_in_banish(player_idx) >= threshold
+        if condition.startswith("steam_removed_ge:"):
+            threshold = int(condition.split(":", 1)[1])
+            return cs.get("LastSteamRemovedCount", 0) >= threshold
         return False
 
     def _apply_play_modifiers(
@@ -4492,6 +5761,81 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
                 self._event_append(f"next attack +{mod.next_attack_power} power")
         return go_again, dominate
 
+    def _card_matches_banish_combo(self, card: Card, target: str) -> bool:
+        """Match graveyard banish_combo targets by name, card type, or type line."""
+        needle = (target or "").strip().lower()
+        if not needle:
+            return False
+        if needle in card.name.lower():
+            return True
+        tl = (card.type_line or "").lower()
+        if f" {needle}" in tl or tl.endswith(needle) or tl.startswith(needle):
+            return True
+        for ct in card.card_types:
+            if needle in ct.lower():
+                return True
+        return False
+
+    def _item_attack_power(self, player_idx: int, card_id: str) -> int:
+        card = self._cards[card_id]
+        bonus = self._permanent_counters(player_idx, card_id).get("power", 0)
+        return max(0, card.power + bonus)
+
+    def _apply_banish_combo_rider(
+        self,
+        player_idx: int,
+        card: Card,
+        effect: "effects.Effect",
+        combat: Optional[CombatState],
+        *,
+        banished_name: str,
+    ) -> None:
+        raw = (effect.raw or "").lower()
+        if effect.amount and combat is not None:
+            self._apply_combat_power_bonus(
+                combat,
+                player_idx,
+                effect.amount,
+                reason=f"banished {banished_name} (+{effect.amount} power)",
+            )
+            if effect.go_again:
+                self._grant_go_again(player_idx, combat, this_card=True)
+            return
+        m = re.search(r"deal (\d+) arcane damage", raw)
+        if m:
+            arcane = effects.Effect(
+                "arcane_damage",
+                int(m.group(1)),
+                raw=effect.raw or "",
+                target=effect.target,
+            )
+            self._apply_effect(player_idx, card, arcane, combat, 0)
+            return
+
+    def _decode_hit_rider(self, encoded: str) -> effects.Effect:
+        parts = (encoded or "").split(":", 2)
+        kind = parts[0] if parts else "unimplemented"
+        banish = parts[1] if len(parts) > 1 else ""
+        return effects.Effect(kind, banish_name=banish)
+
+    def _apply_pending_hit_rider(
+        self,
+        player_idx: int,
+        card: Card,
+        combat: Optional[CombatState],
+        perspective_idx: int,
+    ) -> float:
+        rider = self._players[player_idx].class_state.pop("PendingHitRider", "")
+        if not rider:
+            return 0.0
+        return self._apply_effect(
+            player_idx,
+            card,
+            self._decode_hit_rider(rider),
+            combat,
+            perspective_idx,
+        )
+
     def _apply_effect(
         self,
         player_idx: int,
@@ -4537,37 +5881,92 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             if effect.condition == "min_base_power":
                 cs["NextAttackMinBase"] = int(effect.banish_name or "0")
                 cs["NextAttackWeaponOnly"] = 0
+                cs["NextAttackWeaponClass"] = ""
+            elif effect.condition == "weapon_class":
+                cs["NextAttackMinBase"] = 0
+                cs["NextAttackWeaponOnly"] = 0
+                cs["NextAttackWeaponClass"] = (effect.banish_name or "").lower()
             elif effect.condition == "weapon_only" or (effect.banish_name or "").lower() == "wrench":
                 cs["NextAttackMinBase"] = 0
                 cs["NextAttackWeaponOnly"] = 1
+                cs["NextAttackWeaponClass"] = ""
             else:
                 cs["NextAttackMinBase"] = 0
                 cs["NextAttackWeaponOnly"] = 0
+                cs["NextAttackWeaponClass"] = ""
+            if (effect.token_name or "").startswith("hit:"):
+                cs["NextAttackHitRider"] = effect.token_name[4:]
             self._event_append(f"next attack {effect.amount:+d} power on P{target_idx}")
             return 0.0
         if effect.kind == "banish_combo":
-            if combat is not None:
-                target = effect.banish_name.lower()
-                for j, cid in enumerate(actor.discard):
-                    if target in self._cards[cid].name.lower():
-                        banished = self._cards[cid].name
-                        actor.discard.pop(j)
-                        self._apply_combat_power_bonus(
-                            combat,
-                            player_idx,
-                            effect.amount,
-                            reason=f"banished {banished} (+{effect.amount} power)",
-                        )
-                        if effect.go_again:
-                            self._grant_go_again(player_idx, combat, this_card=True)
-                        break
+            target = (effect.banish_name or "").lower()
+            actor = self._players[player_idx]
+            for j, cid in enumerate(actor.discard):
+                gy_card = self._cards[cid]
+                if not self._card_matches_banish_combo(gy_card, target):
+                    continue
+                banished = gy_card.name
+                actor.discard.pop(j)
+                actor.banished.append(cid)
+                self._event_append(f"banished {banished} from graveyard")
+                self._apply_banish_combo_rider(
+                    player_idx,
+                    card,
+                    effect,
+                    combat,
+                    banished_name=banished,
+                )
+                break
             return 0.0
         if effect.kind == "power":
+            if (effect.banish_name or "").lower() == "gold_count":
+                bonus = actor.gold + actor.tokens.get("gold", 0)
+                if combat is not None and bonus > 0:
+                    self._apply_combat_power_bonus(
+                        combat,
+                        player_idx,
+                        bonus,
+                        reason=f"+{bonus} power (Gold controlled)",
+                    )
+                return 0.0
+            if (effect.banish_name or "").lower() == "hyper_drivers_destroyed":
+                count = actor.class_state.get("LastHyperDriversDestroyed", 0)
+                per = max(1, effect.amount or 1)
+                bonus = count * per
+                if combat is not None and bonus > 0:
+                    self._apply_combat_power_bonus(
+                        combat,
+                        player_idx,
+                        bonus,
+                        reason=f"+{bonus} power ({count} Hyper Drivers destroyed)",
+                    )
+                return 0.0
             if (effect.banish_name or "").lower() == "attacks_targeting_you":
                 actor.class_state["AttacksTargetingYouPenalty"] = abs(effect.amount or 1)
                 self._event_append(
                     f"attacks targeting you get {effect.amount:+d} power this turn"
                 )
+            elif (effect.banish_name or "").lower() == "all_pitch_zones_x2":
+                if combat is not None:
+                    total = sum(len(self._players[i].pitch_zone) for i in (0, 1))
+                    bonus = total * 2
+                    if bonus > 0:
+                        self._apply_combat_power_bonus(
+                            combat,
+                            player_idx,
+                            bonus,
+                            reason=f"+{bonus} power ({total} cards in pitch zones x2)",
+                        )
+            elif (effect.banish_name or "").lower() == "last_banish_count":
+                if combat is not None:
+                    bonus = actor.class_state.get("LastVariableBanishCount", 0)
+                    if bonus > 0:
+                        self._apply_combat_power_bonus(
+                            combat,
+                            player_idx,
+                            bonus,
+                            reason=f"+{bonus} power (items banished to play)",
+                        )
             elif combat is not None:
                 if (effect.banish_name or "").lower() == "chain" and effect.target == "opponent":
                     combat.opposing_power_mod += effect.amount
@@ -4594,6 +5993,10 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             return 0.0
         if effect.kind == "draw":
             if effect.target == "each_hero":
+                if (effect.banish_name or "").lower() == "up_to_intellect":
+                    for idx in (0, 1):
+                        self._draw_up(idx)
+                    return 0.0
                 for idx in (0, 1):
                     for _ in range(max(1, effect.amount or 1)):
                         self._draw_card(idx, from_action=True)
@@ -4607,6 +6010,21 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
                 pass  # NumCardsDrawn updated per card in _draw_card
             return 0.0
         if effect.kind in ("damage", "arcane_damage"):
+            if (effect.banish_name or "").lower() == "cleave":
+                amount = max(0, actor.class_state.get("LastHitDamage", 0))
+                if amount <= 0:
+                    return 0.0
+                target_idx = 1 - player_idx
+                target = self._players[target_idx]
+                amount = self._mitigate_damage(target_idx, amount)
+                if amount <= 0:
+                    return 0.0
+                target.life -= amount
+                actor.class_state["DamageDealt"] += amount
+                target.class_state["DamageTaken"] += amount
+                self._event_append(f"cleave deals {amount} damage to P{target_idx}")
+                r = float(amount) * 0.01
+                return r if perspective_idx == player_idx else -r
             hits = 1
             if effect.condition.startswith("multi:"):
                 hits = max(1, int(effect.condition.split(":")[1]))
@@ -4616,6 +6034,15 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             total_dealt = 0
             for _ in range(hits):
                 amount = effect.amount
+                if (effect.banish_name or "").startswith("token_count:"):
+                    token = (effect.banish_name or "").split(":", 1)[1]
+                    key = token_defs.normalize_token_name(token)
+                    amount = target.tokens.get(key, 0)
+                if (effect.banish_name or "").lower() == "equipment_count":
+                    amount = len(target.equipment)
+                if (effect.banish_name or "").lower().startswith("ice_markers:"):
+                    base = int((effect.banish_name or "ice_markers:0").split(":", 1)[1])
+                    amount = base + self._count_ice_markers(target_idx)
                 if (effect.banish_name or "").lower() == "red_reveal_double":
                     amount = actor.class_state.get("LastRevealRedCount", 0) * 2
                 if effect.kind == "damage":
@@ -4628,8 +6055,13 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
                     amount += 1
                     actor.class_state["ArcanePlusOneThisPlay"] = 0
                     self._event_append("Metacarpus Node: +1 arcane damage")
+                if effect.kind == "arcane_damage" and actor.class_state.get("ArcanePlusOneTurn", 0):
+                    amount += 1
+                    self._event_append("action arcane +1 this turn")
                 if effect.kind == "arcane_damage":
-                    amount = self._mitigate_damage(target_idx, amount, arcane=True)
+                    amount = self._mitigate_damage(
+                        target_idx, amount, arcane=True, source_idx=player_idx
+                    )
                 else:
                     amount = self._mitigate_damage(target_idx, amount)
                 if amount <= 0:
@@ -4671,9 +6103,28 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
                 count = max(0, actor.class_state.get("WeaponHitsThisTurn", 0))
             elif (effect.banish_name or "").lower() == "damage_dealt":
                 count = max(0, actor.class_state.get("LastHitDamage", 0))
+            elif (effect.banish_name or "").lower() == "pitch_value":
+                count = max(1, card.pitch if card else 1)
+            elif (effect.banish_name or "").lower() == "naa_played_this_turn":
+                count = max(0, actor.class_state.get("NumNonAttackCards", 0))
+            elif (effect.banish_name or "").lower().startswith("naa_played:"):
+                count = max(0, actor.class_state.get("NumNonAttackCards", 0))
+            elif (effect.banish_name or "").lower().startswith("life_diff_double:"):
+                token_name = (effect.banish_name or "").split(":", 1)[1]
+                opp = self._players[1 - player_idx]
+                diff = max(0, opp.life - actor.life)
+                count = diff * 2
+                if count > 0:
+                    self._create_token(player_idx, token_name, count)
+                return 0.0
             if count <= 0:
                 return 0.0
             self._create_token(target_idx, effect.token_name, count)
+            rider = (effect.banish_name or "").lower()
+            if ":go_again_if_ge:" in rider:
+                threshold = int(rider.rsplit(":", 1)[1])
+                if count >= threshold:
+                    self._grant_go_again(player_idx, combat)
             return 0.0
         if effect.kind == "create_banished":
             amount = max(1, effect.amount or 1)
@@ -4696,6 +6147,16 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             )
             return 0.0
         if effect.kind == "named_power_bonus":
+            if (effect.banish_name or "").lower() == "this_chain":
+                pattern = actor.named_card if actor.named_card else "named"
+                key = f"NamedPower:{pattern}"
+                actor.class_state[key] = actor.class_state.get(key, 0) + max(
+                    1, effect.amount or 1
+                )
+                self._event_append(
+                    f"named card attacks get +{effect.amount or 1} power this combat chain"
+                )
+                return 0.0
             pattern = token_defs.normalize_token_name(
                 effect.token_name or effect.banish_name or ""
             )
@@ -4766,6 +6227,16 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             self._discard_random(target_idx, max(1, effect.amount or 1))
             return 0.0
         if effect.kind == "gain_resources":
+            rider = (effect.banish_name or "").lower()
+            if rider == "roll_d6_half":
+                self._pending_die_roll = {
+                    "controller": player_idx,
+                    "kind": "gain_resources_half",
+                }
+                if self._pause_for_gambler(player_idx):
+                    return 0.0
+                self._continue_pending_die_roll()
+                return 0.0
             actor.resources += max(1, effect.amount or 1)
             self._event_append(f"gained {effect.amount or 1} resources")
             return 0.0
@@ -4824,8 +6295,9 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
                     if soul_id in zone:
                         zone.remove(soul_id)
                         break
-                if soul_id not in actor.soul:
-                    actor.soul.append(soul_id)
+            if soul_id not in actor.soul:
+                actor.soul.append(soul_id)
+                actor.class_state["SoulCardThisTurn"] = 1
                 self._event_append(f"{card.name} put into soul")
                 return 0.0
             if color_filter == "destroyed_light":
@@ -4854,7 +6326,9 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
                 return 0.0
             if soul_id not in actor.soul:
                 actor.soul.append(soul_id)
+            actor.class_state["SoulCardThisTurn"] = 1
             self._event_append(f"{self._cards[soul_id].name} charged to soul")
+            actor.class_state["ChargedThisTurn"] = 1
             soul_card = self._cards[soul_id]
             if soul_card.pitch == 2:
                 actor.class_state["ChargedYellowThisPlay"] = 1
@@ -4889,7 +6363,9 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
                 return 0.0
             n = max(1, effect.amount or 1)
             if (effect.banish_name or "").lower() == "store_revealed":
-                if effect.condition == "opponent_turn_all" and self._active_player != player_idx:
+                if effect.amount <= 0:
+                    n = len(target.hand)
+                elif effect.condition == "opponent_turn_all" and self._active_player != player_idx:
                     n = len(target.hand)
                 revealed = list(target.hand[: min(n, len(target.hand))])
                 target.revealed_hand = revealed
@@ -4909,6 +6385,39 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             return 0.0
         if effect.kind == "choose_card":
             target_idx = 1 - player_idx if effect.target != "self" else player_idx
+            target = self._players[target_idx]
+            rider = (effect.banish_name or "put_bottom").lower()
+            if rider == "destroy_item_landmark":
+                options = []
+                for i, cid in enumerate(target.equipment):
+                    card_obj = self._cards[cid]
+                    tl = (card_obj.type_line or "").lower()
+                    if self._is_ally_card(card_obj) or "landmark" in tl:
+                        options.append(
+                            {"index": i, "card_id": cid, "name": card_obj.name}
+                        )
+                prompt = effect.raw or "Choose an item or landmark"
+                resume = "after_attack" if combat is not None else "after_play"
+                paused = self._begin_card_choice(
+                    target_idx,
+                    target_idx,
+                    options,
+                    rider="destroy_permanent",
+                    optional=effect.optional,
+                    prompt=prompt,
+                    resume=resume,
+                )
+                if paused:
+                    self._choice_ctx.update(
+                        {
+                            "return_phase": self._phase,
+                            "card_id": card.id,
+                            "fused": bool(combat.fused if combat else False),
+                            "perspective": perspective_idx,
+                        }
+                    )
+                return 0.0
+            target.revealed_hand = list(target.hand)
             from_revealed = effect.condition == "revealed_only"
             no_defense = effect.condition == "no_defense"
             options = self._choice_options_for_hand(
@@ -4956,17 +6465,56 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             return 0.0
         if effect.kind == "reduce_defense":
             target_idx = 1 - player_idx if effect.target != "self" else player_idx
+            rider = (effect.banish_name or "").lower()
+            if rider == "next_defend_reactions":
+                self._players[target_idx].class_state["NextDefendReactionPenalty"] = max(
+                    1, effect.amount or 1
+                )
+                self._event_append("next defend with reactions gets -1 defense")
+                return 0.0
+            if rider == "next_defend_equipment":
+                self._players[target_idx].class_state["NextDefendEquipmentPenalty"] = max(
+                    1, effect.amount or 1
+                )
+                self._event_append("next defend with equipment gets -1 defense")
+                return 0.0
+            if rider == "next_defend_actions":
+                self._players[target_idx].class_state["NextDefendActionPenalty"] = max(
+                    1, effect.amount or 1
+                )
+                self._event_append("next defend with attack actions gets -1 defense")
+                return 0.0
             self._apply_equipment_defense_debuff(target_idx, max(1, effect.amount or 1))
             return 0.0
         if effect.kind == "clash":
-            loser_debuff = (effect.banish_name or "").lower() == "loser_equipment_debuff"
-            self._do_clash(player_idx, effect.token_name or "", loser_debuff=loser_debuff)
+            routine = (effect.banish_name or "").lower()
+            loser_debuff = routine == "loser_equipment_debuff"
+            self._do_clash(
+                player_idx,
+                effect.token_name or "",
+                loser_debuff=loser_debuff,
+                routine=routine,
+                source_card=card,
+            )
+            return 0.0
+        if effect.kind == "pitch_bonus":
+            actor.class_state["PitchBonusLightPlusOne"] = 1
+            self._event_append("light pitch gains +1 resource while equipped")
             return 0.0
         if effect.kind == "amp":
-            actor.amp += max(1, effect.amount or 1)
-            self._event_append(f"amp {effect.amount or 1}: next arcane +{effect.amount or 1}")
+            if (effect.banish_name or "").lower() == "action_arcane_turn":
+                actor.class_state["ArcanePlusOneTurn"] = 1
+                self._event_append("action arcane effects deal +1 this turn")
+            elif (effect.banish_name or "").lower() == "attack_damage_turn":
+                actor.class_state["AttackDamagePlusOneTurn"] = 1
+                self._event_append("attack damage +1 this turn")
+            else:
+                actor.amp += max(1, effect.amount or 1)
+                self._event_append(f"amp {effect.amount or 1}: next arcane +{effect.amount or 1}")
             return 0.0
         if effect.kind in ("reload", "stash_hand"):
+            if effect.condition == "empty_arsenal" and actor.arsenal:
+                return 0.0
             legal = self._legal_stash(player_idx)
             if not legal:
                 return 0.0
@@ -5002,6 +6550,11 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
                 self._discard_random(target_idx, 1)
             return 0.0
         if effect.kind == "search":
+            rider = (effect.banish_name or "").lower()
+            if ":deck_top" in rider:
+                card_type = rider.split(":", 1)[0]
+                self._search_deck_to_top(player_idx, card_type=card_type)
+                return 0.0
             card_type = ""
             name_pattern = effect.banish_name or ""
             if name_pattern == "attack_action":
@@ -5043,12 +6596,17 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
                 target_idx = 1 - player_idx
             target = self._players[target_idx]
             amount = effect.amount or 1
+            if amount > 0 and target.class_state.get("BlockGoldGainTurn", 0):
+                self._event_append(f"P{target_idx} can't gain {{g}} this turn")
+                return 0.0
             if amount < 0:
                 target.gold = max(0, target.gold + amount)
                 self._event_append(f"P{target_idx} lost {-amount}{{g}} (total {target.gold})")
             else:
                 target.gold += amount
                 self._event_append(f"P{target_idx} gained {amount}{{g}} (total {target.gold})")
+            if amount > 0 and target_idx == player_idx:
+                self._fire_whenever_gain_gold_triggers(player_idx, perspective_idx)
             return 0.0
         if effect.kind == "lose_gold":
             target_idx = 1 - player_idx if effect.target == "opponent" else player_idx
@@ -5081,9 +6639,13 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
                 )
             return 0.0
         if effect.kind == "block_defense_reactions":
-            if combat is not None:
+            if effect.condition == "turn":
+                for idx in (0, 1):
+                    self._players[idx].class_state["BlockDefenseReactionsTurn"] = 1
+                self._event_append("defense reactions can't be played this turn")
+            elif combat is not None:
                 combat.defense_reactions_blocked = True
-            self._event_append("defense reactions can't be played to this chain link")
+                self._event_append("defense reactions can't be played to this chain link")
             return 0.0
         if effect.kind == "return_gy_to_deck":
             self._return_from_gy_to_deck(
@@ -5112,6 +6674,9 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             return 0.0
         if effect.kind == "look_deck":
             target_idx = 1 - player_idx if effect.target == "opponent" else player_idx
+            if (effect.banish_name or "").lower() == "event_deck":
+                self._event_append("looked at top 3 cards of the event deck (event deck not modeled)")
+                return 0.0
             if (effect.banish_name or "").lower() == "reveal_red_count":
                 actor = self._players[player_idx]
                 red = 0
@@ -5182,11 +6747,44 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
                 self._event_append(f"put {token} counter")
             return 0.0
         if effect.kind == "reveal_top":
-            top = self._deck_top_card_id(player_idx)
-            if top:
-                self._event_append(f"revealed {self._cards[top].name}")
+            target_idx = 1 - player_idx if effect.target == "opponent" else player_idx
+            target = self._players[target_idx]
+            top = self._deck_top_card_id(target_idx)
+            if not top:
+                self._event_append("no card on deck top to reveal")
+                return 0.0
+            card = self._cards[top]
+            if (effect.banish_name or "").lower() == "store_revealed":
+                target.revealed_hand = [top]
+                actor.class_state["LastRevealedDeckTopId"] = top
+                actor.class_state["LastRevealedDeckTopPower"] = card.power
+            who = "opponent" if target_idx != player_idx else "your"
+            self._event_append(f"{who} deck top revealed: {card.name} ({card.power} power)")
             return 0.0
         if effect.kind == "put_bottom":
+            if (effect.banish_name or "").lower().startswith("yellow_any_gy"):
+                moved = False
+                for idx in (0, 1):
+                    target = self._players[idx]
+                    for i, cid in enumerate(list(target.discard)):
+                        if self._cards[cid].pitch != 2:
+                            continue
+                        cid = target.discard.pop(i)
+                        target.deck.insert(0, cid)
+                        self._event_append(
+                            f"put {self._cards[cid].name} from P{idx} graveyard on bottom of deck"
+                        )
+                        moved = True
+                        break
+                    if moved:
+                        break
+                if not moved:
+                    self._event_append("no yellow card in any graveyard")
+                    return 0.0
+                if ":create_gold" in (effect.banish_name or ""):
+                    self._create_token(player_idx, "gold")
+                    self._event_append("created Gold token")
+                return 0.0
             if effect.target == "self" and (effect.banish_name or "").lower() == "hand_or_arsenal":
                 if actor.hand:
                     cid = actor.hand.pop()
@@ -5255,79 +6853,7 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             self._enable_graveyard_play(player_idx, card, effect.banish_name or "this")
             return 0.0
         if effect.kind == "pitch_pay":
-            max_pay = max(1, effect.amount or 1)
-            n = self._pitch_cards(player_idx, max_pay)
-            actor.class_state["LastPitchPayCount"] = n
-            if n <= 0:
-                self._event_append("declined pitch cost")
-                return 0.0
-            rider = (effect.banish_name or "").lower()
-            if rider == "intimidate":
-                target_idx = 1 - player_idx
-                for _ in range(n):
-                    self._do_intimidate(target_idx)
-            elif rider == "defense":
-                bonus = max(1, effect.max_cost if effect.max_cost > 0 else 2)
-                if combat is not None and combat.blocks:
-                    idx = len(combat.blocks) - 1
-                    d_idx, b_cid, val = combat.blocks[idx]
-                    if d_idx == player_idx:
-                        combat.blocks[idx] = (d_idx, b_cid, val + bonus)
-                        self._event_append(f"pitch pay: +{bonus} defense on block")
-                else:
-                    actor.class_state["NextDefenseBonus"] = (
-                        actor.class_state.get("NextDefenseBonus", 0) + bonus
-                    )
-                    self._event_append(f"pitch pay: next defend +{bonus}")
-            elif rider == "power":
-                bonus = max(1, effect.max_cost if effect.max_cost > 0 else 1)
-                if combat is not None:
-                    self._apply_combat_power_bonus(
-                        combat,
-                        player_idx,
-                        bonus,
-                        reason=f"pitch pay: +{bonus} power",
-                    )
-            elif rider == "power_overpower":
-                bonus = max(1, effect.max_cost if effect.max_cost > 0 else 1)
-                if combat is not None:
-                    self._apply_combat_power_bonus(
-                        combat,
-                        player_idx,
-                        bonus,
-                        reason=f"pitch pay: +{bonus} power and overpower",
-                    )
-                    combat.overpower = True
-            elif effect.token_name:
-                self._create_token(player_idx, effect.token_name, n)
-            elif rider == "destroy_draw":
-                if card.id in actor.equipment:
-                    actor.equipment.remove(card.id)
-                elif card.id == actor.weapon_id:
-                    actor.weapon_id = None
-                if card.id not in actor.discard:
-                    actor.discard.append(card.id)
-                    self._fire_on_leave_triggers(player_idx, card.id, perspective_idx)
-                    self._event_append(f"destroyed {card.name}")
-                self._draw_card(player_idx)
-            elif rider == "aim_counter":
-                arrow_id = actor.class_state.get("LastArrowFromDeckId")
-                if not arrow_id and actor.arsenal:
-                    arrow_id = actor.arsenal[-1]
-                if arrow_id:
-                    self._add_permanent_counter(player_idx, arrow_id, "aim", 1)
-                    self._event_append(f"put aim counter on {self._cards[arrow_id].name}")
-            elif rider.startswith("gain_resources:"):
-                gain = int(rider.split(":", 1)[1])
-                actor.resources += gain * n
-                self._event_append(f"pitch pay: gained {gain * n} resources")
-            elif rider == "arcane_plus_one":
-                actor.class_state["ArcanePlusOneThisPlay"] = 1
-                actor.class_state["DestroyMetacarpusEndPhase"] = 1
-                self._event_append(
-                    "arcane damage +1 this play; Metacarpus Node destroys at end phase"
-                )
-            return 0.0
+            return self._begin_pitch_pay(player_idx, card, effect, perspective_idx)
         if effect.kind == "for_each":
             count = max(1, sum(actor.tokens.values()))
             if effect.token_name:
@@ -5340,6 +6866,7 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         if effect.kind in ("transcend", "contract", "blood_debt"):
             if effect.kind == "transcend":
                 actor.hand.append(card.id)
+                actor.class_state["TranscendedThisTurn"] = 1
                 self._event_append(f"{card.name} transcended to hand")
             elif effect.kind == "blood_debt":
                 self._event_append(f"{card.name} has blood debt while banished")
@@ -5347,16 +6874,193 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
                 self._event_append(f"contract tracked on {card.name}")
             return 0.0
         if effect.kind == "arcane_barrier":
-            actor.arcane_barrier += max(1, effect.amount or 1)
-            self._event_append(f"arcane barrier {actor.arcane_barrier} until end of turn")
+            if (effect.banish_name or "").lower() == "per_runechant":
+                amount = actor.tokens.get("runechant", 0) * max(1, effect.amount or 1)
+                actor.arcane_barrier += amount
+                self._event_append(
+                    f"Runechants grant spellvoid: arcane barrier {amount} until end of turn"
+                )
+            else:
+                actor.arcane_barrier += max(1, effect.amount or 1)
+                self._event_append(f"arcane barrier {actor.arcane_barrier} until end of turn")
             return 0.0
         if effect.kind == "steal_equipment":
             defender = self._players[1 - player_idx]
-            if not defender.equipment:
+            max_cost = effect.amount if (effect.amount or 0) > 0 else 99
+            stolen = False
+            for i, cid in enumerate(list(defender.equipment)):
+                item = self._cards[cid]
+                tl = (item.type_line or "").lower()
+                if " item" not in tl and not tl.endswith("item"):
+                    continue
+                if item.cost > max_cost:
+                    continue
+                defender.equipment.pop(i)
+                actor.equipment.append(cid)
+                self._event_append(f"stole {item.name} from opponent")
+                stolen = True
+                break
+            if not stolen and (effect.banish_name or "").lower() == "or_draw":
+                self._draw_card(player_idx, from_action=True)
+                self._event_append("no item to steal: drew a card")
+            elif not stolen:
+                self._event_append("no item to steal")
+            return 0.0
+        if effect.kind == "steal_ally":
+            opp_idx = 1 - player_idx if effect.target != "self" else player_idx
+            opp = self._players[opp_idx]
+            stolen_id: Optional[str] = None
+            for i, cid in enumerate(list(opp.equipment)):
+                if not self._is_ally_card(self._cards[cid]):
+                    continue
+                stolen_id = opp.equipment.pop(i)
+                actor.equipment.append(stolen_id)
+                self._stolen_until_phase_end.append((opp_idx, player_idx, stolen_id))
+                self._event_append(
+                    f"untapped and stole {self._cards[stolen_id].name} from P{opp_idx}"
+                )
+                break
+            if not stolen_id:
+                self._event_append("no ally to steal")
+            return 0.0
+        if effect.kind == "put_deck_top_arsenal":
+            targets = [0, 1] if effect.target == "each_hero" else [player_idx]
+            rider = effect.banish_name or ""
+            only_empty = rider.startswith("if_empty_arsenal")
+            go_again_from_arsenal = ":go_again_if_played_from_arsenal" in rider
+            count = 0
+            for idx in targets:
+                target = self._players[idx]
+                if only_empty and target.arsenal:
+                    continue
+                if not target.deck:
+                    self._event_append(f"P{idx} has empty deck")
+                    continue
+                if target.arsenal:
+                    self._event_append(f"P{idx} arsenal full")
+                    continue
+                cid = target.deck.pop()
+                target.arsenal.append(cid)
+                self._event_append(
+                    f"P{idx} put {self._cards[cid].name} face-down in arsenal"
+                )
+                count += 1
+            if rider.startswith("go_again_if_ge:"):
+                threshold = int(rider.split(":", 1)[1])
+                if count >= threshold:
+                    self._grant_go_again(player_idx, combat)
+            elif go_again_from_arsenal and self._players[player_idx].class_state.get(
+                "PlayedFromArsenal", 0
+            ):
+                self._grant_go_again(player_idx, combat)
+            return 0.0
+        if effect.kind == "schedule_end_phase":
+            rider = (effect.banish_name or "").lower()
+            if rider == "return_banished_cost":
+                actor.class_state["EndPhaseReturnBanishedCost"] = 1
+            elif rider.startswith("draw_up_to_intellect"):
+                actor.class_state["EndPhaseDrawUpToIntellect"] = 1
+            else:
+                actor.class_state["EndPhaseDeckTopArsenal"] = 1
+            self._event_append("scheduled end-phase effect")
+            return 0.0
+        if effect.kind == "extra_turn":
+            actor.class_state["ExtraTurnPending"] = 1
+            self._event_append("extra turn granted after this one")
+            return 0.0
+        if effect.kind == "intellect_mod":
+            actor.class_state["EndPhaseIntellectDelta"] = (
+                actor.class_state.get("EndPhaseIntellectDelta", 0) + (effect.amount or 0)
+            )
+            self._event_append(
+                f"P{player_idx} intellect {effect.amount or 0:+d} during next end phase"
+            )
+            return 0.0
+        if effect.kind == "lose_game":
+            if effect.target == "self":
+                target_idx = player_idx
+            elif combat is not None and effect.target == "opponent":
+                target_idx = combat.defender
+            else:
+                target_idx = 1 - player_idx
+            self._players[target_idx].life = 0
+            self._event_append(f"P{target_idx} loses the game")
+            return 0.0
+        if effect.kind == "equip_inventory":
+            pattern = (effect.banish_name or "").lower()
+            for cid, card in self._cards.items():
+                hay = f"{card.name} {(card.type_line or '')}".lower()
+                if pattern:
+                    tokens = [t for t in pattern.split() if t not in ("off-hand", "off", "hand")]
+                    if tokens and not all(t in hay for t in tokens):
+                        continue
+                    if "off-hand" in pattern and "off-hand" not in hay:
+                        continue
+                elif pattern not in hay:
+                    continue
+                if "equipment" not in card.card_types and "weapon" not in card.card_types:
+                    continue
+                if cid in actor.equipment or cid == actor.weapon_id:
+                    continue
+                actor.equipment.append(cid)
+                self._fire_enters_triggers(player_idx, card)
+                self._event_append(f"equipped {card.name} from inventory")
                 return 0.0
-            cid = defender.equipment.pop(0)
-            actor.equipment.append(cid)
-            self._event_append(f"equipped {self._cards[cid].name} from opponent")
+            self._event_append(f"no {pattern or 'matching equipment'} in inventory to equip")
+            return 0.0
+        if effect.kind == "inventory_to_hand":
+            pattern = (effect.banish_name or "").lower()
+            for cid, card_obj in self._cards.items():
+                hay = f"{card_obj.name} {(card_obj.type_line or '')} {' '.join(card_obj.card_types)}".lower()
+                if pattern and pattern not in hay:
+                    continue
+                if "attack_action" not in card_obj.card_types:
+                    continue
+                if cid in actor.hand:
+                    continue
+                actor.hand.append(cid)
+                self._event_append(f"put {card_obj.name} from inventory into hand")
+                return 0.0
+            self._event_append(f"no {pattern or 'matching card'} in inventory")
+            return 0.0
+        if effect.kind == "extra_bow_activations":
+            actor.class_state["ExtraBowActivations"] = 1
+            actor.class_state["BowAsInstant"] = 1
+            self._event_append("bows may be activated an additional time as instant")
+            return 0.0
+        if effect.kind == "retrieve_gy":
+            pattern = (effect.banish_name or "").lower()
+            if self._pitch_cards(player_idx, 1) <= 0:
+                self._event_append("declined retrieve cost")
+                return 0.0
+            for i, cid in enumerate(actor.discard):
+                card_obj = self._cards[cid]
+                hay = f"{card_obj.name} {(card_obj.type_line or '')}".lower()
+                if pattern and pattern not in hay:
+                    continue
+                actor.discard.pop(i)
+                actor.equipment.append(cid)
+                self._fire_enters_triggers(player_idx, card_obj)
+                self._event_append(f"retrieved {card_obj.name} from graveyard")
+                return 0.0
+            self._event_append("no matching card in graveyard to retrieve")
+            return 0.0
+        if effect.kind == "put_hand_top":
+            target_idx = 1 - player_idx if effect.target != "self" else player_idx
+            target = self._players[target_idx]
+            max_cost = effect.max_cost if effect.max_cost > 0 else 99
+            type_filter = (effect.banish_name or "").lower()
+            for i, cid in enumerate(list(target.hand)):
+                card_obj = self._cards[cid]
+                if type_filter == "action" and "action" not in card_obj.card_types:
+                    continue
+                if card_obj.cost > max_cost:
+                    continue
+                cid = target.hand.pop(i)
+                target.deck.append(cid)
+                self._event_append(f"put {card_obj.name} from hand on top of deck")
+                return 0.0
+            self._event_append("no matching card in hand to put on deck")
             return 0.0
         if effect.kind == "steal_aura":
             opp = self._players[1 - player_idx]
@@ -5401,6 +7105,59 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             return 0.0
         if effect.kind == "remove_counter":
             token = (effect.token_name or "").lower()
+            rider = (effect.banish_name or "").lower()
+            if rider == "target_all_steam" and token == "steam":
+                best_cid: Optional[str] = None
+                best_idx = player_idx
+                best_steam = 0
+                for pidx in (player_idx, 1 - player_idx):
+                    target = self._players[pidx]
+                    perms = list(target.equipment)
+                    if target.weapon_id:
+                        perms.append(target.weapon_id)
+                    for cid in perms:
+                        steam = self._permanent_counters(pidx, cid).get("steam", 0)
+                        if steam > best_steam:
+                            best_steam = steam
+                            best_cid = cid
+                            best_idx = pidx
+                removed = 0
+                if best_cid and best_steam > 0:
+                    for _ in range(best_steam):
+                        self._remove_permanent_counter(best_idx, best_cid, "steam")
+                        removed += 1
+                    actor.class_state["LastSteamRemovedCount"] = removed
+                    actor.class_state["LastSteamRemovedController"] = best_idx
+                self._event_append(f"removed {removed} steam counter(s) from target permanent")
+                return 0.0
+            if effect.target == "opponent" and token == "steam":
+                target_idx = 1 - player_idx
+                max_perms = 1
+                if rider == "evo_count":
+                    max_perms = max(
+                        1,
+                        sum(
+                            1
+                            for cid in actor.equipment
+                            if "evo" in self._cards[cid].name.lower()
+                        ),
+                    )
+                removed = 0
+                touched = 0
+                for cid in list(self._players[target_idx].equipment):
+                    if touched >= max_perms:
+                        break
+                    steam = self._permanent_counters(target_idx, cid).get("steam", 0)
+                    if steam <= 0:
+                        continue
+                    for _ in range(steam):
+                        self._remove_permanent_counter(target_idx, cid, "steam")
+                        removed += 1
+                    touched += 1
+                self._event_append(
+                    f"removed {removed} steam counter(s) from P{target_idx} equipment"
+                )
+                return 0.0
             removed = False
             if effect.target == "attacking_weapon":
                 if combat is None or not combat.is_weapon:
@@ -5449,7 +7206,13 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
                 self._event_append(f"no {token} counter on aura to remove")
                 return 0.0
             self._check_no_frost_destroy(player_idx, card.id)
-            if (effect.banish_name or "").lower() == "defense":
+            rider = (effect.banish_name or "").lower()
+            if rider.startswith("gain_resources:"):
+                gain = int(rider.split(":", 1)[1])
+                actor.resources += gain
+                self._event_append(f"removed {token} counter: gained {gain} resources")
+                return 0.0
+            if rider == "defense":
                 bonus = max(1, effect.amount or 1)
                 if combat is not None and combat.blocks:
                     idx = len(combat.blocks) - 1
@@ -5486,7 +7249,71 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
                 f"{effect.amount or 0} or less base power this turn"
             )
             return 0.0
+        if effect.kind == "dagger_damage":
+            riders = (effect.banish_name or "").lower()
+            each = "each" in riders
+            not_on_chain = "not_on_chain" in riders
+            destroy = "destroy" in riders
+            daggers = self._dagger_ids_controlled(player_idx)
+            if not_on_chain and combat is not None:
+                on_chain = self._daggers_on_chain(combat)
+                daggers = [d for d in daggers if d not in on_chain]
+            if not each:
+                daggers = daggers[:1]
+            if not daggers:
+                self._event_append("no legal dagger for damage")
+                return 0.0
+            if effect.target == "defender" and combat is not None:
+                target_idx = combat.defender
+            elif effect.target in ("attacked", "defender") and combat is not None:
+                target_idx = combat.defender
+            else:
+                target_idx = self._damage_target_idx(player_idx, effect, combat)
+            target = self._players[target_idx]
+            amount = max(1, effect.amount or 1)
+            total_r = 0.0
+            total_dealt = 0
+            destroyed: list[str] = []
+            for dagger_id in daggers:
+                dmg = self._mitigate_damage(target_idx, amount)
+                if dmg <= 0:
+                    continue
+                target.life -= dmg
+                target.class_state["DamageTakenThisTurn"] = (
+                    target.class_state.get("DamageTakenThisTurn", 0) + dmg
+                )
+                total_dealt += dmg
+                r = float(dmg) * 0.01
+                total_r += r if perspective_idx == player_idx else -r
+                self._event_append(
+                    f"{self._cards[dagger_id].name} deals {dmg} damage to P{target_idx}"
+                )
+                if destroy:
+                    destroyed.append(dagger_id)
+            if total_dealt:
+                actor.class_state["DamageDealt"] += total_dealt
+                target.class_state["DamageTaken"] += total_dealt
+            for dagger_id in destroyed:
+                self._destroy_controlled_dagger(player_idx, dagger_id, perspective_idx)
+            return total_r
         if effect.kind == "destroy_item":
+            if (effect.banish_name or "").lower() == "all_cogs":
+                destroyed = 0
+                for cid in list(actor.equipment):
+                    if "cog" not in self._cards[cid].name.lower():
+                        continue
+                    actor.equipment.remove(cid)
+                    actor.discard.append(cid)
+                    self._fire_on_leave_triggers(player_idx, cid, perspective_idx)
+                    destroyed += 1
+                self._event_append(f"destroyed {destroyed} cog(s)")
+                return 0.0
+            if (effect.banish_name or "").lower() == "your_hero":
+                if card.id in actor.hand:
+                    actor.hand.remove(card.id)
+                actor.discard.append(card.id)
+                self._event_append(f"destroyed {card.name} after hit")
+                return 0.0
             if (effect.banish_name or "").lower() == "reroll_d6" and self._pending_die_roll is not None:
                 self._pending_die_roll["reroll"] = True
             if effect.condition == "no_soul" and actor.soul:
@@ -5601,6 +7428,24 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
                     self._event_append(f"transformed {eq.name} into {card.name}")
                     break
             return 0.0
+        if effect.kind == "transform_token":
+            source = token_defs.normalize_token_name(effect.banish_name or "ash")
+            dest = effect.token_name or "Aether Ashwing"
+            if actor.tokens.get(source, 0) <= 0:
+                self._event_append(f"no {source} token to transform")
+                return 0.0
+            actor.tokens[source] -= 1
+            if actor.tokens[source] <= 0:
+                actor.tokens.pop(source, None)
+            self._create_token(player_idx, dest, 1)
+            self._event_append(f"transformed {source} into {dest}")
+            return 0.0
+        if effect.kind == "extra_attack_targets":
+            actor.extra_attack_targets += max(1, effect.amount or 1)
+            if (effect.banish_name or "").lower() == "crush_next_attack":
+                actor.class_state["NextExtraTargetCrushOnly"] = 1
+            self._event_append("next attack may target an additional hero")
+            return 0.0
         if effect.kind == "counts_as_gold":
             actor.gold += 1
             self._event_append(f"{card.name} counts as Gold (hero gold={actor.gold})")
@@ -5656,15 +7501,35 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
                 return 0.0
             self._event_append("no matching card in graveyard for return")
             return 0.0
+        if effect.kind == "grant_draconic":
+            actor.class_state["NextChainAttackDraconic"] = 1
+            self._event_append("next attack this combat chain is Draconic")
+            return 0.0
+        if effect.kind == "halve_base_power":
+            target_idx = 1 - player_idx if effect.target != "self" else player_idx
+            self._players[target_idx].class_state["HalveFirstAttackBaseNextTurn"] = 1
+            self._event_append("opponent's first attack action next turn has halved base power")
+            return 0.0
         if effect.kind == "opponent_cost_increase":
-            opp = self._players[1 - player_idx]
             amount = max(1, effect.amount or 1)
             if effect.condition == "defense_reaction":
+                opp = self._players[1 - player_idx]
                 opp.extra_defense_reaction_cost += amount
                 self._event_append(
                     f"opponents' defense reactions cost +{amount} this turn"
                 )
+            elif effect.condition == "first_attack_next_turn":
+                target_idx = 1 - player_idx if effect.target != "self" else player_idx
+                self._players[target_idx].class_state["NextFirstAttackExtraCost"] = amount
+                self._event_append(
+                    f"P{target_idx}'s first attack next turn costs +{amount}"
+                )
+            elif effect.target == "each_hero":
+                for idx in (0, 1):
+                    self._players[idx].extra_play_cost += amount
+                self._event_append(f"all heroes' cards cost +{amount} this turn")
             else:
+                opp = self._players[1 - player_idx]
                 opp.extra_play_cost += amount
                 self._event_append(f"opponents' cards cost +{amount} this turn")
             return 0.0
@@ -5809,6 +7674,8 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
                 self._event_append(f"cannot pay {cost} additional cost")
                 return 0.0
             actor.resources -= cost
+            if card.id:
+                actor.class_state[f"AdditionalCostPaid:{card.id}"] = 1
             if (effect.banish_name or "").lower() == "extra_target":
                 actor.extra_attack_targets += 1
                 self._event_append(f"paid {cost} additional cost: extra attack target")
@@ -5834,6 +7701,21 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             self._event_append(
                 f"attacks hit for +{effect.amount or 1} damage this turn"
             )
+            return 0.0
+        if effect.kind == "hit_rider":
+            actor.class_state["PendingHitRider"] = effect.banish_name or ""
+            self._event_append("granted on-hit rider")
+            return 0.0
+        if effect.kind == "freeze":
+            target_idx = 1 - player_idx if effect.target == "opponent" else player_idx
+            target = self._players[target_idx]
+            scope = (effect.banish_name or "").lower()
+            if scope == "hero_and_equipment":
+                target.class_state["FrozenHero"] = 1
+                target.class_state["FrozenEquipment"] = len(target.equipment)
+            elif scope == "arsenal" and target.arsenal:
+                target.class_state[f"FrozenArsenal:{target.arsenal[0]}"] = 1
+            self._event_append(f"freeze ({scope}) on P{target_idx}")
             return 0.0
         if effect.kind == "fusion":
             elements = tuple(
@@ -5862,6 +7744,353 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         if effect.kind == "create_token_triple":
             for token_name in ("agility", "might", "vigor"):
                 self._create_token(player_idx, token_name)
+            return 0.0
+        if effect.kind == "return_self_hand":
+            if card.id in actor.equipment:
+                actor.equipment.remove(card.id)
+                self._fire_on_leave_triggers(player_idx, card.id, perspective_idx)
+            if card.id not in actor.hand:
+                actor.hand.append(card.id)
+            self._event_append(f"returned {card.name} to hand")
+            return 0.0
+        if effect.kind == "return_arsenal_hand":
+            if actor.arsenal:
+                cid = actor.arsenal.pop()
+                actor.face_up_arsenal.discard(cid)
+                actor.hand.append(cid)
+                self._event_append(f"returned {self._cards[cid].name} from arsenal to hand")
+            else:
+                self._event_append("no card in arsenal to return")
+            return 0.0
+        if effect.kind == "turn_arsenal_face_up":
+            if actor.arsenal:
+                cid = actor.arsenal[0]
+                actor.face_up_arsenal.add(cid)
+                self._event_append(f"turned {self._cards[cid].name} in arsenal face-up")
+            else:
+                self._event_append("no card in arsenal to turn face-up")
+            return 0.0
+        if effect.kind == "turn_equipment_face_up":
+            turned = False
+            for cid in list(actor.equipment):
+                if cid not in actor.face_down_permanents:
+                    continue
+                actor.face_down_permanents.discard(cid)
+                self._event_append(f"turned {self._cards[cid].name} face-up")
+                turned = True
+                break
+            if not turned:
+                self._event_append("no face-down equipment to turn face-up")
+            return 0.0
+        if effect.kind == "pitch_deck_top":
+            if actor.deck:
+                cid = actor.deck.pop()
+                card_obj = self._cards[cid]
+                actor.pitch_zone.append(cid)
+                actor.resources += card_obj.pitch
+                self._event_append(
+                    f"pitched top of deck ({card_obj.name}, +{card_obj.pitch} resources)"
+                )
+            else:
+                self._event_append("deck empty: nothing to pitch")
+            return 0.0
+        if effect.kind == "weapon_swing_cost_reduction":
+            actor.class_state["NextWeaponSwingCostReduction"] = max(
+                1, effect.amount or 1
+            )
+            self._event_append(
+                f"next weapon attack costs {effect.amount or 1} less to activate"
+            )
+            return 0.0
+        if effect.kind == "taunt":
+            actor.class_state["TauntActive"] = 1
+            if card.id:
+                actor.class_state["TauntSource"] = hash(card.id) & 0x7FFFFFFF
+            self._event_append("must be chosen as attack target if able")
+            return 0.0
+        if effect.kind == "block_opponent_hit_effects":
+            actor.class_state["BlockOpponentHitEffectsTurn"] = 1
+            self._event_append("opponents' attack hit effects won't trigger this turn")
+            return 0.0
+        if effect.kind == "block_gold_gain":
+            for idx in (0, 1):
+                self._players[idx].class_state["BlockGoldGainTurn"] = 1
+            self._event_append("heroes can't gain {g} this turn")
+            return 0.0
+        if effect.kind == "lose_phantasm":
+            actor.class_state["LosePhantasmNextIllusionistAttack"] = 1
+            self._event_append("next illusionist attack loses phantasm")
+            return 0.0
+        if effect.kind == "prevention_reduction":
+            actor.class_state["PreventionReductionTurn"] = max(1, effect.amount or 1)
+            self._event_append("next prevention effect prevents 1 less damage")
+            return 0.0
+        if effect.kind == "chain_defend":
+            self._apply_chain_defend(player_idx, card, effect, combat)
+            return 0.0
+        if effect.kind == "name_card":
+            actor.named_card = actor.named_card or "named"
+            self._event_append("named a card")
+            return 0.0
+        if effect.kind == "banish_hand_play":
+            link_cap = self._draconic_chain_links()
+            pick: Optional[str] = None
+            for cid in actor.hand:
+                c = self._cards[cid]
+                if "attack_action" not in c.card_types:
+                    continue
+                if c.cost >= link_cap:
+                    continue
+                pick = cid
+                break
+            if pick is None:
+                self._event_append("no eligible attack in hand to banish")
+                return 0.0
+            actor.hand.remove(pick)
+            actor.banished.append(pick)
+            actor.class_state["CardsBanishedThisTurn"] += 1
+            if effect.amount and effect.amount > 0:
+                actor.class_state[f"BanishedPower:{pick}"] = effect.amount
+            if effect.go_again:
+                actor.class_state[f"BanishedGoAgain:{pick}"] = 1
+            if effect.playable_banished:
+                actor.playable_banished.add(pick)
+            self._event_append(
+                f"banished {self._cards[pick].name} from hand"
+                + (f" (+{effect.amount} power)" if effect.amount else "")
+            )
+            return 0.0
+        if effect.kind == "banish_self_play":
+            if effect.condition and not self._effect_condition_met(
+                player_idx, effect.condition, card, combat
+            ):
+                return 0.0
+            cid = card.id
+            if cid in actor.discard:
+                actor.discard.remove(cid)
+                actor.banished.append(cid)
+            actor.playable_banished.add(cid)
+            self._event_append(f"banished {card.name}; may play it this turn")
+            return 0.0
+        if effect.kind == "block_arcane_prevention":
+            target_idx = 1 - player_idx if effect.target != "self" else player_idx
+            self._players[target_idx].class_state["BlockArcaneFromSource"] = player_idx
+            self._event_append("hero can't prevent your arcane damage this turn")
+            return 0.0
+        if effect.kind == "reveal_named_hand":
+            card_pattern = (effect.banish_name or "Crouching Tiger").split(":", 1)[0].lower()
+            revealed = sum(
+                1
+                for cid in actor.hand
+                if card_pattern in self._cards[cid].name.lower()
+            )
+            if revealed <= 0:
+                self._event_append(f"no {card_pattern} cards revealed")
+                return 0.0
+            self._event_append(f"revealed {revealed} {card_pattern} card(s)")
+            if combat is not None:
+                if revealed >= 1:
+                    self._grant_go_again(player_idx, combat, this_card=True)
+                if revealed >= 2:
+                    self._apply_combat_power_bonus(
+                        combat,
+                        player_idx,
+                        1,
+                        reason=f"+1 power ({revealed} revealed)",
+                    )
+                if revealed >= 3:
+                    self._draw_card(player_idx, from_action=True)
+            return 0.0
+        if effect.kind == "transform_hero":
+            hero_name = effect.banish_name or ""
+            for cid in list(actor.banished):
+                actor.face_down_banished.add(cid)
+            matched = False
+            for hero in self._heroes.values():
+                if _card_name_key(hero.name) == _card_name_key(hero_name):
+                    actor.hero = hero
+                    matched = True
+                    self._event_append(f"transformed into {hero.name}")
+                    break
+            if not matched:
+                self._event_append(f"could not transform into {hero_name}")
+            return 0.0
+        if effect.kind == "grade_increase":
+            actor.class_state["RevealGradeBonus"] = max(1, effect.amount or 1)
+            self._event_append("next revealed card has grade increased by 1")
+            return 0.0
+        if effect.kind == "return_arena_tapped":
+            cid = card.id
+            if cid in actor.banished:
+                actor.banished.remove(cid)
+            elif cid in actor.discard:
+                actor.discard.remove(cid)
+            if cid and cid not in actor.equipment:
+                actor.equipment.append(cid)
+            if cid:
+                actor.tapped_permanents.add(cid)
+                token = (effect.token_name or "steam").lower()
+                self._add_permanent_counter(player_idx, cid, token, 1)
+                self._event_append(
+                    f"returned {card.name} to arena tapped with {token} counter"
+                )
+            return 0.0
+        if effect.kind == "play_restriction":
+            self._play_restriction_kind = effect.banish_name or "weapon_attack_only"
+            self._play_restriction_clear_at_turn = self._turn + 2
+            self._event_append(
+                "only weapon and attack actions may be played or activated until "
+                "your next turn"
+            )
+            return 0.0
+        if effect.kind == "pitch_restriction":
+            target_idx = 1 - player_idx if effect.target != "self" else player_idx
+            target = self._players[target_idx]
+            rider = (effect.banish_name or "").lower()
+            if rider == "no_cost_zero":
+                target.class_state["BlockZeroCostUntilTurn"] = self._turn + 1
+                self._event_append(
+                    f"P{target_idx} can't pitch or play cards with base cost 0 until "
+                    "end of their next turn"
+                )
+            return 0.0
+        if effect.kind == "block_pitch_color":
+            target_idx = 1 - player_idx if effect.target != "self" else player_idx
+            target = self._players[target_idx]
+            colors = [(1, "red"), (2, "yellow"), (3, "blue")]
+            if player_idx == 0 and not self._self_play:
+                pick = self._rng.randrange(3)
+            elif player_idx == 0:
+                pick = 0
+            else:
+                pick = self._rng.randrange(3)
+            pitch_val, color_name = colors[pick]
+            target.blocked_pitch_values.add(pitch_val)
+            target.class_state["BlockPitchColorUntilTurn"] = self._turn + 1
+            self._event_append(
+                f"P{target_idx} can't pitch {color_name} cards until start of your next turn"
+            )
+            return 0.0
+        if effect.kind == "banish_gy_variable":
+            pattern = (effect.banish_name or "item").lower()
+            count = 0
+            for i in range(len(actor.discard) - 1, -1, -1):
+                cid = actor.discard[i]
+                card_obj = self._cards[cid]
+                hay = f"{card_obj.name} {(card_obj.type_line or '')} {' '.join(card_obj.card_types)}".lower()
+                if pattern == "item" and "item" not in hay and "item" not in card_obj.card_types:
+                    continue
+                actor.discard.pop(i)
+                actor.banished.append(cid)
+                count += 1
+            actor.class_state["LastVariableBanishCount"] = count
+            actor.class_state["CardsBanishedThisTurn"] += count
+            self._event_append(f"banished {count} item(s) from graveyard as additional cost")
+            return 0.0
+        if effect.kind == "random_banished_pick":
+            type_filter = (effect.banish_name or "").lower()
+            need = max(1, effect.amount or 3)
+            candidates: list[str] = []
+            seen: set[str] = set()
+            for cid in actor.banished:
+                card_obj = self._cards[cid]
+                if type_filter == "action" and "action" not in card_obj.card_types:
+                    continue
+                key = card_obj.name.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                candidates.append(cid)
+            pool = candidates[:need]
+            if len(pool) < need:
+                self._event_append(
+                    f"need {need} distinct banished action cards, found {len(pool)}"
+                )
+                return 0.0
+            pick = self._rng.choice(pool)
+            actor.playable_banished.add(pick)
+            self._event_append(
+                f"randomly chose {self._cards[pick].name} from banished (may play this turn)"
+            )
+            return 0.0
+        if effect.kind == "turn_banished_face":
+            rider = (effect.banish_name or "").lower()
+            if rider == "face_up":
+                if actor.banished:
+                    cid = actor.banished[-1]
+                    actor.face_down_banished.discard(cid)
+                    self._event_append(
+                        f"turned {self._cards[cid].name} face-up in banished zone"
+                    )
+                return 0.0
+            if rider == "face_down:opponent_banished":
+                target_idx = 1 - player_idx if effect.target != "self" else player_idx
+                target = self._players[target_idx]
+                if target.banished:
+                    cid = target.banished[-1]
+                    target.face_down_banished.add(cid)
+                    self._event_append(
+                        f"turned {self._cards[cid].name} face-down in P{target_idx} banished zone"
+                    )
+                return 0.0
+            if rider in ("face_down:opponent_gy_yellow_gold", "face_down:any_gy_yellow_gold"):
+                zones: list[tuple[int, list[str], str]] = []
+                if rider == "face_down:opponent_gy_yellow_gold":
+                    opp = 1 - player_idx
+                    zones.append((opp, self._players[opp].discard, "discard"))
+                else:
+                    for idx in (0, 1):
+                        zones.append((idx, self._players[idx].discard, "discard"))
+                for idx, zone, _ in zones:
+                    if not zone:
+                        continue
+                    cid = zone[-1]
+                    card = self._cards[cid]
+                    self._players[idx].face_down_discard.add(cid)
+                    self._event_append(
+                        f"turned {card.name} face-down in P{idx} graveyard"
+                    )
+                    if card.pitch == 2:
+                        self._create_token(player_idx, "gold", 1)
+                        self._event_append("created Gold token (yellow card turned face-down)")
+                    return 0.0
+                return 0.0
+            if rider == "face_down:any_banished":
+                for idx in (0, 1):
+                    target = self._players[idx]
+                    if target.banished:
+                        cid = target.banished[-1]
+                        target.face_down_banished.add(cid)
+                        self._event_append(
+                            f"turned {self._cards[cid].name} face-down in P{idx} banished zone"
+                        )
+                        return 0.0
+                return 0.0
+            if rider.startswith("face_down"):
+                count = len(actor.soul) if ":variable" in rider else max(1, effect.amount or 1)
+                turned = 0
+                for cid in list(actor.banished):
+                    if turned >= count:
+                        break
+                    actor.face_down_banished.add(cid)
+                    turned += 1
+                self._event_append(f"turned {turned} banished card(s) face-down")
+            return 0.0
+        if effect.kind == "damage_redirect":
+            rider = (effect.banish_name or "").lower()
+            if rider == "yoji_shield":
+                actor.redirect_shield = {
+                    "kind": "yoji",
+                    "prevent": max(1, effect.amount or 1),
+                }
+                self._event_append(
+                    "next damage to another hero will hit Yoji instead (prevent 1)"
+                )
+            elif rider == "weapon_reflect":
+                actor.redirect_shield = {"kind": "weapon_reflect"}
+                self._event_append(
+                    "next weapon damage at X or less will reflect to its controller"
+                )
             return 0.0
         return 0.0
 
@@ -6000,8 +8229,11 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
     def _optional_available(self, player_idx: int, effect: "effects.Effect") -> bool:
         """Whether an optional effect could actually do something if taken."""
         if effect.kind == "banish_combo":
-            target = effect.banish_name.lower()
-            return any(target in self._cards[c].name.lower() for c in self._players[player_idx].discard)
+            target = (effect.banish_name or "").lower()
+            return any(
+                self._card_matches_banish_combo(self._cards[c], target)
+                for c in self._players[player_idx].discard
+            )
         if effect.kind in ("reload", "stash_hand"):
             actor = self._players[player_idx]
             return not actor.arsenal and bool(actor.hand)
@@ -6034,9 +8266,38 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             return bool(self._players[player_idx].hand)
         if effect.kind == "additional_pay":
             return self._players[player_idx].resources >= max(1, effect.amount or 1)
+        if effect.kind == "dagger_damage":
+            daggers = self._dagger_ids_controlled(player_idx)
+            if "not_on_chain" in (effect.banish_name or "").lower():
+                combat = self._pending_combat
+                if combat is not None:
+                    on_chain = self._daggers_on_chain(combat)
+                    daggers = [d for d in daggers if d not in on_chain]
+            return bool(daggers)
         if effect.kind == "pitch_pay":
+            cost = max(1, effect.amount or 1)
+            return self._can_pay_pitch_cost(
+                player_idx, cost, variable=self._pitch_pay_is_variable(effect)
+            )
+        if effect.kind == "retrieve_gy":
             actor = self._players[player_idx]
-            return any(self._cards[cid].pitch > 0 for cid in actor.hand)
+            pattern = (effect.banish_name or "").lower()
+            has_match = any(
+                pattern in f"{self._cards[cid].name} {(self._cards[cid].type_line or '')}".lower()
+                for cid in actor.discard
+            )
+            return has_match and any(self._cards[cid].pitch > 0 for cid in actor.hand)
+        if effect.kind == "search" and effect.condition == "revealed_attack_reaction":
+            opp = self._players[1 - player_idx]
+            has_attack_reaction = any(
+                "attack_reaction" in self._cards[cid].card_types
+                for cid in (opp.revealed_hand or opp.hand)
+            )
+            actor = self._players[player_idx]
+            has_defense = any(
+                "defense_reaction" in self._cards[cid].card_types for cid in actor.deck
+            )
+            return has_attack_reaction and has_defense
         if effect.kind == "fusion":
             elements = tuple(
                 e.strip() for e in (effect.banish_name or "").split(",") if e.strip()
@@ -6064,6 +8325,31 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
                 self._permanent_counters(player_idx, cid).get(token, 0) > 0
                 for cid in self._players[player_idx].equipment
             )
+        if effect.kind == "banish_gy_variable":
+            actor = self._players[player_idx]
+            pattern = (effect.banish_name or "item").lower()
+            return any(
+                pattern in f"{self._cards[cid].name} {(self._cards[cid].type_line or '')}".lower()
+                or pattern in self._cards[cid].card_types
+                for cid in actor.discard
+            )
+        if effect.kind == "put_bottom" and (effect.banish_name or "").startswith("yellow_any_gy"):
+            return any(
+                self._cards[cid].pitch == 2
+                for p in self._players
+                for cid in p.discard
+            )
+        if effect.kind == "turn_banished_face":
+            rider = (effect.banish_name or "").lower()
+            if rider == "face_down:opponent_banished":
+                return bool(self._players[1 - player_idx].banished)
+            if rider == "face_down:opponent_gy_yellow_gold":
+                return bool(self._players[1 - player_idx].discard)
+            if rider == "face_down:any_gy_yellow_gold":
+                return any(p.discard for p in self._players)
+            if rider == "face_down:any_banished":
+                return any(p.banished for p in self._players)
+            return bool(self._players[player_idx].banished)
         return True
 
     def _do_optional(self, accept: bool) -> float:
@@ -6075,10 +8361,21 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         reward = 0.0
         card = self._cards[opt["card_id"]]
         if accept:
-            reward = self._apply_effect(opt["player"], card, opt["effect"], self._pending_combat, opt["perspective"])
+            if opt["effect"].kind == "pitch_pay":
+                reward = self._begin_pitch_pay(
+                    opt["player"],
+                    card,
+                    opt["effect"],
+                    opt["perspective"],
+                    optional_resume=self._optional_resume,
+                )
+            else:
+                reward = self._apply_effect(
+                    opt["player"], card, opt["effect"], self._pending_combat, opt["perspective"]
+                )
         else:
             self._event_append(f"declined {card.name} optional")
-        if not self._pending_optionals:
+        if not self._pending_optionals and not self._pending_pitch_pay:
             self._resume_after_optional()
         return reward
 
@@ -6185,9 +8482,26 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             else:
                 self._begin_arsenal_step(ctx["attacker"])
 
-    def _do_play_card(self, player_idx: int, hand_idx: int, perspective_idx: int = 0) -> float:
+    def _do_play_card(
+        self,
+        player_idx: int,
+        hand_idx: int,
+        perspective_idx: int = 0,
+        *,
+        from_arsenal: bool = False,
+    ) -> float:
         actor = self._players[player_idx]
-        card = self._cards[actor.hand[hand_idx]]
+        if from_arsenal:
+            if not actor.arsenal:
+                self._last_event = "Arsenal is empty"
+                return -0.05
+            card = self._cards[actor.arsenal[0]]
+            hand_idx = -1
+        else:
+            if hand_idx < 0 or hand_idx >= len(actor.hand):
+                self._last_event = "No such card"
+                return -0.05
+            card = self._cards[actor.hand[hand_idx]]
 
         is_attack = "attack_action" in card.card_types
         is_utility = "utility_action" in card.card_types
@@ -6201,7 +8515,9 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         if actor.resources < effective_cost:
             self._last_event = f"Need {effective_cost} resources (pitch cards first)"
             return -0.05
-        reason = self._play_blocked_reason(player_idx, hand_idx, card)
+        reason = self._play_blocked_reason(
+            player_idx, hand_idx, card, from_arsenal=from_arsenal
+        )
         if reason:
             self._last_event = reason
             return -0.05
@@ -6211,15 +8527,20 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         fused = False
         go_again = self._go_again_for_play(player_idx, card, is_utility)
         dominate = "dominate" in keywords
-        damage, arcane = _parse_action_damage(card.text, card.power, is_attack)
+        attack_base = self._effective_attack_base_power(player_idx, card) if is_attack else card.power
+        damage, arcane = _parse_action_damage(card.text, attack_base, is_attack)
 
         actor.resources -= effective_cost
         self._consume_cost_reduction(player_idx, card, effective_cost)
         actor.action_points -= 1
         actor.class_state["ScrappedThisPlay"] = 0
-        played_cid = actor.hand[hand_idx]
-        actor.hand.pop(hand_idx)
-        self._mark_played_from_arsenal(player_idx, played_cid)
+        if from_arsenal:
+            played_cid = actor.arsenal.pop(0)
+            self._mark_played_from_arsenal(player_idx, played_cid, from_arsenal=True)
+        else:
+            actor.hand.pop(hand_idx)
+
+        play_zone = " from arsenal" if from_arsenal else ""
 
         # Physical attacks go through the combat chain (blocks + reactions).
         # Arcane damage and non-attack actions cannot be blocked normally, so
@@ -6238,7 +8559,7 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             self._apply_defender_targeting_penalty(combat)
             self._pending_combat = combat
             suffix = self._play_suffix(fused, elements, go_again)
-            self._last_event = f"P{player_idx} attacks with {card.name} ({damage}){suffix}"
+            self._last_event = f"P{player_idx} attacks{play_zone} with {card.name} ({damage}){suffix}"
             self._record_opponent_attack(
                 player_idx,
                 attack_name=card.name,
@@ -6251,6 +8572,7 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             combat.go_again = go_again
             combat.dominate = dominate
             self._apply_kayo_power6(player_idx, card, combat)
+            self._mark_attack_started(player_idx)
             if self._phase == "optional":
                 self._play_resume_ctx = {
                     "player": player_idx,
@@ -6263,7 +8585,13 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
                 self._active_player = player_idx
                 return 0.0
             self._record_play_counters(
-                player_idx, card, is_attack, is_utility, fused, elements[0] if elements else None
+                player_idx,
+                card,
+                is_attack,
+                is_utility,
+                fused,
+                elements[0] if elements else None,
+                from_hand=not from_arsenal,
             )
             # Consume a pending "next attack gets +power" buff (e.g. Nimblism).
             self._consume_pending_next_attack_power(player_idx, card, combat)
@@ -6288,6 +8616,9 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         return self._resolve_direct(
             player_idx, card, damage, arcane, go_again, dominate, fused, elements, perspective_idx
         )
+
+    def _do_play_arsenal(self, player_idx: int, perspective_idx: int = 0) -> float:
+        return self._do_play_card(player_idx, 0, perspective_idx, from_arsenal=True)
 
     def _do_play_banished(self, player_idx: int, banished_idx: int, perspective_idx: int = 0) -> float:
         actor = self._players[player_idx]
@@ -6320,13 +8651,16 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         dominate = "dominate" in keywords
         fused = False
         element = None
-        damage, arcane = _parse_action_damage(card.text, card.power, is_attack)
+        attack_base = self._effective_attack_base_power(player_idx, card) if is_attack else card.power
+        damage, arcane = _parse_action_damage(card.text, attack_base, is_attack)
 
         actor.resources -= effective_cost
         self._consume_cost_reduction(player_idx, card, effective_cost)
         actor.action_points -= 1
         actor.class_state["ScrappedThisPlay"] = 0
-        self._record_play_counters(player_idx, card, is_attack, is_utility, fused, element)
+        self._record_play_counters(
+            player_idx, card, is_attack, is_utility, fused, element, from_hand=False
+        )
 
         if is_attack and not arcane:
             combat = CombatState(
@@ -6346,6 +8680,7 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             )
             combat.go_again = go_again
             combat.dominate = dominate
+            self._mark_attack_started(player_idx)
             self._consume_pending_next_attack_power(player_idx, card, combat)
             self._queue_play_costs(player_idx, card, perspective_idx)
             if self._pending_optionals:
@@ -6396,13 +8731,16 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         dominate = "dominate" in keywords
         fused = False
         element = None
-        damage, arcane = _parse_action_damage(card.text, card.power, is_attack)
+        attack_base = self._effective_attack_base_power(player_idx, card) if is_attack else card.power
+        damage, arcane = _parse_action_damage(card.text, attack_base, is_attack)
 
         actor.resources -= effective_cost
         self._consume_cost_reduction(player_idx, card, effective_cost)
         actor.action_points -= 1
         actor.class_state["ScrappedThisPlay"] = 0
-        self._record_play_counters(player_idx, card, is_attack, is_utility, fused, element)
+        self._record_play_counters(
+            player_idx, card, is_attack, is_utility, fused, element, from_hand=False
+        )
 
         if is_attack and not arcane:
             combat = CombatState(
@@ -6422,6 +8760,7 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             )
             combat.go_again = go_again
             combat.dominate = dominate
+            self._mark_attack_started(player_idx)
             self._consume_pending_next_attack_power(player_idx, card, combat)
             self._queue_play_costs(player_idx, card, perspective_idx)
             if self._pending_optionals:
@@ -6544,10 +8883,15 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             damage += 1
             actor.class_state["ArcanePlusOneThisPlay"] = 0
             self._event_append("Metacarpus Node: +1 arcane damage")
+        if arcane and actor.class_state.get("ArcanePlusOneTurn", 0):
+            damage += 1
+            self._event_append("action arcane +1 this turn")
         if damage > 0:
             if not arcane:
                 damage = self._apply_damage_floor(player_idx, damage)
-            damage = self._mitigate_damage(1 - player_idx, damage, arcane=arcane)
+            damage = self._mitigate_damage(
+                1 - player_idx, damage, arcane=arcane, source_idx=player_idx
+            )
         defender.life -= damage
         enters_arena = self._is_arena_permanent(card) and damage <= 0 and not arcane
         if enters_arena:
@@ -6561,6 +8905,8 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             verb = f"deals {damage} {kind} to P{1 - player_idx}"
             actor.class_state["ArcaneDamageDealt" if arcane else "DamageDealt"] += damage
             actor.class_state["HitCounter"] += 1
+            if arcane:
+                actor.class_state["LastArcaneHeroDamage"] = damage
             defender.class_state["DamageTaken"] += damage
         else:
             verb = "enters the arena" if enters_arena else "resolves"
@@ -6613,7 +8959,10 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             return -0.05
         blocker.hand.pop(hand_idx)
         self._move_card_to_gy(defender_idx, card.id)
+        if "defense_reaction" in card.card_types:
+            self._queue_play_costs(defender_idx, card, perspective_idx)
         defense = card.defense + blocker.class_state.get("NextDefenseBonus", 0)
+        defense -= self._defend_penalty_for_block(defender_idx, card)
         action_bonus = blocker.class_state.get("ActionBlockBonusThisChain", 0)
         if action_bonus and "attack_action" in card.card_types:
             defense += action_bonus
@@ -6659,6 +9008,39 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             reward += self._run_triggers(defender_idx, card, "on_play", combat, perspective_idx, False)
         return reward
 
+    def _do_trap_defend(self, defender_idx: int, perspective_idx: int = 0) -> float:
+        combat = self._pending_combat
+        if combat is None:
+            self._last_event = "No attack to defend"
+            return -0.05
+        if self._phase != "defense":
+            self._last_event = "Traps can only be triggered during the defend step"
+            return -0.05
+        if not self._legal_trap_defense(defender_idx):
+            self._last_event = "No trap in arsenal to trigger"
+            return -0.05
+        defender = self._players[defender_idx]
+        cid = defender.arsenal.pop()
+        card = self._cards[cid]
+        defender.face_up_arsenal.add(cid)
+        self._move_card_to_gy(defender_idx, cid)
+        defense = card.defense + defender.class_state.get("NextDefenseBonus", 0)
+        defense -= self._defend_penalty_for_block(defender_idx, card)
+        action_bonus = defender.class_state.get("ActionBlockBonusThisChain", 0)
+        if action_bonus and fab_rules.is_action_card(card.card_types):
+            defense += action_bonus
+        if defender.class_state.get("LightBlockBonusThisChain", 0) and "light" in (
+            card.talent or ""
+        ).lower():
+            defense += defender.class_state["LightBlockBonusThisChain"]
+        if defender.class_state.get("NextDefenseBonus", 0):
+            defender.class_state["NextDefenseBonus"] = 0
+        combat.blocks.append((defender_idx, cid, defense))
+        self._last_event = (
+            f"P{defender_idx} triggers {card.name} from arsenal (+{defense} defense)"
+        )
+        return self._fire_trap_triggered(defender_idx, card, combat, perspective_idx)
+
     def _do_block_gear(self, defender_idx: int, equip_idx: int, perspective_idx: int = 0) -> float:
         combat = self._pending_combat
         if combat is None:
@@ -6678,6 +9060,7 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             return -0.05
         defense = self._effective_equipment_defense(defender_idx, cid, card.defense)
         defense += defender.class_state.get("NextDefenseBonus", 0)
+        defense -= self._defend_penalty_for_block(defender_idx, card, is_equipment=True)
         for mod in effects.parse_play_modifiers(card.text):
             if mod.condition and not self._effect_condition_met(
                 defender_idx, mod.condition, card, condition_arg=mod.condition_arg
@@ -6723,6 +9106,9 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         if combat is None:
             self._last_event = "No attack in progress"
             return -0.05
+        if self._phase != "attack_reaction":
+            self._last_event = "Attack reactions can only be played during the attack-reaction step"
+            return -0.05
         attacker = self._players[attacker_idx]
         card = self._cards[attacker.hand[hand_idx]]
         if "attack_reaction" not in card.card_types:
@@ -6746,14 +9132,55 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         self._last_event = f"P{attacker_idx} boosts with {card.name} (+{card.power} power)"
         return 0.0
 
+    def _do_defense_reaction(self, defender_idx: int, hand_idx: int, perspective_idx: int = 0) -> float:
+        combat = self._pending_combat
+        if combat is None:
+            self._last_event = "No attack in progress"
+            return -0.05
+        if self._phase != "defense_reaction":
+            self._last_event = "Defense reactions can only be played during the defense-reaction step"
+            return -0.05
+        if hand_idx not in self._legal_defense_reactions(defender_idx):
+            self._last_event = "That defense reaction cannot be played now"
+            return -0.05
+        defender = self._players[defender_idx]
+        card = self._cards[defender.hand[hand_idx]]
+        cost = self._effective_card_cost(defender_idx, card) + defender.extra_defense_reaction_cost
+        defender.resources -= cost
+        self._consume_cost_reduction(defender_idx, card, cost)
+        defender.hand.pop(hand_idx)
+        self._move_card_to_gy(defender_idx, card.id)
+        self._queue_play_costs(defender_idx, card, perspective_idx)
+        defense = card.defense + defender.class_state.get("NextDefenseBonus", 0)
+        defense -= self._defend_penalty_for_block(defender_idx, card)
+        action_bonus = defender.class_state.get("ActionBlockBonusThisChain", 0)
+        if action_bonus and fab_rules.is_action_card(card.card_types):
+            defense += action_bonus
+        if defender.class_state.get("LightBlockBonusThisChain", 0) and "light" in (
+            card.talent or ""
+        ).lower():
+            defense += defender.class_state["LightBlockBonusThisChain"]
+        if defender.class_state.get("NextDefenseBonus", 0):
+            defender.class_state["NextDefenseBonus"] = 0
+        combat.blocks.append((defender_idx, card.id, defense))
+        self._last_event = (
+            f"P{defender_idx} defends with {card.name} (+{defense} defense, reaction)"
+        )
+        reward = self._run_triggers(defender_idx, card, "on_defend", combat, perspective_idx, False)
+        reward += self._run_triggers(defender_idx, card, "on_play", combat, perspective_idx, False)
+        return reward
+
     def _do_weapon_attack(self, player_idx: int, perspective_idx: int = 0) -> float:
         actor = self._players[player_idx]
         if not self._can_weapon_attack(player_idx):
             self._last_event = "Cannot attack with weapon right now"
             return -0.05
         name, attack, cost, weapon_card = self._weapon_stats(player_idx)
-        actor.resources -= cost
+        swing_extra = self._first_attack_extra_cost(player_idx, is_attack=True)
+        eff_cost = self._effective_weapon_swing_cost(player_idx, cost, consume=True)
+        actor.resources -= eff_cost + swing_extra
         actor.action_points -= 1
+        self._mark_attack_started(player_idx)
         if actor.weapon_used:
             actor.class_state["ExtraWeaponAttacks"] = max(
                 0, actor.class_state.get("ExtraWeaponAttacks", 0) - 1
@@ -6816,6 +9243,64 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         reward = 0.0
         if weapon_card is not None:
             reward += self._run_triggers(player_idx, weapon_card, "on_attack", combat, perspective_idx, False)
+            if re.search(
+                r"earth card was pitched to attack with this",
+                weapon_card.text or "",
+                re.I,
+            ) and any(
+                (self._cards[cid].talent or "").lower() == "earth"
+                for cid in actor.pitch_zone
+            ):
+                self._apply_combat_power_bonus(
+                    combat,
+                    player_idx,
+                    1,
+                    reason="Earth Bond +1 power",
+                )
+        if self._pending_optionals:
+            self._optional_resume = "defense"
+            self._phase = "optional"
+            self._active_player = player_idx
+        else:
+            self._enter_defense()
+        return reward
+
+    def _do_item_attack(self, player_idx: int, item_id: str, perspective_idx: int = 0) -> float:
+        """Attack using an equipment item's printed power (e.g. Miller's Grindstone)."""
+        actor = self._players[player_idx]
+        if item_id not in actor.equipment:
+            self._last_event = "Item not in arena"
+            return -0.05
+        item = self._cards[item_id]
+        attack = self._item_attack_power(player_idx, item_id)
+        if attack <= 0:
+            self._last_event = f"{item.name} has no attack"
+            return -0.05
+        keywords = set(item.keywords)
+        combat = CombatState(
+            attacker=player_idx,
+            defender=1 - player_idx,
+            attack_card_id=item_id,
+            attack_power=attack,
+            blocks=[],
+            go_again=("go_again" in keywords),
+            dominate=("dominate" in keywords),
+            is_weapon=True,
+            source_name=item.name,
+        )
+        self._pending_combat = combat
+        self._last_event = f"P{player_idx} attacks with {item.name} ({attack})"
+        self._record_opponent_attack(
+            player_idx,
+            attack_name=item.name,
+            attack_power=attack,
+            is_weapon=True,
+        )
+        self._consume_pending_next_attack_power(
+            player_idx, item, combat, is_weapon=True
+        )
+        self._mark_attack_started(player_idx)
+        reward = self._run_triggers(player_idx, item, "on_attack", combat, perspective_idx, False)
         if self._pending_optionals:
             self._optional_resume = "defense"
             self._phase = "optional"
@@ -6865,7 +9350,12 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         ):
             self._last_event = "Already has a steam counter"
             return -0.05
-        actor.resources -= max(0, ability.cost - actor.class_state.get("NextAbilityCostReduction", 0))
+        pay_cost = max(0, ability.cost - actor.class_state.get("NextAbilityCostReduction", 0))
+        if ability.effect.kind == "attack" and cid and cid in actor.equipment:
+            item = self._cards[cid]
+            if item.power > 0:
+                pay_cost += self._first_attack_extra_cost(player_idx, is_attack=True)
+        actor.resources -= pay_cost
         if actor.class_state.get("NextAbilityCostReduction", 0) > 0 and ability.cost > 0:
             actor.class_state["NextAbilityCostReduction"] = 0
         if ability.uses_action_point:
@@ -6910,44 +9400,89 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             )
         effect = ability.effect
         if effect.kind == "attack":
+            item_cid = entry.get("card_id") or ""
+            if item_cid and item_cid in actor.equipment:
+                item = self._cards[item_cid]
+                if item.power > 0:
+                    return self._do_item_attack(player_idx, item_cid, perspective_idx)
             if self._phase == "action" and self._can_weapon_attack(player_idx):
                 return self._do_weapon_attack(player_idx, perspective_idx)
             return 0.0
-        reward = self._apply_effect(player_idx, card, effect, None, perspective_idx)
+        reward = self._apply_effect(
+            player_idx, card, effect, self._pending_combat, perspective_idx
+        )
         if ability.grants_go_again:
             self._grant_go_again(player_idx, None, this_card=False)
         return reward
 
     def _do_instant_play(self, player_idx: int, hand_idx: int, perspective_idx: int = 0) -> float:
-        """Play a non-attack action as instant (no action point cost)."""
+        """Play an instant card or a utility action granted play-as-instant."""
         actor = self._players[player_idx]
-        if not actor.play_as_instant:
-            self._last_event = "No instant play available"
-            return -0.05
         if hand_idx < 0 or hand_idx >= len(actor.hand):
             self._last_event = "No such card"
             return -0.05
+        if not self._instant_playable(
+            player_idx,
+            hand_idx,
+            in_action=self._phase == "action" and self._action_phase_player == player_idx,
+        ):
+            self._last_event = "That instant cannot be played now"
+            return -0.05
         card = self._cards[actor.hand[hand_idx]]
-        if "attack_action" in card.card_types:
-            self._last_event = "Only non-attack actions can be played as instant"
+        in_combat = self._in_combat_chain()
+        in_action = self._phase == "action" and self._action_phase_player == player_idx
+        if not in_combat and not in_action:
+            self._last_event = "Instants cannot be played now"
             return -0.05
         effective_cost = self._effective_card_cost(player_idx, card)
         if actor.resources < effective_cost:
+            if effective_cost > 0 and self._can_pitch_to_afford(
+                player_idx, effective_cost, exclude_card_ids={card.id}
+            ):
+                return self._begin_instant_pay(
+                    player_idx, hand_idx, perspective_idx, effective_cost
+                )
             self._last_event = f"Need {effective_cost} resources"
             return -0.05
-        actor.play_as_instant = False
+        return self._finish_instant_play(player_idx, hand_idx, perspective_idx)
+
+    def _finish_instant_play(
+        self,
+        player_idx: int,
+        hand_idx: int,
+        perspective_idx: int = 0,
+    ) -> float:
+        """Resolve an instant after its resource cost is paid."""
+        actor = self._players[player_idx]
+        card = self._cards[actor.hand[hand_idx]]
+        effective_cost = self._effective_card_cost(player_idx, card)
+        if actor.resources < effective_cost:
+            if effective_cost > 0 and self._can_pitch_to_afford(
+                player_idx, effective_cost, exclude_card_ids={card.id}
+            ):
+                return self._begin_instant_pay(
+                    player_idx, hand_idx, perspective_idx, effective_cost
+                )
+            self._last_event = f"Need {effective_cost} resources"
+            return -0.05
+        is_grant_utility = actor.play_as_instant and "utility_action" in card.card_types
+        if is_grant_utility:
+            actor.play_as_instant = False
         actor.resources -= effective_cost
         self._consume_cost_reduction(player_idx, card, effective_cost)
-        played_cid = actor.hand[hand_idx]
         actor.hand.pop(hand_idx)
-        self._mark_played_from_arsenal(player_idx, played_cid)
         keywords = set(card.keywords)
         go_again = self._go_again_for_play(player_idx, card, True)
         dominate = "dominate" in keywords
-        fused = False
-        damage, arcane = _parse_action_damage(card.text, card.power, False)
+        is_attack = "attack_action" in card.card_types
+        damage, arcane = _parse_action_damage(
+            card.text,
+            card.power if is_attack else 0,
+            is_attack,
+        )
+        self._last_event = f"P{player_idx} plays {card.name} as instant"
         return self._resolve_direct(
-            player_idx, card, damage, arcane, go_again, dominate, fused, (), perspective_idx
+            player_idx, card, damage, arcane, go_again, dominate, False, (), perspective_idx
         )
 
     def _apply_ability_effect(
@@ -6982,14 +9517,34 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
     # ------------------------------------------------------------------
     def _enter_defense(self) -> None:
         combat = self._pending_combat
+        attack = self._cards.get(combat.attack_card_id)
+        attacker = self._players[combat.attacker]
+        cs = attacker.class_state
+        cs["ComboLastAttackDraconic"] = cs.get("CurrentChainAttackDraconic", 0)
+        if attack is not None:
+            cs["LastChainAttackName"] = attack.name
+            cs["CurrentChainAttackDraconic"] = (
+                1 if self._card_is_draconic(attack, combat.attacker) else 0
+            )
+        if self._card_is_draconic(attack, combat.attacker, consume_pending=True):
+            combat.draconic_links += 1
         self._combat_chain_links += 1
         self._phase = "defense"
         self._active_player = combat.defender
 
-    def _enter_reaction(self) -> None:
+    def _enter_attack_reaction(self) -> None:
         combat = self._pending_combat
-        self._phase = "reaction"
+        if combat is None:
+            return
+        self._phase = "attack_reaction"
         self._active_player = combat.attacker
+
+    def _enter_defense_reaction(self) -> None:
+        combat = self._pending_combat
+        if combat is None:
+            return
+        self._phase = "defense_reaction"
+        self._active_player = combat.defender
 
     def _pass_action(self, player_idx: int) -> None:
         self._begin_arsenal_step(player_idx)
@@ -6998,7 +9553,16 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         if self._pending_combat is None:
             self._phase = "action"
             return
-        self._enter_reaction()
+        self._enter_attack_reaction()
+
+    def _pass_attack_reaction(self) -> None:
+        if self._pending_combat is None:
+            self._phase = "action"
+            return
+        self._enter_defense_reaction()
+
+    def _pass_defense_reaction(self, perspective_idx: int) -> float:
+        return self._resolve_and_advance(perspective_idx)
 
     def _hit_effects_allowed(self, combat: CombatState, attacker_idx: int) -> bool:
         if not combat.hit_effects_blocked:
@@ -7085,6 +9649,9 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         )
         raw_damage = max(0, total_power - total_block)
         raw_damage = self._apply_damage_floor(attacker_idx, raw_damage)
+        if attacker.class_state.get("AttackDamagePlusOneTurn", 0) and raw_damage > 0:
+            raw_damage += 1
+            self._event_append("attack damage +1 this turn")
         damage = self._mitigate_damage(defender_idx, raw_damage)
         defender.life -= damage
         if damage > 0:
@@ -7159,6 +9726,9 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             # On-hit triggers fire only when the attack connects.
             if attack_card is not None and hit_ok:
                 reward += self._run_triggers(attacker_idx, attack_card, "on_hit", combat, perspective_idx, fused)
+                reward += self._apply_pending_hit_rider(
+                    attacker_idx, attack_card, combat, perspective_idx
+                )
                 if self._phase == "choice":
                     self._choice_ctx["combat_finish"] = {
                         "reward": reward,
@@ -7201,6 +9771,39 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             fused,
         )
 
+    def _agent_combat_instant_step(self, parsed: str, perspective_idx: int) -> float:
+        """Resolve agent instant/may-play actions during a combat chain."""
+        if parsed.startswith("instant "):
+            return self._do_instant_play(perspective_idx, int(parsed.split(" ")[1]), perspective_idx)
+        if parsed == "deckplay":
+            return self._do_play_deck_top(perspective_idx, perspective_idx)
+        if parsed.startswith("mayplay "):
+            parts = parsed.split(" ")
+            return self._do_may_play(perspective_idx, parts[1], int(parts[2]), perspective_idx)
+        return -0.1
+
+    def _opponent_attack_reaction(self) -> None:
+        combat = self._pending_combat
+        if combat is None or combat.attacker != 1:
+            self._pass_attack_reaction()
+            return
+        opp = self._players[1]
+        reactions = self._legal_reactions(1)
+        if reactions:
+            self._do_reaction(1, reactions[0])
+            return
+        self._pass_attack_reaction()
+
+    def _opponent_defense_reaction(self) -> float:
+        combat = self._pending_combat
+        if combat is None or combat.defender != 1:
+            return self._pass_defense_reaction(0)
+        reactions = self._legal_defense_reactions(1)
+        if reactions:
+            self._do_defense_reaction(1, reactions[0], 0)
+            return 0.0
+        return self._pass_defense_reaction(0)
+
     # ------------------------------------------------------------------
     # Self-play transition (single policy controls the active player)
     # ------------------------------------------------------------------
@@ -7216,6 +9819,8 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
                 return self._do_pitch(player, int(parsed.split(" ")[1]))
             if parsed.startswith("play "):
                 return self._do_play_card(player, int(parsed.split(" ")[1]), player)
+            if parsed.startswith("arsenalplay"):
+                return self._do_play_arsenal(player, player)
             if parsed.startswith("banishplay "):
                 return self._do_play_banished(player, int(parsed.split(" ")[1]), player)
             if parsed.startswith("gyplay "):
@@ -7229,6 +9834,8 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             if parsed.startswith("mayplay "):
                 parts = parsed.split(" ")
                 return self._do_may_play(player, parts[1], int(parts[2]), player)
+            if parsed.startswith("instant "):
+                return self._do_instant_play(player, int(parsed.split(" ")[1]), player)
             return 0.0
 
         if self._phase == "arsenal":
@@ -7248,6 +9855,8 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
                 return self._do_block(player, int(parsed.split(" ")[1]))
             if parsed.startswith("blockgear "):
                 return self._do_block_gear(player, int(parsed.split(" ")[1]))
+            if parsed == "trapdefend":
+                return self._do_trap_defend(player, player)
             if parsed.startswith("instant "):
                 return self._do_instant_play(player, int(parsed.split(" ")[1]), player)
             if parsed == "deckplay":
@@ -7257,11 +9866,26 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
                 return self._do_may_play(player, parts[1], int(parts[2]), player)
             return 0.0
 
-        if self._phase == "reaction":
+        if self._phase == "attack_reaction":
             if parsed == "pass":
-                return self._resolve_and_advance(player)
+                self._pass_attack_reaction()
+                return 0.0
             if parsed.startswith("reaction "):
                 return self._do_reaction(player, int(parsed.split(" ")[1]))
+            if parsed.startswith("instant "):
+                return self._do_instant_play(player, int(parsed.split(" ")[1]), player)
+            if parsed == "deckplay":
+                return self._do_play_deck_top(player, player)
+            if parsed.startswith("mayplay "):
+                parts = parsed.split(" ")
+                return self._do_may_play(player, parts[1], int(parts[2]), player)
+            return 0.0
+
+        if self._phase == "defense_reaction":
+            if parsed == "pass":
+                return self._pass_defense_reaction(player)
+            if parsed.startswith("defreact "):
+                return self._do_defense_reaction(player, int(parsed.split(" ")[1]), player)
             if parsed.startswith("instant "):
                 return self._do_instant_play(player, int(parsed.split(" ")[1]), player)
             if parsed == "deckplay":
@@ -7288,6 +9912,21 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
                 self._do_opt_choice(player, to_bottom=False)
             return 0.0
 
+        if self._phase == "instant_pay":
+            if parsed == "pass":
+                self._cancel_instant_pay()
+                return 0.0
+            if parsed.startswith("pitch "):
+                return self._do_pitch(player, int(parsed.split(" ")[1]))
+            return 0.0
+
+        if self._phase == "pitch_pay":
+            if parsed == "pass":
+                return self._pass_pitch_pay()
+            if parsed.startswith("pitch "):
+                return self._do_pitch(player, int(parsed.split(" ")[1]))
+            return 0.0
+
         return 0.0
 
     # ------------------------------------------------------------------
@@ -7311,15 +9950,30 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
                     return accum
                 if phase == "opt":
                     return accum
+                if phase == "instant_pay":
+                    return accum
+                if phase == "pitch_pay":
+                    return accum
                 if phase == "defense":
                     if self._legal_blocks(0) or self._legal_gear_blocks(0):
                         return accum
+                    if self._combat_instant_actions_for(0):
+                        return accum
                     self._pass_defense(0)
                     continue
-                if phase == "reaction":
+                if phase == "attack_reaction":
                     if self._legal_reactions(0):
                         return accum
-                    accum += self._resolve_and_advance(0)
+                    if self._combat_instant_actions_for(0):
+                        return accum
+                    self._pass_attack_reaction()
+                    continue
+                if phase == "defense_reaction":
+                    if self._legal_defense_reactions(0):
+                        return accum
+                    if self._combat_instant_actions_for(0):
+                        return accum
+                    accum += self._pass_defense_reaction(0)
                     continue
                 return accum
 
@@ -7346,11 +10000,75 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
                 self._do_opt_choice(1, to_bottom=False)
             elif phase == "defense":
                 self._opponent_block()
-            elif phase == "reaction":
-                accum += self._resolve_and_advance(0)
+            elif phase == "attack_reaction":
+                self._opponent_attack_reaction()
+            elif phase == "defense_reaction":
+                accum += self._opponent_defense_reaction()
+            elif phase == "instant_pay":
+                accum += self._opponent_instant_pay()
+            elif phase == "pitch_pay":
+                accum += self._opponent_pitch_pay()
             else:
                 return accum
         return accum
+
+    def _opponent_instant_pay(self) -> float:
+        """Pitch until the opponent can pay for a pending instant play."""
+        ctx = self._pending_instant_pay
+        if not ctx or ctx.get("player") != 1:
+            return 0.0
+        opp = self._players[1]
+        cost = ctx["cost"]
+        if opp.resources >= cost:
+            return self._try_complete_instant_pay()
+        best_idx: Optional[int] = None
+        best_rank: Optional[tuple[int, int]] = None
+        for i, cid in enumerate(opp.hand):
+            if cid in opp.arsenal or cid == ctx.get("card_id"):
+                continue
+            card = self._cards[cid]
+            if card.pitch <= 0:
+                continue
+            is_attack = 1 if "attack_action" in card.card_types else 0
+            rank = (is_attack, card.power + card.defense)
+            if best_rank is None or rank < best_rank:
+                best_rank = rank
+                best_idx = i
+        if best_idx is None:
+            self._cancel_instant_pay()
+            self._last_event = "Opponent cancelled instant (cannot pitch)"
+            return -0.05
+        return self._do_pitch(1, best_idx)
+
+    def _opponent_pitch_pay(self) -> float:
+        """Pitch until the opponent can pay a pending pitch_pay cost."""
+        ctx = self._pending_pitch_pay
+        if not ctx or ctx.get("player") != 1:
+            return 0.0
+        opp = self._players[1]
+        cost = ctx["cost"]
+        if ctx.get("variable"):
+            paid = opp.resources - ctx.get("resources_at_start", opp.resources)
+            if paid >= 1:
+                return self._pass_pitch_pay()
+        elif opp.resources >= cost:
+            return self._pass_pitch_pay()
+        best_idx: Optional[int] = None
+        best_rank: Optional[tuple[int, int]] = None
+        for i, cid in enumerate(opp.hand):
+            if cid in opp.arsenal:
+                continue
+            card = self._cards[cid]
+            if card.pitch <= 0:
+                continue
+            is_attack = 1 if "attack_action" in card.card_types else 0
+            rank = (is_attack, card.power + card.defense)
+            if best_rank is None or rank < best_rank:
+                best_rank = rank
+                best_idx = i
+        if best_idx is None:
+            return self._cancel_pitch_pay()
+        return self._do_pitch(1, best_idx)
 
     def _opponent_prepare_resources(self, budget: int = 3) -> None:
         """Auto-pitch low-value cards so the scripted opponent can afford a play."""
@@ -7361,6 +10079,8 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             best_idx: Optional[int] = None
             best_rank: Optional[tuple[int, int]] = None
             for i, cid in enumerate(opp.hand):
+                if cid in opp.arsenal:
+                    continue
                 card = self._cards[cid]
                 if card.pitch <= 0:
                     continue
@@ -7433,6 +10153,9 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             remaining = combat.attack_power + combat.attack_bonus - sum(b[2] for b in combat.blocks)
             if remaining <= 0:
                 break
+            if self._legal_trap_defense(1):
+                self._do_trap_defend(1, 1)
+                continue
             if combat.dominate and self._defender_hand_blocks(combat, 1):
                 break
             try:
@@ -7466,18 +10189,25 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             return []
 
         actor_idx = self._active_player
-        if not self._self_play and actor_idx != 0:
-            return ["pass"]
+        if not self._self_play:
+            if actor_idx != 0:
+                instant_actions = self._combat_instant_actions_for(0)
+                if instant_actions:
+                    return instant_actions + ["pass"]
+                return ["pass"]
 
         if self._phase == "action":
             actions = ["pass"]
             actions.extend(f"pitch {i}" for i in self._legal_pitches(actor_idx))
             actions.extend(f"play {i}" for i in self._legal_plays(actor_idx))
+            if self._legal_arsenal_plays(actor_idx):
+                actions.append("arsenalplay")
             actions.extend(f"banishplay {i}" for i in self._legal_banished_plays(actor_idx))
             actions.extend(f"gyplay {i}" for i in self._legal_graveyard_plays(actor_idx))
             if self._can_weapon_attack(actor_idx):
                 actions.append("weapon")
             actions.extend(f"ability {i}" for i in self._legal_abilities(actor_idx))
+            actions.extend(f"instant {i}" for i in self._legal_instant_plays(actor_idx))
             if self._can_deck_top_play_now(actor_idx):
                 actions.append("deckplay")
             actions.extend(self._legal_may_plays(actor_idx))
@@ -7492,21 +10222,34 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
 
         if self._phase == "defense":
             if self._pending_combat is None or self._pending_combat.defender != actor_idx:
-                return ["pass"]
+                return self._combat_instant_actions_for(actor_idx) + ["pass"]
             actions = ["pass"]
             actions.extend(f"block {i}" for i in self._legal_blocks(actor_idx))
             actions.extend(f"blockgear {i}" for i in self._legal_gear_blocks(actor_idx))
+            if self._legal_trap_defense(actor_idx):
+                actions.append("trapdefend")
             actions.extend(f"instant {i}" for i in self._legal_instant_plays(actor_idx))
             if self._can_deck_top_play_now(actor_idx):
                 actions.append("deckplay")
             actions.extend(self._legal_may_plays(actor_idx))
             return actions
 
-        if self._phase == "reaction":
+        if self._phase == "attack_reaction":
             if self._pending_combat is None or self._pending_combat.attacker != actor_idx:
-                return ["pass"]
+                return self._combat_instant_actions_for(actor_idx) + ["pass"]
             actions = ["pass"]
             actions.extend(f"reaction {i}" for i in self._legal_reactions(actor_idx))
+            actions.extend(f"instant {i}" for i in self._legal_instant_plays(actor_idx))
+            if self._can_deck_top_play_now(actor_idx):
+                actions.append("deckplay")
+            actions.extend(self._legal_may_plays(actor_idx))
+            return actions
+
+        if self._phase == "defense_reaction":
+            if self._pending_combat is None or self._pending_combat.defender != actor_idx:
+                return self._combat_instant_actions_for(actor_idx) + ["pass"]
+            actions = ["pass"]
+            actions.extend(f"defreact {i}" for i in self._legal_defense_reactions(actor_idx))
             actions.extend(f"instant {i}" for i in self._legal_instant_plays(actor_idx))
             if self._can_deck_top_play_now(actor_idx):
                 actions.append("deckplay")
@@ -7531,6 +10274,25 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             if not self._opt_ctx or self._opt_ctx.get("player") != actor_idx:
                 return ["pass"]
             return ["opt_top", "opt_bottom"]
+
+        if self._phase == "instant_pay":
+            ctx = self._pending_instant_pay
+            if not ctx or ctx.get("player") != actor_idx:
+                return ["pass"]
+            exclude = {ctx["card_id"]} if ctx.get("card_id") else None
+            actions = ["pass"]
+            actions.extend(
+                f"pitch {i}" for i in self._legal_pitches(actor_idx, exclude_card_ids=exclude)
+            )
+            return actions
+
+        if self._phase == "pitch_pay":
+            ctx = self._pending_pitch_pay
+            if not ctx or ctx.get("player") != actor_idx:
+                return ["pass"]
+            actions = ["pass"]
+            actions.extend(f"pitch {i}" for i in self._legal_pitches(actor_idx))
+            return actions
 
         return ["pass"]
 
@@ -7593,8 +10355,11 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         eff = opt["effect"]
         card = self._cards[opt["card_id"]]
         if eff.kind == "banish_combo":
-            rider = f"+{eff.amount} power" + (" and go again" if eff.go_again else "")
-            desc = f"banish {eff.banish_name} from your graveyard for {rider}"
+            if re.search(r"deal \d+ arcane damage", (eff.raw or "").lower()):
+                desc = f"banish {eff.banish_name} from your graveyard to deal arcane damage"
+            else:
+                rider = f"+{eff.amount} power" + (" and go again" if eff.go_again else "")
+                desc = f"banish {eff.banish_name} from your graveyard for {rider}"
         elif eff.kind == "destroy_item" and (eff.banish_name or "").lower() == "reroll_d6":
             desc = "destroy Gambler's Gloves to reroll the die"
         elif eff.kind in ("damage", "arcane_damage"):
@@ -7649,16 +10414,22 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
                 return f"play {action}"
             if self._phase == "defense":
                 return f"block {action}"
-            if self._phase == "reaction":
+            if self._phase == "attack_reaction":
                 return f"reaction {action}"
+            if self._phase == "defense_reaction":
+                return f"defreact {action}"
         text = str(action).strip().lower()
         if text in {"pass", "end", "end turn"}:
             return "pass"
         if text in {"weapon", "attack weapon", "weapon attack"}:
             return "weapon"
-        for verb in ("banishplay", "gyplay", "play", "block", "pitch", "reaction", "ability", "stash", "blockgear", "instant"):
+        if text in {"trapdefend", "trap", "trigger trap"}:
+            return "trapdefend"
+        for verb in ("banishplay", "gyplay", "arsenalplay", "play", "block", "pitch", "reaction", "defreact", "ability", "stash", "blockgear", "trapdefend", "instant"):
             if text.startswith(verb):
                 parts = text.split()
+                if verb == "arsenalplay":
+                    return "arsenalplay"
                 if len(parts) == 2 and parts[1].isdigit():
                     return f"{verb} {parts[1]}"
         return text

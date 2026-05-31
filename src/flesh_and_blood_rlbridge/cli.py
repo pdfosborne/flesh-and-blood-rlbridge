@@ -410,12 +410,25 @@ def _describe_action(action: str, obs: dict[str, Any]) -> str:
         if phase == "optional":
             return "Decline - skip this optional effect"
         if phase == "defense":
-            return "Pass - take the attack unblocked (no more blocks)"
-        if phase == "reaction":
-            return "Pass - resolve the attack (play no reactions)"
+            return "Pass - finish defending (no more blocks)"
+        if phase == "attack_reaction":
+            return "Pass - finish attack reactions (defense reactions next)"
+        if phase == "defense_reaction":
+            return "Pass - resolve the attack (play no defense reactions)"
         if phase == "arsenal":
             return "Skip - don't stash (proceed to draw)"
+        if phase == "instant_pay":
+            return "Cancel - don't play this instant"
+        if phase == "pitch_pay":
+            return "Confirm payment - pass when done pitching (or cancel if optional)"
         return "Pass - end attacks (arsenal stash step next)"
+
+    if action == "arsenalplay":
+        agent = obs.get("agent") if isinstance(obs.get("agent"), dict) else {}
+        agent_arena = agent.get("arena") if isinstance(agent.get("arena"), dict) else {}
+        names = agent_arena.get("arsenal") or []
+        name = _clean_name(names[0]) if names else "stashed card"
+        return f'Play "{name}" from arsenal - attack or action (stays until used)'
 
     arena = obs.get("agent", {}).get("arena") if isinstance(obs.get("agent"), dict) else None
     arena = arena if isinstance(arena, dict) else {}
@@ -445,7 +458,7 @@ def _describe_action(action: str, obs: dict[str, Any]) -> str:
                 return f'Block with {_clean_name(piece.get("name"))} [{piece.get("slot")}] - prevents {piece.get("defense", 0)} damage{fragile}'
             return action
 
-    if len(parts) == 2 and parts[0] in {"play", "banishplay", "block", "pitch", "reaction"} and parts[1].isdigit():
+    if len(parts) == 2 and parts[0] in {"play", "banishplay", "block", "pitch", "reaction", "defreact"} and parts[1].isdigit():
         if parts[0] == "banishplay":
             agent = obs.get("agent") if isinstance(obs.get("agent"), dict) else {}
             banished = agent.get("banished") if isinstance(agent.get("banished"), list) else []
@@ -481,6 +494,8 @@ def _describe_action(action: str, obs: dict[str, Any]) -> str:
             return f'Pitch "{name}" - gain {card.get("pitch", 0)} resources'
         if parts[0] == "reaction":
             return f'React with "{name}" - +{card.get("power", 0)} attack (cost {card.get("cost", 0)})'
+        if parts[0] == "defreact":
+            return f'Defense react with "{name}" - +{card.get("defense", 0)} defense (cost {card.get("cost", 0)})'
         return f'Block with "{name}" - prevents {card.get("defense", 0)} damage'
     return action
 
@@ -668,7 +683,7 @@ def _render_board(obs: dict[str, Any], win_agent: float, win_opp: float) -> str:
         )
         lines.append(f"  (?) Choice: {choice.get('prompt')} [{opts}]")
     if obs.get("phase") == "arsenal":
-        lines.append("  (i) Attack phase over — stash one card face-down in arsenal, or skip to draw.")
+        lines.append("  (i) Attack phase over — stash one card face-down in your empty arsenal, or skip to draw.")
 
     lines.append("-" * 64)
     lines.append(f"OPPONENT - {opp.get('hero', '?')}")

@@ -4,7 +4,15 @@ from __future__ import annotations
 
 import re
 
-from .effects import Effect, Trigger, _clean, _parse_clause_effects, _parse_effect
+from .effects import (
+    Effect,
+    Trigger,
+    _clean,
+    _parse_clause_effects,
+    _parse_effect,
+    _parse_trigger_clause,
+    card_has_mode_menu_bullets,
+)
 
 
 def parse_clause(clause: str, *, allow_this_turn: bool = False) -> tuple[str, tuple[Effect, ...]]:
@@ -48,6 +56,24 @@ def parse_extended_triggers(text: str) -> tuple[Trigger, ...]:
         )
 
     m = re.search(
+        r"if you have a base (head|chest|arms|legs) equipped, transform it and x hyper drivers you control into this, then equip this",
+        body,
+        re.I,
+    )
+    if m:
+        triggers.append(
+            Trigger(
+                "on_enters",
+                Effect(
+                    "transform_equip",
+                    banish_name=f"{m.group(1)}:hyper_drivers",
+                    raw=m.group(0)[:80],
+                ),
+                m.group(0)[:80],
+            )
+        )
+
+    m = re.search(
         r"if you have a base (head|chest|arms|legs) equipped, transform it into this, then equip this",
         body,
         re.I,
@@ -75,13 +101,13 @@ def parse_extended_triggers(text: str) -> tuple[Trigger, ...]:
         clause = m.group(1).strip(" .")
         agg = parse_single(clause, allow_this_turn=True)
         if agg and agg.implemented:
-            triggers.append(Trigger("when_fused", agg, clause))
+            triggers.append(Trigger("on_attack", agg, clause))
         elif "whenever" in clause.lower():
             from .effect_coverage import _parse_effect_aggressive
 
             agg2 = _parse_effect_aggressive(clause) or parse_single(clause, allow_this_turn=True)
             if agg2 and agg2.implemented:
-                triggers.append(Trigger("when_fused", agg2, clause))
+                triggers.append(Trigger("on_attack", agg2, clause))
 
     # Galvanize without full sentence match
     for m in re.finditer(
@@ -214,8 +240,38 @@ def parse_extended_triggers(text: str) -> tuple[Trigger, ...]:
             )
         )
 
+    # When this defends alone, ...
+    for m in re.finditer(r"when (?:this|it) defends alone,?\s*([^.]+)\.?", body, re.I):
+        clause = m.group(1).strip()
+        _, effs = parse_clause(clause)
+        for eff in effs:
+            if not eff.implemented:
+                continue
+            merged = eff
+            if eff.condition != "defends_alone":
+                merged = Effect(
+                    eff.kind,
+                    eff.amount,
+                    eff.raw,
+                    max_cost=eff.max_cost,
+                    banish_name=eff.banish_name,
+                    token_name=eff.token_name,
+                    target=eff.target if eff.target != "opponent" else "self"
+                    if eff.kind == "prevent_damage"
+                    else eff.target,
+                    playable_banished=eff.playable_banished,
+                    go_again=eff.go_again,
+                    optional=eff.optional,
+                    condition="defends_alone",
+                )
+            triggers.append(Trigger("on_defend", merged, clause))
+
     # When this defends, ...
-    for m in re.finditer(r"when (?:this|it) defends(?: a \w+ attack)?,?\s*([^.]+)\.?", body, re.I):
+    for m in re.finditer(
+        r"when (?:this|it) defends(?! alone)(?: a \w+ attack)?,?\s*([^.]+)\.?",
+        body,
+        re.I,
+    ):
         clause = m.group(1).strip()
         if any(
             re.search(pat, clause, re.I)
@@ -322,14 +378,51 @@ def parse_extended_triggers(text: str) -> tuple[Trigger, ...]:
             )
         )
 
+    if re.search(r"target attack gets \+x\{p\}", body, re.I):
+        triggers.append(
+            Trigger(
+                "on_play",
+                Effect(
+                    "modify_attack_power",
+                    banish_name="last_banish_count",
+                    raw="target attack gets +X power",
+                ),
+                "target attack gets +X power",
+            )
+        )
+
     # Quoted on-hit grants: gets "When this hits, ..."
     for m in re.finditer(r'gets?\s+"when this hits[^"]*"', body, re.I):
         inner = m.group(0)
+        qm = re.search(r'"(when this hits[^"]*)"', inner, re.I)
+        if not qm:
+            continue
+        hit_text = re.sub(
+            r"^when this hits(?: a hero or ally| a hero|,)?,?\s*",
+            "",
+            qm.group(1).strip(),
+            flags=re.I,
+        )
+        hit = _parse_trigger_clause(hit_text, optional="you may" in hit_text.lower())
+        if hit is not None and hit.implemented:
+            triggers.append(
+                Trigger(
+                    "on_play",
+                    Effect(
+                        "next_attack_power",
+                        0,
+                        token_name=f"hit:{hit.kind}:{hit.banish_name or ''}",
+                        raw=inner[:80],
+                    ),
+                    inner[:80],
+                )
+            )
+            continue
         if "go again" in inner.lower():
             triggers.append(
                 Trigger("on_play", Effect("next_action_go_again", raw=inner[:80]), inner[:80])
             )
-        if "banish" in inner.lower():
+        if "banish" in inner.lower() and not card_has_mode_menu_bullets(text):
             triggers.append(
                 Trigger("on_play", Effect("banish_top", target="self", raw=inner[:80]), inner[:80])
             )

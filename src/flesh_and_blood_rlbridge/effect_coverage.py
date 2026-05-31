@@ -12,6 +12,7 @@ from .effects import (
     _is_activated_ability_clause,
     _parse_clause_effects,
     _parse_create_banish,
+    _parse_dagger_damage_text,
     _parse_effect,
     card_has_mode_menu_bullets,
     _parse_extended_clause,
@@ -63,6 +64,10 @@ def _parse_effect_aggressive(clause: str) -> Effect | None:
     if not c:
         return None
 
+    dagger = _parse_dagger_damage_text(clause, full_context=clause)
+    if dagger is not None:
+        return dagger
+
     m = re.search(r"deal (\d+) arcane damage to (?:two target heroes|up to any (\d+) targets)", c)
     if m:
         hits = int(m.group(2)) if m.group(2) else 2
@@ -100,7 +105,8 @@ def _parse_effect_aggressive(clause: str) -> Effect | None:
 
     m = re.search(r"gain (\d+)\{g\}", c)
     if m:
-        return Effect("gain_gold", int(m.group(1)), clause.strip())
+        target = "opponent" if re.search(r"they gain \d+\{g\}", c) else "self"
+        return Effect("gain_gold", int(m.group(1)), clause.strip(), target=target)
 
     m = re.search(r"put (.+?) from your graveyard on (?:the )?bottom of your deck", c)
     if m:
@@ -261,6 +267,8 @@ def _parse_effect_aggressive(clause: str) -> Effect | None:
     if re.search(r"\bbanish\b", c):
         if "graveyard" in c:
             return Effect("banish_graveyard", target="opponent", raw=clause.strip())
+        if "from your hand" in c or "from hand" in c:
+            return None
         if "arsenal" in c:
             return Effect("banish_arsenal", target="opponent", raw=clause.strip())
         return Effect("banish_top", target="opponent", raw=clause.strip())
@@ -288,6 +296,19 @@ def _parse_effect_aggressive(clause: str) -> Effect | None:
     nap = _parse_next_attack_power(clause)
     if nap is not None and nap.implemented:
         return nap
+    m = re.search(r"the attack deals (\d+) damage to the defending hero", c)
+    if m:
+        return Effect("hit_bonus_damage", int(m.group(1)), clause.strip())
+
+    m = re.search(r"shuffle (\d+) attack action cards from your banished zone into your deck", c)
+    if m:
+        return Effect(
+            "return_gy_to_deck",
+            int(m.group(1)),
+            banish_name="attack action",
+            raw=clause.strip(),
+        )
+
     if re.search(r"gets \+(\d+)\s*(?:\{p\}|power)", c):
         m = re.search(r"gets \+(\d+)\s*(?:\{p\}|power)", c)
         return Effect("power", int(m.group(1)), clause.strip(), go_again="go again" in c)
@@ -375,6 +396,21 @@ def _parse_optional_destroy_then_patterns(body: str, triggers: list[Trigger]) ->
             "on_random_discard",
         ),
         (
+            r"when an edge of autumn you control hits,?\s*you may destroy this\.?\s*"
+            r"if you do,?\s*(.+?)(?:\.\s|\.$|$)",
+            "on_controlled_hit",
+        ),
+        (
+            r"whenever a lightning or elemental attack you control is defended by a card from hand,?\s*"
+            r"you may destroy this\.?\s*if you do,?\s*(.+?)(?:\.\s|\.$|$)",
+            "on_lightning_defended",
+        ),
+        (
+            r"when you attack for the fourth time during a turn,?\s*"
+            r"you may destroy this\.?\s*if you do,?\s*(.+?)(?:\.\s|\.$|$)",
+            "on_attack_count",
+        ),
+        (
             r"whenever a card with 6 or more \{p\} is put into your banished zone,?\s*"
             r"you may destroy this\.?\s*if you do,?\s*(.+?)(?:\.\s|\.$|$)",
             "on_banish_high_power",
@@ -399,6 +435,341 @@ def parse_keyword_triggers(keywords: tuple[str, ...] | list[str]) -> tuple[Trigg
     return tuple(triggers)
 
 
+def _parse_destroy_equipment_body_triggers(body: str) -> tuple[Trigger, ...]:
+    """Multi-sentence destroy-category equipment patterns matched against full text."""
+    triggers: list[Trigger] = []
+    low = body.lower()
+
+    m = re.search(
+        r"if you would sharpen a zenith blade, instead you may pay \{r\} and destroy this\.?\s*"
+        r"if you do, sharpen it an additional time",
+        low,
+    )
+    if m:
+        triggers.append(
+            Trigger(
+                "on_sharpen",
+                Effect(
+                    "pitch_pay",
+                    1,
+                    optional=True,
+                    banish_name="destroy_sharpen_extra",
+                    raw=m.group(0)[:120],
+                ),
+                m.group(0)[:80],
+            )
+        )
+
+    m = re.search(
+        r"whenever an attacking ally you control dies or an attack action card you control is destroyed by phantasm,?\s*"
+        r"you may pay \{r\}\{r\}\{r\}\.?\s*if you do,?\s*destroy this and gain 1 action point",
+        low,
+    )
+    if m:
+        triggers.append(
+            Trigger(
+                "on_phantasm_destroy",
+                Effect(
+                    "pitch_pay",
+                    3,
+                    optional=True,
+                    banish_name="destroy_self_go_again",
+                    raw=m.group(0)[:120],
+                ),
+                m.group(0)[:80],
+            )
+        )
+
+    m = re.search(
+        r"the first time each turn another hero destroys a card they don[\u2019']t control,?\s*"
+        r"you may pay \{r\}\{r\}\.?\s*if you do,?\s*they destroy a non-hero permanent they control",
+        low,
+    )
+    if m:
+        triggers.append(
+            Trigger(
+                "on_opponent_destroy",
+                Effect(
+                    "pitch_pay",
+                    2,
+                    optional=True,
+                    banish_name="they_destroy_permanent",
+                    raw=m.group(0)[:120],
+                ),
+                m.group(0)[:80],
+            )
+        )
+
+    return tuple(triggers)
+
+
+def _parse_banish_body_triggers(body: str) -> tuple[Trigger, ...]:
+    """Multi-sentence banish-category patterns matched against full card text."""
+    triggers: list[Trigger] = []
+    low = body.lower()
+
+    m = re.search(
+        r"when this defends, banish any number of action cards from your hand,?\s*"
+        r"then add them to the chain link as defending cards",
+        low,
+    )
+    if m:
+        triggers.append(
+            Trigger(
+                "on_defend",
+                Effect(
+                    "chain_defend",
+                    banish_name="hand_actions",
+                    raw=m.group(0)[:120],
+                ),
+                m.group(0)[:80],
+            )
+        )
+
+    m = re.search(
+        r"when this defends, you may banish an arrow from your hand\.?\s*"
+        r"if you do, at the start of your next turn, put it face-up into your arsenal and it gets \+3\{p\} until end of turn",
+        low,
+    )
+    if m:
+        triggers.append(
+            Trigger(
+                "on_defend",
+                Effect(
+                    "destroy_hand",
+                    1,
+                    optional=True,
+                    banish_name="arrow:next_turn_arsenal:+3",
+                    raw=m.group(0)[:120],
+                ),
+                m.group(0)[:80],
+            )
+        )
+
+    m = re.search(
+        r"while this is in your graveyard, at the start of your turn, you may banish 2 cards named loyalty beyond the grave from your graveyard\.?\s*"
+        r"if you do, draw a card",
+        low,
+    )
+    if m:
+        triggers.append(
+            Trigger(
+                "on_turn_start",
+                Effect(
+                    "banish_gy_variable",
+                    2,
+                    optional=True,
+                    banish_name="named:loyalty beyond the grave:draw",
+                    condition="in_graveyard",
+                    raw=m.group(0)[:120],
+                ),
+                m.group(0)[:80],
+            )
+        )
+
+    m = re.search(
+        r"the next time you would be dealt lethal damage this turn, you may banish minerva themis from your hand or arsenal to prevent that damage",
+        low,
+    )
+    if m:
+        triggers.append(
+            Trigger(
+                "on_play",
+                Effect(
+                    "prevent_damage",
+                    0,
+                    optional=True,
+                    banish_name="minerva_themis:lethal",
+                    raw=m.group(0)[:120],
+                ),
+                m.group(0)[:80],
+            )
+        )
+
+    m = re.search(
+        r"at the beginning of the end phase, return them to your hand\.?\s*"
+        r"the next time you would be dealt damage this turn, prevent x of that damage, where x is 2 plus the number of cards banished to play this",
+        low,
+    )
+    if m:
+        triggers.append(
+            Trigger(
+                "on_play",
+                Effect(
+                    "schedule_end_phase",
+                    banish_name="return_banished_cost",
+                    raw="return banished cost cards at end phase",
+                ),
+                m.group(0)[:80],
+            )
+        )
+        triggers.append(
+            Trigger(
+                "on_play",
+                Effect(
+                    "prevent_damage",
+                    2,
+                    banish_name="last_banish_count_plus:2",
+                    raw=m.group(0)[:120],
+                ),
+                m.group(0)[:80],
+            )
+        )
+
+    m = re.search(
+        r"if a card with 6 or more \{p\} is banished this way, you may play it from your banished zone during your next action phase",
+        low,
+    )
+    if m:
+        triggers.append(
+            Trigger(
+                "on_play",
+                Effect(
+                    "enable_gy_play",
+                    optional=True,
+                    banish_name="next_action_phase",
+                    condition="banished_power6_this_cost",
+                    raw=m.group(0)[:120],
+                ),
+                m.group(0)[:80],
+            )
+        )
+
+    m = re.search(
+        r"whenever you \*\*opt\*\*, put energy counters on blaze equal to the number of cards looked at this way",
+        body,
+        re.I,
+    )
+    if m:
+        triggers.append(
+            Trigger(
+                "on_play",
+                Effect(
+                    "put_counter",
+                    token_name="energy",
+                    banish_name="blaze:opt_looked",
+                    raw=m.group(0)[:120],
+                ),
+                m.group(0)[:80],
+            )
+        )
+
+    m = re.search(
+        r"target attack gets \+x\{p\}",
+        low,
+    )
+    if m:
+        triggers.append(
+            Trigger(
+                "on_play",
+                Effect(
+                    "modify_attack_power",
+                    banish_name="last_banish_count",
+                    raw=m.group(0)[:80],
+                ),
+                m.group(0)[:80],
+            )
+        )
+
+    m = re.search(
+        r"if you(?:'ve| have) \*\*charged\*\* this turn, search your deck for an action card with cost x or less, reveal it, put it into your hand, then shuffle",
+        body,
+        re.I,
+    )
+    if m:
+        triggers.append(
+            Trigger(
+                "on_play",
+                Effect(
+                    "search",
+                    banish_name="action:variable_cost",
+                    condition="charged_this_turn",
+                    raw=m.group(0)[:120],
+                ),
+                m.group(0)[:80],
+            )
+        )
+
+    return tuple(triggers)
+
+
+def _parse_draw_body_triggers(body: str) -> tuple[Trigger, ...]:
+    """Multi-sentence draw-category patterns matched against full card text."""
+    triggers: list[Trigger] = []
+    low = body.lower()
+
+    m = re.search(
+        r"at the start of each other hero'?s turn, if they have less \{h\} than you, they may draw a card\.?\s*"
+        r"if they do, you create a silver token",
+        low,
+    )
+    if m:
+        triggers.append(
+            Trigger(
+                "on_turn_start",
+                Effect(
+                    "draw",
+                    1,
+                    optional=True,
+                    target="opponent",
+                    condition="other_hero:life_less",
+                    banish_name="create:silver",
+                    raw=m.group(0)[:120],
+                ),
+                m.group(0)[:80],
+            )
+        )
+
+    m = re.search(
+        r"look at the defending hero'?s hand and choose a blue card\.?\s*"
+        r"add it to this chain link as a defending card\.?\s*if you do, draw a card",
+        low,
+    )
+    if m:
+        triggers.append(
+            Trigger(
+                "on_play",
+                Effect(
+                    "choose_card",
+                    target="opponent",
+                    banish_name="blue:chain_defend:draw",
+                    raw=m.group(0)[:120],
+                ),
+                m.group(0)[:80],
+            )
+        )
+
+    m = re.search(
+        r"while this is defending an attack with 2 or less \{p\}, when the combat chain closes, draw a card",
+        low,
+    )
+    if m:
+        triggers.append(
+            Trigger(
+                "on_chain_close",
+                Effect(
+                    "draw",
+                    1,
+                    condition="defending_attack_power_le:2",
+                    raw=m.group(0)[:120],
+                ),
+                m.group(0)[:80],
+            )
+        )
+
+    m = re.search(r"if a chi was pitched to play this, draw a card", low)
+    if m:
+        triggers.append(
+            Trigger(
+                "on_play",
+                Effect("draw", 1, condition="chi_pitched", raw=m.group(0)[:120]),
+                m.group(0)[:80],
+            )
+        )
+
+    return tuple(triggers)
+
+
 def parse_passive_triggers(text: str) -> tuple[Trigger, ...]:
     """Parse standalone sentences and non-standard trigger wordings."""
     triggers: list[Trigger] = []
@@ -407,6 +778,31 @@ def parse_passive_triggers(text: str) -> tuple[Trigger, ...]:
         return ()
 
     _parse_optional_destroy_then_patterns(body, triggers)
+    triggers.extend(_parse_destroy_equipment_body_triggers(body))
+    triggers.extend(_parse_banish_body_triggers(body))
+    triggers.extend(_parse_draw_body_triggers(body))
+
+    m = re.search(
+        r"if there are 8 or more earth cards in your banished zone,?\s*"
+        r"\w+(?:,\s*)? gets \"whenever you gain \{g\} during your turn,?\s*"
+        r"you may deal (\d+) arcane damage to any opposing target\.?\"",
+        body,
+        re.I,
+    )
+    if m:
+        triggers.append(
+            Trigger(
+                "whenever_gain_gold",
+                Effect(
+                    "arcane_damage",
+                    int(m.group(1)),
+                    m.group(0),
+                    optional=True,
+                    condition="earth_banish_ge:8",
+                ),
+                m.group(0),
+            )
+        )
 
     m = re.search(
         r"once per turn, when cromai attacks or leaves the arena,?\s*gain 1 action point",
@@ -526,6 +922,106 @@ def parse_passive_triggers(text: str) -> tuple[Trigger, ...]:
                         optional=True,
                         banish_name="go_again",
                         raw=sent,
+                    ),
+                    sent,
+                )
+            )
+            continue
+
+        m = re.search(
+            r"if the discarded card has 6 or more \{p\},?\s*deal (\d+) damage to the attacking hero",
+            sent,
+            re.I,
+        )
+        if m:
+            triggers.append(
+                Trigger(
+                    "on_play",
+                    Effect(
+                        "damage",
+                        int(m.group(1)),
+                        sent,
+                        target="attacking_hero",
+                        condition="discarded_power6_turn",
+                    ),
+                    sent,
+                )
+            )
+            continue
+
+        m = re.search(
+            r"whenever you play a card from hand,?\s*"
+            r"you may put a card from hand face-down into your arsenal",
+            sent,
+            re.I,
+        )
+        if m:
+            triggers.append(
+                Trigger(
+                    "whenever_play_from_hand",
+                    Effect("stash_hand", optional=True, raw=sent),
+                    sent,
+                )
+            )
+            continue
+
+        m = re.search(
+            r"whenever a trap you control triggers,?\s*deal (\d+) damage to the attacking hero",
+            sent,
+            re.I,
+        )
+        if m:
+            triggers.append(
+                Trigger(
+                    "whenever_trap_triggers",
+                    Effect(
+                        "damage",
+                        int(m.group(1)),
+                        sent,
+                        target="attacking_hero",
+                    ),
+                    sent,
+                )
+            )
+            continue
+
+        m = re.search(
+            r"remove all steam counters from target equipment, item, or weapon",
+            sent,
+            re.I,
+        )
+        if m:
+            triggers.append(
+                Trigger(
+                    "on_play",
+                    Effect(
+                        "remove_counter",
+                        0,
+                        sent,
+                        token_name="steam",
+                        banish_name="target_all_steam",
+                    ),
+                    sent,
+                )
+            )
+            continue
+
+        m = re.search(
+            r"if 2 or more steam counters are removed this way,?\s*"
+            r"deal (\d+) damage to its controller",
+            sent,
+            re.I,
+        )
+        if m:
+            triggers.append(
+                Trigger(
+                    "on_play",
+                    Effect(
+                        "damage",
+                        int(m.group(1)),
+                        sent,
+                        target="permanent_controller",
+                        condition="steam_removed_ge:2",
                     ),
                     sent,
                 )
@@ -832,6 +1328,40 @@ def parse_passive_triggers(text: str) -> tuple[Trigger, ...]:
             )
             continue
 
+        m = re.search(r"target opponent reveals their hand", low)
+        if m:
+            triggers.append(
+                Trigger(
+                    "on_play",
+                    Effect(
+                        "reveal_hand",
+                        0,
+                        sent,
+                        target="opponent",
+                        banish_name="store_revealed",
+                    ),
+                    sent,
+                )
+            )
+            continue
+
+        m = re.search(r"create x (.+?) tokens under target hero'?s control", low)
+        if m:
+            triggers.append(
+                Trigger(
+                    "on_play",
+                    Effect(
+                        "create_token",
+                        token_name=m.group(1).strip(),
+                        target="opponent",
+                        banish_name="pitch_value",
+                        raw=sent,
+                    ),
+                    sent,
+                )
+            )
+            continue
+
         m = re.search(
             r"whenever an attack you control hits a light hero this turn,?\s*"
             r"you may banish a card from their soul",
@@ -968,6 +1498,21 @@ def parse_passive_triggers(text: str) -> tuple[Trigger, ...]:
                         "choose_card",
                         target="opponent",
                         banish_name="put_bottom:draw",
+                        raw=sent,
+                    ),
+                    sent,
+                )
+            )
+            continue
+
+        if re.search(r"look at their hand and choose a card\b", low):
+            triggers.append(
+                Trigger(
+                    "on_hit",
+                    Effect(
+                        "choose_card",
+                        target="opponent",
+                        banish_name="banish_same_name:3",
                         raw=sent,
                     ),
                     sent,
@@ -1332,7 +1877,7 @@ def parse_passive_triggers(text: str) -> tuple[Trigger, ...]:
             r"prevent the next (\d+) damage that would be dealt to you this turn",
             low,
         )
-        if m:
+        if m and "defends alone" not in low:
             triggers.append(
                 Trigger(
                     "on_play",
@@ -2134,6 +2679,30 @@ def parse_passive_triggers(text: str) -> tuple[Trigger, ...]:
             )
             continue
 
+        # Virtuoso Bodice — remove suspense counter on defend for resources.
+        m = re.search(
+            r"when this defends,?\s*you may remove a suspense counter from an aura you control[,.\s]+"
+            r"if you do,?\s*gain ((?:\{r\})+|\d+)",
+            low,
+        )
+        if m:
+            gain = _resource_amount(m.group(1))
+            triggers.append(
+                Trigger(
+                    "on_defend",
+                    Effect(
+                        "remove_counter",
+                        1,
+                        token_name="suspense",
+                        banish_name=f"gain_resources:{gain}",
+                        optional=True,
+                        raw=sent,
+                    ),
+                    sent,
+                )
+            )
+            continue
+
         # Galvanize — when this defends, ...
         m = re.search(
             r"galvanize\s*[-—–]\s*when (?:this|it) defends,?\s*you may destroy an item you control\.?\s*"
@@ -2150,8 +2719,8 @@ def parse_passive_triggers(text: str) -> tuple[Trigger, ...]:
             )
             continue
 
-        # This enters the arena with ...
-        m = re.search(r"this enters the arena(?: with|,)\s*(.+)", sent, re.I)
+        # This enters the arena with ... (comma form handled by specific parsers below)
+        m = re.search(r"^(?:when )?this enters the arena with\s*(.+)", sent, re.I)
         if m:
             clause = m.group(1).strip(" .")
             if re.search(r"steam counter", clause, re.I):
@@ -2410,7 +2979,7 @@ def parse_passive_triggers(text: str) -> tuple[Trigger, ...]:
             continue
 
         m = re.search(
-            r"when this defends,?\s*you may turn a card in a graveyard face-down\.?\s*"
+            r"when this defends,?\s*you may turn a card in a graveyard face-down(?:\.|,)?\s*"
             r"if it'?s yellow,?\s*create a gold token",
             low,
         )
@@ -2419,10 +2988,69 @@ def parse_passive_triggers(text: str) -> tuple[Trigger, ...]:
                 Trigger(
                     "on_defend",
                     Effect(
-                        "create_token",
-                        token_name="gold",
+                        "turn_banished_face",
                         optional=True,
-                        condition="gy_yellow",
+                        banish_name="face_down:any_gy_yellow_gold",
+                        raw=sent,
+                    ),
+                    sent,
+                )
+            )
+            continue
+
+        m = re.search(
+            r"when this hits(?: a hero)?,?\s*you may turn a card in their banished zone face-down",
+            low,
+        )
+        if m:
+            triggers.append(
+                Trigger(
+                    "on_hit",
+                    Effect(
+                        "turn_banished_face",
+                        target="opponent",
+                        optional=True,
+                        banish_name="face_down:opponent_banished",
+                        raw=sent,
+                    ),
+                    sent,
+                )
+            )
+            continue
+
+        m = re.search(
+            r"when this hits(?: a hero)?,?\s*you may turn a card in their graveyard face-down(?:\.|,)?\s*"
+            r"if it'?s yellow,?\s*create a gold token",
+            low,
+        )
+        if m:
+            triggers.append(
+                Trigger(
+                    "on_hit",
+                    Effect(
+                        "turn_banished_face",
+                        target="opponent",
+                        optional=True,
+                        banish_name="face_down:opponent_gy_yellow_gold",
+                        raw=sent,
+                    ),
+                    sent,
+                )
+            )
+            continue
+
+        m = re.search(
+            r"when this enters the arena,?\s*you may turn a card in any banished zone face-down",
+            low,
+        )
+        if m:
+            triggers.append(
+                Trigger(
+                    "on_enters",
+                    Effect(
+                        "turn_banished_face",
+                        optional=True,
+                        banish_name="face_down:any_banished",
                         raw=sent,
                     ),
                     sent,
@@ -2793,7 +3421,13 @@ def parse_passive_triggers(text: str) -> tuple[Trigger, ...]:
             triggers.append(
                 Trigger(
                     "on_defend",
-                    Effect("power", -int(m.group(1)), raw=sent),
+                    Effect(
+                        "power",
+                        -int(m.group(1)),
+                        target="opponent",
+                        banish_name="chain",
+                        raw=sent,
+                    ),
                     sent,
                 )
             )
@@ -2828,6 +3462,286 @@ def parse_passive_triggers(text: str) -> tuple[Trigger, ...]:
             )
             continue
 
+        if re.search(r"^heroes can't gain \{g\}", low):
+            triggers.append(
+                Trigger(
+                    "on_play",
+                    Effect("block_gold_gain", raw=sent),
+                    sent,
+                )
+            )
+            continue
+
+        m = re.search(
+            r"if you do, the next time you would be dealt damage this turn, prevent twice x of that damage",
+            low,
+        )
+        if m:
+            triggers.append(
+                Trigger(
+                    "on_enters",
+                    Effect(
+                        "prevent_damage",
+                        0,
+                        banish_name="twice_x",
+                        condition="per_hit:1",
+                        target="self",
+                        raw=sent,
+                    ),
+                    sent,
+                )
+            )
+            continue
+
+        m = re.search(
+            r"whenever you boost(?: an attack action card)?,?\s*"
+            r"you may destroy a card under this\.?\s*if you do,?\s*(.+?)(?:\.\s|\.$|$)",
+            body,
+            re.I,
+        )
+        if m:
+            remainder = m.group(1).strip(" .")
+            for eff in _parse_destroy_then_clause(remainder):
+                triggers.append(
+                    Trigger(
+                        "on_boost",
+                        eff,
+                        m.group(0).strip()[:90],
+                    )
+                )
+            triggers.append(
+                Trigger(
+                    "on_boost",
+                    Effect("destroy_item", optional=True, banish_name="under_this", raw=sent),
+                    sent,
+                )
+            )
+            continue
+
+        m = re.search(
+            r"the first attack that targets you each turn gets -(\d+)\{p\}",
+            low,
+        )
+        if m:
+            triggers.append(
+                Trigger(
+                    "on_play",
+                    Effect(
+                        "power",
+                        -int(m.group(1)),
+                        banish_name="first_attack_targeting_you",
+                        target="self",
+                        raw=sent,
+                    ),
+                    sent,
+                )
+            )
+            continue
+
+        m = re.search(
+            r"at the beginning of each end phase, destroy this unless you(?:'ve| have) pitched, played, or defended with a blue card this turn",
+            low,
+        )
+        if m:
+            triggers.append(
+                Trigger(
+                    "on_end_phase",
+                    Effect(
+                        "upkeep_or_destroy",
+                        banish_name="blue_pitched_played_defended",
+                        raw=sent,
+                    ),
+                    sent,
+                )
+            )
+            if re.search(
+                r"if you(?:'ve| have) pitched, played, and defended with a blue card this turn, \*\*transcend\*\*",
+                low,
+            ):
+                triggers.append(
+                    Trigger(
+                        "on_end_phase",
+                        Effect(
+                            "transcend",
+                            condition="blue_pitched_played_defended_all",
+                            raw=sent,
+                        ),
+                        sent,
+                    )
+                )
+            continue
+
+        m = re.search(
+            r"at the beginning of your end phase, put a sand counter on this, then destroy it unless you banish a red card from your graveyard for each sand counter on it",
+            low,
+        )
+        if m:
+            triggers.append(
+                Trigger(
+                    "on_end_phase",
+                    Effect(
+                        "put_counter",
+                        token_name="sand",
+                        banish_name="upkeep_banish_red_each",
+                        raw=sent,
+                    ),
+                    sent,
+                )
+            )
+            continue
+
+        m = re.search(
+            r"at the beginning of your end phase, if you(?:'ve| have) attacked less than (\d+) times this turn, destroy this",
+            low,
+        )
+        if m:
+            triggers.append(
+                Trigger(
+                    "on_end_phase",
+                    Effect(
+                        "destroy_item",
+                        condition=f"attacks_lt:{int(m.group(1))}",
+                        raw=sent,
+                    ),
+                    sent,
+                )
+            )
+            continue
+
+        m = re.search(
+            r"if you would sharpen a zenith blade, instead you may pay \{r\} and destroy this\.?\s*"
+            r"if you do, \*\*sharpen\*\* it an additional time",
+            low,
+        )
+        if m:
+            triggers.append(
+                Trigger(
+                    "on_sharpen",
+                    Effect(
+                        "pitch_pay",
+                        1,
+                        optional=True,
+                        banish_name="destroy_sharpen_extra",
+                        raw=sent,
+                    ),
+                    sent,
+                )
+            )
+            continue
+
+        m = re.search(
+            r"whenever an attacking ally you control dies or an attack action card you control is destroyed by \*\*phantasm\*\*,?\s*"
+            r"you may pay \{r\}\{r\}\{r\}\.?\s*if you do,?\s*destroy this and gain 1 action point",
+            low,
+        )
+        if m:
+            triggers.append(
+                Trigger(
+                    "on_phantasm_destroy",
+                    Effect(
+                        "pitch_pay",
+                        3,
+                        optional=True,
+                        banish_name="destroy_self_go_again",
+                        raw=sent,
+                    ),
+                    sent,
+                )
+            )
+            continue
+
+        m = re.search(
+            r"whenever you roll a ([56]) or ([56]) on a die, your brute attacks get \+(\d+)\{p\} this turn",
+            low,
+        )
+        if m:
+            triggers.append(
+                Trigger(
+                    "on_die_roll",
+                    Effect(
+                        "power",
+                        int(m.group(3)),
+                        condition="roll_ge:5",
+                        banish_name="brute_attacks_turn",
+                        raw=sent,
+                    ),
+                    sent,
+                )
+            )
+            continue
+
+        m = re.search(r"whenever you roll a 1 on a die, destroy this", low)
+        if m:
+            triggers.append(
+                Trigger(
+                    "on_die_roll",
+                    Effect("destroy_item", condition="roll_eq:1", raw=sent),
+                    sent,
+                )
+            )
+            continue
+
+        m = re.search(
+            r"the first time each turn another hero destroys a card they don'?t control,?\s*"
+            r"you may pay \{r\}\{r\}\.?\s*if you do,?\s*they destroy a non-hero permanent they control",
+            low,
+        )
+        if m:
+            triggers.append(
+                Trigger(
+                    "on_opponent_destroy",
+                    Effect(
+                        "pitch_pay",
+                        2,
+                        optional=True,
+                        banish_name="they_destroy_permanent",
+                        raw=sent,
+                    ),
+                    sent,
+                )
+            )
+            continue
+
+        m = re.search(r"when this enters the arena, choose an opponent", low)
+        if m:
+            triggers.append(
+                Trigger(
+                    "on_enters",
+                    Effect("choose_card", banish_name="opponent", raw=sent),
+                    sent,
+                )
+            )
+            continue
+
+        m = re.search(
+            r"at the beginning of their end phase, destroy this and you each gain 3\{g\}",
+            low,
+        )
+        if m:
+            triggers.append(
+                Trigger(
+                    "on_chosen_end_phase",
+                    Effect("destroy_item", raw=sent),
+                    sent,
+                )
+            )
+            triggers.append(
+                Trigger(
+                    "on_chosen_end_phase",
+                    Effect("gain_gold", 3, target="each_hero", raw=sent),
+                    sent,
+                )
+            )
+            continue
+
+        m = re.search(
+            r"when you or a card you control is the target of an attack they control, destroy this and draw a card",
+            low,
+        )
+        if m:
+            _append_destroy_then_triggers(triggers, "on_targeted_by_attack", sent, "draw a card")
+            continue
+
         # Generic "When X, Y" not caught elsewhere.
         m = re.search(r"^when (.+?), (.+)$", sent, re.I)
         if m and "this" in m.group(1).lower():
@@ -2844,6 +3758,14 @@ def parse_passive_triggers(text: str) -> tuple[Trigger, ...]:
                 when = "on_leave"
             elif "enters" in cond_part:
                 when = "on_enters"
+            if when == "on_defend" and re.search(
+                r"remove a suspense counter from an aura",
+                f"{cond_part} {clause}",
+                re.I,
+            ):
+                continue
+            if when == "on_defend" and re.search(r"\balone\b", cond_part):
+                continue
             if when == "on_defend" and re.search(r"\bclash\b", clause.lower()):
                 triggers.append(
                     Trigger("on_defend", Effect("clash", raw=clause), clause)
@@ -2878,6 +3800,91 @@ def parse_passive_triggers(text: str) -> tuple[Trigger, ...]:
                         )
                     )
                     continue
+            if when == "on_hit" and re.search(
+                r"clash with them\.?\s*if you win, destroy the top card of their deck",
+                body,
+                re.I,
+            ):
+                continue
+            if when == "on_attack" and re.search(
+                r"you may banish .+ from your graveyard\.?\s*if you do",
+                body,
+                re.I,
+            ):
+                continue
+            if when == "on_attack" and re.search(
+                r"if 2 or more cards are put into arsenals this way, this gets go again",
+                body,
+                re.I,
+            ):
+                continue
+            if when == "on_attack" and re.search(
+                r"create runechant tokens equal to the number of non-attack action cards you've played this turn",
+                body,
+                re.I,
+            ):
+                continue
+            if when == "on_attack" and re.search(
+                r"when this attacks, transform up to 1 ash you control into an aether ashwings?",
+                body,
+                re.I,
+            ):
+                continue
+            if when == "on_attack" and re.search(
+                r"the defending hero reveals their hand",
+                clause,
+                re.I,
+            ):
+                continue
+            if when == "on_attack" and re.search(
+                r"for each hyper driver destroyed this way",
+                clause,
+                re.I,
+            ):
+                continue
+            if when == "on_attack" and re.search(
+                r"it gets \+x\{p\}, where x is the number of gold you control",
+                clause,
+                re.I,
+            ):
+                continue
+            if when == "on_hit" and re.search(
+                r"remove all steam counters from an equipment, item, or weapon they control",
+                clause,
+                re.I,
+            ):
+                continue
+            if when == "on_hit" and re.search(
+                r"when this hits and you have no cards in your arsenal",
+                body,
+                re.I,
+            ):
+                continue
+            if when in ("on_attack", "on_defend") and re.search(
+                r"when this attacks or defends, your hero gets -",
+                body,
+                re.I,
+            ):
+                continue
+            if when == "on_hit" and re.search(
+                r"when this hits a hero, look at their hand and choose a card\.\s*"
+                r"search their hand, deck, and graveyard and banish",
+                body,
+                re.I,
+            ):
+                continue
+            if when == "on_hit" and re.search(
+                r"each hero who doesn't have a card in their arsenal puts the top card of their deck face-down into their arsenal",
+                body,
+                re.I,
+            ):
+                continue
+            if when == "on_hit" and re.search(
+                r"at the beginning of your end phase, put the top card of your deck face-up into your arsenal",
+                body,
+                re.I,
+            ):
+                continue
             for eff in _parse_clause_to_effects(clause, allow_this_turn=True):
                 triggers.append(Trigger(when, eff, clause))
             if not _parse_clause_to_effects(clause):
@@ -2916,10 +3923,37 @@ def parse_passive_triggers(text: str) -> tuple[Trigger, ...]:
             )
             continue
 
+        if re.search(r"^search their hand, deck, and graveyard and banish", low):
+            continue
+
         # Standalone effect sentence (no trigger word).
         if re.search(r"^additional cost\b", low):
             continue
+        if re.search(r"^as an additional cost\b", low):
+            continue
+        if re.search(r"destroy the daggers?\b", low) and re.search(
+            r"dagger you control.*deals \d+ damage", body, re.I
+        ):
+            continue
+        if re.search(
+            r"when this attacks a hero, each dagger you control deals \d+ damage",
+            sent,
+            re.I,
+        ):
+            continue
         if not re.search(r"^(when|whenever|if|while|at the|legendary|galvanize|stealth)\b", low):
+            if re.search(r"you may reveal any number of crouching tigers", body, re.I):
+                if re.search(r"^\d+ or more, this gets", low):
+                    continue
+            if re.search(
+                r"gain control of an item with cost \d+ or less they control",
+                body,
+                re.I,
+            ) and re.search(r"^otherwise,?\s*draw a card", low):
+                continue
+            if re.search(r"played or created \d+ or more auras", body, re.I):
+                if re.search(r"^\d+ or more, this gets", low):
+                    continue
             agg = _parse_effect_aggressive(sent)
             if agg and agg.kind != "destroy_item":
                 triggers.append(Trigger("on_play", agg, sent))
@@ -2965,7 +3999,10 @@ def parse_action_damage(text: str, power: int, is_attack: bool) -> tuple[int, bo
         return int(power or 0), False
     if power and power > 0:
         return int(power), "arcane" in body
-    match = re.search(r"deal (\d+)\s+(arcane\s+)?damage", body)
-    if match:
-        return int(match.group(1)), bool(match.group(2)) or "arcane damage" in body
+    for match in re.finditer(r"deal (\d+)\s+(arcane\s+)?damage", body):
+        start = max(body.rfind(".", 0, match.start()), body.rfind("{br}", 0, match.start()))
+        if re.search(r"\bif\b", body[start:match.start()]):
+            continue
+        tail = body[match.start(): match.end() + 24]
+        return int(match.group(1)), bool(match.group(2)) or "arcane damage" in tail
     return 0, False

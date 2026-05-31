@@ -21,6 +21,7 @@ from flesh_and_blood_rlbridge import effects
 
 CARDS_PATH = Path(__file__).with_name("cards.json")
 OUT_JSON = Path(__file__).with_name("unimplemented_effects.json")
+OUT_CARDS_JSON = Path(__file__).with_name("unimplemented_cards.json")
 OUT_MD = Path(__file__).with_name("unimplemented_effects.md")
 
 # Mechanics we model in environment.py (partial coverage noted in README section).
@@ -357,8 +358,25 @@ def main() -> None:
     report = scan()
     OUT_JSON.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     OUT_MD.write_text(_write_markdown(report), encoding="utf-8")
+    cards_report = {
+        "generated_at": report["generated_at"],
+        "source": OUT_JSON.name,
+        "summary": {
+            "total_with_gaps": report["summary"]["cards_with_gaps"],
+            "by_status": {
+                "partial": report["summary"].get("partial", 0),
+                "unimplemented_only": report["summary"].get("unimplemented_only", 0),
+                "unparsed": report["summary"].get("unparsed", 0),
+            },
+        },
+        "cards": report["cards"],
+    }
+    OUT_CARDS_JSON.write_text(
+        json.dumps(cards_report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
     s = report["summary"]
     print(f"Wrote {OUT_JSON} ({s['cards_with_gaps']} cards with gaps)")
+    print(f"Wrote {OUT_CARDS_JSON}")
     print(f"Wrote {OUT_MD}")
 
 
