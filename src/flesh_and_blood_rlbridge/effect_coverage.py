@@ -2719,6 +2719,29 @@ def parse_passive_triggers(text: str) -> tuple[Trigger, ...]:
             )
             continue
 
+        # "While this is defending, if you control a X token, this gets +N{d}."
+        m = re.search(
+            r"while this is defending,?\s*if you control an? ([\w][\w ]+?) tokens?,?\s*this gets \+(\d+)\{d\}",
+            sent,
+            re.I,
+        )
+        if m:
+            tok = m.group(1).strip().lower()
+            bonus = int(m.group(2))
+            triggers.append(
+                Trigger(
+                    "on_defend",
+                    Effect(
+                        "next_defense_bonus",
+                        bonus,
+                        condition=f"control_token:{tok}",
+                        raw=sent[:80],
+                    ),
+                    sent[:80],
+                )
+            )
+            continue
+
         # This enters the arena with ... (comma form handled by specific parsers below)
         m = re.search(r"^(?:when )?this enters the arena with\s*(.+)", sent, re.I)
         if m:

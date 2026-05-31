@@ -516,6 +516,11 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         self._initialized = False
         self._last_event = ""
         self._last_combat_summary: Optional[dict[str, Any]] = None
+        # Optional callback fired right after every combat resolution with a dict
+        # containing: combat, attacker_idx, defender_idx, total_power, total_block,
+        # raw_damage, damage, defender_life_before.  Set by external tools (e.g.
+        # TalisharOracle) — not used by the environment itself.
+        self.on_combat_resolve: Optional[Any] = None
         self._last_opponent_turn: Optional[dict[str, Any]] = None
         self._notices: list[str] = []
         self._pending_optionals: list[dict[str, Any]] = []
@@ -1861,6 +1866,13 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             self._event_append("Proclamation of Combat restriction ended")
         if p.class_state.get("BlockZeroCostUntilTurn", 0) and self._turn > p.class_state["BlockZeroCostUntilTurn"]:
             p.class_state["BlockZeroCostUntilTurn"] = 0
+        # Apply any action limit imposed by the opponent last turn
+        max_actions_next = p.class_state.pop("MaxActionsNextTurn", 0)
+        if max_actions_next:
+            p.class_state["MaxActionsThisTurn"] = max_actions_next
+            self._event_append(f"P{player_idx} limited to {max_actions_next} action(s) this turn")
+        else:
+            p.class_state.pop("MaxActionsThisTurn", None)
         if p.blocked_pitch_values and self._turn > p.class_state.get("BlockPitchColorUntilTurn", 0):
             p.blocked_pitch_values = set()
             p.class_state["BlockPitchColorUntilTurn"] = 0
@@ -2072,6 +2084,10 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
                     f"{card.name} blocked: only weapon and attack actions may be played "
                     "(Proclamation of Combat)"
                 )
+        max_actions = actor.class_state.get("MaxActionsThisTurn", 0)
+        if max_actions and "action" in card.card_types:
+            if actor.class_state.get("NumActionsPlayed", 0) >= max_actions:
+                return f"{card.name} blocked: limited to {max_actions} action(s) this turn"
         if actor.class_state.get("BlockZeroCostUntilTurn", 0) and self._turn <= actor.class_state["BlockZeroCostUntilTurn"]:
             if card.cost <= 0:
                 return f"{card.name} blocked: cannot play cards with base cost 0 this turn"
@@ -5687,6 +5703,22 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         if condition.startswith("steam_removed_ge:"):
             threshold = int(condition.split(":", 1)[1])
             return cs.get("LastSteamRemovedCount", 0) >= threshold
+        if condition.startswith("control_token:"):
+            token = condition.split(":", 1)[1].strip()
+            return actor.tokens.get(token_defs.normalize_token_name(token), 0) > 0
+        if condition.startswith("control_tokens:"):
+            tokens = condition.split(":", 1)[1].split(",")
+            return all(
+                actor.tokens.get(token_defs.normalize_token_name(t.strip()), 0) > 0
+                for t in tokens
+            )
+        if condition.startswith("defender_controls_token:"):
+            pending = self._pending_combat
+            if pending is None:
+                return False
+            token = condition.split(":", 1)[1].strip()
+            defender = self._players[pending.defender]
+            return defender.tokens.get(token_defs.normalize_token_name(token), 0) > 0
         return False
 
     def _apply_play_modifiers(
@@ -6975,6 +7007,79 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             self._event_append(
                 f"P{player_idx} intellect {effect.amount or 0:+d} during next end phase"
             )
+            return 0.0
+        if effect.kind == "lose_life_per_hand_card":
+            opp_idx = 1 - player_idx if effect.target == "opponent" else player_idx
+            opp = self._players[opp_idx]
+            amount = len(opp.hand)
+            if amount > 0:
+                opp.life -= amount
+                self._event_append(f"P{opp_idx} loses {amount}{{h}} (hand size)")
+            return 0.0
+        if effect.kind == "lose_life_per_dagger_hit":
+            opp_idx = 1 - player_idx if effect.target == "opponent" else player_idx
+            opp = self._players[opp_idx]
+            # Count dagger hits this chain via HitCounter on the acting player.
+            amount = actor.class_state.get("HitCounter", 0)
+            if amount > 0:
+                opp.life -= amount
+                self._event_append(f"P{opp_idx} loses {amount}{{h}} ({amount} dagger hit(s))")
+            return 0.0
+        if effect.kind == "power_per_block":
+            if combat is not None:
+                n_defenders = len(combat.reaction_cards)
+                if n_defenders > 0:
+                    combat.power += n_defenders
+                    self._event_append(f"attack gets +{n_defenders}{{p}} ({n_defenders} defending card(s))")
+            return 0.0
+        if effect.kind == "limit_actions_next_turn":
+            opp_idx = 1 - player_idx if effect.target == "opponent" else player_idx
+            self._players[opp_idx].class_state["MaxActionsNextTurn"] = 1
+            self._event_append(f"P{opp_idx} limited to 1 action next turn")
+            return 0.0
+        if effect.kind == "look_face_down":
+            # Face-down cards are not tracked separately; treat as no-op for RL.
+            self._event_append(f"P{player_idx} looks at a face-down card (look_face_down no-op)")
+            return 0.0
+        if effect.kind == "set_next_instant_return_self":
+            # Flag that the next instant card played on this chain link returns this card to hand.
+            actor.class_state["NextInstantEffect"] = "return_self"
+            if combat is not None:
+                actor.class_state["NextInstantCardId"] = combat.attack_card_id
+            self._event_append(f"P{player_idx} set: next instant returns attacker to hand")
+            return 0.0
+        if effect.kind == "set_next_instant_return_aura":
+            # Flag that the next instant card played returns an opponent aura.
+            actor.class_state["NextInstantEffect"] = "return_aura"
+            self._event_append(f"P{player_idx} set: next instant returns target aura")
+            return 0.0
+        if effect.kind == "reveal_for_blue_bonus":
+            # Reveal opponent's top card; if it's a blue pitch card, grant +3 power or +3 defense.
+            opp_idx = 1 - player_idx
+            opp = self._players[opp_idx]
+            if opp.deck:
+                top_cid = opp.deck[-1]
+                top_card = self._cards.get(top_cid)
+                if top_card is not None and getattr(top_card, "pitch", 0) == 3:
+                    if combat is not None and combat.attacker == player_idx:
+                        combat.power += 3
+                        self._event_append("Attune: top card is blue, +3{p}")
+                    elif combat is not None:
+                        combat.defense += 3
+                        self._event_append("Attune: top card is blue, +3{d}")
+            return 0.0
+        if effect.kind == "reveal_top_draconic_power":
+            # Red Hot: reveal X = draconic chain links, gain +1{p} per card with cost ≥ 3.
+            if combat is not None:
+                x = self._draconic_chain_links(player_idx)
+                revealed = actor.deck[-x:] if x > 0 else []
+                bonus = sum(
+                    1 for cid in revealed
+                    if (self._cards.get(cid) and (getattr(self._cards[cid], "cost", 0) or 0) >= 3)
+                )
+                if bonus > 0:
+                    combat.power += bonus
+                    self._event_append(f"Red Hot: revealed {x} cards, +{bonus}{{p}} from high-cost cards")
             return 0.0
         if effect.kind == "lose_game":
             if effect.target == "self":
@@ -9471,6 +9576,16 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         actor.resources -= effective_cost
         self._consume_cost_reduction(player_idx, card, effective_cost)
         actor.hand.pop(hand_idx)
+        # Check if an on-attack effect asked us to return the attack card (or an aura) on next instant.
+        _nie = actor.class_state.pop("NextInstantEffect", None)
+        if _nie == "return_self":
+            _nie_cid = actor.class_state.pop("NextInstantCardId", None)
+            if _nie_cid is not None:
+                actor.class_state["ReturnAttackCardToHand"] = _nie_cid
+        elif _nie == "return_aura":
+            actor.class_state.pop("NextInstantCardId", None)
+            # Mark so the attack resolution can bounce opponent aura (best-effort, no-op if none).
+            actor.class_state["ReturnOpponentAura"] = True
         keywords = set(card.keywords)
         go_again = self._go_again_for_play(player_idx, card, True)
         dominate = "dominate" in keywords
@@ -9653,7 +9768,22 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
             raw_damage += 1
             self._event_append("attack damage +1 this turn")
         damage = self._mitigate_damage(defender_idx, raw_damage)
+        _defender_life_before = defender.life
         defender.life -= damage
+        if self.on_combat_resolve is not None:
+            try:
+                self.on_combat_resolve({
+                    "combat": combat,
+                    "attacker_idx": attacker_idx,
+                    "defender_idx": defender_idx,
+                    "total_power": total_power,
+                    "total_block": total_block,
+                    "raw_damage": raw_damage,
+                    "damage": damage,
+                    "defender_life_before": _defender_life_before,
+                })
+            except Exception:  # noqa: BLE001 — never let oracle bugs break gameplay
+                pass
         if damage > 0:
             defender.class_state["DamageTakenThisTurn"] = (
                 defender.class_state.get("DamageTakenThisTurn", 0) + damage
@@ -9663,8 +9793,12 @@ class FleshAndBloodEnvironment(rlbridgeEnvironment):
         fused = combat.fused
         if not combat.is_weapon and combat.attack_card_id:
             skip = attacker.class_state.get("SkipGyThisCard", 0)
+            return_to_hand_cid = attacker.class_state.pop("ReturnAttackCardToHand", None)
             if skip == combat.attack_card_id:
                 attacker.class_state["SkipGyThisCard"] = 0
+            elif return_to_hand_cid == combat.attack_card_id:
+                attacker.hand.append(combat.attack_card_id)
+                self._event_append(f"{attack_card.name if attack_card else 'attack'} returned to hand by instant effect")
             else:
                 self._move_card_to_gy(attacker_idx, combat.attack_card_id)
             if attack_card is not None:

@@ -172,6 +172,16 @@ SUPPORTED_EFFECTS = {
     "banish_self_play",
     "block_arcane_prevention",
     "reveal_named_hand",
+    # New effects added to cover previously unimplemented cards
+    "lose_life_per_hand_card",    # Vipox: lose {h} equal to opponent hand count
+    "lose_life_per_dagger_hit",   # Stab Wound: lose X{h} per dagger chain hit
+    "power_per_block",            # Tenacity: +X{p} per defending card on chain
+    "limit_actions_next_turn",    # Red in the Ledger: cap opponent actions next turn
+    "look_face_down",             # Fact-Finding Mission: peek at face-down card
+    "set_next_instant_return_self",   # Gone in a Flash: next instant triggers return attack to hand
+    "set_next_instant_return_aura",   # Blast to Oblivion: next instant triggers return target aura
+    "reveal_for_blue_bonus",      # Attune with Cosmic Vibrations: reveal top, +3p/+3d if blue
+    "reveal_top_draconic_power",  # Red Hot: reveal X=draconic links, +{p} per high-cost card
 }
 
 # Only mark as unimplemented when these appear and no specific parser matched.
@@ -681,8 +691,32 @@ def _parse_trigger_clause(clause: str, *, optional: bool = False) -> Effect | No
             raw=raw,
         )
 
-    if re.match(r"^put it into your hand\.?$", c):
+    if re.search(r"put (?:it|this) into (?:its owner'?s|your) hand", c):
         return Effect("return_self_hand", raw=raw)
+
+    if re.match(r"^name a card\.?$", c):
+        return Effect("name_card", raw=raw)
+
+    if re.search(r"look at a face-down card in their (?:arsenal|equipment)", c):
+        return Effect("look_face_down", raw=raw, optional=True)
+
+    if re.search(
+        r"put a mechanologist item from your hand into the arena with cost less than or equal to the number of times you'?ve? boosted",
+        c,
+    ):
+        return Effect("put_item_in_arena", 0, optional=True, banish_name="boost_count_cost", raw=raw)
+
+    if re.search(
+        r"the next time you play an instant card this chain link,?\s*you may return this to its owner'?s hand",
+        c,
+    ):
+        return Effect("set_next_instant_return_self", optional=True, raw=raw)
+
+    if re.search(
+        r"the next time you play an instant card this chain link,?\s*you may return target aura",
+        c,
+    ):
+        return Effect("set_next_instant_return_aura", optional=True, raw=raw)
 
     m = re.search(
         r"gain control of an item with cost (\d+) or less they control\.?\s*"
@@ -763,6 +797,11 @@ def _parse_trigger_clause(clause: str, *, optional: bool = False) -> Effect | No
     if m:
         n = 1 if m.group(1) in ("a", "an", "one") else int(m.group(1))
         return Effect("draw", n, raw=raw, optional=opt)
+
+    m = re.search(r"they discard (\d+|a|an|one) cards?", c)
+    if m:
+        n = 1 if m.group(1) in ("a", "an", "one") else int(m.group(1))
+        return Effect("discard", n, target="opponent", raw=raw)
 
     return None
 
@@ -1251,6 +1290,10 @@ def _parse_extended_clause(clause: str, *, optional: bool, condition: str) -> Ef
     if m and "destroy an item" in c:
         return eff("galvanize", int(m.group(1)), optional=optional or "you may" in c)
 
+    m = re.search(r"^this gets \+(\d+)\{d\}\.?$", c)
+    if m:
+        return eff("next_defense_bonus", int(m.group(1)))
+
     m = re.search(r"the next action card you defend with this turn gets \+(\d+)\{d\}", c)
     if m:
         return eff("next_defense_bonus", int(m.group(1)))
@@ -1259,9 +1302,31 @@ def _parse_extended_clause(clause: str, *, optional: bool, condition: str) -> Ef
     if m:
         return eff("gain_life", int(m.group(1)))
 
+    m = re.search(r"your hero gets \+(\d+)(?:\{i\})?(?: until end of turn| this turn)?\.?$", c)
+    if m:
+        return eff("intellect_mod", int(m.group(1)))
+
     m = re.search(r"(?:they|that hero) lose(?:s)? (\d+)\{h\}", c)
     if m:
         return eff("lose_life", int(m.group(1)), target="opponent")
+
+    m = re.search(r"(?:they|that hero) lose(?:s)? (\d+)\{g\}", c)
+    if m:
+        return eff("lose_gold", int(m.group(1)), target="opponent")
+
+    if re.search(r"they lose \{h\} equal to the number of cards in their hand", c):
+        return eff("lose_life_per_hand_card", target="opponent")
+
+    m = re.search(r"they lose (?:x\{h\}|\{h\}), where x is the number of times a dagger has hit this combat chain", c)
+    if m:
+        return eff("lose_life_per_dagger_hit", target="opponent")
+
+    m = re.search(r"it gets \+x\{p\},?\s+where x is the number of defending cards on the combat chain", c)
+    if m:
+        return eff("power_per_block")
+
+    if re.search(r"they can'?t play or activate more than 1 action", c):
+        return eff("limit_actions_next_turn", target="opponent")
 
     m = re.search(
         r"you may attack with it an additional time this turn",
@@ -1741,7 +1806,7 @@ def _parse_extended_clause(clause: str, *, optional: bool, condition: str) -> Ef
         return eff("steal_ally", target="opponent", raw=clause.strip())
 
     m = re.search(
-        r"steal an item they control until the end of this action phase",
+        r"steal an item they control",
         c,
     )
     if m:
@@ -1776,6 +1841,9 @@ def _parse_extended_clause(clause: str, *, optional: bool, condition: str) -> Ef
     if re.search(r"put it on the bottom of its owner'?s deck", c):
         return eff("put_bottom", target="opponent")
 
+    if re.search(r"put this on the bottom of (?:its owner'?s|your) deck", c):
+        return eff("put_bottom", target="self")
+
     if re.search(r"cards and abilities cost opponents an additional \{r\} to play or activate this turn", c):
         return eff("opponent_cost_increase", 1, target="opponent")
 
@@ -1805,6 +1873,11 @@ def _parse_extended_clause(clause: str, *, optional: bool, condition: str) -> Ef
         m = re.search(r"for each (.+?), create an? (.+?) token", c)
         if m:
             return eff("for_each", token_name=m.group(2).strip(), raw=raw)
+
+    m = re.search(r"if you control an? (\w+) token,?\s*create (\d+) more", c)
+    if m:
+        return eff("create_token", int(m.group(2)), token_name=m.group(1).strip(),
+                   condition=f"control_token:{m.group(1).strip()}")
 
     grant = _parse_grant_may_play(c, raw, optional, condition)
     if grant is not None:
@@ -2238,6 +2311,56 @@ def _parse_conditional_quoted_hit_triggers(body: str) -> tuple[Trigger, ...]:
                         "schedule_end_phase",
                         banish_name="draw_up_to_intellect:opponent",
                         condition=cond,
+                        raw=m.group(0)[:120],
+                    ),
+                    m.group(0)[:80],
+                )
+            )
+
+    # "If you've dealt arcane damage this turn, this gets 'When this hits a hero, they discard a card.'"
+    m = re.search(
+        r'if you(?:\'ve| have) dealt arcane damage this turn,?\s*this gets "([^"]+)"',
+        body,
+        re.I,
+    )
+    if m:
+        inner = re.sub(r"^when this hits(?: a hero)?,?\s*", "", m.group(1).strip(), flags=re.I)
+        hit = _parse_trigger_clause(inner, optional=False)
+        if hit is not None and hit.implemented:
+            triggers.append(
+                Trigger(
+                    "on_hit",
+                    Effect(
+                        hit.kind,
+                        hit.amount,
+                        condition="arcane_dealt_turn",
+                        banish_name=hit.banish_name,
+                        target=hit.target,
+                        raw=m.group(0)[:120],
+                    ),
+                    m.group(0)[:80],
+                )
+            )
+
+    # "If you've played or created an aura this turn, this gets 'When this hits a hero, they discard a card.'"
+    m = re.search(
+        r'if you(?:\'ve| have) played or created an? aura this turn,?\s*this gets "([^"]+)"',
+        body,
+        re.I,
+    )
+    if m:
+        inner = re.sub(r"^when this hits(?: a hero)?,?\s*", "", m.group(1).strip(), flags=re.I)
+        hit = _parse_trigger_clause(inner, optional=False)
+        if hit is not None and hit.implemented:
+            triggers.append(
+                Trigger(
+                    "on_hit",
+                    Effect(
+                        hit.kind,
+                        hit.amount,
+                        condition="auras_ge:1",
+                        banish_name=hit.banish_name,
+                        target=hit.target,
                         raw=m.group(0)[:120],
                     ),
                     m.group(0)[:80],
@@ -2860,6 +2983,73 @@ def parse_play_modifiers(text: str) -> tuple[PlayModifier, ...]:
             )
         elif kind == "next_defend_combo":
             mods.append(PlayModifier(defense=int(m.group(1)), condition=kind, raw=m.group(0)[:80]))
+
+    # Token-pair defense bonus (e.g. Laughing Knee-Slappers, Plate of Tough Love).
+    for m in re.finditer(
+        r"if you control an? ([\w][\w ]+?) and an? ([\w][\w ]+?) tokens?,?\s*this gets \+(\d+)\{d\}",
+        body,
+        re.I,
+    ):
+        tok1 = m.group(1).strip().lower()
+        tok2 = m.group(2).strip().lower()
+        mods.append(
+            PlayModifier(
+                defense=int(m.group(3)),
+                condition=f"control_tokens:{tok1},{tok2}",
+                raw=m.group(0)[:80],
+            )
+        )
+
+    # Single token defense bonus (e.g. Tremor of Resistance, Stand Ground).
+    # Only match if NOT already covered by the pair pattern above.
+    _pair_spans = {
+        m2.start()
+        for m2 in re.finditer(
+            r"if you control an? ([\w][\w ]+?) and an? ([\w][\w ]+?) tokens?,?\s*this gets \+(\d+)\{d\}",
+            body,
+            re.I,
+        )
+    }
+    for m in re.finditer(
+        r"if you control an? ([\w][\w ]+?) tokens?,?\s*this gets \+(\d+)\{d\}",
+        body,
+        re.I,
+    ):
+        if m.start() in _pair_spans:
+            continue
+        tok = m.group(1).strip().lower()
+        mods.append(
+            PlayModifier(
+                defense=int(m.group(2)),
+                condition=f"control_token:{tok}",
+                raw=m.group(0)[:80],
+            )
+        )
+
+    # "If you control less Gold than an opponent, this gets +N{p}."
+    m = re.search(
+        r"if you control less gold than an opponent,?\s*this gets \+(\d+)\s*(?:\{p\}|power)",
+        body,
+        re.I,
+    )
+    if m:
+        mods.append(PlayModifier(power=int(m.group(1)), condition="less_gold_than_opponent", raw=m.group(0)[:80]))
+
+    # "If the defending hero controls an aura token, this gets +N{p}."
+    m = re.search(
+        r"if the defending hero controls an? aura tokens?,?\s*this gets \+(\d+)\s*(?:\{p\}|power)",
+        body,
+        re.I,
+    )
+    if m:
+        mods.append(
+            PlayModifier(
+                power=int(m.group(1)),
+                condition="defender_controls_token:aura",
+                raw=m.group(0)[:80],
+            )
+        )
+
     return tuple(mods)
 
 
@@ -3469,6 +3659,85 @@ def parse_triggers(text: str) -> tuple[Trigger, ...]:
                 )
             )
 
+    # Special-case: Gone in a Flash — on_attack, set up next-instant return self.
+    if re.search(
+        r"the next time you play an instant card this chain link,?\s*you may return this to its owner'?s hand",
+        body,
+        re.I,
+    ):
+        triggers.append(
+            Trigger(
+                "on_attack",
+                Effect("set_next_instant_return_self", optional=True, raw="set next instant: return self to hand"),
+                "next instant: return self",
+            )
+        )
+
+    # Special-case: Blast to Oblivion — on_attack, set up next-instant return aura.
+    if re.search(
+        r"the next time you play an instant card this chain link,?\s*you may return target aura",
+        body,
+        re.I,
+    ):
+        triggers.append(
+            Trigger(
+                "on_attack",
+                Effect("set_next_instant_return_aura", optional=True, raw="set next instant: return target aura"),
+                "next instant: return aura",
+            )
+        )
+
+    # Special-case: Attune with Cosmic Vibrations — on_attack + on_defend, reveal top for blue bonus.
+    if re.search(
+        r"(?:attacks|defends) a hero'?s? attack,?\s*reveal the top card of their deck",
+        body,
+        re.I,
+    ):
+        for when in ("on_attack", "on_defend"):
+            triggers.append(
+                Trigger(
+                    when,
+                    Effect("reveal_for_blue_bonus", raw="reveal top card for blue +3 bonus"),
+                    "attune: reveal top for blue bonus",
+                )
+            )
+
+    # Special-case: Red Hot — on_attack, reveal X draconic chain link cards for +power.
+    if re.search(
+        r"reveal the top x cards of your deck,?\s*where x is the number of draconic chain links you control",
+        body,
+        re.I,
+    ):
+        triggers.append(
+            Trigger(
+                "on_attack",
+                Effect("reveal_top_draconic_power", raw="reveal top X draconic links, +power per cost-3+"),
+                "red hot: reveal top draconic links",
+            )
+        )
+
+    # Special-case: Whittle from Bone — on_attack against marked hero, equip Graphene Chelicera token.
+    m = re.search(
+        r"when this attacks a marked hero,?\s*equip an? (.+?) token",
+        body,
+        re.I,
+    )
+    if m:
+        triggers.append(
+            Trigger(
+                "on_attack",
+                Effect(
+                    "create_token",
+                    token_name=m.group(1).strip().lower(),
+                    condition="target_marked",
+                    raw=m.group(0)[:80],
+                ),
+                m.group(0)[:80],
+            )
+        )
+        # Skip generic loop catching "attacks a marked hero" clause
+        body = body  # no mutation needed; generic loop will skip "^a hero," prefix for "a marked hero,"
+
     # On-attack: "when (this|it) attacks, <effect>".
     _douse_runeblood = re.search(
         r"when this attacks, create runechant tokens equal to the number of non-attack action cards you've played this turn\.?\s*"
@@ -3493,6 +3762,15 @@ def parse_triggers(text: str) -> tuple[Trigger, ...]:
         ):
             continue
         if re.search(r"you may look at the defending hero'?s hand", clause, re.I):
+            continue
+        # Skip special-cased on_attack triggers already handled above
+        if re.search(r"^a marked hero,", clause, re.I):
+            continue
+        if re.search(r"the next time you play an instant card this chain link", clause, re.I):
+            continue
+        if re.search(
+            r"reveal the top x cards of your deck.*draconic chain links", clause, re.I
+        ):
             continue
         if re.search(
             r"when this attacks, it gets \+x\{p\}, where x is the number of gold you control",
@@ -3533,7 +3811,7 @@ def parse_triggers(text: str) -> tuple[Trigger, ...]:
             re.I,
         ):
             continue
-        if re.search(r"^a hero,", clause, re.I):
+        if re.search(r"^a hero[,\s]", clause, re.I):
             continue
         if re.search(r"for each hyper driver destroyed this way", clause, re.I):
             m = re.search(
@@ -3772,11 +4050,32 @@ def parse_triggers(text: str) -> tuple[Trigger, ...]:
             )
         )
 
+    # Special-case: Dishonor — on_hit, lose all abilities if trio of named cards controlled.
+    if re.search(r"surging strike.*descendent gustwave.*bonds of ancestry", body, re.I) or re.search(
+        r"bonds of ancestry.*surging strike.*descendent gustwave", body, re.I
+    ):
+        triggers.append(
+            Trigger(
+                "on_hit",
+                Effect(
+                    "lose_all_abilities",
+                    condition="control:Surging Strike,Descendent Gustwave,Bonds of Ancestry",
+                    raw="if you control Surging Strike, Descendent Gustwave, and Bonds of Ancestry, lose all abilities",
+                ),
+                "dishonor: on-hit lose all abilities",
+            )
+        )
+
     # On-hit: "when(ever) (this|it) hits[ ...], <effect>".
     for m in re.finditer(r"when(?:ever)? (?:this|it) hits[^,]*,\s*([^.]*)\.?", body, re.I):
         if m.start() > 0 and body[m.start() - 1] == '"':
             continue
         clause = m.group(1).strip()
+        # Skip Dishonor's complex conditional — handled by special case above
+        if re.search(r"surging strike.*descendent gustwave", clause, re.I) or re.search(
+            r"if you control surging strike", clause, re.I
+        ):
+            continue
         if re.search(r"this gets the chosen name", body, re.I):
             continue
         if re.search(

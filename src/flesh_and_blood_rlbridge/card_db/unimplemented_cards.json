@@ -1,11 +1,11 @@
 {
-  "generated_at": "2026-05-31T20:01:43.984274+00:00",
+  "generated_at": "2026-05-31T21:54:00.929085+00:00",
   "source": "unimplemented_effects.json",
   "summary": {
-    "total_with_gaps": 203,
+    "total_with_gaps": 153,
     "by_status": {
-      "partial": 2,
-      "unimplemented_only": 56,
+      "partial": 0,
+      "unimplemented_only": 8,
       "unparsed": 145
     }
   },
@@ -37,48 +37,6 @@
       "unimplemented": [],
       "implemented": [],
       "text": "**Prism Specialization**{br}If an opponent declares an attack, they must choose this as the target of that attack if able.{br}**Spectra**"
-    },
-    {
-      "id": "attune_with_cosmic_vibrations_blue",
-      "name": "Attune with Cosmic Vibrations",
-      "pitch": 3,
-      "class": "Generic",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "other"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_attack",
-          "kind": "unimplemented",
-          "raw": "a hero or defends a hero's attack, reveal the top card of their deck"
-        }
-      ],
-      "implemented": [],
-      "text": "When this attacks a hero or defends a hero's attack, reveal the top card of their deck. If the revealed card is blue, this gets +3{p} and +3{d}."
-    },
-    {
-      "id": "attune-with-cosmic-vibrations-3",
-      "name": "attune-with-cosmic-vibrations-3---Attune with Cosmic Vibrations",
-      "pitch": 3,
-      "class": "Generic",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "other"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_attack",
-          "kind": "unimplemented",
-          "raw": "a hero or defends a hero's attack, reveal the top card of their deck"
-        }
-      ],
-      "implemented": [],
-      "text": "When this attacks a hero or defends a hero's attack, reveal the top card of their deck. If the revealed card is blue, this gets +3{p} and +3{d}."
     },
     {
       "id": "blanch_red",
@@ -165,90 +123,6 @@
       "text": "When this hits a hero, cards they own lose all colors until the end of their next turn."
     },
     {
-      "id": "blast_to_oblivion_red",
-      "name": "Blast to Oblivion",
-      "pitch": 1,
-      "class": "Generic",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "other"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_attack",
-          "kind": "unimplemented",
-          "raw": "the next time you play an instant card this chain link, you may return target aura permanent with cost 1 or less or target aura token to its owner's hand"
-        }
-      ],
-      "implemented": [],
-      "text": "When this attacks, the next time you play an instant card this chain link, you may return target aura permanent with cost 1 or less or target aura token to its owner's hand."
-    },
-    {
-      "id": "blast_to_oblivion_yellow",
-      "name": "Blast to Oblivion",
-      "pitch": 2,
-      "class": "Generic",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "other"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_attack",
-          "kind": "unimplemented",
-          "raw": "the next time you play an instant card this chain link, you may return target aura permanent with cost 1 or less or target aura token to its owner's hand"
-        }
-      ],
-      "implemented": [],
-      "text": "When this attacks, the next time you play an instant card this chain link, you may return target aura permanent with cost 1 or less or target aura token to its owner's hand."
-    },
-    {
-      "id": "blast_to_oblivion_blue",
-      "name": "Blast to Oblivion",
-      "pitch": 3,
-      "class": "Generic",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "other"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_attack",
-          "kind": "unimplemented",
-          "raw": "the next time you play an instant card this chain link, you may return target aura permanent with cost 1 or less or target aura token to its owner's hand"
-        }
-      ],
-      "implemented": [],
-      "text": "When this attacks, the next time you play an instant card this chain link, you may return target aura permanent with cost 1 or less or target aura token to its owner's hand."
-    },
-    {
-      "id": "blast-to-oblivion-1",
-      "name": "blast-to-oblivion-1---Blast to Oblivion",
-      "pitch": 1,
-      "class": "Generic",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "other"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_attack",
-          "kind": "unimplemented",
-          "raw": "the next time you play an instant card this chain link, you may return target aura permanent with cost 1 or less or target aura token to its owner's hand"
-        }
-      ],
-      "implemented": [],
-      "text": "When this attacks, the next time you play an instant card this chain link, you may return target aura permanent with cost 1 or less or target aura token to its owner's hand."
-    },
-    {
       "id": "brutus_summa_rudis",
       "name": "Brutus, Summa Rudis",
       "pitch": 0,
@@ -275,48 +149,6 @@
       "unimplemented": [],
       "implemented": [],
       "text": "You may have cards with **clash** of any class or talent in your deck.{br}If all heroes in a **clash** would fail to win, instead choose which hero wins the clash."
-    },
-    {
-      "id": "censor_red",
-      "name": "Censor",
-      "pitch": 1,
-      "class": "Generic",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "other"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_hit",
-          "kind": "unimplemented",
-          "raw": "name a card"
-        }
-      ],
-      "implemented": [],
-      "text": "When this hits a hero, name a card. They can't play the named card until the end of their next turn."
-    },
-    {
-      "id": "censor-1",
-      "name": "censor-1---Censor",
-      "pitch": 1,
-      "class": "Generic",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "other"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_hit",
-          "kind": "unimplemented",
-          "raw": "name a card"
-        }
-      ],
-      "implemented": [],
-      "text": "When this hits a hero, name a card. They can't play the named card until the end of their next turn."
     },
     {
       "id": "code_of_conduct_kill_or_be_killed",
@@ -459,74 +291,6 @@
       "text": "If an attack action card was pitched to play this, each hero chooses and destroys an ally they control.{br}If a non-attack action card was pitched to play this, each hero chooses and destroys an aura they control."
     },
     {
-      "id": "dishonor_blue",
-      "name": "Dishonor",
-      "pitch": 3,
-      "class": "Ninja",
-      "keywords": [],
-      "status": "partial",
-      "categories": [
-        "combo"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_hit",
-          "kind": "unimplemented",
-          "raw": "if you control Surging Strike, Descendent Gustwave, and Bonds of Ancestry, that hero loses all abilities for the rest of the game"
-        }
-      ],
-      "implemented": [
-        {
-          "source": "trigger",
-          "when": "on_play",
-          "kind": "power",
-          "raw": "this gets +2{p}.. When this hits a hero, if you control Surging Strike, Descende"
-        },
-        {
-          "source": "trigger",
-          "when": "on_play",
-          "kind": "power",
-          "raw": "Combo - If Bonds of Ancestry was the last attack this combat chain, this gets +2{p}"
-        }
-      ],
-      "text": "**Combo** - If Bonds of Ancestry was the last attack this combat chain, this gets +2{p}.{br}When this hits a hero, if you control Surging Strike, Descendent Gustwave, and Bonds of Ancestry, that hero loses all abilities for the rest of the game."
-    },
-    {
-      "id": "dishonor-3",
-      "name": "dishonor-3---Dishonor",
-      "pitch": 3,
-      "class": "Ninja",
-      "keywords": [],
-      "status": "partial",
-      "categories": [
-        "combo"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_hit",
-          "kind": "unimplemented",
-          "raw": "if you control Surging Strike, Descendent Gustwave, and Bonds of Ancestry, that hero loses all abilities for the rest of the game"
-        }
-      ],
-      "implemented": [
-        {
-          "source": "trigger",
-          "when": "on_play",
-          "kind": "power",
-          "raw": "this gets +2{p}.. When this hits a hero, if you control Surging Strike, Descende"
-        },
-        {
-          "source": "trigger",
-          "when": "on_play",
-          "kind": "power",
-          "raw": "Combo - If Bonds of Ancestry was the last attack this combat chain, this gets +2{p}"
-        }
-      ],
-      "text": "**Combo** - If Bonds of Ancestry was the last attack this combat chain, this gets +2{p}.{br}When this hits a hero, if you control Surging Strike, Descendent Gustwave, and Bonds of Ancestry, that hero loses all abilities for the rest of the game."
-    },
-    {
       "id": "divvy_up_blue",
       "name": "Divvy Up",
       "pitch": 3,
@@ -611,48 +375,6 @@
       "text": "Choose up to 2 attack action cards with cost 0 or more on the active chain link. Return them to their owner's hand when the chain link resolves."
     },
     {
-      "id": "endless_arrow_red",
-      "name": "Endless Arrow",
-      "pitch": 1,
-      "class": "Ranger",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "other"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_hit",
-          "kind": "unimplemented",
-          "raw": "put it into its owner's hand"
-        }
-      ],
-      "implemented": [],
-      "text": "When this hits, put it into its owner's hand."
-    },
-    {
-      "id": "endless-arrow-1",
-      "name": "endless-arrow-1---Endless Arrow",
-      "pitch": 1,
-      "class": "Ranger",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "other"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_hit",
-          "kind": "unimplemented",
-          "raw": "put it into its owner's hand"
-        }
-      ],
-      "implemented": [],
-      "text": "When this hits, put it into its owner's hand."
-    },
-    {
       "id": "erase_face_red",
       "name": "Erase Face",
       "pitch": 1,
@@ -695,90 +417,6 @@
       "text": "When this hits a hero, cards they own lose all class and talent types until the end of their next turn."
     },
     {
-      "id": "escalate_order_red",
-      "name": "Escalate Order",
-      "pitch": 1,
-      "class": "Generic",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "other"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_attack",
-          "kind": "unimplemented",
-          "raw": "if you control a Toughness token, create 3 more"
-        }
-      ],
-      "implemented": [],
-      "text": "When this attacks, if you control a Toughness token, create 3 more."
-    },
-    {
-      "id": "escalate_violence_blue",
-      "name": "Escalate Violence",
-      "pitch": 3,
-      "class": "Generic",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "other"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_attack",
-          "kind": "unimplemented",
-          "raw": "if you control a Might token, create 3 more"
-        }
-      ],
-      "implemented": [],
-      "text": "When this attacks, if you control a Might token, create 3 more."
-    },
-    {
-      "id": "escalate-order-1",
-      "name": "escalate-order-1---Escalate Order",
-      "pitch": 1,
-      "class": "Generic",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "other"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_attack",
-          "kind": "unimplemented",
-          "raw": "if you control a Toughness token, create 3 more"
-        }
-      ],
-      "implemented": [],
-      "text": "When this attacks, if you control a Toughness token, create 3 more."
-    },
-    {
-      "id": "escalate-violence-3",
-      "name": "escalate-violence-3---Escalate Violence",
-      "pitch": 3,
-      "class": "Generic",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "other"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_attack",
-          "kind": "unimplemented",
-          "raw": "if you control a Might token, create 3 more"
-        }
-      ],
-      "implemented": [],
-      "text": "When this attacks, if you control a Might token, create 3 more."
-    },
-    {
       "id": "fabric_of_spring_yellow",
       "name": "Fabric of Spring",
       "pitch": 2,
@@ -805,132 +443,6 @@
       "unimplemented": [],
       "implemented": [],
       "text": "**Legendary**\r\nEquip Fyendal's Spring Tunic. If you don't, **negate** this."
-    },
-    {
-      "id": "fact_finding_mission_red",
-      "name": "Fact-Finding Mission",
-      "pitch": 1,
-      "class": "Generic",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "equipment_mod"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_hit",
-          "kind": "unimplemented",
-          "raw": "you may look at a face-down card in their arsenal or equipment zones"
-        }
-      ],
-      "implemented": [],
-      "text": "When this hits a hero, you may look at a face-down card in their arsenal or equipment zones."
-    },
-    {
-      "id": "fact_finding_mission_yellow",
-      "name": "Fact-Finding Mission",
-      "pitch": 2,
-      "class": "Generic",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "equipment_mod"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_hit",
-          "kind": "unimplemented",
-          "raw": "you may look at a face-down card in their arsenal or equipment zones"
-        }
-      ],
-      "implemented": [],
-      "text": "When this hits a hero, you may look at a face-down card in their arsenal or equipment zones."
-    },
-    {
-      "id": "fact_finding_mission_blue",
-      "name": "Fact-Finding Mission",
-      "pitch": 3,
-      "class": "Generic",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "equipment_mod"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_hit",
-          "kind": "unimplemented",
-          "raw": "you may look at a face-down card in their arsenal or equipment zones"
-        }
-      ],
-      "implemented": [],
-      "text": "When this hits a hero, you may look at a face-down card in their arsenal or equipment zones."
-    },
-    {
-      "id": "fact-finding-mission-1",
-      "name": "fact-finding-mission-1---Fact-Finding Mission",
-      "pitch": 1,
-      "class": "Generic",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "equipment_mod"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_hit",
-          "kind": "unimplemented",
-          "raw": "you may look at a face-down card in their arsenal or equipment zones"
-        }
-      ],
-      "implemented": [],
-      "text": "When this hits a hero, you may look at a face-down card in their arsenal or equipment zones."
-    },
-    {
-      "id": "fight_fair_red",
-      "name": "Fight Fair",
-      "pitch": 1,
-      "class": "Generic",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "other"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_hit",
-          "kind": "unimplemented",
-          "raw": "put this on the bottom of its owner's deck"
-        }
-      ],
-      "implemented": [],
-      "text": "If this is defended by a Reviled card, this gets +1{p}.{br}When this hits a Reviled hero, put this on the bottom of its owner's deck."
-    },
-    {
-      "id": "fight-fair-1",
-      "name": "fight-fair-1---Fight Fair",
-      "pitch": 1,
-      "class": "Generic",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "other"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_hit",
-          "kind": "unimplemented",
-          "raw": "put this on the bottom of its owner's deck"
-        }
-      ],
-      "implemented": [],
-      "text": "If this is defended by a Reviled card, this gets +1{p}.{br}When this hits a Reviled hero, put this on the bottom of its owner's deck."
     },
     {
       "id": "florian_rotwood_harbinger",
@@ -1099,48 +611,6 @@
       "unimplemented": [],
       "implemented": [],
       "text": "{br}If this would be put into a graveyard, instead remove it from the game."
-    },
-    {
-      "id": "gone_in_a_flash_red",
-      "name": "Gone in a Flash",
-      "pitch": 1,
-      "class": "Generic",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "other"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_attack",
-          "kind": "unimplemented",
-          "raw": "the next time you play an instant card this chain link, you may return this to its owner's hand"
-        }
-      ],
-      "implemented": [],
-      "text": "When this attacks, the next time you play an instant card this chain link, you may return this to its owner's hand."
-    },
-    {
-      "id": "gone-in-a-flash-1",
-      "name": "gone-in-a-flash-1---Gone in a Flash",
-      "pitch": 1,
-      "class": "Generic",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "other"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_attack",
-          "kind": "unimplemented",
-          "raw": "the next time you play an instant card this chain link, you may return this to its owner's hand"
-        }
-      ],
-      "implemented": [],
-      "text": "When this attacks, the next time you play an instant card this chain link, you may return this to its owner's hand."
     },
     {
       "id": "halo_of_lumina_light",
@@ -1364,48 +834,6 @@
       "unimplemented": [],
       "implemented": [],
       "text": "**Essence of Ice**{br}If it's not your turn, you may play blue non-attack action cards from your arsenal as though they were instants.{br}Whenever you play an Ice card during an opponent's turn, create a Frostbite token under their control."
-    },
-    {
-      "id": "kiss_of_death_red",
-      "name": "Kiss of Death",
-      "pitch": 1,
-      "class": "Assassin",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "stealth"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_hit",
-          "kind": "unimplemented",
-          "raw": "they lose 1{g}"
-        }
-      ],
-      "implemented": [],
-      "text": "**Stealth**{br}When this hits a hero, they lose 1{g}."
-    },
-    {
-      "id": "kiss-of-death-1",
-      "name": "kiss-of-death-1---Kiss of Death",
-      "pitch": 1,
-      "class": "Assassin",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "stealth"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_hit",
-          "kind": "unimplemented",
-          "raw": "they lose 1{g}"
-        }
-      ],
-      "implemented": [],
-      "text": "**Stealth**{br}When this hits a hero, they lose 1{g}."
     },
     {
       "id": "laughing_knee_slappers",
@@ -1771,48 +1199,6 @@
       "text": "If you've completed a contract this turn, create 4 Silver tokens."
     },
     {
-      "id": "phantasmal_symbiosis_yellow",
-      "name": "Phantasmal Symbiosis",
-      "pitch": 2,
-      "class": "Illusionist",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "other"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_attack",
-          "kind": "unimplemented",
-          "raw": "name a card"
-        }
-      ],
-      "implemented": [],
-      "text": "When this attacks, name a card. Cards with that name are Illusionist until end of turn.{br}**Phantasm**"
-    },
-    {
-      "id": "phantasmal-symbiosis-2",
-      "name": "phantasmal-symbiosis-2---Phantasmal Symbiosis",
-      "pitch": 2,
-      "class": "Illusionist",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "other"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_attack",
-          "kind": "unimplemented",
-          "raw": "name a card"
-        }
-      ],
-      "implemented": [],
-      "text": "When this attacks, name a card. Cards with that name are Illusionist until end of turn.{br}**Phantasm**"
-    },
-    {
       "id": "pick_yourself_up_off_the_floor",
       "name": "Pick Yourself Up Off the Floor",
       "pitch": 0,
@@ -2097,48 +1483,6 @@
       "text": "**Evo Upgrade** - When this attacks a hero, they reveal X cards from their hand, where X is the number of Evos you have equipped. Choose an action card with {d} less than X, then add it to this chain link as a defending card."
     },
     {
-      "id": "pursuit_of_knowledge_blue",
-      "name": "Pursuit of Knowledge",
-      "pitch": 3,
-      "class": "Generic",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "other"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_hit",
-          "kind": "unimplemented",
-          "raw": "your hero gets +1 until end of turn"
-        }
-      ],
-      "implemented": [],
-      "text": "When this hits, your hero gets +1{i} until end of turn."
-    },
-    {
-      "id": "pursuit-of-knowledge-3",
-      "name": "pursuit-of-knowledge-3---Pursuit of Knowledge",
-      "pitch": 3,
-      "class": "Generic",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "other"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_hit",
-          "kind": "unimplemented",
-          "raw": "your hero gets +1 until end of turn"
-        }
-      ],
-      "implemented": [],
-      "text": "When this hits, your hero gets +1{i} until end of turn."
-    },
-    {
       "id": "ray_of_hope_yellow",
       "name": "Ray of Hope",
       "pitch": 2,
@@ -2221,90 +1565,6 @@
       "unimplemented": [],
       "implemented": [],
       "text": "**Combo** - If Head Jab was the last attack this combat chain, this gets \"When this hits a hero, they put a card from their hand on top of their deck.\""
-    },
-    {
-      "id": "red_hot_red",
-      "name": "Red Hot",
-      "pitch": 1,
-      "class": "Generic",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "other"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_attack",
-          "kind": "unimplemented",
-          "raw": "reveal the top X cards of your deck, where X is the number of Draconic chain links you control"
-        }
-      ],
-      "implemented": [],
-      "text": "**Dromai or Fai Specialization**{br}**Rupture** - If this is played as chain link 4 or higher, it gets \"When this attacks, reveal the top X cards of your deck, where X is the number of Draconic chain links you control. Deal damage equal to the number of red cards revealed this way to any target, then shuffle.\""
-    },
-    {
-      "id": "red_in_the_ledger_red",
-      "name": "Red in the Ledger",
-      "pitch": 1,
-      "class": "Ranger",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "other"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_hit",
-          "kind": "unimplemented",
-          "raw": "they can't play or activate more than 1 action during their next turn"
-        }
-      ],
-      "implemented": [],
-      "text": "**Azalea Specialization**{br}When this hits a hero, they can't play or activate more than 1 action during their next turn."
-    },
-    {
-      "id": "red-hot-1",
-      "name": "red-hot-1---Red Hot",
-      "pitch": 1,
-      "class": "Generic",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "other"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_attack",
-          "kind": "unimplemented",
-          "raw": "reveal the top X cards of your deck, where X is the number of Draconic chain links you control"
-        }
-      ],
-      "implemented": [],
-      "text": "**Dromai or Fai Specialization**{br}**Rupture** - If this is played as chain link 4 or higher, it gets \"When this attacks, reveal the top X cards of your deck, where X is the number of Draconic chain links you control. Deal damage equal to the number of red cards revealed this way to any target, then shuffle.\""
-    },
-    {
-      "id": "red-in-the-ledger-1",
-      "name": "red-in-the-ledger-1---Red in the Ledger",
-      "pitch": 1,
-      "class": "Ranger",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "other"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_hit",
-          "kind": "unimplemented",
-          "raw": "they can't play or activate more than 1 action during their next turn"
-        }
-      ],
-      "implemented": [],
-      "text": "**Azalea Specialization**{br}When this hits a hero, they can't play or activate more than 1 action during their next turn."
     },
     {
       "id": "reek_of_corruption_red",
@@ -2623,48 +1883,6 @@
       "text": "At the start of each opposing hero's turn, they may create a Cracked Bauble in their hand. If they do, you create a Gold token."
     },
     {
-      "id": "stab_wound_blue",
-      "name": "Stab Wound",
-      "pitch": 3,
-      "class": "Assassin",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "other"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_hit",
-          "kind": "unimplemented",
-          "raw": "they lose X{h}, where X is the number of times a dagger has hit this combat chain"
-        }
-      ],
-      "implemented": [],
-      "text": "When this hits a hero, they lose X{h}, where X is the number of times a dagger has hit this combat chain."
-    },
-    {
-      "id": "stab-wound-3",
-      "name": "stab-wound-3---Stab Wound",
-      "pitch": 3,
-      "class": "Assassin",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "other"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_hit",
-          "kind": "unimplemented",
-          "raw": "they lose X{h}, where X is the number of times a dagger has hit this combat chain"
-        }
-      ],
-      "implemented": [],
-      "text": "When this hits a hero, they lose X{h}, where X is the number of times a dagger has hit this combat chain."
-    },
-    {
       "id": "stand_ground",
       "name": "Stand Ground",
       "pitch": 0,
@@ -2785,48 +2003,6 @@
       "unimplemented": [],
       "implemented": [],
       "text": "**Yorick Specialization**{br}Each other hero chooses and creates a token that hasn't been chosen; Aether Ashwing, Embodiment of Earth, Embodiment of Lightning, Ponder, Quicken, Runechant, Seismic Surge, Soul Shackle, Spectral Shield, Zen State.{br}You create a Copper, Silver, and Gold."
-    },
-    {
-      "id": "tenacity_yellow",
-      "name": "Tenacity",
-      "pitch": 2,
-      "class": "Generic",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "other"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_attack",
-          "kind": "unimplemented",
-          "raw": "it gets +X{p}, where X is the number of defending cards on the combat chain"
-        }
-      ],
-      "implemented": [],
-      "text": "When this attacks, it gets +X{p}, where X is the number of defending cards on the combat chain."
-    },
-    {
-      "id": "tenacity-2",
-      "name": "tenacity-2---Tenacity",
-      "pitch": 2,
-      "class": "Generic",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "other"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_attack",
-          "kind": "unimplemented",
-          "raw": "it gets +X{p}, where X is the number of defending cards on the combat chain"
-        }
-      ],
-      "implemented": [],
-      "text": "When this attacks, it gets +X{p}, where X is the number of defending cards on the combat chain."
     },
     {
       "id": "testament_of_valahai",
@@ -3009,132 +2185,6 @@
       "text": "**Suspense**{br}When this leaves the arena, {t} target Brute hero. They don't {u} during their next end phase."
     },
     {
-      "id": "undercover_acquisition_red",
-      "name": "Undercover Acquisition",
-      "pitch": 1,
-      "class": "Assassin",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "stealth"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_hit",
-          "kind": "unimplemented",
-          "raw": "steal an item they control"
-        }
-      ],
-      "implemented": [],
-      "text": "**Stealth**{br}When this hits a hero, **steal** an item they control."
-    },
-    {
-      "id": "undercover-acquisition-1",
-      "name": "undercover-acquisition-1---Undercover Acquisition",
-      "pitch": 1,
-      "class": "Assassin",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "stealth"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_hit",
-          "kind": "unimplemented",
-          "raw": "steal an item they control"
-        }
-      ],
-      "implemented": [],
-      "text": "**Stealth**{br}When this hits a hero, **steal** an item they control."
-    },
-    {
-      "id": "urgent_delivery_red",
-      "name": "Urgent Delivery",
-      "pitch": 1,
-      "class": "Mechanologist",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "other"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_hit",
-          "kind": "unimplemented",
-          "raw": "you may put a Mechanologist item from your hand into the arena with cost less than or equal to the number of times you've boosted this combat chain"
-        }
-      ],
-      "implemented": [],
-      "text": "When this hits, you may put a Mechanologist item from your hand into the arena with cost less than or equal to the number of times you've **boosted** this combat chain."
-    },
-    {
-      "id": "urgent_delivery_yellow",
-      "name": "Urgent Delivery",
-      "pitch": 2,
-      "class": "Mechanologist",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "other"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_hit",
-          "kind": "unimplemented",
-          "raw": "you may put a Mechanologist item from your hand into the arena with cost less than or equal to the number of times you've boosted this combat chain"
-        }
-      ],
-      "implemented": [],
-      "text": "When this hits, you may put a Mechanologist item from your hand into the arena with cost less than or equal to the number of times you've **boosted** this combat chain."
-    },
-    {
-      "id": "urgent_delivery_blue",
-      "name": "Urgent Delivery",
-      "pitch": 3,
-      "class": "Mechanologist",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "other"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_hit",
-          "kind": "unimplemented",
-          "raw": "you may put a Mechanologist item from your hand into the arena with cost less than or equal to the number of times you've boosted this combat chain"
-        }
-      ],
-      "implemented": [],
-      "text": "When this hits, you may put a Mechanologist item from your hand into the arena with cost less than or equal to the number of times you've **boosted** this combat chain."
-    },
-    {
-      "id": "urgent-delivery-1",
-      "name": "urgent-delivery-1---Urgent Delivery",
-      "pitch": 1,
-      "class": "Mechanologist",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "other"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_hit",
-          "kind": "unimplemented",
-          "raw": "you may put a Mechanologist item from your hand into the arena with cost less than or equal to the number of times you've boosted this combat chain"
-        }
-      ],
-      "implemented": [],
-      "text": "When this hits, you may put a Mechanologist item from your hand into the arena with cost less than or equal to the number of times you've **boosted** this combat chain."
-    },
-    {
       "id": "venomback_fabric_yellow",
       "name": "Venomback Fabric",
       "pitch": 2,
@@ -3161,48 +2211,6 @@
       "unimplemented": [],
       "implemented": [],
       "text": "Equip Scabskin Leathers. If you don't, **negate** this."
-    },
-    {
-      "id": "vipox_red",
-      "name": "Vipox",
-      "pitch": 1,
-      "class": "Generic",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "other"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_hit",
-          "kind": "unimplemented",
-          "raw": "they lose {h} equal to the number of cards in their hand"
-        }
-      ],
-      "implemented": [],
-      "text": "When this hits a hero, they lose {h} equal to the number of cards in their hand."
-    },
-    {
-      "id": "vipox-1",
-      "name": "vipox-1---Vipox",
-      "pitch": 1,
-      "class": "Generic",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "other"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_hit",
-          "kind": "unimplemented",
-          "raw": "they lose {h} equal to the number of cards in their hand"
-        }
-      ],
-      "implemented": [],
-      "text": "When this hits a hero, they lose {h} equal to the number of cards in their hand."
     },
     {
       "id": "visit_the_golden_anvil_blue",
@@ -3276,90 +2284,6 @@
       "unimplemented": [],
       "implemented": [],
       "text": "Starting with the hero to your left, each hero chooses war or peace.{br}If they choose war, the only actions they may play or activate during their next turn are weapon and attack actions.{br}If they choose peace, the only actions they may play or activate during their next turn are non-weapon non-attack actions."
-    },
-    {
-      "id": "whittle_from_bone_red",
-      "name": "Whittle from Bone",
-      "pitch": 1,
-      "class": "Assassin",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "stealth"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_attack",
-          "kind": "unimplemented",
-          "raw": "a marked hero, equip a Graphene Chelicera token"
-        }
-      ],
-      "implemented": [],
-      "text": "**Stealth**{br}When this attacks a **marked** hero, equip a Graphene Chelicera token."
-    },
-    {
-      "id": "whittle_from_bone_yellow",
-      "name": "Whittle from Bone",
-      "pitch": 2,
-      "class": "Assassin",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "stealth"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_attack",
-          "kind": "unimplemented",
-          "raw": "a marked hero, equip a Graphene Chelicera token"
-        }
-      ],
-      "implemented": [],
-      "text": "**Stealth**{br}When this attacks a **marked** hero, equip a Graphene Chelicera token."
-    },
-    {
-      "id": "whittle_from_bone_blue",
-      "name": "Whittle from Bone",
-      "pitch": 3,
-      "class": "Assassin",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "stealth"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_attack",
-          "kind": "unimplemented",
-          "raw": "a marked hero, equip a Graphene Chelicera token"
-        }
-      ],
-      "implemented": [],
-      "text": "**Stealth**{br}When this attacks a **marked** hero, equip a Graphene Chelicera token."
-    },
-    {
-      "id": "whittle-from-bone-1",
-      "name": "whittle-from-bone-1---Whittle from Bone",
-      "pitch": 1,
-      "class": "Assassin",
-      "keywords": [],
-      "status": "unimplemented_only",
-      "categories": [
-        "stealth"
-      ],
-      "unimplemented": [
-        {
-          "source": "trigger",
-          "when": "on_attack",
-          "kind": "unimplemented",
-          "raw": "a marked hero, equip a Graphene Chelicera token"
-        }
-      ],
-      "implemented": [],
-      "text": "**Stealth**{br}When this attacks a **marked** hero, equip a Graphene Chelicera token."
     }
   ]
 }
