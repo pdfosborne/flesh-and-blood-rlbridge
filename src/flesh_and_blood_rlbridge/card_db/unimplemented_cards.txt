@@ -1,0 +1,447 @@
+alluring_inducement_yellow	partial	Alluring Inducement	2
+amethyst_tiara	unimplemented_only	Amethyst Tiara	0
+annexation_of_all_things_known_yellow	unparsed	Annexation of All Things Known	2
+annexation_of_grandeur_yellow	unparsed	Annexation of Grandeur	2
+apocalypse_automaton_red	unparsed	Apocalypse Automaton	1
+arc_light_sentinel_yellow	unparsed	Arc Light Sentinel	2
+arknight_ascendancy_red	partial	Arknight Ascendancy	1
+arousing_wave	unimplemented_only	Arousing Wave	0
+attune_with_cosmic_vibrations_blue	unimplemented_only	Attune with Cosmic Vibrations	3
+awakening_blue	partial	Awakening	3
+azvolai	unparsed	Azvolai	0
+barbed_barrage_red	unparsed	Barbed Barrage	1
+barbed_castaway	partial	Barbed Castaway	0
+barbed_undertow_red	unimplemented_only	Barbed Undertow	1
+barkbone_strapping	unimplemented_only	Barkbone Strapping	0
+battlefield_beacon_yellow	partial	Battlefield Beacon	2
+be_like_water_red	partial	Be Like Water	1
+be_like_water_yellow	partial	Be Like Water	2
+be_like_water_blue	partial	Be Like Water	3
+benefactor_of_bloodworth_goldmane	partial	Benefactor of Bloodworth Goldmane	0
+billowing_mirage_red	partial	Billowing Mirage	1
+billowing_mirage_yellow	partial	Billowing Mirage	2
+billowing_mirage_blue	partial	Billowing Mirage	3
+bingo_red	partial	Bingo	1
+blanch_red	unimplemented_only	Blanch	1
+blanch_yellow	unimplemented_only	Blanch	2
+blanch_blue	unimplemented_only	Blanch	3
+blast_to_oblivion_red	unimplemented_only	Blast to Oblivion	1
+blast_to_oblivion_yellow	unimplemented_only	Blast to Oblivion	2
+blast_to_oblivion_blue	unimplemented_only	Blast to Oblivion	3
+blood_runs_deep_red	partial	Blood Runs Deep	1
+bolfar_bear_hands	partial	Bolfar, Bear Hands	0
+bonds_of_agony_blue	partial	Bonds of Agony	3
+bone_head_barrier_yellow	unparsed	Bone Head Barrier	2
+brain_freeze_red	unimplemented_only	Brain Freeze	1
+brain_freeze_yellow	unimplemented_only	Brain Freeze	2
+brain_freeze_blue	unimplemented_only	Brain Freeze	3
+brand_with_cinderclaw_red	partial	Brand with Cinderclaw	1
+brand_with_cinderclaw_yellow	partial	Brand with Cinderclaw	2
+brand_with_cinderclaw_blue	partial	Brand with Cinderclaw	3
+bravo_flattering_showman	partial	Bravo, Flattering Showman	0
+brevant_civic_protector	unparsed	Brevant, Civic Protector	0
+brush_of_heavenly_rites	partial	Brush of Heavenly Rites	0
+brutus_summa_rudis	unparsed	Brutus, Summa Rudis	0
+bunker_beard	unimplemented_only	Bunker Beard	0
+buzzsaw_trap_blue	unparsed	Buzzsaw Trap	3
+censor_red	unimplemented_only	Censor	1
+cindra_dracai_of_retribution	partial	Cindra, Dracai of Retribution	0
+clash_of_bravado_yellow	unparsed	Clash of Bravado	2
+clash_of_shields_yellow	unparsed	Clash of Shields	2
+cleave_red	partial	Cleave	1
+coax_a_commotion_red	partial	Coax a Commotion	1
+code_of_conduct_kill_or_be_killed	unparsed	Code of Conduct: Kill or Be Killed	0
+cogwerx_dovetail_red	partial	Cogwerx Dovetail	1
+concealed_blade_blue	partial	Concealed Blade	3
+concoct-disorder-1	partial	Concoct Disorder	1
+concoct-disorder-2	partial	Concoct Disorder	2
+concoct-disorder-3	partial	Concoct Disorder	3
+cosmo_scroll_of_ancestral_tapestry	partial	Cosmo, Scroll of Ancestral Tapestry	0
+courage_of_bladehold	partial	Courage of Bladehold	0
+cracker_bauble_yellow	unparsed	Cracker Bauble	2
+crash_down_the_gates_red	partial	Crash Down the Gates	1
+crash_down_the_gates_yellow	partial	Crash Down the Gates	2
+crash_down_the_gates_blue	partial	Crash Down the Gates	3
+crazy_brew_blue	partial	Crazy Brew	3
+cromai	unparsed	Cromai	0
+crow_s_nest	unparsed	Crow's Nest	0
+crown_of_providence	unparsed	Crown of Providence	0
+crushing_impact	unparsed	Crushing Impact	0
+cryptic_crossing_yellow	unparsed	Cryptic Crossing	2
+danger_digits	partial	Danger Digits	0
+data_doll_mkii	unparsed	Data Doll MKII	0
+dead_eye_yellow	partial	Dead Eye	2
+demolition_protocol_red	unimplemented_only	Demolition Protocol	1
+den_of_the_spider_red	unparsed	Den of the Spider	1
+dense_blue_mist_blue	unparsed	Dense Blue Mist	3
+deny_redemption_red	partial	Deny Redemption	1
+diabolic_ultimatum_red	unparsed	Diabolic Ultimatum	1
+diamond_hands	unparsed	Diamond Hands	0
+dishonor_blue	partial	Dishonor	3
+divvy_up_blue	unparsed	Divvy Up	3
+dominia	unparsed	Dominia	0
+douse_in_runeblood_red	partial	Douse in Runeblood	1
+dracona_optimai	unparsed	Dracona Optimai	0
+drag-down-1	unparsed	Drag Down	1
+drag-down-2	unparsed	Drag Down	2
+drag-down-3	unparsed	Drag Down	3
+dream_weavers	partial	Dream Weavers	0
+drive_brake	unparsed	Drive Brake	0
+dusk_path_pilgrimage_red	partial	Dusk Path Pilgrimage	1
+dusk_path_pilgrimage_yellow	partial	Dusk Path Pilgrimage	2
+dusk_path_pilgrimage_blue	partial	Dusk Path Pilgrimage	3
+earthlore_bounty	unparsed	Earthlore Bounty	0
+echo_casque	unparsed	Echo Casque	0
+eclipse_existence_blue	unparsed	Eclipse Existence	3
+electromagnetic_somersault_red	unparsed	Electromagnetic Somersault	1
+electromagnetic_somersault_yellow	unparsed	Electromagnetic Somersault	2
+electromagnetic_somersault_blue	unparsed	Electromagnetic Somersault	3
+encase_red	partial	Encase	1
+endless_arrow_red	unimplemented_only	Endless Arrow	1
+enigma_new_moon	unimplemented_only	Enigma, New Moon	0
+erase_face_red	unimplemented_only	Erase Face	1
+escalate_bloodshed_red	unparsed	Escalate Bloodshed	1
+escalate_order_red	unimplemented_only	Escalate Order	1
+escalate_violence_blue	unimplemented_only	Escalate Violence	3
+evo_atom_breaker_red	unparsed	Evo Atom Breaker	1
+evo_circuit_breaker_red	unparsed	Evo Circuit Breaker	1
+evo_engine_room_yellow	partial	Evo Engine Room	2
+evo_face_breaker_red	unparsed	Evo Face Breaker	1
+evo_mach_breaker_red	unparsed	Evo Mach Breaker	1
+evo_thruster_yellow	partial	Evo Thruster	2
+fabric_of_spring_yellow	unparsed	Fabric of Spring	2
+fact_finding_mission_red	unimplemented_only	Fact-Finding Mission	1
+fact_finding_mission_yellow	unimplemented_only	Fact-Finding Mission	2
+fact_finding_mission_blue	unimplemented_only	Fact-Finding Mission	3
+fatigue_shot_red	unimplemented_only	Fatigue Shot	1
+fatigue_shot_yellow	unimplemented_only	Fatigue Shot	2
+fatigue_shot_blue	unimplemented_only	Fatigue Shot	3
+feign_death_yellow	unparsed	Feign Death	2
+fight_fair_red	unimplemented_only	Fight Fair	1
+fightmaster_kox	partial	Fightmaster Kox	0
+figment_of_judgment_yellow	unparsed	Figment of Judgment	2
+final_act_red	unimplemented_only	Final Act	1
+fist_pump	unparsed	Fist Pump	0
+flex_red	unimplemented_only	Flex	1
+flex_yellow	unimplemented_only	Flex	2
+flex_blue	unimplemented_only	Flex	3
+flick_knives	partial	Flick Knives	0
+flicker_wisp_yellow	partial	Flicker Wisp	2
+florian_rotwood_harbinger	unparsed	Florian, Rotwood Harbinger	0
+flurry_foot_dance_yellow	unparsed	Flurry Foot Dance	2
+forked_lightning_red	unparsed	Forked Lightning	1
+fractal_replication_red	unparsed	Fractal Replication	1
+frankie_make_ends_meat	partial	Frankie, Make Ends Meat	0
+frazzle_red	unimplemented_only	Frazzle	1
+frazzle_yellow	unimplemented_only	Frazzle	2
+frazzle_blue	unimplemented_only	Frazzle	3
+freezing_point_red	partial	Freezing Point	1
+frightmare_red	unparsed	Frightmare	1
+frontline_scout_red	partial	Frontline Scout	1
+frontline_scout_yellow	partial	Frontline Scout	2
+frontline_scout_blue	partial	Frontline Scout	3
+frost_lock_blue	partial	Frost Lock	3
+gallow_end_of_the_line_yellow	partial	Gallow, End of the Line	2
+gambler_s_gloves	unparsed	Gambler's Gloves	0
+gang_robbery_yellow	unimplemented_only	Gang Robbery	2
+gauntlets_of_iron_will	unparsed	Gauntlets of Iron Will	0
+genesis_yellow	unparsed	Genesis	2
+genis_wotchuneed	partial	Genis Wotchuneed	0
+gesture_of_goodwill_blue	unparsed	Gesture of Goodwill	3
+glacial_horns	partial	Glacial Horns	0
+gold_hunter_longboat_yellow	unparsed	Gold Hunter Longboat	2
+goldfin_harpoon_yellow	unparsed	Goldfin Harpoon	0
+gone_in_a_flash_red	unimplemented_only	Gone in a Flash	1
+gore_belching_red	unimplemented_only	Gore Belching	1
+grains_of_bloodspill	unparsed	Grains of Bloodspill	0
+graven_call	partial	Graven Call	0
+grinding_gears_blue	partial	Grinding Gears	3
+guardian_of_the_shadowrealm_red	partial	Guardian of the Shadowrealm	1
+hala_bladesaint_of_the_vow	partial	Hala, Bladesaint of the Vow	0
+halo_of_lumina_light	unparsed	Halo of Lumina Light	0
+hamstring_shot_red	unimplemented_only	Hamstring Shot	1
+hamstring_shot_yellow	unimplemented_only	Hamstring Shot	2
+hamstring_shot_blue	unimplemented_only	Hamstring Shot	3
+head_leads_the_tail_red	partial	Head Leads the Tail	1
+heat_seeker_red	unimplemented_only	Heat Seeker	1
+heirloom_of_snake_hide	unparsed	Heirloom of Snake Hide	0
+heirloom_of_tiger_hide	unparsed	Heirloom of Tiger Hide	0
+helm_of_isen_s_peak	unimplemented_only	Helm of Isen's Peak	0
+hide_tanner	unparsed	Hide Tanner	0
+hit_the_gas_blue	unparsed	Hit the Gas	3
+honing_hood	unimplemented_only	Honing Hood	0
+horrors_of_the_past_yellow	unimplemented_only	Horrors of the Past	2
+hunted_or_hunter_red	unparsed	Hunted or Hunter	1
+hurl_red	partial	Hurl	1
+hurl_yellow	partial	Hurl	2
+hurl_blue	partial	Hurl	3
+hurricane_technique_yellow	partial	Hurricane Technique	2
+hyper_scrapper_blue	partial	Hyper Scrapper	3
+hyper-inflation-1	partial	Hyper Inflation	1
+hyper-inflation-2	partial	Hyper Inflation	2
+hyper-inflation-3	partial	Hyper Inflation	3
+ice_eternal_blue	unimplemented_only	Ice Eternal	3
+icebind_red	partial	Icebind	1
+icebind_yellow	partial	Icebind	2
+icebind_blue	partial	Icebind	3
+immobilizing_shot_red	unimplemented_only	Immobilizing Shot	1
+imperial_edict_red	partial	Imperial Edict	1
+imperial_seal_of_command_red	partial	Imperial Seal of Command	1
+imperial_warhorn_red	partial	Imperial Warhorn	1
+insidious_chill_blue	unparsed	Insidious Chill	3
+invoke-nekria-1--nekria	unparsed	Nekria	0
+invoke-ouvia-1--ouvia	unparsed	Ouvia	0
+invoke-tomeltai-1--tomeltai	unparsed	Tomeltai	0
+invoke-vynserakai-1--vynserakai	unparsed	Vynserakai	0
+ire_of_the_crowd	unparsed	Ire of the Crowd	0
+ironfist_revelation	unparsed	Ironfist Revelation	0
+iyslander_stormbind	unparsed	Iyslander, Stormbind	0
+jack_be_nimble_red	partial	Jack Be Nimble	1
+jack_be_quick_red	partial	Jack Be Quick	1
+kabuto_of_imperial_authority	unparsed	Kabuto of Imperial Authority	0
+kassai_cintari_sellsword	unparsed	Kassai, Cintari Sellsword	0
+kayo_berserker_runt	unparsed	Kayo, Berserker Runt	0
+kayo_strong_arm	partial	Kayo, Strong-arm	0
+kayo_underhanded_cheat	partial	Kayo, Underhanded Cheat	0
+kelpie_tangled_mess_yellow	partial	Kelpie, Tangled Mess	2
+kiss_of_death_red	unimplemented_only	Kiss of Death	1
+laughing_knee_slappers	unparsed	Laughing Knee-Slappers	0
+lay_down_the_law_red	unparsed	Lay Down the Law	1
+lay_low_yellow	unparsed	Lay Low	2
+lay_to_rest_red	partial	Lay to Rest	1
+lay_to_rest_yellow	partial	Lay to Rest	2
+lay_to_rest_blue	partial	Lay to Rest	3
+leap_frog_leggings	unparsed	Leap Frog Leggings	0
+leap_frog_slime_skin	unparsed	Leap Frog Slime Skin	0
+leap_frog_vocal_sac	unparsed	Leap Frog Vocal Sac	0
+levels_of_enlightenment_blue	partial	Levels of Enlightenment	3
+levia_redeemed	partial	Levia, Redeemed	0
+levia_shadowborn_abomination	unparsed	Levia, Shadowborn Abomination	0
+light_fingers	unparsed	Light Fingers	0
+light_it_up_yellow	unimplemented_only	Light it Up	2
+lord_of_wind_blue	unparsed	Lord of Wind	3
+lost_in_transit_yellow	unparsed	Lost in Transit	2
+loyalty_beyond_the_grave_red	unparsed	Loyalty Beyond the Grave	1
+manifestation_of_miragai_blue	unparsed	Manifestation of Miragai	3
+mark_of_lightning	unparsed	Mark of Lightning	0
+marlynn_treasure_hunter	partial	Marlynn, Treasure Hunter	0
+mask_of_deceit	unparsed	Mask of Deceit	0
+mask_of_malicious_manifestations	partial	Mask of Malicious Manifestations	0
+mask_of_many_faces	unimplemented_only	Mask of Many Faces	0
+meet_madness_red	partial	Meet Madness	1
+melody_sing_along	unparsed	Melody, Sing-along	0
+merciful_retribution_yellow	unparsed	Merciful Retribution	2
+metacarpus_node	unparsed	Metacarpus Node	0
+miller_s_grindstone	partial	Miller's Grindstone	0
+miraging_metamorph_red	unparsed	Miraging Metamorph	1
+mischievous_meeps_red	partial	Mischievous Meeps	1
+mistcloak_gully	unparsed	Mistcloak Gully	0
+moonshot_yellow	partial	Moonshot	2
+nerve_scalpel	partial	Nerve Scalpel	0
+nerves_of_steel_blue	unparsed	Nerves of Steel	3
+no_hero_stands_alone_yellow	unparsed	No Hero Stands Alone	2
+nom_de_plume	partial	Nom de Plume	0
+nourishing_emptiness_red	partial	Nourishing Emptiness	1
+nuu_alluring_desire	partial	Nuu, Alluring Desire	0
+oaken_old_red	partial	Oaken Old	1
+oasis_respite_red	unparsed	Oasis Respite	1
+oasis_respite_yellow	unparsed	Oasis Respite	2
+oasis_respite_blue	unparsed	Oasis Respite	3
+oblivion_blue	unparsed	Oblivion	3
+ole-3	unparsed	Olé	3
+onyx_amulet_blue	partial	Onyx Amulet	3
+overcrowded_blue	partial	Overcrowded	3
+pain_in_the_backside_red	partial	Pain in the Backside	1
+parched_terrain_red	unparsed	Parched Terrain	1
+patch_the_hole	unimplemented_only	Patch the Hole	0
+pathing_helix_red	unimplemented_only	Pathing Helix	1
+pathing_helix_yellow	unimplemented_only	Pathing Helix	2
+pathing_helix_blue	unimplemented_only	Pathing Helix	3
+pay_day_blue	unparsed	Pay Day	3
+pay_up_red	partial	Pay Up	1
+pearl_amulet_blue	partial	Pearl Amulet	3
+pec_perfect_red	unparsed	Pec Perfect	1
+pendulum_trap_yellow	unparsed	Pendulum Trap	2
+phantasmaclasm_red	partial	Phantasmaclasm	1
+phantasmal_symbiosis_yellow	unimplemented_only	Phantasmal Symbiosis	2
+pick_up_the_point_red	partial	Pick Up the Point	1
+pick_up_the_point_yellow	partial	Pick Up the Point	2
+pick_up_the_point_blue	partial	Pick Up the Point	3
+pick_yourself_up_off_the_floor	unparsed	Pick Yourself Up Off the Floor	0
+pilfer_the_wreck_red	unimplemented_only	Pilfer the Wreck	1
+pilfer_the_wreck_yellow	unimplemented_only	Pilfer the Wreck	2
+pilfer_the_wreck_blue	unimplemented_only	Pilfer the Wreck	3
+pink_visor	partial	Pink Visor	0
+plague_hive_yellow	unparsed	Plague Hive	2
+plate_of_tough_love	unparsed	Plate of Tough Love	0
+plume_of_evergrowth	unimplemented_only	Plume of Evergrowth	0
+poison_the_well_blue	unparsed	Poison the Well	3
+polly_cranka	unimplemented_only	Polly Cranka	0
+potion_of_d_j_vu_blue	unimplemented_only	Potion of Déjà Vu	3
+potion_of_seeing_blue	unimplemented_only	Potion of Seeing	3
+pounding_gale_red	unparsed	Pounding Gale	1
+powder_keg_blue	unparsed	Powder Keg	3
+prey_spotters	unimplemented_only	Prey Spotters	0
+prism_advent_of_thrones	unimplemented_only	Prism, Advent of Thrones	0
+prism_awakener_of_sol	unimplemented_only	Prism, Awakener of Sol	0
+prized_galea	unimplemented_only	Prized Galea	0
+proclamation_of_abundance	unimplemented_only	Proclamation of Abundance	0
+proclamation_of_combat	unimplemented_only	Proclamation of Combat	0
+proclamation_of_requisition	unimplemented_only	Proclamation of Requisition	0
+promise_of_plenty_red	partial	Promise of Plenty	1
+promise_of_plenty_yellow	partial	Promise of Plenty	2
+promise_of_plenty_blue	partial	Promise of Plenty	3
+prowess_of_agility_blue	unparsed	Prowess of Agility	3
+pry_red	unparsed	Pry	1
+pry_yellow	unparsed	Pry	2
+pry_blue	unparsed	Pry	3
+pulse_of_isenloft_blue	unparsed	Pulse of Isenloft	3
+pulse_of_volthaven_red	unparsed	Pulse of Volthaven	1
+pulsewave_harpoon_red	partial	Pulsewave Harpoon	1
+pulsewave_protocol_yellow	unimplemented_only	Pulsewave Protocol	2
+punch_above_your_weight_red	unimplemented_only	Punch Above Your Weight	1
+punch_above_your_weight_yellow	unimplemented_only	Punch Above Your Weight	2
+punch_above_your_weight_blue	unimplemented_only	Punch Above Your Weight	3
+pursuit_of_knowledge_blue	unimplemented_only	Pursuit of Knowledge	3
+quantum_processor_yellow	partial	Quantum Processor	2
+quickdodge_flexors	unimplemented_only	Quickdodge Flexors	0
+quiver_of_abyssal_depths	unimplemented_only	Quiver of Abyssal Depths	0
+radiant_forcefield_yellow	unparsed	Radiant Forcefield	2
+ray_of_hope_yellow	unparsed	Ray of Hope	2
+reckless_charge_blue	unparsed	Reckless Charge	3
+reckless_stampede_red	unparsed	Reckless Stampede	1
+red_hot_red	unimplemented_only	Red Hot	1
+red_in_the_ledger_red	unimplemented_only	Red in the Ledger	1
+redwood_hammer	unparsed	Redwood Hammer	0
+regain_composure_blue	partial	Regain Composure	3
+regicide_blue	unimplemented_only	Regicide	3
+renounce_grandeur_red	unparsed	Renounce Grandeur	1
+reverent_rerebrace	unparsed	Reverent Rerebrace	0
+reya_the_unyielding	unparsed	Reya, the Unyielding	0
+riptide_lurker_of_the_deep	unparsed	Riptide, Lurker of the Deep	0
+robe_of_autumn_s_fall	unparsed	Robe of Autumn's Fall	0
+sacred_art_immortal_lunar_shrine_blue	partial	Sacred Art: Immortal Lunar Shrine	3
+sacred_art_jade_tiger_domain_blue	partial	Sacred Art: Jade Tiger Domain	3
+sacred_art_undercurrent_desires_blue	partial	Sacred Art: Undercurrent Desires	3
+sapphire_amulet_blue	unimplemented_only	Sapphire Amulet	3
+scale_peeler	partial	Scale Peeler	0
+scarf_for_a_scarf_red	partial	Scarf for a Scarf	1
+schism_of_chaos_blue	unparsed	Schism of Chaos	3
+scooba_salty_sea_dog_yellow	partial	Scooba, Salty Sea Dog	2
+scrap_trader_red	unparsed	Scrap Trader	1
+seasoned_saviour	unparsed	Seasoned Saviour	0
+second_tenet_of_chi_moon_blue	unparsed	Second Tenet of Chi: Moon	3
+seduce_secrets_yellow	unparsed	Seduce Secrets	2
+shake_down_red	partial	Shake Down	1
+sharpening_sparks_red	partial	Sharpening Sparks	1
+shield_bash_red	unparsed	Shield Bash	1
+shield_bash_yellow	unparsed	Shield Bash	2
+shield_bash_blue	unparsed	Shield Bash	3
+shock_charmers	unimplemented_only	Shock Charmers	0
+show_of_strength_red	unparsed	Show of Strength	1
+shriek_razors	unimplemented_only	Shriek Razors	0
+sigil_of_parapets_blue	unparsed	Sigil of Parapets	3
+sigil_of_suffering_red	unparsed	Sigil of Suffering	1
+sigil_of_suffering_yellow	unparsed	Sigil of Suffering	2
+sigil_of_suffering_blue	unparsed	Sigil of Suffering	3
+silent_stilettos	unparsed	Silent Stilettos	0
+silken_form	unimplemented_only	Silken Form	0
+silver_palms	unparsed	Silver Palms	0
+singeing_steelblade_red	unparsed	Singeing Steelblade	1
+singeing_steelblade_yellow	unparsed	Singeing Steelblade	2
+singeing_steelblade_blue	unparsed	Singeing Steelblade	3
+siren_s_call_red	unparsed	Siren's Call	1
+sit_red	unparsed	Sit!	1
+skull_crushers	unparsed	Skull Crushers	0
+smash_and_grab_red	unimplemented_only	Smash and Grab	1
+smoke_out_red	unparsed	Smoke Out	1
+snap_shot_red	unimplemented_only	Snap Shot	1
+snap_shot_yellow	unimplemented_only	Snap Shot	2
+snap_shot_blue	unimplemented_only	Snap Shot	3
+sonata_fantasmia_blue	unparsed	Sonata Fantasmia	3
+soul_shield_yellow	unparsed	Soul Shield	2
+sound_the_alarm_red	unimplemented_only	Sound the Alarm	1
+spark_spray_red	unparsed	Spark Spray	1
+spark_spray_yellow	unparsed	Spark Spray	2
+spark_spray_blue	unparsed	Spark Spray	3
+spider_s_bite	partial	Spider's Bite	0
+spike_pit_trap_blue	unparsed	Spike Pit Trap	3
+spirit_of_eirina_yellow	unparsed	Spirit of Eirina	2
+spoiled_skull	partial	Spoiled Skull	0
+spreading_plague_yellow	unparsed	Spreading Plague	2
+spring_a_leak_red	partial	Spring a Leak	1
+spring_a_leak_yellow	partial	Spring a Leak	2
+spring_a_leak_blue	partial	Spring a Leak	3
+squizzy_floof	unparsed	Squizzy & Floof	0
+stab_wound_blue	unimplemented_only	Stab Wound	3
+stand_ground	unparsed	Stand Ground	0
+stand_tall_yellow	unparsed	Stand Tall	2
+standing_ovation_blue	unimplemented_only	Standing Ovation	3
+starlight_striders	unparsed	Starlight Striders	0
+starting_stake_yellow	unparsed	Starting Stake	2
+stasis_cell_blue	partial	Stasis Cell	3
+steal_victory_blue	unparsed	Steal Victory	3
+steelblade_shunt_red	unparsed	Steelblade Shunt	1
+steelblade_shunt_yellow	unparsed	Steelblade Shunt	2
+steelblade_shunt_blue	unparsed	Steelblade Shunt	3
+sticky_fingers	partial	Sticky Fingers	0
+stonewall_gauntlet	unparsed	Stonewall Gauntlet	0
+stonewall_impasse	unparsed	Stonewall Impasse	0
+strong_stomach_for_adversity	unparsed	Strong Stomach for Adversity	0
+sunken_treasure_blue	unparsed	Sunken Treasure	3
+swarming_gloomveil_red	partial	Swarming Gloomveil	1
+system_failure_yellow	unparsed	System Failure	2
+tales_of_adventure_blue	unparsed	Tales of Adventure	3
+ten_foot_tall_and_bulletproof_red	unimplemented_only	Ten Foot Tall and Bulletproof	1
+tenacity_yellow	unimplemented_only	Tenacity	2
+test_of_iron_grip_red	unparsed	Test of Iron Grip	1
+testament_of_valahai	unparsed	Testament of Valahai	0
+that_all_you_got_yellow	unparsed	That All You Got?	2
+the_moat_exchange	unparsed	The Moat Exchange	0
+the_weakest_link_red	unimplemented_only	The Weakest Link	1
+theryon_magister_of_justice	unparsed	Theryon, Magister of Justice	0
+thiev_n_varmints_red	unimplemented_only	Thiev'n Varmints	1
+three_visits_red	unparsed	Three Visits	1
+tooth_and_claw_red	partial	Tooth and Claw	1
+tough_leather_boots	unparsed	Tough Leather Boots	0
+tremor_of_resistance	unparsed	Tremor of Resistance	0
+tripwire_trap_red	unparsed	Tripwire Trap	1
+trounce_red	unparsed	Trounce	1
+truce_blue	unparsed	Truce	3
+tuffnut_bumbling_hulkster	partial	Tuffnut, Bumbling Hulkster	0
+turn_heads_blue	unparsed	Turn Heads	3
+turn_timber_red	unimplemented_only	Turn Timber	1
+turn_timber_yellow	unimplemented_only	Turn Timber	2
+turn_timber_blue	unimplemented_only	Turn Timber	3
+undercover_acquisition_red	unimplemented_only	Undercover Acquisition	1
+undertow_stilettos	unimplemented_only	Undertow Stilettos	0
+unravel_aggression_blue	unparsed	Unravel Aggression	3
+urgent_delivery_red	unimplemented_only	Urgent Delivery	1
+urgent_delivery_yellow	unimplemented_only	Urgent Delivery	2
+urgent_delivery_blue	unimplemented_only	Urgent Delivery	3
+uzuri_switchblade	unimplemented_only	Uzuri, Switchblade	0
+vambrace_of_determination	partial	Vambrace of Determination	0
+venomback_fabric_yellow	unparsed	Venomback Fabric	2
+verdance_thorn_of_the_rose	unparsed	Verdance, Thorn of the Rose	0
+vestige_of_sol	unparsed	Vestige of Sol	0
+victor_goldmane_match_fixer	partial	Victor Goldmane, Match Fixer	0
+vipox_red	unimplemented_only	Vipox	1
+virtuoso_bodice	unparsed	Virtuoso Bodice	0
+viserai_rune_blood	unparsed	Viserai, Rune Blood	0
+vow_of_vengeance	unimplemented_only	Vow of Vengeance	0
+vynnset_iron_maiden	unparsed	Vynnset, Iron Maiden	0
+walk-in-my-shoes-2	unparsed	Walk in My Shoes	2
+war_cry_of_bellona_yellow	partial	War Cry of Bellona	2
+war_cry_of_themis_yellow	partial	War Cry of Themis	2
+warmonger_s_diplomacy_blue	unparsed	Warmonger's Diplomacy	3
+wax_off_blue	unparsed	Wax Off	3
+whittle_from_bone_red	unimplemented_only	Whittle from Bone	1
+whittle_from_bone_yellow	unimplemented_only	Whittle from Bone	2
+whittle_from_bone_blue	unimplemented_only	Whittle from Bone	3
+widowmaker_red	unparsed	Widowmaker	1
+widowmaker_yellow	unparsed	Widowmaker	2
+widowmaker_blue	unparsed	Widowmaker	3
+will_of_the_crowd_blue	unparsed	Will of the Crowd	3
+winds_of_eternity_blue	partial	Winds of Eternity	3
+yoji_royal_protector	unimplemented_only	Yoji, Royal Protector	0
+zap_clappers	unparsed	Zap Clappers	0
