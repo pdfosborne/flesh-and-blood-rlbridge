@@ -2,11 +2,16 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from rlbridge.environments.base import rlbridgeEnvironmentFactory
+from rlbridge.environments.base import rlbridgeEnvironment, rlbridgeEnvironmentFactory
 from rlbridge.protocol.messages import EnvironmentInfo, SuggestedHyperparameters
 
-from .deck_builder_environment import FleshAndBloodDeckBuilderEnvironment
-from .gameplay_environment import FleshAndBloodGameplayEnvironment
+from .simulator.deck_builder_environment import FleshAndBloodDeckBuilderEnvironment
+from .simulator.gameplay_environment import FleshAndBloodGameplayEnvironment
+from .talishar_deckbuilder_environment import TalisharDeckBuilderEnvironment
+from .talishar_engine_environment import (
+    TalisharEngineEnvironment,
+    _DEFAULT_DECK_LINK as _TALISHAR_DEFAULT_DECK,
+)
 
 
 class FleshAndBloodFactory(rlbridgeEnvironmentFactory):
@@ -105,7 +110,145 @@ class FleshAndBloodFactory(rlbridgeEnvironmentFactory):
         )
 
 
-FLESH_AND_BLOOD_TALISHAR_V0 = FleshAndBloodFactory("FleshAndBlood-Talishar-v0")
+class TalisharEngineFactory(rlbridgeEnvironmentFactory):
+    """Factory that creates :class:`TalisharEngineEnvironment` instances."""
+
+    def __init__(
+        self,
+        env_id: str,
+        *,
+        deck_link: str = _TALISHAR_DEFAULT_DECK,
+        game_format: str = "blitz",
+        max_turns: int = 60,
+    ) -> None:
+        self._env_id = env_id
+        self._deck_link = deck_link
+        self._game_format = game_format
+        self._max_turns = max_turns
+
+    @property
+    def env_info(self) -> EnvironmentInfo:
+        return EnvironmentInfo(
+            env_id=self._env_id,
+            description=(
+                "Flesh and Blood TCG environment backed by a live Talishar server "
+                "(https://github.com/Talishar/Talishar).  The agent plays as player "
+                "1 against the built-in CombatDummy AI.  Requires a running "
+                "Talishar Docker instance (set TALISHAR_URL env var)."
+            ),
+            tags=["tcg", "flesh-and-blood", "card-game", "turn-based", "talishar"],
+            namespace="flesh_and_blood",
+            render_modes=["ansi"],
+            max_episode_steps=self._max_turns,
+            suggested_hyperparameters=SuggestedHyperparameters(
+                agent_type="ppo",
+                n_episodes=300,
+                max_steps=self._max_turns,
+                alpha=0.1,
+                gamma=0.99,
+                epsilon=1.0,
+                epsilon_min=0.05,
+                epsilon_decay=0.997,
+                sub_goal_threshold=0.5,
+                top_k=3,
+                min_episode_visits=2,
+            ),
+        )
+
+    def create(
+        self,
+        render_mode: Optional[str] = None,
+        **kwargs: Any,
+    ) -> rlbridgeEnvironment:
+        local_deck = kwargs.get("local_deck_name", "Ira")
+        opponent_deck = kwargs.get("opponent_deck_name", None)
+        return TalisharEngineEnvironment(
+            base_url=kwargs.get("base_url"),
+            deck_link=str(kwargs.get("deck_link", self._deck_link)),
+            game_format=str(kwargs.get("game_format", self._game_format)),
+            max_turns=int(kwargs.get("max_turns", self._max_turns)),
+            render_mode=render_mode,
+            local_deck_name=local_deck if local_deck is not None else None,
+            opponent_deck_name=opponent_deck,
+        )
+
+
+class TalisharDeckBuilderFactory(rlbridgeEnvironmentFactory):
+    """Factory that creates :class:`TalisharDeckBuilderEnvironment` instances."""
+
+    def __init__(
+        self,
+        env_id: str,
+        *,
+        hero_id: str = "ira_crimson_haze",
+        hero_class: str = "Ninja",
+        game_format: str = "blitz",
+        num_eval_games: int = 5,
+        max_build_steps: int = 200,
+    ) -> None:
+        self._env_id = env_id
+        self._hero_id = hero_id
+        self._hero_class = hero_class
+        self._game_format = game_format
+        self._num_eval_games = num_eval_games
+        self._max_build_steps = max_build_steps
+
+    @property
+    def env_info(self) -> EnvironmentInfo:
+        return EnvironmentInfo(
+            env_id=self._env_id,
+            description=(
+                "Flesh and Blood TCG deck-building environment.  The agent "
+                "constructs a deck card-by-card; reward is based on win rate "
+                "against the Talishar CombatDummy AI.  Requires a running "
+                "Talishar Docker instance (set TALISHAR_URL env var)."
+            ),
+            tags=[
+                "tcg",
+                "flesh-and-blood",
+                "card-game",
+                "deck-building",
+                "talishar",
+            ],
+            namespace="flesh_and_blood",
+            render_modes=["ansi"],
+            max_episode_steps=self._max_build_steps,
+            suggested_hyperparameters=SuggestedHyperparameters(
+                agent_type="ppo",
+                n_episodes=500,
+                max_steps=self._max_build_steps,
+                alpha=0.1,
+                gamma=0.99,
+                epsilon=1.0,
+                epsilon_min=0.05,
+                epsilon_decay=0.995,
+                sub_goal_threshold=0.5,
+                top_k=3,
+                min_episode_visits=2,
+            ),
+        )
+
+    def create(
+        self,
+        render_mode: Optional[str] = None,
+        **kwargs: Any,
+    ) -> rlbridgeEnvironment:
+        return TalisharDeckBuilderEnvironment(
+            hero_id=str(kwargs.get("hero_id", self._hero_id)),
+            hero_class=str(kwargs.get("hero_class", self._hero_class)),
+            game_format=str(kwargs.get("game_format", self._game_format)),
+            num_eval_games=int(kwargs.get("num_eval_games", self._num_eval_games)),
+            base_url=kwargs.get("base_url"),
+            talishar_assets_path=kwargs.get("talishar_assets_path"),
+            max_build_steps=int(kwargs.get("max_build_steps", self._max_build_steps)),
+            render_mode=render_mode,
+        )
+
+
+FLESH_AND_BLOOD_TALISHAR_V0 = TalisharEngineFactory("FleshAndBlood-Talishar-v0")
+FLESH_AND_BLOOD_DECKBUILD_TALISHAR_V0 = TalisharDeckBuilderFactory(
+    "FleshAndBlood-DeckBuild-Talishar-v0"
+)
 FLESH_AND_BLOOD_SELFPLAY_V0 = FleshAndBloodFactory(
     "FleshAndBlood-SelfPlay-v0",
     self_play=True,
@@ -114,8 +257,9 @@ FLESH_AND_BLOOD_DECKBUILD_V0 = FleshAndBloodFactory(
     "FleshAndBlood-DeckBuild-v0",
     two_phase_deckbuild=True,
 )
-ALL_FAB_FACTORIES: list[FleshAndBloodFactory] = [
+ALL_FAB_FACTORIES: list[rlbridgeEnvironmentFactory] = [
     FLESH_AND_BLOOD_TALISHAR_V0,
+    FLESH_AND_BLOOD_DECKBUILD_TALISHAR_V0,
     FLESH_AND_BLOOD_SELFPLAY_V0,
     FLESH_AND_BLOOD_DECKBUILD_V0,
 ]

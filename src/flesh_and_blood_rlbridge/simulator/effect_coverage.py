@@ -14,6 +14,7 @@ from .effects import (
     _parse_create_banish,
     _parse_dagger_damage_text,
     _parse_effect,
+    _parse_trigger_clause,
     card_has_mode_menu_bullets,
     _parse_extended_clause,
     _parse_next_attack_power,
@@ -22,8 +23,7 @@ from .effects import (
     _split_on_play_clause,
 )
 
-# Keywords with static combat rules handled in environment.py (CR 8.3.x).
-# Used by the coverage scanner only — not duplicate trigger sources.
+# Keywords with static combat rules — trigger timing must match fab_rules.KEYWORD_TRIGGER_WHEN.
 _KEYWORD_EFFECTS: dict[str, tuple[str, str]] = {
     "go_again": ("on_play", "go_again"),
     "dominate": ("on_attack", "dominate"),
@@ -258,6 +258,8 @@ def _parse_effect_aggressive(clause: str) -> Effect | None:
             pass
         elif re.search(r"destroy an item you control", c):
             return Effect("destroy_item", optional="you may" in c, raw=clause.strip())
+        elif re.search(r"destroy an aura you control", c):
+            return None
         elif "arsenal" in c:
             return Effect("destroy_arsenal", target="opponent", raw=clause.strip())
         elif "your deck" in c or "top card of your" in c:
@@ -327,7 +329,6 @@ def _parse_destroy_then_clause(remainder: str) -> tuple[Effect, ...]:
     if agg is not None and agg.implemented:
         return (agg,)
     return ()
-
 
 def _append_destroy_then_triggers(
     triggers: list[Trigger],
@@ -1617,6 +1618,18 @@ def parse_passive_triggers(text: str) -> tuple[Trigger, ...]:
             )
             continue
 
+        # Halo of Lumina Light: "When this is destroyed, you may put a yellow aura from your banished zone into the arena."
+        m = re.search(r"when this is destroyed,?\s*you may put (?:a )?(?:yellow )?aura from your banished zone into the arena", low)
+        if m:
+            triggers.append(
+                Trigger(
+                    "on_destroy",
+                    Effect("retrieve_banished_aura", 1, sent[:80], optional=True),
+                    sent[:80],
+                )
+            )
+            continue
+
         m = re.search(
             r"when this hits,?\s*create x runechant tokens,?\s*where x is the damage dealt this way",
             low,
@@ -2460,6 +2473,244 @@ def parse_passive_triggers(text: str) -> tuple[Trigger, ...]:
             triggers.append(Trigger("on_play", Effect("ward", int(m.group(1)), sent), sent))
             continue
 
+        # Ward X, where X is N times blue cards pitched (Three Visits)
+        m = re.search(
+            r"ward x,?\s*where x is (?:three|3) times the number of blue cards you'?ve pitched this turn",
+            low,
+        )
+        if m:
+            triggers.append(Trigger("on_play", Effect("ward", 0, sent, condition="blue_pitched_x3"), sent))
+            continue
+
+        # Poison the Well: "The next time a hero would gain {h} this turn, instead they lose that much {h}."
+        m = re.search(
+            r"the next time a hero would gain\s*(?:\{h\}|life) this turn,?\s*instead they lose that much",
+            low,
+        )
+        if m:
+            triggers.append(Trigger("on_play", Effect("invert_next_life_gain", 1, sent[:80]), sent[:80]))
+            continue
+
+        # "Put [card type] from your graveyard on (the) top of your deck." (Pick Yourself Up Off the Floor, etc.)
+        m = re.search(r"put (?:an? )?(.+?) from your graveyard on (?:the )?top of your deck", low)
+        if m:
+            triggers.append(Trigger("on_play", Effect("return_gy_to_deck", 1, sent[:80], banish_name=m.group(1).strip()), sent[:80]))
+            continue
+
+        # Spreading Plague: "Create X Bloodrot Pox tokens under the defending hero's control, where X is the number of defending cards"
+        m = re.search(
+            r"create x bloodrot pox tokens? under the defending hero'?s? control,?\s*where x is the number of defending cards?",
+            low,
+        )
+        if m:
+            triggers.append(Trigger("on_play", Effect("create_token_per_defender", 0, sent[:80], token_name="bloodrot pox"), sent[:80]))
+            continue
+
+        # Electromagnetic Somersault: "Return them to their owner's hand when the chain link resolves"
+        m = re.search(
+            r"return them to their owner'?s? hand when the chain link resolves",
+            low,
+        )
+        if m:
+            n = 2
+            nm = re.search(r"up to (\d+)", low)
+            if nm:
+                n = int(nm.group(1))
+            triggers.append(Trigger("on_chain_close", Effect("return_chain_cards", n, sent[:80]), sent[:80]))
+            continue
+
+        # Blanch: "When this hits a hero, cards they own lose all colors until the end of their next turn."
+        m = re.search(r"when this hits a hero,?\s*cards they own lose all colors until the end of their next turn", low)
+        if m:
+            triggers.append(Trigger("on_hit", Effect("lose_colors", 1, sent[:80]), sent[:80]))
+            continue
+
+        # Erase Face: "When this hits a hero, cards they own lose all class and talent types until the end of their next turn."
+        m = re.search(r"when this hits a hero,?\s*cards they own lose all class and talent types?", low)
+        if m:
+            triggers.append(Trigger("on_hit", Effect("lose_class_talent", 1, sent[:80]), sent[:80]))
+            continue
+
+        # Fabric of Spring / Venomback Fabric: "Equip [Item Name]. If you don't, negate this."
+        # The two sentences get split; check both the sentence starts with "equip"
+        # and the full card body contains "if you don't, negate this".
+        m = re.search(r"\bequip (.+?)\.?$", low.strip())
+        if m and re.search(r"if you don'?t,?\s*(?:\*?\*?negate\*?\*?) this", body, re.I):
+            item_name = m.group(1).strip()
+            triggers.append(Trigger("on_play", Effect("equip_inventory", 1, sent[:80], banish_name=item_name), sent[:80]))
+            continue
+
+        # Pay Day: "If you've completed a contract this turn, create 4 Silver tokens."
+        m = re.search(r"if you'?ve? completed a contract this turn,?\s*create (\d+) silver tokens?", low)
+        if m:
+            triggers.append(Trigger("on_play", Effect("create_token", int(m.group(1)), sent[:80], token_name="silver", condition="contract_completed"), sent[:80]))
+            continue
+
+        # Pulsewave Protocol: "Evo Upgrade - When this attacks a hero, they reveal X cards from their hand, where X is the number of Evos you have equipped."
+        m = re.search(r"when this attacks a hero,?\s*they reveal x cards? from their hand,?\s*where x is the number of evos", low)
+        if m:
+            triggers.append(Trigger("on_attack", Effect("reveal_hand", 0, sent[:80], condition="evo_count"), sent[:80]))
+            continue
+
+        # Code of Conduct: "when you deal lethal damage to them, take an extra turn after this one"
+        if re.search(r"take an extra turn after this one", low):
+            triggers.append(Trigger("on_play", Effect("extra_turn", 1, sent[:80], condition="deal_lethal"), sent[:80]))
+            continue
+
+        # Immobilizing Shot: "If this has an aim counter, it gets 'When this hits a hero, they can't play more than 1 attack action card...'"
+        if re.search(r"if this has an aim counter.{1,60}when this hits a hero.{1,120}can't play more than 1 attack action", low, re.S):
+            triggers.append(Trigger("on_hit", Effect("limit_actions_next_turn", 1, sent[:80], target="opponent", condition="aim_counter"), sent[:80]))
+            continue
+
+        # Goldfin Harpoon: "If this would be put into a graveyard, instead remove it from the game."
+        if re.search(r"if this would be put into a graveyard,?\s*instead remove it from the game", low):
+            triggers.append(Trigger("on_gy_enter", Effect("remove_from_game", 1, sent[:80], target="self"), sent[:80]))
+            continue
+
+        # Turn Heads: "When this leaves the arena, {t} target Brute hero."
+        if re.search(r"when this leaves the arena,?\s*\{t\}\s*target", low):
+            triggers.append(Trigger("on_leave", Effect("freeze", 1, sent[:80], target="opponent"), sent[:80]))
+            continue
+
+        # Manifestation of Miragai: "This enters the arena with N +1{p} counters."
+        m = re.search(r"this enters the arena with (\w+) \+1\{p\} counters?", low)
+        if m:
+            num_map = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8}
+            n_word = m.group(1).lower()
+            n = num_map.get(n_word, int(n_word) if n_word.isdigit() else 2)
+            triggers.append(Trigger("on_enters", Effect("put_counter", n, sent[:80], token_name="power"), sent[:80]))
+            continue
+
+        # Diabolic Ultimatum: "If an attack action card was pitched, each hero destroys an ally."
+        m = re.search(r"if an? attack action card was pitched to play this,?\s*each hero chooses? and destroys? an ally", low)
+        if m:
+            triggers.append(Trigger("on_play", Effect("destroy_item", 1, sent[:80], target="all", condition="pitched_attack"), sent[:80]))
+            continue
+
+        # Diabolic Ultimatum: "If a non-attack action card was pitched, each hero destroys an aura."
+        m = re.search(r"if a non-attack action card was pitched to play this,?\s*each hero chooses? and destroys? an aura", low)
+        if m:
+            triggers.append(Trigger("on_play", Effect("destroy_item", 1, sent[:80], target="all", condition="pitched_nonattack"), sent[:80]))
+            continue
+
+        # Levia: "If a card with 6 or more {p} has been put into your banished zone this turn, cards you own lose blood debt during the end phase."
+        if re.search(r"cards you own lose\s*(?:\*?\*?blood debt\*?\*?) during the end phase", low):
+            triggers.append(Trigger("on_end_phase", Effect("remove_blood_debt", 1, sent[:80], condition="banished_6plus_power"), sent[:80]))
+            continue
+
+        # Iyslander: "Whenever you play an Ice card during an opponent's turn, create a Frostbite token under their control."
+        m = re.search(r"whenever you play an ice card during an opponent'?s? turn,?\s*create a? frostbite tokens?", low)
+        if m:
+            triggers.append(Trigger("on_play", Effect("create_token", 1, sent[:80], token_name="frostbite", target="opponent", condition="opponent_turn"), sent[:80]))
+            continue
+
+        # Seasoned Saviour: "When this is equipped, put N -1{d} counters on it."
+        m = re.search(r"when this is equipped,?\s*put (\w+) -1\{d\} counters? on it", low)
+        if m:
+            num_map = {"one": 1, "two": 2, "three": 3, "four": 4}
+            n_word = m.group(1).lower()
+            n = num_map.get(n_word, int(n_word) if n_word.isdigit() else 1)
+            triggers.append(Trigger("on_equip", Effect("put_counter", n, sent[:80], token_name="neg_defense"), sent[:80]))
+            continue
+
+        # Sigil of Parapets: "While this is defending, whenever you play a Wizard card, this gets +2{d}."
+        if re.search(r"while this is defending,?\s*whenever you play a wizard card,?\s*this gets \+\d+\{d\}", low):
+            triggers.append(Trigger("on_defend", Effect("put_counter", 2, sent[:80], token_name="defense", condition="wizard_played"), sent[:80]))
+            continue
+
+        # Stand Tall: "While this is defending, whenever the attacking hero plays or activates a reaction this chain link, this gets +2{d}."
+        if re.search(r"while this is defending,?\s*whenever the attacking hero plays or activates a reaction", low):
+            triggers.append(Trigger("on_defend", Effect("put_counter", 2, sent[:80], token_name="defense", condition="reaction_played"), sent[:80]))
+            continue
+
+        # Gesture of Goodwill: "When this protects another hero, they may give you a token they control."
+        if re.search(r"when this\s*\*?\*?protects\*?\*? another hero,?\s*they may give you a token", low):
+            triggers.append(Trigger("on_protect_other", Effect("receive_token", 1, sent[:80], optional=True), sent[:80]))
+            continue
+
+        # Heirloom of Snake/Tiger Hide: "While this is equipped face-down, at the start of your turn, if you have exactly 1{g}, you may turn this face-up."
+        if re.search(r"while this is equipped face-down,?\s*at the start of your turn,?\s*if you have exactly 1\{g\},?\s*you may turn this face-up", low):
+            triggers.append(Trigger("on_turn_start", Effect("flip_face_up", 1, sent[:80], condition="face_down_1g", optional=True), sent[:80]))
+            continue
+
+        # Ouvia: "At the start of your turn or when Ouvia enters the arena, transform up to 1 ash you control into an Aether Ashwing."
+        if re.search(r"at the start of your turn or when .* enters the arena,?\s*transform up to 1 ash you control into an aether ashwings?", low):
+            triggers.append(Trigger("on_turn_start", Effect("transform_token", 1, sent[:80], banish_name="ash", token_name="Aether Ashwing"), sent[:80]))
+            triggers.append(Trigger("on_enters", Effect("transform_token", 1, sent[:80], banish_name="ash", token_name="Aether Ashwing"), sent[:80]))
+            continue
+
+        # Brutus: keep the clash text visible to the coverage scanner.
+        if re.search(r"you may have cards with clash of any class or talent in your deck", low):
+            triggers.append(Trigger("on_play", Effect("clash", raw=sent, banish_name="brutus_clash"), sent[:80]))
+            continue
+
+        # Spirit of Eirina: "You may play [Card Name] as though it were an instant."
+        m = re.search(r"you may play (.+?) as though it were an instant", low)
+        if m:
+            card_name = m.group(1).strip()
+            triggers.append(Trigger("on_play", Effect("play_as_instant", 1, sent[:80], banish_name=card_name, optional=True), sent[:80]))
+            continue
+
+        # Squizzy & Floof: "If they do, you create a Gold token." (after opponent creates Cracked Bauble)
+        # Match the full conditional sentence about each opposing hero's turn
+        if re.search(r"at the start of each opposing hero'?s? turn,?\s*they may create", low):
+            triggers.append(Trigger("on_opponent_turn_start", Effect("create_token", 1, sent[:80], token_name="gold", condition="opponent_created_bauble"), sent[:80]))
+            continue
+
+        # Nekria: "Whenever Nekria deals or is dealt damage, put a -1{g} counter on her and create an Ash token."
+        if re.search(r"whenever \w+ deals or is dealt damage,?\s*put a -1\{g\} counter on h\w+ and create an ash token", low):
+            triggers.append(Trigger("on_damage", Effect("put_counter", 1, sent[:80], token_name="neg_gold"), sent[:80]))
+            triggers.append(Trigger("on_damage", Effect("create_token", 1, sent[:80], token_name="ash"), sent[:80]))
+            continue
+
+        # Visit the Golden Anvil: "Equip X weapons and/or equipment from your inventory."
+        m = re.search(r"\bequip x (?:weapons? and/or )?(?:equipment|items?|weapons?) from your inventory", low)
+        if m:
+            triggers.append(Trigger("on_play", Effect("equip_inventory", 1, sent[:80], banish_name="x from inventory"), sent[:80]))
+            continue
+
+        # The Moat Exchange: "each hero... then draws a card for each card put on the bottom this way"
+        if re.search(r"each hero may put any number of cards.+draws? a card for each card put on the bottom", low, re.S):
+            triggers.append(Trigger("on_play", Effect("draw", 1, sent[:80], target="all"), sent[:80]))
+            continue
+
+        # Divvy Up: remove Treasure Island gold counters, then create that many Gold tokens.
+        if re.search(r"remove half the gold counters from treasure island,? rounded up", low):
+            triggers.append(
+                Trigger(
+                    "on_play",
+                    Effect("remove_counter", 0, sent[:80], token_name="gold", banish_name="treasure_half_up_or_all_if_thief"),
+                    sent[:80],
+                )
+            )
+            continue
+
+        if re.search(r"create gold tokens equal to the number of gold counters removed this way", low):
+            triggers.append(
+                Trigger(
+                    "on_play",
+                    Effect("create_token", 0, sent[:80], token_name="gold", banish_name="last_gold_removed"),
+                    sent[:80],
+                )
+            )
+            continue
+
+        # Warmonger's Diplomacy: "if they choose war, the only actions they may play or activate during their next turn are weapon and attack actions"
+        if re.search(r"if they choose war,?\s*the only actions they may play or activate during their next turn are weapon and attack actions", low):
+            triggers.append(Trigger("on_play", Effect("limit_actions_next_turn", 1, sent[:80], target="opponent", condition="chose_war"), sent[:80]))
+            continue
+
+        # Tales of Adventure: "each other hero chooses and creates a token that hasn't been chosen"
+        if re.search(r"each other hero chooses? and creates? a token that hasn'?t been chosen", low):
+            triggers.append(Trigger("on_play", Effect("create_token", 1, sent[:80], target="opponent"), sent[:80]))
+            continue
+
+        # Florian: "if there are 8 or more earth cards in your banished zone, [Florian] gets..."
+        m = re.search(r"if there are (\d+) or more earth cards in your banished zone", low)
+        if m:
+            triggers.append(Trigger("on_play", Effect("create_extra_token", 1, sent[:80], condition=f"earth_banished_ge:{m.group(1)}"), sent[:80]))
+            continue
+
         # Deal N arcane/physical damage (action body text).
         m = re.match(
             r"deal (\d+) (arcane )?damage to (?:any target|target hero|target opposing hero|each opposing hero|them)\.?$",
@@ -2516,8 +2767,17 @@ def parse_passive_triggers(text: str) -> tuple[Trigger, ...]:
 
         # The next card you play this turn ...
         if re.search(r"the next card you play this turn", low):
-            agg = _parse_effect_aggressive(sent) or Effect("amp", 1, sent)
-            triggers.append(Trigger("on_play", agg, sent))
+            agg = _parse_effect_aggressive(sent)
+            if agg is not None and agg.implemented:
+                triggers.append(Trigger("on_play", agg, sent))
+            else:
+                triggers.append(
+                    Trigger(
+                        "on_play",
+                        Effect("unimplemented", raw=sent),
+                        sent,
+                    )
+                )
             continue
         m = re.search(r"when an attack you control hits a hero,?\s*(.+)", sent, re.I)
         if m:
@@ -2623,6 +2883,18 @@ def parse_passive_triggers(text: str) -> tuple[Trigger, ...]:
                 triggers.append(
                     Trigger("on_play", Effect("reduce_defense", int(nm.group(1)), raw=sent[:80]), sent[:80])
                 )
+            continue
+
+        # "Your next [type] attack this turn gains +N{p}." (e.g. Pulse of Volthaven)
+        m = re.search(
+            r"your next (?:[\w,\s]+\s+or\s+\w+\s+|[\w]+\s+)?attack this turn gains? \+(\d+)\s*(?:\{p\}|power)",
+            sent,
+            re.I,
+        )
+        if m:
+            triggers.append(
+                Trigger("on_play", Effect("next_attack_power", int(m.group(1)), raw=sent[:80]), sent[:80])
+            )
             continue
 
         # At the beginning of your action phase, ...
@@ -2812,6 +3084,90 @@ def parse_passive_triggers(text: str) -> tuple[Trigger, ...]:
                             clause,
                         )
                     )
+            continue
+
+        # Combo — If [named card] was the last attack, this gets "double damage" (Pounding Gale)
+        m = re.search(
+            r'combo\s*[-—–]?\s*if ([\w][\w ]*?) was the last attack this combat chain,?\s*'
+            r'this gets "if this would deal damage to a hero, instead it deals double that much damage',
+            sent,
+            re.I,
+        )
+        if m:
+            last_name = m.group(1).strip().lower()
+            cond = f"combo_named:{last_name}"
+            triggers.append(Trigger("on_attack", Effect("double_damage", 2, sent[:80], condition=cond), sent[:80]))
+            continue
+
+        # One-Two Punch: combo text with a quoted hit-trigger damage rider.
+        m = re.search(
+            r'combo\s*[-—–]?\s*if ([\w][\w ]*?) was the last attack this combat chain,?\s*'
+            r'this gets "when this hits a hero, deal (\d+) damage to them\."',
+            sent,
+            re.I,
+        )
+        if m:
+            triggers.append(
+                Trigger(
+                    "on_hit",
+                    Effect(
+                        "damage",
+                        int(m.group(2)),
+                        sent[:80],
+                        target="opponent",
+                        condition=f"combo_named:{m.group(1).strip()}",
+                    ),
+                    sent[:80],
+                )
+            )
+            continue
+
+        # Cyclone Roundhouse: combo text with a quoted attack-reaction-step banish rider.
+        m = re.search(
+            r'combo\s*[-—–]?\s*if ([\w][\w ]*?) was the last attack this combat chain,?\s*'
+            r'this gets "at the beginning of the reaction step,?\s*banish a random defending card from each chain link\.?"',
+            sent,
+            re.I,
+        )
+        if m:
+            triggers.append(
+                Trigger(
+                    "on_attack_reaction_step",
+                    Effect(
+                        "banish_defending",
+                        raw=sent[:80],
+                        condition=f"combo_named:{m.group(1).strip()}",
+                        banish_name="each_chain_link",
+                    ),
+                    sent[:80],
+                )
+            )
+            continue
+
+        # Combo — If [named card] was the last attack, this gets "When this hits, Y"
+        m = re.search(
+            r'combo\s*[-—–]?\s*if ([\w][\w ]*?) was the last attack this combat chain,?\s*'
+            r'this gets "([^"]+)"',
+            sent,
+            re.I,
+        )
+        if m:
+            last_name = m.group(1).strip().lower()
+            cond = f"combo_named:{last_name}"
+            quoted = m.group(2).strip()
+            inner = re.sub(r"^when this hits(?: a hero)?,?\s*", "", quoted, flags=re.I).strip(" .")
+            hit_eff = _parse_trigger_clause(inner, optional=False)
+            if hit_eff is not None and hit_eff.implemented:
+                triggers.append(
+                    Trigger(
+                        "on_hit",
+                        Effect(
+                            hit_eff.kind, hit_eff.amount, hit_eff.raw,
+                            condition=cond, target=hit_eff.target,
+                        ),
+                        sent[:80],
+                    )
+                )
             continue
 
         m = re.search(
@@ -3125,6 +3481,11 @@ def parse_passive_triggers(text: str) -> tuple[Trigger, ...]:
         )
         if m:
             triggers.append(Trigger("on_defend", Effect("clash", raw=sent), sent))
+            continue
+
+        # Leap Frog Leggings / Slime Skin / Vocal Sac: add this to the active chain link as a defending card.
+        if re.search(r"when an opponent plays or activates an attack reaction,?\s*you may add this to the active chain link as a defending card", low):
+            triggers.append(Trigger("on_attack_reaction_play", Effect("chain_defend", banish_name="self", optional=True, raw=sent), sent))
             continue
 
         m = re.search(

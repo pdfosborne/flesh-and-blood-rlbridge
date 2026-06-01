@@ -164110,9 +164110,7 @@
     "talent": null,
     "rarity": "Common",
     "set": "SIM",
-    "keywords": [
-      "go_again"
-    ],
+    "keywords": [],
     "text": "**Hala Specialization** _(You may only have this in your deck if your hero is Hala.)_{br}**Once per Turn Action** -- {r}: **Attack**{br}If this has been sharpened this turn, its first attack this turn gets **go again**.",
     "legality": {
       "classic_constructed": "legal",
@@ -164134,9 +164132,7 @@
     "talent": null,
     "rarity": "marvel",
     "set": "MPW",
-    "keywords": [
-      "go_again"
-    ],
+    "keywords": [],
     "text": "**Hala Specialization** _(You may only have this in your deck if your hero is Hala.)_{br}**Once per Turn Action** -- {r}: **Attack**{br}If this has been sharpened this turn, its first attack this turn gets **go again**.",
     "legality": {
       "blitz": "legal",

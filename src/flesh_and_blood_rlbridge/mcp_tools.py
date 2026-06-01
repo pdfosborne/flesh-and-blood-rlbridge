@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from typing import Any, Optional
 
-from .environment_factory import FleshAndBloodFactory
+from .environment_factory import TalisharEngineFactory
 
 _FAB_DB_DIR = Path(__file__).with_name("card_db")
 _FABRARY_DECKS_PATH = _FAB_DB_DIR / "fabrary_decks.json"
@@ -119,92 +119,82 @@ def register_mcp_tools(
         }
 
     def _fab_win_probabilities(obs: Any) -> tuple[float, float]:
+        if isinstance(obs, str):
+            try:
+                obs = json.loads(obs)
+            except Exception:
+                return 0.5, 0.5
         if not isinstance(obs, dict):
             return 0.5, 0.5
 
-        agent = obs.get("agent") if isinstance(obs.get("agent"), dict) else {}
-        opp = obs.get("opponent") if isinstance(obs.get("opponent"), dict) else {}
+        player_hp = float(obs.get("playerHealth", 0.0))
+        opp_hp = float(obs.get("opponentHealth", 0.0))
 
-        agent_life = float(agent.get("life", 0.0))
-        opp_life = float(opp.get("life", 0.0))
-
-        if opp_life <= 0 < agent_life:
+        if opp_hp <= 0 < player_hp:
             return 1.0, 0.0
-        if agent_life <= 0 < opp_life:
+        if player_hp <= 0 < opp_hp:
             return 0.0, 1.0
 
-        agent_hand_size = len(agent.get("hand", [])) if isinstance(agent.get("hand"), list) else 0
-        opp_hand_size = int(opp.get("hand_size", 0) or 0)
+        player_hand = float(obs.get("playerHandSize", 0))
+        opp_hand = float(obs.get("opponentHandSize", 0))
+        player_deck = float(obs.get("playerDeckCount", 0))
+        opp_deck = float(obs.get("opponentDeckCount", 0))
+        player_pitch = float(obs.get("playerPitchCount", 0))
 
-        agent_resources = float(agent.get("resources", 0.0))
-        opp_resources = float(opp.get("resources", 0.0))
-        agent_ap = float(agent.get("action_points", 0.0))
-        opp_ap = float(opp.get("action_points", 0.0))
-        agent_deck = float(agent.get("deck", 0.0))
-        opp_deck = float(opp.get("deck", 0.0))
-
-        agent_score = (
-            1.8 * agent_life
-            + 1.0 * agent_hand_size
-            + 0.6 * agent_resources
-            + 0.8 * agent_ap
-            + 0.05 * agent_deck
+        player_score = (
+            1.8 * player_hp
+            + 1.0 * player_hand
+            + 0.05 * player_deck
+            + 0.3 * player_pitch
         )
         opp_score = (
-            1.8 * opp_life
-            + 1.0 * opp_hand_size
-            + 0.6 * opp_resources
-            + 0.8 * opp_ap
+            1.8 * opp_hp
+            + 1.0 * opp_hand
             + 0.05 * opp_deck
         )
 
-        pending = obs.get("pending_combat")
-        if isinstance(pending, dict):
-            atk = float(pending.get("attack_power", 0.0) or 0.0)
-            blk = float(pending.get("total_block", 0.0) or 0.0)
-            net = max(0.0, atk - blk)
-            attacker = int(pending.get("attacker", 0) or 0)
-            if attacker == 0:
-                agent_score += 1.5 * net
-            else:
-                opp_score += 1.5 * net
+        if bool(obs.get("havePriority", False)):
+            player_score += 0.4
 
-        active_player = int(obs.get("active_player", 0) or 0)
-        if active_player == 0:
-            agent_score += 0.4
-        else:
-            opp_score += 0.4
-
-        diff = (agent_score - opp_score) / 8.0
-        agent_p = 1.0 / (1.0 + math.exp(-diff))
-        agent_p = max(0.0, min(1.0, agent_p))
-        return agent_p, 1.0 - agent_p
+        diff = (player_score - opp_score) / 8.0
+        player_p = 1.0 / (1.0 + math.exp(-diff))
+        player_p = max(0.0, min(1.0, player_p))
+        return player_p, 1.0 - player_p
 
     def _fab_outcome_score(obs: Any, *, terminated: bool) -> float:
+        if isinstance(obs, str):
+            try:
+                obs = json.loads(obs)
+            except Exception:
+                return 0.5
         if isinstance(obs, dict):
-            agent = obs.get("agent") if isinstance(obs.get("agent"), dict) else {}
-            opp = obs.get("opponent") if isinstance(obs.get("opponent"), dict) else {}
-            agent_life = float(agent.get("life", 0.0) or 0.0)
-            opp_life = float(opp.get("life", 0.0) or 0.0)
+            player_hp = float(obs.get("playerHealth", 0.0) or 0.0)
+            opp_hp = float(obs.get("opponentHealth", 0.0) or 0.0)
             if terminated:
-                if opp_life <= 0 < agent_life:
+                if opp_hp <= 0 < player_hp:
                     return 1.0
-                if agent_life <= 0 < opp_life:
+                if player_hp <= 0 < opp_hp:
                     return 0.0
-                if agent_life == opp_life:
+                if player_hp == opp_hp:
                     return 0.5
         p_agent, _ = _fab_win_probabilities(obs)
         return float(p_agent)
 
     def _get_deck_options(format_name: str, seed: Optional[int]) -> list[dict[str, Any]]:
-        env = registry.create("FleshAndBlood-DeckBuild-v0", render_mode=None, format=format_name)
-        try:
-            reset_out = env.reset(seed=seed, options={"format": format_name, "two_phase_deckbuild": True})
-            obs = reset_out.observation if hasattr(reset_out, "observation") else reset_out.get("observation", {})
-            options = obs.get("deck_options") if isinstance(obs, dict) else None
-            return list(options) if isinstance(options, list) else []
-        finally:
-            env.close()
+        assets_path = Path(
+            os.environ.get(
+                "TALISHAR_ASSETS_PATH",
+                str(Path.home() / "Documents/flesh-and-blood/Talishar/Assets"),
+            )
+        )
+        options: list[dict[str, Any]] = []
+        if assets_path.is_dir():
+            for deck_file in sorted(assets_path.glob("*.txt")):
+                deck_name = deck_file.stem
+                options.append({"key": deck_name, "label": deck_name, "deck_name": deck_name})
+        if not options:
+            options = [{"key": "Ira", "label": "Ira", "deck_name": "Ira"}]
+        return options
 
     def _cache_paths(matchup_cache_key: str) -> tuple[Path, Path]:
         digest = hashlib.sha1(matchup_cache_key.encode("utf-8")).hexdigest()
@@ -282,18 +272,8 @@ def register_mcp_tools(
 
     def _resolve_supported_formats(format_names_csv: Optional[str]) -> list[str]:
         if format_names_csv:
-            requested = [f.strip() for f in str(format_names_csv).split(",") if f.strip()]
-        else:
-            requested = ["silver_age", "classic_constructed"]
-
-        supported: list[str] = []
-        for fmt in requested:
-            try:
-                _ = _get_deck_options(fmt, seed=None)
-                supported.append(fmt)
-            except Exception:
-                continue
-        return supported
+            return [f.strip() for f in str(format_names_csv).split(",") if f.strip()]
+        return ["blitz", "classic_constructed"]
 
     def _evaluate_deck_vs_matchup(
         *,
@@ -314,23 +294,15 @@ def register_mcp_tools(
                 str(inner_agent_type),
                 str(deck_key),
                 str(matchup_key),
-                str(deck_option.get("hero_id", "")),
-                str(matchup_option.get("hero_id", "")),
-                str(deck_option.get("style", "balanced")),
-                str(matchup_option.get("style", "balanced")),
-                str(int(deck_option.get("deck_size", 40) or 40)),
+                str(deck_option.get("deck_name", "Ira")),
             ]
         )
         cached_metadata, cached_agent, used_cached_agent = _load_cached_matchup_entry(matchup_cache_key)
 
         env_kwargs: dict[str, Any] = {
             "render_mode": None,
-            "format": format_name,
-            "agent_hero_id": str(deck_option.get("hero_id")),
-            "opponent_hero_id": str(matchup_option.get("hero_id")),
-            "deck_size": int(deck_option.get("deck_size", 40) or 40),
-            "agent_deck_style": str(deck_option.get("style", "balanced")),
-            "opponent_deck_style": str(matchup_option.get("style", "balanced")),
+            "local_deck_name": str(deck_option.get("deck_name", "Ira")),
+            "game_format": str(format_name),
         }
 
         train_result: Any = None
@@ -454,23 +426,20 @@ def register_mcp_tools(
             log.exception("fab_estimate_win_probabilities error")
             return f"Error computing win probabilities: {exc}"
 
-        agent = obs.get("agent") if isinstance(obs.get("agent"), dict) else {}
-        opp = obs.get("opponent") if isinstance(obs.get("opponent"), dict) else {}
-
         result = {
             "agent_win_probability": round(agent_p, 4),
             "opponent_win_probability": round(opp_p, 4),
             "inputs": {
-                "agent_life": agent.get("life"),
-                "opponent_life": opp.get("life"),
-                "agent_hand_size": len(agent.get("hand", [])) if isinstance(agent.get("hand"), list) else agent.get("hand_size"),
-                "opponent_hand_size": opp.get("hand_size"),
-                "active_player": obs.get("active_player"),
+                "agent_life": obs.get("playerHealth"),
+                "opponent_life": obs.get("opponentHealth"),
+                "agent_hand_size": obs.get("playerHandSize"),
+                "opponent_hand_size": obs.get("opponentHandSize"),
+                "have_priority": obs.get("havePriority"),
             },
             "reasoning": (
                 "Logistic model over life totals (x1.8), hand size (x1.0), "
-                "resources (x0.6), action points (x0.8), deck size (x0.05), "
-                "pending combat net damage (x1.5), and initiative bonus (+/-0.4)."
+                "deck size (x0.05), pitch zone count (x0.3), "
+                "and initiative bonus (+0.4 when agent has priority)."
             ),
         }
         return json.dumps(result, indent=2)
@@ -555,12 +524,9 @@ def register_mcp_tools(
             ).hexdigest()[:12]
             _agent_id = f"fabm_{_key_digest}"
             _registered_env_id = f"FleshAndBlood-matchup-{_key_digest}"
-            matchup_factory = FleshAndBloodFactory(
+            matchup_factory = TalisharEngineFactory(
                 _registered_env_id,
-                agent_hero_id=str(deck_option.get("hero_id", "hero_dorinthea_ironsong")),
-                opponent_hero_id=str(matchup_option.get("hero_id", "hero_rhinar_reckless_rampage")),
-                deck_size=int(deck_option.get("deck_size", 40) or 40),
-                format=format_name,
+                game_format=format_name,
             )
             if _registered_env_id not in _FAB_REGISTERED_MATCHUP_ENVS:
                 registry.register(matchup_factory)
@@ -714,20 +680,12 @@ def register_mcp_tools(
             info if resolution failed.
         """
         # Normalize format name
-        try:
-            # Create temp env to access format normalization
-            temp_env = registry.create("FleshAndBlood-Talishar-v0", render_mode=None, format=format_name)
-            normalized_format = temp_env._format
-            temp_env.close()
-        except Exception as exc:
-            return json.dumps(
-                {
-                    "error": f"Invalid format {format_name!r}: {exc}",
-                    "side": side,
-                    "url": fabrary_url,
-                },
-                indent=2,
-            )
+        _FORMAT_ALIASES: dict[str, str] = {
+            "sa": "silver_age",
+            "cc": "classic_constructed",
+            "ll": "living_legend",
+        }
+        normalized_format = _FORMAT_ALIASES.get(format_name.lower(), format_name.lower())
 
         # Extract deck ID from URL: https://fabrary.net/decks/01KR40W4Z2ZS9EQPT6VT6CDSPE
         match = re.search(r"/decks/([a-zA-Z0-9]+)\b", fabrary_url)
@@ -785,10 +743,24 @@ def register_mcp_tools(
                     indent=2,
                 )
 
-            # Resolve the deck to card IDs using the environment's logic
-            temp_env = registry.create("FleshAndBlood-Talishar-v0", render_mode=None, format=normalized_format)
-            card_ids = temp_env._resolve_fabrary_deck(deck_entry)
-            temp_env.close()
+            # Resolve deck to card IDs by name lookup in the card database
+            _cards_db_path = _FAB_DB_DIR / "cards.json"
+            try:
+                _all_cards = json.loads(_cards_db_path.read_text(encoding="utf-8"))
+                _name_to_id = {
+                    c["name"].lower(): c["id"]
+                    for c in _all_cards
+                    if "name" in c and "id" in c
+                }
+            except Exception:
+                _name_to_id = {}
+            card_ids: list[str] = []
+            for _card_entry in deck_entry.get("cards", []):
+                _cname = str(_card_entry.get("name", "")).lower()
+                _count = int(_card_entry.get("count", 1))
+                _cid = _name_to_id.get(_cname)
+                if _cid:
+                    card_ids.extend([_cid] * _count)
 
             if not card_ids:
                 return json.dumps(

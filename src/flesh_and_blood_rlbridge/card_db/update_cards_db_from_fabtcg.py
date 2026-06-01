@@ -22,6 +22,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+from flesh_and_blood_rlbridge import fab_rules
+
 
 DEFAULT_CARDS_PATH = Path(__file__).with_name("cards.json")
 DEFAULT_DECKS_PATH = Path(__file__).with_name("fabrary_decks.json")
@@ -56,26 +58,9 @@ def _card_name_key(name: str) -> str:
     return text.lower()
 
 
-# Keyword tokens recognized in rules text (kept in sync with environment.py).
-_KEYWORD_PATTERNS: dict[str, str] = {
-    "go_again": r"\bgo again\b",
-    "dominate": r"\bdominate\b",
-    "overpower": r"\boverpower\b",
-    "intimidate": r"\bintimidate\b",
-    "ward": r"\bward\b",
-    "fusion": r"\bfusion\b",
-    "battleworn": r"\bbattleworn\b",
-    "blade_break": r"\bblade break\b",
-    "arcane_barrier": r"\barcane barrier\b",
-    "temper": r"\btemper\b",
-}
-
 
 def _derive_keywords(text: str) -> list[str]:
-    body = str(text or "").lower()
-    if not body:
-        return []
-    return [kw for kw, pat in _KEYWORD_PATTERNS.items() if re.search(pat, body)]
+    return list(fab_rules.derive_keywords_from_text(text))
 
 
 def _canonical_name_key(name: str) -> str:

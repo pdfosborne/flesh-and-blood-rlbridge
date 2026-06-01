@@ -27,6 +27,23 @@ def _run_play(args: list[str]) -> int:
     return int(play_main(args) or 0)
 
 
+def _run_talishar(args: list[str]) -> int:
+    import runpy
+
+    argv_backup = sys.argv
+    sys.argv = ["cli_talishar.py", *args]
+    try:
+        runpy.run_path(
+            str(Path(__file__).resolve().parent / "scripts" / "cli_talishar.py"),
+            run_name="__main__",
+        )
+        return 0
+    except SystemExit as exc:
+        return int(exc.code) if exc.code is not None else 0
+    finally:
+        sys.argv = argv_backup
+
+
 def _run_update_db(args: list[str]) -> int:
     from flesh_and_blood_rlbridge.card_db import update_cards_db_from_fabtcg as updater
 
@@ -43,6 +60,10 @@ _TOOLS: dict[str, tuple[str, Callable[[list[str]], int]]] = {
     "play": (
         "Play a Flesh and Blood match (pick deck + opponent, agent suggestions)",
         _run_play,
+    ),
+    "talishar": (
+        "Play interactively via the Talishar engine (human or agent vs CombatDummy AI)",
+        _run_talishar,
     ),
     "update-db": (
         "Update the card database from the official FAB Card Vault API",

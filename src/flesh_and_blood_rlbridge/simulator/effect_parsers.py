@@ -394,6 +394,11 @@ def parse_extended_triggers(text: str) -> tuple[Trigger, ...]:
     # Quoted on-hit grants: gets "When this hits, ..."
     for m in re.finditer(r'gets?\s+"when this hits[^"]*"', body, re.I):
         inner = m.group(0)
+        # Skip if this quoted grant is guarded by a named-combo condition
+        # (parse_passive_triggers handles it conditionally instead).
+        pre_ctx = body[max(0, m.start() - 150):m.start()]
+        if re.search(r"was the last attack this combat chain", pre_ctx, re.I):
+            continue
         qm = re.search(r'"(when this hits[^"]*)"', inner, re.I)
         if not qm:
             continue

@@ -44,6 +44,7 @@ SUPPORTED_EFFECTS = {
     "destroy_top",
     "destroy_arsenal",
     "destroy_hand",
+    "destroy_aura_create_token",
     "gain_resources",
     "damage_floor",
     "prevent_damage",
@@ -182,6 +183,21 @@ SUPPORTED_EFFECTS = {
     "set_next_instant_return_aura",   # Blast to Oblivion: next instant triggers return target aura
     "reveal_for_blue_bonus",      # Attune with Cosmic Vibrations: reveal top, +3p/+3d if blue
     "reveal_top_draconic_power",  # Red Hot: reveal X=draconic links, +{p} per high-cost card
+    "double_damage",               # Pounding Gale: combo — deal double damage to hero
+    "create_random_token",         # Plague Hive: create a random token from a list
+    "shuffle_put_top_arsenal",     # Schism of Chaos: shuffle then put top card face-down in arsenal
+    "invert_next_life_gain",       # Poison the Well: next life gain becomes life loss
+    "create_token_per_defender",   # Spreading Plague: create X tokens per defending card
+    "retrieve_banished_aura",      # Halo of Lumina Light: put aura from banished zone into arena
+    "return_chain_cards",          # Electromagnetic Somersault: return chain link cards to hand
+    "lose_colors",                  # Blanch: cards lose all colors
+    "lose_class_talent",            # Erase Face: cards lose class/talent types
+    "remove_from_game",             # Goldfin Harpoon: if this would be put into GY, remove it instead
+    "remove_blood_debt",             # Levia: cards lose blood debt during end phase when condition met
+    "receive_token",                 # Gesture of Goodwill: receive a token from the protected hero
+    "flip_face_up",                  # Heirloom of Snake/Tiger Hide: flip face-down equipment to face-up
+    "play_as_instant",               # Spirit of Eirina: play a named card as an instant
+    "create_extra_token",            # Florian: create one extra aura token when creating aura tokens
 }
 
 # Only mark as unimplemented when these appear and no specific parser matched.
@@ -406,6 +422,11 @@ def _merge_split_clauses(body: str) -> str:
         ),
         (
             r"(when this defends,?\s*you may turn a card in a graveyard face-down)\.\s*"
+            r"(if it'?s yellow,?\s*create a gold token)",
+            r"\1, \2",
+        ),
+        (
+            r"(when this hits(?: a hero)?,?\s*you may turn a card in their graveyard face-down)\.\s*"
             r"(if it'?s yellow,?\s*create a gold token)",
             r"\1, \2",
         ),
@@ -803,6 +824,15 @@ def _parse_trigger_clause(clause: str, *, optional: bool = False) -> Effect | No
         n = 1 if m.group(1) in ("a", "an", "one") else int(m.group(1))
         return Effect("discard", n, target="opponent", raw=raw)
 
+    if re.search(r"they put (?:a |an |one )cards? from their hand on top of their deck", c):
+        return Effect("put_hand_top", 1, target="opponent", raw=raw)
+
+    if re.search(r"cards they own lose all colors", c):
+        return Effect("lose_colors", 1, target="opponent", raw=raw)
+
+    if re.search(r"cards they own lose all class and talent types?", c):
+        return Effect("lose_class_talent", 1, target="opponent", raw=raw)
+
     return None
 
 
@@ -1092,7 +1122,7 @@ def _parse_create_banish(clause: str) -> Effect | None:
     if m:
         name = m.group(1).strip()
         if name and " in your banished zone" not in name and " under their control" not in name:
-            return Effect("create_token", token_name=name, raw=clause.strip())
+            return Effect("create_token", token_name=name, target="self", raw=clause.strip())
     if re.search(r"create[ds]? an? (.+?) token under their control", c):
         m = re.search(r"create[ds]? an? (.+?) token under their control", c)
         return Effect("create_token", token_name=m.group(1).strip(), target="opponent", raw=clause.strip())
@@ -1229,7 +1259,7 @@ def _parse_extended_clause(clause: str, *, optional: bool, condition: str) -> Ef
         target = "opponent" if re.search(r"they gain \d+\{g\}", c) else "self"
         return eff("gain_gold", int(m.group(1)), target=target)
 
-    m = re.search(r"put (.+?) from your graveyard on top of your deck", c)
+    m = re.search(r"put (.+?) from your graveyard on (?:the )?top of your deck", c)
     if m:
         return eff("return_gy_to_deck", banish_name=m.group(1).strip())
 
@@ -2983,6 +3013,8 @@ def parse_play_modifiers(text: str) -> tuple[PlayModifier, ...]:
             )
         elif kind == "next_defend_combo":
             mods.append(PlayModifier(defense=int(m.group(1)), condition=kind, raw=m.group(0)[:80]))
+        elif kind == "must_attack_this":
+            mods.append(PlayModifier(condition=kind, raw=m.group(0)[:80]))
 
     # Token-pair defense bonus (e.g. Laughing Knee-Slappers, Plate of Tough Love).
     for m in re.finditer(
@@ -3049,6 +3081,92 @@ def parse_play_modifiers(text: str) -> tuple[PlayModifier, ...]:
                 raw=m.group(0)[:80],
             )
         )
+
+    # "If the attacking hero is **marked**, their next attack this turn gets -N{p}." (Lay Low)
+    m = re.search(
+        r"if the attacking hero is\s*(?:\*\*)?marked(?:\*\*)?,?\s*"
+        r"their next attack this turn gets -(\d+)\s*(?:\{p\}|power)",
+        body,
+        re.I,
+    )
+    if m:
+        mods.append(
+            PlayModifier(
+                next_attack_power=-int(m.group(1)),
+                condition="attacker_marked",
+                raw=m.group(0)[:80],
+            )
+        )
+
+    # "If you control N or more X tokens, this gets +M{d}."
+    # Handles numeric and word-number thresholds (e.g. Testament of Valahai).
+    _WORD_NUMS = {
+        "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+        "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    }
+
+    def _word_or_int(s: str) -> int:
+        return _WORD_NUMS.get(s.strip().lower(), 0) or int(s)
+
+    for m in re.finditer(
+        r"if you control ((?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)) or more"
+        r" ([\w][\w ]*?\w) tokens?,?\s*(?:instead )?this gets \+(\d+)\{d\}",
+        body,
+        re.I,
+    ):
+        threshold = _word_or_int(m.group(1))
+        tok = m.group(2).strip().lower()
+        bonus = int(m.group(3))
+        mods.append(
+            PlayModifier(
+                defense=bonus,
+                condition=f"controls_ge:{tok}:{threshold}",
+                raw=m.group(0)[:80],
+            )
+        )
+
+    # "Your attacks get +N{p} while attacking a Shadow hero this turn." (Ray of Hope)
+    m = re.search(
+        r"your attacks get \+(\d+)\s*(?:\{p\}|power) while attacking a shadow hero(?:\s+this turn)?",
+        body, re.I,
+    )
+    if m:
+        mods.append(PlayModifier(next_attack_power=int(m.group(1)), condition="shadow_hero", raw=m.group(0)[:80]))
+
+    # "Earth, Ice, and Elemental action cards get +1{d} while defending this turn." (Pulse of Isenloft)
+    m = re.search(
+        r"earth,?\s*ice,?\s*and elemental action cards get \+(\d+)\s*(?:\{d\}|defense) while defending this turn",
+        body, re.I,
+    )
+    if m:
+        mods.append(PlayModifier(defense=int(m.group(1)), condition="earth_ice_elemental_type", raw=m.group(0)[:80]))
+
+    # "If you've boosted 2 or more times this turn, this gets +N{p}" (Smash and Grab)
+    m = re.search(
+        r"if you'?ve?\s*\*?\*?boosted\*?\*?\s*(\d+) or more times this turn,?\s*this gets \+(\d+)\s*(?:\{p\}|power)",
+        body, re.I,
+    )
+    if m:
+        n = int(m.group(1))
+        mods.append(PlayModifier(power=int(m.group(2)), condition=f"boosted_ge:{n}", raw=m.group(0)[:80]))
+
+    # "This gets -1{p} for each card with 6 or more {p} defending it." (Show of Strength)
+    m = re.search(
+        r"this gets -1\s*(?:\{p\}|power) for each card with \d+ or more \{p\} defending it",
+        body, re.I,
+    )
+    if m:
+        mods.append(PlayModifier(power=-1, condition="per_high_power_defender", raw=m.group(0)[:80]))
+
+    # Lay Down the Law: "Tower - If this has 13 or more {p}, non-equipment cards get -1{d} while defending this."
+    m = re.search(r"\btower\b.{0,80}non-equipment cards?\s+get(?:s)?\s+-1\s*(?:\{d\}|defense)", body, re.I)
+    if m:
+        mods.append(PlayModifier(defense=-1, condition="tower_high_power", raw=m.group(0)[:80]))
+
+    # Walk in My Shoes: "If this has {p} greater than its base, it gets +1{p}."
+    m = re.search(r"if this has\s*(?:\{p\}|power) greater than its base,?\s*it gets \+1\s*(?:\{p\}|power)", body, re.I)
+    if m:
+        mods.append(PlayModifier(power=1, condition="power_gt_base", raw=m.group(0)[:80]))
 
     return tuple(mods)
 
@@ -3738,6 +3856,24 @@ def parse_triggers(text: str) -> tuple[Trigger, ...]:
         # Skip generic loop catching "attacks a marked hero" clause
         body = body  # no mutation needed; generic loop will skip "^a hero," prefix for "a marked hero,"
 
+    # On-attack/on-hit: destroy your aura to create a Runechant (Splintering Deadwood, etc.).
+    _aura_for_runechant = re.search(
+        r"when this attacks or hits, you may destroy an aura you control\.?\s*"
+        r"if you do, create a runechant token",
+        body,
+        re.I,
+    )
+    if _aura_for_runechant:
+        aura_rune = Effect(
+            "destroy_aura_create_token",
+            token_name="runechant",
+            target="self",
+            optional=True,
+            raw=_aura_for_runechant.group(0)[:120],
+        )
+        for when in ("on_attack", "on_hit"):
+            triggers.append(Trigger(when, aura_rune, _aura_for_runechant.group(0)[:80]))
+
     # On-attack: "when (this|it) attacks, <effect>".
     _douse_runeblood = re.search(
         r"when this attacks, create runechant tokens equal to the number of non-attack action cards you've played this turn\.?\s*"
@@ -3747,6 +3883,8 @@ def parse_triggers(text: str) -> tuple[Trigger, ...]:
     )
     for m in re.finditer(r"when (?:this|it) attacks,?\s*([^.]*)\.?", body, re.I):
         clause = m.group(1)
+        if _aura_for_runechant:
+            continue
         if _douse_runeblood:
             continue
         if re.search(
@@ -4069,6 +4207,8 @@ def parse_triggers(text: str) -> tuple[Trigger, ...]:
     # On-hit: "when(ever) (this|it) hits[ ...], <effect>".
     for m in re.finditer(r"when(?:ever)? (?:this|it) hits[^,]*,\s*([^.]*)\.?", body, re.I):
         if m.start() > 0 and body[m.start() - 1] == '"':
+            continue
+        if _aura_for_runechant:
             continue
         clause = m.group(1).strip()
         # Skip Dishonor's complex conditional — handled by special case above
@@ -4440,6 +4580,36 @@ def parse_triggers(text: str) -> tuple[Trigger, ...]:
                     target="opponent",
                     raw=m.group(0)[:80],
                 ),
+                m.group(0)[:80],
+            )
+        )
+
+    # Plague Hive: "When this is pitched, for each opponent, choose Frailty/Inertia/Bloodrot Pox at random"
+    m = re.search(
+        r"when this is pitched,?\s*for each opponent,?\s*choose frailty",
+        body,
+        re.I,
+    )
+    if m:
+        triggers.append(
+            Trigger(
+                "on_pitched",
+                Effect("create_random_token", 1, m.group(0)[:80], token_name="frailty|inertia|bloodrot pox"),
+                m.group(0)[:80],
+            )
+        )
+
+    # Schism of Chaos: "When this is pitched, each hero shuffles, then puts the top card ... face-down into their arsenal"
+    m = re.search(
+        r"when this is pitched,?\s*each hero shuffles,?\s*then puts? the top card",
+        body,
+        re.I,
+    )
+    if m:
+        triggers.append(
+            Trigger(
+                "on_pitched",
+                Effect("shuffle_put_top_arsenal", 1, m.group(0)[:80], target="all"),
                 m.group(0)[:80],
             )
         )
@@ -5120,6 +5290,9 @@ def parse_play_costs(text: str) -> tuple[Effect, ...]:
                 raw="banish 6+ power cards from hand",
             )
         )
+
+    if re.search(r"as an additional cost to play this,?\s*you may pay \{x\}", body, re.I):
+        costs.append(Effect("additional_pay", 0, optional=True, raw="pay {x} additional cost"))
 
     if re.search(r"as an additional cost to play this,?\s*you may pay ((?:\{r\})+|\d+)", body, re.I):
         m = re.search(r"as an additional cost to play this,?\s*you may pay ((?:\{r\})+|\d+)", body, re.I)

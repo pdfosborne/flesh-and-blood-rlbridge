@@ -310,10 +310,17 @@ def _card_line(card: dict[str, Any]) -> str:
     types = "/".join(t for t in card.get("card_types", []) if t) or "card"
     keywords = card.get("keywords") or []
     kw = f"  {{{', '.join(keywords)}}}" if keywords else ""
+    play_tag = ""
+    if card.get("legal_play"):
+        play_tag = "  [can play]"
+    elif card.get("affordable") and any(
+        t in (card.get("card_types") or []) for t in ("attack_action", "utility_action")
+    ):
+        play_tag = "  [blocked]"
     line = (
         f"{_card_display_name(card)} "
         f"- cost {card.get('cost', 0)}, pitch {card.get('pitch', 0)}, "
-        f"attack {card.get('power', 0)}, defense {card.get('defense', 0)} ({types}){kw}"
+        f"attack {card.get('power', 0)}, defense {card.get('defense', 0)} ({types}){kw}{play_tag}"
     )
     text = _clean_text(card.get("text"))
     if text:
@@ -418,7 +425,21 @@ def _describe_action(action: str, obs: dict[str, Any]) -> str:
         if phase == "arsenal":
             return "Skip - don't stash (proceed to draw)"
         if phase == "instant_pay":
+            agent = obs.get("agent") if isinstance(obs.get("agent"), dict) else {}
+            resources = int(agent.get("resources") or 0)
+            ctx = obs.get("pending_payment") if isinstance(obs.get("pending_payment"), dict) else {}
+            cost = int(ctx.get("cost") or 0)
+            if resources >= cost:
+                return "Confirm - pay and play this instant"
             return "Cancel - don't play this instant"
+        if phase == "card_pay":
+            agent = obs.get("agent") if isinstance(obs.get("agent"), dict) else {}
+            resources = int(agent.get("resources") or 0)
+            ctx = obs.get("pending_payment") if isinstance(obs.get("pending_payment"), dict) else {}
+            cost = int(ctx.get("cost") or 0)
+            if resources >= cost:
+                return "Confirm - pay cost and complete action"
+            return "Cancel - abandon this play"
         if phase == "pitch_pay":
             return "Confirm payment - pass when done pitching (or cancel if optional)"
         return "Pass - end attacks (arsenal stash step next)"
@@ -473,6 +494,7 @@ def _describe_action(action: str, obs: dict[str, Any]) -> str:
         name = _card_display_name(card)
         if parts[0] == "play":
             cost = card.get("cost", 0)
+            eff = card.get("effective_cost", cost)
             damage = card.get("damage", card.get("power", 0))
             is_attack = "attack_action" in (card.get("card_types") or [])
             if damage and card.get("arcane"):
@@ -481,6 +503,14 @@ def _describe_action(action: str, obs: dict[str, Any]) -> str:
                 effect = f"attack for {damage}" if is_attack else f"deal {damage} damage"
             else:
                 effect = "play action"
+            pay_note = ""
+            if eff > 0:
+                need = int(card.get("resources_needed") or max(0, eff - int(
+                    (obs.get("agent") or {}).get("resources") or 0
+                )))
+                pay_note = (
+                    f" — pay {eff} resources (pitch {need} more)" if need else f" — pay {eff} resources"
+                )
             extras = []
             if card.get("fusion_element"):
                 state = "ready" if card.get("fusable") else f"needs a {card['fusion_element']} card"
@@ -489,8 +519,13 @@ def _describe_action(action: str, obs: dict[str, Any]) -> str:
                 extras.append("go again")
             extras.extend(_effect_hints(card.get("text")))
             tag = f" [{', '.join(extras)}]" if extras else ""
-            return f'Play "{name}" - {effect} (cost {cost}){tag}'
+            return f'Play "{name}" - {effect} (cost {cost}){pay_note}{tag}'
         if parts[0] == "pitch":
+            phase = obs.get("phase")
+            if phase in {"instant_pay", "card_pay", "pitch_pay"}:
+                ctx = obs.get("pending_payment") if isinstance(obs.get("pending_payment"), dict) else {}
+                target = ctx.get("card") or "pending cost"
+                return f'Pitch "{name}" - gain {card.get("pitch", 0)} resources toward {target}'
             return f'Pitch "{name}" - gain {card.get("pitch", 0)} resources'
         if parts[0] == "reaction":
             return f'React with "{name}" - +{card.get("power", 0)} attack (cost {card.get("cost", 0)})'
@@ -500,6 +535,80 @@ def _describe_action(action: str, obs: dict[str, Any]) -> str:
     return action
 
 
+def _format_permanent_line(entry: dict[str, Any], *, reveal: bool) -> str:
+    name = _clean_name(entry.get("name"))
+    used = "*" if entry.get("used") else ""
+    counters = entry.get("counters") if isinstance(entry.get("counters"), dict) else {}
+    counter_bits = [
+        f"{_token_display_name(k)} x{int(v)}"
+        for k, v in sorted(counters.items())
+        if int(v or 0) > 0
+    ]
+    counter_text = f" [{', '.join(counter_bits)}]" if counter_bits else ""
+    defense = int(entry.get("defense") or 0)
+    slot = entry.get("slot")
+    if slot:
+        return f"{slot}: {name} (def {defense}){counter_text}{used}"
+    if reveal and entry.get("text"):
+        summary = _clean_text(str(entry.get("text"))).split("\n")[0]
+        if len(summary) > 48:
+            summary = summary[:45] + "..."
+        return f"{name}{counter_text}{used} — {summary}"
+    return f"{name}{counter_text}{used}"
+
+
+def _format_buff_line(buff: dict[str, Any]) -> str:
+    label = _clean_text(buff.get("label") or "pending effect")
+    source = buff.get("source")
+    if source:
+        return f"{label} (from {_clean_name(source)})"
+    return label
+
+
+def _format_resource_summary(player: dict[str, Any]) -> str:
+    resources = int(player.get("resources") or 0)
+    pitched = int(player.get("pitch_resources") or 0)
+    bonus = int(player.get("bonus_resources") or 0)
+    text = f"Resources {resources}"
+    gained: list[str] = []
+    if pitched:
+        gained.append(f"+{pitched} pitched")
+    if bonus:
+        gained.append(f"+{bonus} bonus")
+    if gained:
+        text += f" ({', '.join(gained)} this turn)"
+    return text
+
+
+def _pitch_zone_line(player: dict[str, Any]) -> str:
+    zone = player.get("pitch_zone") if isinstance(player.get("pitch_zone"), dict) else {}
+    count = int(zone.get("count") or 0)
+    if count <= 0:
+        return ""
+    value = int(zone.get("value") or 0)
+    cards = zone.get("cards") if isinstance(zone.get("cards"), list) else []
+    if cards:
+        names = ", ".join(_card_display_name(c) for c in cards if isinstance(c, dict))
+        return f"  Pitch zone ({count} cards, {value} value): {names}"
+    return f"  Pitch zone: {count} card(s) ({value} value)"
+
+
+def _player_economy_lines(player: dict[str, Any]) -> list[str]:
+    lines = [_format_resource_summary(player)]
+    pitch_line = _pitch_zone_line(player)
+    if pitch_line:
+        lines.append(pitch_line)
+    return lines
+
+
+def _buff_lines(player: dict[str, Any]) -> list[str]:
+    buffs = player.get("buffs") if isinstance(player.get("buffs"), list) else []
+    active = [b for b in buffs if isinstance(b, dict) and b.get("label")]
+    if not active:
+        return []
+    return ["  Buffs: " + "  |  ".join(_format_buff_line(b) for b in active)]
+
+
 def _arena_lines(arena: dict[str, Any], reveal: bool) -> list[str]:
     """Render the equipment / weapon / hero / arsenal zones."""
     if not isinstance(arena, dict):
@@ -507,11 +616,20 @@ def _arena_lines(arena: dict[str, Any], reveal: bool) -> list[str]:
     out: list[str] = []
     equipment = arena.get("equipment") or []
     if equipment:
-        pieces = []
-        for e in equipment:
-            mark = "*" if e.get("used") else ""
-            pieces.append(f"{e.get('slot')}: {_clean_name(e.get('name'))} (def {e.get('defense', 0)}){mark}")
+        pieces = [_format_permanent_line(e, reveal=reveal) for e in equipment]
         out.append("  Equipment: " + "  |  ".join(pieces))
+    auras = arena.get("auras") or []
+    if auras:
+        pieces = [_format_permanent_line(a, reveal=reveal) for a in auras]
+        out.append("  Auras: " + "  |  ".join(pieces))
+    items = arena.get("items") or []
+    if items:
+        pieces = [_format_permanent_line(i, reveal=reveal) for i in items]
+        out.append("  Items: " + "  |  ".join(pieces))
+    allies = arena.get("allies") or []
+    if allies:
+        pieces = [_format_permanent_line(a, reveal=reveal) for a in allies]
+        out.append("  Allies: " + "  |  ".join(pieces))
     weapon = arena.get("weapon") or {}
     if weapon.get("name"):
         used = " [used]" if weapon.get("used") else ""
@@ -650,6 +768,25 @@ def _last_opponent_turn_lines(turn: dict[str, Any]) -> list[str]:
     return [f"  [OPPONENT'S LAST TURN] {summary}"]
 
 
+def _format_opponent_action_line(message: str) -> str:
+    text = str(message or "").strip()
+    for prefix in ("P1 ", "Opponent "):
+        if text.startswith(prefix):
+            text = text[len(prefix) :]
+    return text
+
+
+def _print_opponent_action_log(obs: dict[str, Any]) -> None:
+    actions = obs.get("opponent_actions")
+    if not isinstance(actions, list) or not actions:
+        return
+    print("\n  Opponent's turn:")
+    for i, message in enumerate(actions, 1):
+        if not isinstance(message, str) or not message.strip():
+            continue
+        print(f"    {i}. {_format_opponent_action_line(message)}")
+
+
 def _render_board(obs: dict[str, Any], win_agent: float, win_opp: float) -> str:
     agent = obs.get("agent") if isinstance(obs.get("agent"), dict) else {}
     opp = obs.get("opponent") if isinstance(obs.get("opponent"), dict) else {}
@@ -672,7 +809,10 @@ def _render_board(obs: dict[str, Any], win_agent: float, win_opp: float) -> str:
     if isinstance(last_opp_turn, dict) and not opp_attacking:
         lines.extend(_last_opponent_turn_lines(last_opp_turn))
     for notice in obs.get("notices") or []:
-        lines.append(f"  (!) {notice}")
+        if notice.startswith("UnimplementedError"):
+            lines.append(f"  (!) {notice}")
+        else:
+            lines.append(f"  (i) {notice}")
     decision = obs.get("optional_decision")
     if isinstance(decision, dict):
         lines.append(f"  (?) Optional: {decision.get('card')} - may {decision.get('description')}")
@@ -690,9 +830,11 @@ def _render_board(obs: dict[str, Any], win_agent: float, win_opp: float) -> str:
     lines.append(
         f"  Life {opp.get('life', 0)}  |  Hand {opp.get('hand_size', 0)} (hidden)  |  "
         f"Deck {opp.get('deck', 0)}  |  Discard {opp.get('discard', 0)}  |  "
-        f"Resources {opp.get('resources', 0)}  |  AP {opp.get('action_points', 0)}"
+        f"AP {opp.get('action_points', 0)}"
     )
+    lines.extend(_player_economy_lines(opp))
     lines.extend(_arena_lines(opp.get("arena") or {}, reveal=False))
+    lines.extend(_buff_lines(opp))
     lines.extend(_board_token_lines(agent, opp))
 
     if isinstance(pending, dict):
@@ -746,14 +888,15 @@ def _render_board(obs: dict[str, Any], win_agent: float, win_opp: float) -> str:
     lines.append(f"YOU - {agent.get('hero', '?')}")
     lines.append(
         f"  Life {agent.get('life', 0)}  |  Deck {agent.get('deck', 0)}  |  "
-        f"Discard {agent.get('discard', 0)}  |  Resources {agent.get('resources', 0)}  |  "
-        f"AP {agent.get('action_points', 0)}"
+        f"Discard {agent.get('discard', 0)}  |  AP {agent.get('action_points', 0)}"
     )
+    lines.extend(_player_economy_lines(agent))
     banished = agent.get("banished") if isinstance(agent.get("banished"), list) else []
     if banished:
         names = [_clean_name(c.get("name")) for c in banished if isinstance(c, dict)]
         lines.append(f"  Banished: {', '.join(names) if names else '(empty)'}")
     lines.extend(_arena_lines(agent.get("arena") or {}, reveal=True))
+    lines.extend(_buff_lines(agent))
     lines.append("  Your hand:")
     hand = agent.get("hand") if isinstance(agent.get("hand"), list) else []
     if not hand:
@@ -776,10 +919,41 @@ def _win_probabilities(env: Any, obs: dict[str, Any]) -> tuple[float, float]:
 
 def _action_phase_hints(obs: dict[str, Any]) -> list[str]:
     """Explain why attack / play options may be missing during the action phase."""
-    if obs.get("phase") != "action":
+    phase = obs.get("phase")
+    if phase in {"instant_pay", "card_pay", "pitch_pay"}:
+        ctx = obs.get("pending_payment") if isinstance(obs.get("pending_payment"), dict) else {}
+        cost = int(ctx.get("cost") or 0)
+        agent = obs.get("agent") if isinstance(obs.get("agent"), dict) else {}
+        resources = int(agent.get("resources") or 0)
+        if cost > resources:
+            need = cost - resources
+            exclude = ctx.get("card") or "payment"
+            pitchable = sum(
+                int(c.get("pitch") or 0)
+                for c in (agent.get("hand") or [])
+                if isinstance(c, dict) and int(c.get("pitch") or 0) > 0
+            )
+            if pitchable < need:
+                return [
+                    f"Need {need} more resources for {exclude} "
+                    f"(only {pitchable} pitchable in hand)."
+                ]
+            return [
+                f"Pitch cards to pay {cost} for {exclude} "
+                f"({resources}/{cost} ready — overpitch allowed until cost is met)."
+            ]
+        return []
+    if phase != "action":
         return []
     legal = list(obs.get("legal_actions") or [])
-    if any(a == "weapon" or a.startswith("play ") for a in legal):
+    hints: list[str] = []
+    play_actions = [a for a in legal if a.startswith("play ")]
+    if play_actions:
+        hints.append(
+            "Select a card to play — you'll pitch from hand next if you need more resources."
+        )
+        return hints
+    if any(a == "weapon" or a.startswith("instant ") for a in legal):
         return []
 
     agent = obs.get("agent") if isinstance(obs.get("agent"), dict) else {}
@@ -787,20 +961,25 @@ def _action_phase_hints(obs: dict[str, Any]) -> list[str]:
     resources = int(agent.get("resources") or 0)
     pitchable = sum(int(c.get("pitch") or 0) for c in hand if int(c.get("pitch") or 0) > 0)
 
-    attacks = [
+    playable_types = (
+        "attack_action", "utility_action", "instant", "defense_reaction", "attack_reaction"
+    )
+    playable = [
         c for c in hand
-        if isinstance(c, dict) and "attack_action" in (c.get("card_types") or [])
+        if isinstance(c, dict) and any(t in (c.get("card_types") or []) for t in playable_types)
     ]
-    hints: list[str] = []
-    if not attacks:
+    if not playable:
         hints.append(
-            "No attack action cards in hand — defense reactions can't be played on your turn. "
-            "Pitch to dig for attacks, activate your weapon ability, or pass."
+            "No playable action cards in hand — activate your weapon ability, or pass."
         )
-    elif all(int(c.get("cost") or 0) > resources for c in attacks):
+    elif pitchable > 0:
         hints.append(
-            f"You have attack actions but need resources (have {resources}, "
-            f"can pitch for up to {pitchable} more this turn)."
+            f"No affordable plays right now (have {resources} resources, "
+            f"could pitch up to {pitchable} more if you play a card) — try a play action or pass."
+        )
+    else:
+        hints.append(
+            f"No affordable plays and nothing left to pitch (have {resources} resources)."
         )
 
     arena = agent.get("arena") if isinstance(agent.get("arena"), dict) else {}
@@ -810,7 +989,8 @@ def _action_phase_hints(obs: dict[str, Any]) -> list[str]:
         cost = int(ab.get("cost") or 0)
         if cost > resources and cost <= resources + pitchable:
             hints.append(
-                f"Ability \"{_clean_name(ab.get('source'))}\" needs {cost} resources — pitch first, then activate."
+                f"Ability \"{_clean_name(ab.get('source'))}\" needs {cost} resources — "
+                f"select it to enter payment (pitch while paying)."
             )
     return hints
 
@@ -824,8 +1004,20 @@ def _play(env: FleshAndBloodGameplayEnvironment, obs: dict[str, Any], agent: Any
             break
 
         if legal == ["pass"]:
-            print("\n(Only 'pass' is available - auto-passing.)")
+            phase = obs.get("phase")
+            pending = obs.get("pending_payment") if isinstance(obs.get("pending_payment"), dict) else {}
+            agent_obs = obs.get("agent") if isinstance(obs.get("agent"), dict) else {}
+            if phase == "card_pay" and pending:
+                cost = int(pending.get("cost") or 0)
+                ready = int(agent_obs.get("resources") or 0)
+                if ready >= cost:
+                    print("\n(Confirming payment — pass to play selected card.)")
+                else:
+                    print("\n(Cancelling payment — not enough resources.)")
+            else:
+                print("\n(Only 'pass' is available - auto-passing.)")
             out = env.step("pass")
+            _print_opponent_action_log(out.observation)
             obs = out.observation
             print("\n" + _render_board(obs, *_win_probabilities(env, obs)))
             if out.terminated or out.truncated:
@@ -836,6 +1028,28 @@ def _play(env: FleshAndBloodGameplayEnvironment, obs: dict[str, Any], agent: Any
 
         for hint in _action_phase_hints(obs):
             print(f"  (i) {hint}")
+
+        pending_payment = obs.get("pending_payment")
+        if isinstance(pending_payment, dict):
+            card = _clean_name(pending_payment.get("card"))
+            cost = int(pending_payment.get("cost") or 0)
+            paid = int(pending_payment.get("paid") or 0)
+            agent = obs.get("agent") if isinstance(obs.get("agent"), dict) else {}
+            ready = int(agent.get("resources") or 0)
+            if pending_payment.get("kind") == "instant":
+                print(f"  (i) Paying for instant \"{card}\": {ready}/{cost} resources ready")
+            elif pending_payment.get("kind") == "card_pay":
+                need = max(0, cost - ready)
+                if need:
+                    print(
+                        f"  (i) Selected \"{card}\" — pitch {need} more resource(s), "
+                        f"then pass ({ready}/{cost} ready)"
+                    )
+                else:
+                    print(f"  (i) Selected \"{card}\" — pass to pay {cost} and play")
+            else:
+                label = "up to " if pending_payment.get("variable") else ""
+                print(f"  (i) Pitch pay for \"{card}\": {ready}/{label}{cost} resources ready")
 
         print("\nYour move:")
         for i, action in enumerate(legal):
@@ -862,6 +1076,7 @@ def _play(env: FleshAndBloodGameplayEnvironment, obs: dict[str, Any], agent: Any
             action = raw
 
         out = env.step(action)
+        _print_opponent_action_log(out.observation)
         obs = out.observation
         print("\n" + _render_board(obs, *_win_probabilities(env, obs)))
         if out.info.get("error"):
