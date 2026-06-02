@@ -404,10 +404,10 @@ def main() -> None:
             print(f"  fabrary_decks.json not found; using default 'Ira'.")
 
     # Import env (after sys.path is set)
-    from flesh_and_blood_rlbridge import FLESH_AND_BLOOD_TALISHAR_V0  # noqa: E402
+    from flesh_and_blood_rlbridge import FLESH_AND_BLOOD_TALISHAR_VS_AI_V0  # noqa: E402
 
     print(f"\nConnecting to {base_url}  |  deck: {deck_name}  |  format: {args.game_format}")
-    env = FLESH_AND_BLOOD_TALISHAR_V0.create(
+    env = FLESH_AND_BLOOD_TALISHAR_VS_AI_V0.create(
         render_mode="ansi",
         base_url=base_url,
         local_deck_name=deck_name,

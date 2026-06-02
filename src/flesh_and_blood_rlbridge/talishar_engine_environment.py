@@ -67,15 +67,17 @@ from .talishar_oracle import TalisharConnectionError
 
 # Default practice deck: Ira Crimson Haze (young hero, blitz-legal)
 _DEFAULT_DECK_LINK = "https://fabrary.net/decks/01GJG7Z4WGWSZ95FY74KX4M557"
+_DEFAULT_RENDER_WIDTH = 1920
+_DEFAULT_RENDER_HEIGHT = 1080
 
 
 class TalisharEngineEnvironment(rlbridgeEnvironment):
     """RL environment that uses a live Talishar server as its game engine.
 
-    By default the agent plays as player 1 against the built-in Combat Dummy AI
-    (player 2).  With ``self_play=True``, a single policy controls whichever
-    player currently has priority (mirror match; requires Talishar
-    ``CreateLocalGame.php`` with ``selfPlay`` support).
+    By default (``self_play=True``) a single policy controls whichever player
+    currently has priority (requires Talishar ``CreateLocalGame.php`` with
+    ``selfPlay`` support).  With ``self_play=False``, the agent plays as
+    player 1 against the built-in Combat Dummy AI (player 2).
 
     Parameters
     ----------
@@ -99,6 +101,9 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         Base URL of the Talishar-FE dev server used by ``"human"`` rendering.
         Defaults to the ``TALISHAR_FE_URL`` environment variable or
         ``"http://localhost:5173"``.
+    render_width, render_height:
+        Playwright viewport size for ``rgb_array`` screenshots (default 1920×1080).
+        Override via ``TALISHAR_RENDER_WIDTH`` / ``TALISHAR_RENDER_HEIGHT``.
     """
 
     def __init__(
@@ -113,7 +118,9 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         render_mode: Optional[str] = None,
         local_deck_name: Optional[str] = "Ira",
         opponent_deck_name: Optional[str] = None,
-        self_play: bool = False,
+        self_play: bool = True,
+        render_width: Optional[int] = None,
+        render_height: Optional[int] = None,
     ) -> None:
         self._base_url = (
             base_url or os.environ.get("TALISHAR_URL", "http://localhost")
@@ -129,6 +136,14 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         self._timeout = timeout
         self._max_turns = max_turns
         self._render_mode = render_mode
+        self._render_width = int(
+            render_width
+            or os.environ.get("TALISHAR_RENDER_WIDTH", _DEFAULT_RENDER_WIDTH)
+        )
+        self._render_height = int(
+            render_height
+            or os.environ.get("TALISHAR_RENDER_HEIGHT", _DEFAULT_RENDER_HEIGHT)
+        )
         self._opened_frontend_url: Optional[str] = None
 
         # HTTP session (rebuilt each episode so cookies/sessions don't leak)
@@ -737,7 +752,9 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             try:
                 pw = _sync_playwright().start()
                 browser = pw.chromium.launch(headless=True)
-                ctx = browser.new_context(viewport={"width": 1280, "height": 800})
+                ctx = browser.new_context(
+                    viewport={"width": self._render_width, "height": self._render_height}
+                )
                 page = ctx.new_page()
                 page.add_init_script(
                     "localStorage.setItem('gdpr-analytics-enabled','true');"
@@ -834,7 +851,12 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         if not result_box:
             return RenderResult(mode="rgb_array")
         b64 = base64.b64encode(result_box[0]).decode()
-        return RenderResult(mode="rgb_array", data=b64, width=1280, height=800)
+        return RenderResult(
+            mode="rgb_array",
+            data=b64,
+            width=self._render_width,
+            height=self._render_height,
+        )
 
     def render(self) -> RenderResult:
         if self._render_mode == "human":
@@ -861,3 +883,127 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         if not legal:
             return "pass"
         return str(random.randrange(len(legal)))
+
+
+def parse_acting_player_id(env: Any, obs: Any) -> int:
+    """Return the player ID that should act next (1 or 2)."""
+    if hasattr(env, "_acting_player_id"):
+        return int(getattr(env, "_acting_player_id", 1) or 1)
+    if isinstance(obs, str):
+        try:
+            obs = json.loads(obs)
+        except json.JSONDecodeError:
+            return 1
+    if isinstance(obs, dict):
+        return int(obs.get("actingPlayerID", 1) or 1)
+    return 1
+
+
+def _eval_agent_action(agent: Any, obs: Any) -> Any:
+    if hasattr(agent, "act_greedy"):
+        return agent.act_greedy(obs)
+    return agent.act(obs)
+
+
+def run_talishar_eval_episode(
+    env: Any,
+    p1_agent: Any,
+    max_steps: int,
+    seed: Optional[int] = None,
+    *,
+    p2_agent: Optional[Any] = None,
+    deck_player_id: int = 1,
+) -> dict[str, Any]:
+    """Play one evaluation episode with trained agents on both sides (self-play).
+
+    *p1_agent* controls player 1; *p2_agent* controls player 2 (defaults to
+    *p1_agent* when omitted, i.e. one policy for both sides).  Requires a
+    self-play Talishar environment.
+    """
+    policy_p2 = p2_agent if p2_agent is not None else p1_agent
+    reset_out = env.reset(seed=seed)
+    obs = (
+        reset_out.observation
+        if hasattr(reset_out, "observation")
+        else reset_out.get("observation", reset_out)
+    )
+    total_reward = 0.0
+    steps = 0
+    terminated = False
+    truncated = False
+    step_result: Any = None
+
+    for step in range(1, max_steps + 1):
+        acting = parse_acting_player_id(env, obs)
+        policy = p1_agent if acting == 1 else policy_p2
+        action = _eval_agent_action(policy, obs)
+        step_result = env.step(action)
+        obs = (
+            step_result.observation
+            if hasattr(step_result, "observation")
+            else step_result.get("observation", obs)
+        )
+        reward = float(
+            step_result.reward
+            if hasattr(step_result, "reward")
+            else step_result.get("reward", 0.0)
+        )
+        terminated = bool(
+            step_result.terminated
+            if hasattr(step_result, "terminated")
+            else step_result.get("terminated", False)
+        )
+        truncated = bool(
+            step_result.truncated
+            if hasattr(step_result, "truncated")
+            else step_result.get("truncated", False)
+        )
+        total_reward += reward
+        steps = step
+        if terminated or truncated:
+            break
+
+    return {
+        "steps": steps,
+        "total_reward": total_reward,
+        "terminated": terminated,
+        "truncated": truncated,
+        "final_observation": obs,
+        "deck_player_id": deck_player_id,
+        "deck_player_won": talishar_deck_player_won(
+            obs,
+            deck_player_id=deck_player_id,
+            terminated=terminated,
+        ),
+    }
+
+
+def talishar_deck_player_won(
+    obs: Any,
+    *,
+    deck_player_id: int = 1,
+    terminated: bool = False,
+) -> Optional[bool]:
+    """Whether *deck_player_id* won, from a Talishar JSON observation."""
+    if isinstance(obs, str):
+        try:
+            obs = json.loads(obs)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(obs, dict):
+        return None
+
+    acting = int(obs.get("actingPlayerID", deck_player_id) or deck_player_id)
+    player_hp = float(obs.get("playerHealth", 0.0) or 0.0)
+    opp_hp = float(obs.get("opponentHealth", 0.0) or 0.0)
+    if acting != deck_player_id:
+        player_hp, opp_hp = opp_hp, player_hp
+
+    if terminated:
+        if opp_hp <= 0 < player_hp:
+            return True
+        if player_hp <= 0 < opp_hp:
+            return False
+        if player_hp == opp_hp:
+            return None
+    return None

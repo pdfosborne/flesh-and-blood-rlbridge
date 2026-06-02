@@ -29,7 +29,12 @@ for p in (_FAB_SRC, _RL_SRC):
     if s not in sys.path:
         sys.path.insert(0, s)
 
-from flesh_and_blood_rlbridge.talishar_engine_environment import TalisharEngineEnvironment
+from flesh_and_blood_rlbridge.talishar_engine_environment import (
+    TalisharEngineEnvironment,
+    parse_acting_player_id,
+    run_talishar_eval_episode,
+    talishar_deck_player_won,
+)
 from rlbridge.rl_agents.ppo import PPOAgent
 
 
@@ -47,14 +52,31 @@ def run_episode(
     seed: int | None = None,
     verbose: bool = False,
 ) -> dict:
+    if not verbose:
+        out = run_talishar_eval_episode(
+            env,
+            p1_agent,
+            max_steps,
+            seed,
+            p2_agent=p2_agent,
+            deck_player_id=1,
+        )
+        return {
+            "total_reward": out["total_reward"],
+            "steps": out["steps"],
+            "terminated": out["terminated"],
+            "truncated": out["truncated"],
+            "p1_won": out.get("deck_player_won"),
+        }
+
     result = env.reset(seed=seed)
     obs = result.observation
     total_reward = 0.0
     steps = 0
+    step_result = None
 
     while steps < max_steps:
-        # Route action to the agent whose turn it is
-        acting = env._acting_player_id
+        acting = parse_acting_player_id(env, obs)
         agent = p1_agent if acting == 1 else p2_agent
         action = agent.act_greedy(obs)
 
@@ -63,14 +85,13 @@ def run_episode(
         steps += 1
         obs = step_result.observation
 
-        if verbose:
-            info = step_result.info
-            print(
-                f"  step {steps:3d}  P{acting} acts  "
-                f"r={step_result.reward:+.3f}  "
-                f"P1 HP={info.get('player_hp','?')}  "
-                f"P2 HP={info.get('opponent_hp','?')}"
-            )
+        info = step_result.info
+        print(
+            f"  step {steps:3d}  P{acting} acts  "
+            f"r={step_result.reward:+.3f}  "
+            f"P1 HP={info.get('player_hp','?')}  "
+            f"P2 HP={info.get('opponent_hp','?')}"
+        )
 
         if step_result.terminated or step_result.truncated:
             break
@@ -78,10 +99,13 @@ def run_episode(
     return {
         "total_reward": total_reward,
         "steps": steps,
-        "terminated": step_result.terminated,
-        "truncated": step_result.truncated,
-        "p1_hp": step_result.info.get("player_hp", 0),
-        "p2_hp": step_result.info.get("opponent_hp", 0),
+        "terminated": step_result.terminated if step_result else False,
+        "truncated": step_result.truncated if step_result else False,
+        "p1_won": talishar_deck_player_won(
+            obs,
+            deck_player_id=1,
+            terminated=bool(step_result and step_result.terminated),
+        ),
     }
 
 
@@ -131,11 +155,12 @@ def main() -> None:
         ep_result = run_episode(env, p1, p2, args.max_steps, seed=seed, verbose=args.verbose)
         episodes.append(ep_result)
 
+        p1_won = ep_result.get("p1_won")
         r = ep_result["total_reward"]
-        if r > 0:
+        if p1_won is True:
             p1_wins += 1
             outcome = "P1 WIN"
-        elif r < -0.5:
+        elif p1_won is False:
             p2_wins += 1
             outcome = "P2 WIN"
         else:
@@ -144,8 +169,7 @@ def main() -> None:
 
         print(
             f"  ep {ep:3d}  {outcome:<8}  "
-            f"reward={r:+.3f}  steps={ep_result['steps']:3d}  "
-            f"P1 HP={ep_result['p1_hp']}  P2 HP={ep_result['p2_hp']}"
+            f"reward={r:+.3f}  steps={ep_result['steps']:3d}"
         )
 
     env.close()

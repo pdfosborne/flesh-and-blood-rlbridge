@@ -120,7 +120,7 @@ class TalisharEngineFactory(rlbridgeEnvironmentFactory):
         deck_link: str = _TALISHAR_DEFAULT_DECK,
         game_format: str = "blitz",
         max_turns: int = 60,
-        self_play: bool = False,
+        self_play: bool = True,
     ) -> None:
         self._env_id = env_id
         self._deck_link = deck_link
@@ -136,7 +136,7 @@ class TalisharEngineFactory(rlbridgeEnvironmentFactory):
                 "Flesh and Blood TCG environment backed by a live Talishar server "
                 "(https://github.com/Talishar/Talishar).  "
                 + (
-                    "One policy controls both players in a mirror match (self-play).  "
+                    "One policy controls both players (self-play; learns from both sides).  "
                     if self._self_play
                     else "The agent plays as player 1 against the built-in CombatDummy AI.  "
                 )
@@ -151,7 +151,7 @@ class TalisharEngineFactory(rlbridgeEnvironmentFactory):
                 *(["self-play"] if self._self_play else []),
             ],
             namespace="flesh_and_blood",
-            render_modes=["human", "ansi"],
+            render_modes=["human", "ansi", "rgb_array"],
             max_episode_steps=self._max_turns,
             suggested_hyperparameters=SuggestedHyperparameters(
                 agent_type="ppo",
@@ -185,6 +185,8 @@ class TalisharEngineFactory(rlbridgeEnvironmentFactory):
             local_deck_name=local_deck if local_deck is not None else None,
             opponent_deck_name=opponent_deck,
             self_play=bool(kwargs.get("self_play", self._self_play)),
+            render_width=kwargs.get("render_width"),
+            render_height=kwargs.get("render_height"),
         )
 
 
@@ -260,10 +262,17 @@ class TalisharDeckBuilderFactory(rlbridgeEnvironmentFactory):
         )
 
 
-FLESH_AND_BLOOD_TALISHAR_V0 = TalisharEngineFactory("FleshAndBlood-Talishar-v0")
+FLESH_AND_BLOOD_TALISHAR_V0 = TalisharEngineFactory(
+    "FleshAndBlood-Talishar-v0",
+    self_play=True,
+)
 FLESH_AND_BLOOD_TALISHAR_SELFPLAY_V0 = TalisharEngineFactory(
     "FleshAndBlood-Talishar-SelfPlay-v0",
     self_play=True,
+)
+FLESH_AND_BLOOD_TALISHAR_VS_AI_V0 = TalisharEngineFactory(
+    "FleshAndBlood-Talishar-VsAI-v0",
+    self_play=False,
 )
 FLESH_AND_BLOOD_DECKBUILD_TALISHAR_V0 = TalisharDeckBuilderFactory(
     "FleshAndBlood-DeckBuild-Talishar-v0"
@@ -279,6 +288,7 @@ FLESH_AND_BLOOD_DECKBUILD_V0 = FleshAndBloodFactory(
 ALL_FAB_FACTORIES: list[rlbridgeEnvironmentFactory] = [
     FLESH_AND_BLOOD_TALISHAR_V0,
     FLESH_AND_BLOOD_TALISHAR_SELFPLAY_V0,
+    FLESH_AND_BLOOD_TALISHAR_VS_AI_V0,
     FLESH_AND_BLOOD_DECKBUILD_TALISHAR_V0,
     FLESH_AND_BLOOD_SELFPLAY_V0,
     FLESH_AND_BLOOD_DECKBUILD_V0,

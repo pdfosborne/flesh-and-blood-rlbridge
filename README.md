@@ -8,8 +8,9 @@ This package is **not** bundled with rlbridge. Install it separately when you wa
 
 | Env ID | Description |
 |--------|-------------|
-| `FleshAndBlood-Talishar-v0` | Agent vs CombatDummy AI (live Talishar server) |
-| `FleshAndBlood-Talishar-SelfPlay-v0` | One policy controls both players (live Talishar server) |
+| `FleshAndBlood-Talishar-v0` | Self-play: one policy controls both players (live Talishar server) |
+| `FleshAndBlood-Talishar-SelfPlay-v0` | Alias for `FleshAndBlood-Talishar-v0` |
+| `FleshAndBlood-Talishar-VsAI-v0` | Agent vs CombatDummy AI (live Talishar server) |
 | `FleshAndBlood-SelfPlay-v0` | Single policy controls both heroes (local simulator) |
 | `FleshAndBlood-DeckBuild-v0` | Two-phase deck selection before play |
 
@@ -60,6 +61,8 @@ When installed, the rlbridge MCP plugin exposes FaB-specific tools:
 - `fab_meta_reward_for_deck`
 - `fab_resolve_deck_from_url`
 - `fab_update_cards_db_from_fabtcg`
+- `fab_list_dual_agent_training_programs` — SAGE precon / Silver Age / CC Talishar training scripts
+- `fab_run_dual_agent_training` — run one of those scripts (matchup, episodes, cache, etc.)
 
 ## Card database
 

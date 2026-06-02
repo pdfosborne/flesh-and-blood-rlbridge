@@ -1,10 +1,11 @@
 """Talishar Deck Builder RL environment.
 
 The agent constructs a Flesh and Blood deck card-by-card.  When the agent
-finalizes a valid deck, it is evaluated by playing ``num_eval_games`` games
-against the Talishar CombatDummy AI using the built-in
-:class:`TalisharEngineEnvironment`.  The episode reward reflects the resulting
-win rate.
+finalizes a valid deck, it is evaluated by playing ``num_eval_games`` Talishar
+self-play games using :class:`TalisharEngineEnvironment`.  Optional
+``eval_p1_agent`` / ``eval_p2_agent`` policies control both sides; otherwise
+actions are chosen uniformly at random.  The episode reward reflects the built
+deck's win rate as player 1.
 
 Deck construction rules (from FaB Comprehensive Rules)
 -------------------------------------------------------
@@ -40,7 +41,11 @@ from typing import Any, Optional
 from rlbridge.environments.base import rlbridgeEnvironment
 from rlbridge.protocol.messages import RenderResult, ResetResult, StepResult, TextSpace
 
-from .talishar_engine_environment import TalisharEngineEnvironment
+from .talishar_engine_environment import (
+    TalisharEngineEnvironment,
+    run_talishar_eval_episode,
+    talishar_deck_player_won,
+)
 from .talishar_oracle import TalisharConnectionError
 
 # ---------------------------------------------------------------------------
@@ -131,9 +136,8 @@ class TalisharDeckBuilderEnvironment(rlbridgeEnvironment):
 
     The agent adds and removes cards one at a time.  Once the deck is valid
     (meets the format minimum), the agent can finalize it.  Finalization
-    triggers ``num_eval_games`` evaluation games against the Talishar
-    CombatDummy AI.  The episode reward is proportional to the resulting win
-    rate.
+    triggers ``num_eval_games`` self-play evaluation games on Talishar.  The
+    episode reward is proportional to the built deck's win rate as player 1.
 
     Observation (JSON string)
     ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -182,7 +186,12 @@ class TalisharDeckBuilderEnvironment(rlbridgeEnvironment):
     game_format:
         FaB format string — ``"blitz"``, ``"classic_constructed"``, etc.
     num_eval_games:
-        Number of Talishar games to play when evaluating a finalized deck.
+        Number of Talishar self-play games to play when evaluating a finalized deck.
+    opponent_deck_name:
+        Talishar Assets deck name for player 2 (default ``"Ira"``).
+    eval_p1_agent, eval_p2_agent:
+        Optional trained policies for players 1 and 2 during evaluation.  When
+        ``eval_p2_agent`` is omitted, ``eval_p1_agent`` controls both sides.
     base_url:
         Talishar server base URL.  Defaults to ``TALISHAR_URL`` env var or
         ``"http://localhost"``.
@@ -208,6 +217,9 @@ class TalisharDeckBuilderEnvironment(rlbridgeEnvironment):
         hero_equipment_header: Optional[str] = None,
         game_format: str = _DEFAULT_FORMAT,
         num_eval_games: int = 5,
+        opponent_deck_name: str = "Ira",
+        eval_p1_agent: Optional[Any] = None,
+        eval_p2_agent: Optional[Any] = None,
         base_url: Optional[str] = None,
         talishar_assets_path: Optional[str] = None,
         card_pool: Optional[list[dict[str, Any]]] = None,
@@ -219,6 +231,9 @@ class TalisharDeckBuilderEnvironment(rlbridgeEnvironment):
         self._hero_class = hero_class
         self._game_format = game_format
         self._num_eval_games = num_eval_games
+        self._opponent_deck_name = opponent_deck_name
+        self._eval_p1_agent = eval_p1_agent
+        self._eval_p2_agent = eval_p2_agent
         self._base_url = base_url or os.environ.get("TALISHAR_URL", "http://localhost")
         self._step_penalty = step_penalty
         self._max_build_steps = max_build_steps
@@ -469,31 +484,50 @@ class TalisharDeckBuilderEnvironment(rlbridgeEnvironment):
         try:
             deck_file = self._write_deck_file(deck_name)
 
+            p1_policy = self._eval_p1_agent
+            p2_policy = self._eval_p2_agent
             for _ in range(self._num_eval_games):
                 env = TalisharEngineEnvironment(
                     base_url=self._base_url,
                     game_format=self._game_format,
                     local_deck_name=deck_name,
+                    opponent_deck_name=self._opponent_deck_name,
                     max_turns=60,
+                    self_play=True,
                 )
-                reset_result = env.reset()
-                obs_data = json.loads(reset_result.observation)
-                step_result: Optional[StepResult] = None
-                done = False
-
-                while not done:
-                    legal = obs_data.get("legalActions", [])
-                    idx = random.randint(0, max(0, len(legal) - 1))
-                    step_result = env.step(str(idx))
-                    done = step_result.terminated or step_result.truncated
-                    if not done:
-                        obs_data = json.loads(step_result.observation)
-
-                # A reward of +1.0 signals a win in TalisharEngineEnvironment
-                if step_result is not None and step_result.reward >= 1.0:
-                    wins += 1
-
-                env.close()
+                try:
+                    if p1_policy is not None:
+                        out = run_talishar_eval_episode(
+                            env,
+                            p1_policy,
+                            max_steps=60,
+                            p2_agent=p2_policy,
+                            deck_player_id=1,
+                        )
+                        if out.get("deck_player_won") is True:
+                            wins += 1
+                    else:
+                        reset_result = env.reset()
+                        obs_data = json.loads(reset_result.observation)
+                        step_result: Optional[StepResult] = None
+                        done = False
+                        while not done:
+                            legal = obs_data.get("legalActions", [])
+                            idx = random.randint(0, max(0, len(legal) - 1))
+                            step_result = env.step(str(idx))
+                            done = step_result.terminated or step_result.truncated
+                            if not done:
+                                obs_data = json.loads(step_result.observation)
+                        if talishar_deck_player_won(
+                            obs_data,
+                            deck_player_id=1,
+                            terminated=bool(
+                                step_result is not None and step_result.terminated
+                            ),
+                        ):
+                            wins += 1
+                finally:
+                    env.close()
 
         except TalisharConnectionError:
             # Server unreachable — return neutral score so the episode doesn't crash

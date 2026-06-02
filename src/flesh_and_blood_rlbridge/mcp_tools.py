@@ -4,6 +4,7 @@ import hashlib
 import importlib
 import json
 import math
+import os
 import pickle
 import random
 import re
@@ -13,16 +14,140 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .environment_factory import TalisharEngineFactory
+from .talishar_engine_environment import (
+    run_talishar_eval_episode,
+    talishar_deck_player_won,
+)
 
 _FAB_DB_DIR = Path(__file__).with_name("card_db")
 _FABRARY_DECKS_PATH = _FAB_DB_DIR / "fabrary_decks.json"
 _UPDATE_CARDS_SCRIPT_PATH = _FAB_DB_DIR / "update_cards_db_from_fabtcg.py"
 _FAB_AGENT_CACHE_DIR = _FAB_DB_DIR / "agent_cache"
+_FAB_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+_FAB_DUAL_AGENT_TRAINING_PROGRAMS: dict[str, dict[str, Any]] = {
+    "sage_precons": {
+        "script": _FAB_REPO_ROOT / "scripts" / "train_sage_precons.py",
+        "description": (
+            "Train PPO agents on all SAGE precon cross-matchups (Assets decks, blitz)."
+        ),
+        "default_format": "blitz",
+        "default_max_steps": 60,
+        "default_out_dir": "results/sage_precon_agents",
+        "matchup_example": "briar-vs-dorinthea",
+    },
+    "silver_age": {
+        "script": _FAB_REPO_ROOT / "scripts" / "train_silver_age_decks.py",
+        "description": (
+            "Train PPO agents on Silver Age fabrary deck cross-matchups "
+            "(fabrary_decks.json, four-tier cache)."
+        ),
+        "default_format": "silver_age",
+        "default_max_steps": 60,
+        "default_out_dir": "results/silver_age_agents",
+        "matchup_example": "ira_crimson_haze_sage_aggro-vs-fai_sage_chain",
+    },
+    "classic_constructed": {
+        "script": _FAB_REPO_ROOT / "scripts" / "train_classic_constructed_decks.py",
+        "description": (
+            "Train PPO agents on Classic Constructed fabrary deck cross-matchups "
+            "(fabrary_decks.json, four-tier cache)."
+        ),
+        "default_format": "classic_constructed",
+        "default_max_steps": 120,
+        "default_out_dir": "results/classic_constructed_agents",
+        "matchup_example": "dorinthea_ironsong_cc_aggro-vs-chane_cc_shadow",
+    },
+}
 
 _FAB_CUSTOM_TOOLS_REGISTERED = False
 _FAB_REGISTERED_MATCHUP_ENVS: set[str] = set()
 _FAB_CURRENT_AGENT_KEY: Optional[str] = None
 _FAB_CURRENT_AGENT: Any = None
+
+
+def _dual_agent_training_programs_payload() -> dict[str, Any]:
+    programs: dict[str, Any] = {}
+    for key, spec in _FAB_DUAL_AGENT_TRAINING_PROGRAMS.items():
+        script_path = Path(spec["script"])
+        programs[key] = {
+            "description": spec["description"],
+            "script_path": str(script_path),
+            "script_exists": script_path.is_file(),
+            "default_format": spec["default_format"],
+            "default_max_steps": spec["default_max_steps"],
+            "default_out_dir": spec["default_out_dir"],
+            "matchup_example": spec["matchup_example"],
+            "cli_options": {
+                "matchup": "all or a slug (see matchup_example)",
+                "episodes": "training episodes per matchup (default 300)",
+                "max_steps": "max steps per episode (program-specific default)",
+                "format": "Talishar game format (program-specific default)",
+                "seed": "optional RNG seed",
+                "out_dir": "where matchup agent packages are saved",
+                "cache_dir": "four-tier weight cache root (fabrary programs only)",
+            },
+        }
+    return {
+        "programs": programs,
+        "program_ids": list(_FAB_DUAL_AGENT_TRAINING_PROGRAMS),
+        "notes": (
+            "Requires a running Talishar server (set TALISHAR_URL or pass talishar_url). "
+            "Training can take a long time when matchup=all."
+        ),
+    }
+
+
+def _build_dual_agent_training_command(
+    training_program: str,
+    *,
+    matchup: str,
+    episodes: int,
+    max_steps: Optional[int],
+    game_format: Optional[str],
+    seed: Optional[int],
+    out_dir: Optional[str],
+    cache_dir: Optional[str],
+) -> tuple[list[str], dict[str, Any]]:
+    spec = _FAB_DUAL_AGENT_TRAINING_PROGRAMS[training_program]
+    script_path = Path(spec["script"])
+    if not script_path.is_file():
+        raise FileNotFoundError(f"Training script not found: {script_path}")
+
+    fmt = game_format or spec["default_format"]
+    steps = int(max_steps) if max_steps is not None else int(spec["default_max_steps"])
+    output = out_dir or str(_FAB_REPO_ROOT / spec["default_out_dir"])
+
+    cmd: list[str] = [
+        sys.executable,
+        str(script_path),
+        "--matchup",
+        matchup,
+        "--episodes",
+        str(int(episodes)),
+        "--max-steps",
+        str(steps),
+        "--format",
+        fmt,
+        "--out-dir",
+        output,
+    ]
+    if seed is not None:
+        cmd.extend(["--seed", str(int(seed))])
+    if cache_dir:
+        cmd.extend(["--cache-dir", cache_dir])
+
+    meta = {
+        "training_program": training_program,
+        "script_path": str(script_path),
+        "matchup": matchup,
+        "episodes": int(episodes),
+        "max_steps": steps,
+        "format": fmt,
+        "out_dir": output,
+        "cache_dir": cache_dir,
+        "seed": seed,
+    }
+    return cmd, meta
 
 
 def register_mcp_tools(
@@ -87,36 +212,40 @@ def register_mcp_tools(
             )
         raise ValueError(f"Unsupported agent type: {agent_type!r}")
 
-    def _run_eval_episode(env: Any, agent: Any, max_steps: int, seed: Optional[int]) -> dict[str, Any]:
-        reset_out = env.reset(seed=seed)
-        obs = reset_out.observation if hasattr(reset_out, "observation") else reset_out.get("observation", reset_out)
-        total_reward = 0.0
-        steps = 0
-        terminated = False
-        truncated = False
+    def _matchup_cache_key(
+        *,
+        format_name: str,
+        inner_agent_type: str,
+        deck_key: str,
+        matchup_key: str,
+        deck_name: str,
+    ) -> str:
+        return "|".join(
+            [
+                str(format_name),
+                str(inner_agent_type),
+                str(deck_key),
+                str(matchup_key),
+                str(deck_name),
+            ]
+        )
 
-        for step in range(1, max_steps + 1):
-            if hasattr(agent, "act_greedy"):
-                action = agent.act_greedy(obs)
-            else:
-                action = agent.act(obs)
-            out = env.step(action)
-            obs = out.observation if hasattr(out, "observation") else out.get("observation", obs)
-            reward = float(out.reward if hasattr(out, "reward") else out.get("reward", 0.0))
-            terminated = bool(out.terminated if hasattr(out, "terminated") else out.get("terminated", False))
-            truncated = bool(out.truncated if hasattr(out, "truncated") else out.get("truncated", False))
-            total_reward += reward
-            steps = step
-            if terminated or truncated:
-                break
-
-        return {
-            "steps": steps,
-            "total_reward": total_reward,
-            "terminated": terminated,
-            "truncated": truncated,
-            "final_observation": obs,
-        }
+    def _run_eval_episode(
+        env: Any,
+        agent: Any,
+        max_steps: int,
+        seed: Optional[int],
+        *,
+        opponent_agent: Any | None = None,
+    ) -> dict[str, Any]:
+        return run_talishar_eval_episode(
+            env,
+            agent,
+            max_steps,
+            seed,
+            p2_agent=opponent_agent,
+            deck_player_id=1,
+        )
 
     def _fab_win_probabilities(obs: Any) -> tuple[float, float]:
         if isinstance(obs, str):
@@ -161,23 +290,40 @@ def register_mcp_tools(
         player_p = max(0.0, min(1.0, player_p))
         return player_p, 1.0 - player_p
 
-    def _fab_outcome_score(obs: Any, *, terminated: bool) -> float:
+    def _fab_outcome_score(
+        obs: Any,
+        *,
+        terminated: bool,
+        deck_player_won: bool | None = None,
+        deck_player_id: int = 1,
+    ) -> float:
+        if deck_player_won is True:
+            return 1.0
+        if deck_player_won is False:
+            return 0.0
+        if deck_player_won is None and terminated:
+            return 0.5
+
+        resolved = talishar_deck_player_won(
+            obs,
+            deck_player_id=deck_player_id,
+            terminated=terminated,
+        )
+        if resolved is True:
+            return 1.0
+        if resolved is False:
+            return 0.0
+        if resolved is None and terminated:
+            return 0.5
+
+        p_agent, _ = _fab_win_probabilities(obs)
         if isinstance(obs, str):
             try:
                 obs = json.loads(obs)
             except Exception:
-                return 0.5
-        if isinstance(obs, dict):
-            player_hp = float(obs.get("playerHealth", 0.0) or 0.0)
-            opp_hp = float(obs.get("opponentHealth", 0.0) or 0.0)
-            if terminated:
-                if opp_hp <= 0 < player_hp:
-                    return 1.0
-                if player_hp <= 0 < opp_hp:
-                    return 0.0
-                if player_hp == opp_hp:
-                    return 0.5
-        p_agent, _ = _fab_win_probabilities(obs)
+                return float(p_agent)
+        if isinstance(obs, dict) and int(obs.get("actingPlayerID", 1)) != deck_player_id:
+            return 1.0 - float(p_agent)
         return float(p_agent)
 
     def _get_deck_options(format_name: str, seed: Optional[int]) -> list[dict[str, Any]]:
@@ -288,20 +434,30 @@ def register_mcp_tools(
         inner_max_steps: int,
         seed: Optional[int],
     ) -> dict[str, Any]:
-        matchup_cache_key = "|".join(
-            [
-                str(format_name),
-                str(inner_agent_type),
-                str(deck_key),
-                str(matchup_key),
-                str(deck_option.get("deck_name", "Ira")),
-            ]
+        p1_deck = str(deck_option.get("deck_name", "Ira"))
+        p2_deck = str(matchup_option.get("deck_name", p1_deck))
+        matchup_cache_key = _matchup_cache_key(
+            format_name=format_name,
+            inner_agent_type=inner_agent_type,
+            deck_key=deck_key,
+            matchup_key=matchup_key,
+            deck_name=p1_deck,
         )
         cached_metadata, cached_agent, used_cached_agent = _load_cached_matchup_entry(matchup_cache_key)
 
+        reverse_cache_key = _matchup_cache_key(
+            format_name=format_name,
+            inner_agent_type=inner_agent_type,
+            deck_key=matchup_key,
+            matchup_key=deck_key,
+            deck_name=p2_deck,
+        )
+        _, opponent_agent, _ = _load_cached_matchup_entry(reverse_cache_key)
+
         env_kwargs: dict[str, Any] = {
             "render_mode": None,
-            "local_deck_name": str(deck_option.get("deck_name", "Ira")),
+            "local_deck_name": p1_deck,
+            "opponent_deck_name": p2_deck,
             "game_format": str(format_name),
         }
 
@@ -332,11 +488,18 @@ def register_mcp_tools(
             base_seed = 0 if seed is None else int(seed)
             for ep in range(inner_eval_episodes):
                 ep_seed = base_seed + 10_000 + ep
-                out = _run_eval_episode(eval_env, agent, max_steps=inner_max_steps, seed=ep_seed)
+                out = _run_eval_episode(
+                    eval_env,
+                    agent,
+                    max_steps=inner_max_steps,
+                    seed=ep_seed,
+                    opponent_agent=opponent_agent,
+                )
                 eval_scores.append(
                     _fab_outcome_score(
                         out.get("final_observation"),
                         terminated=bool(out.get("terminated", False)),
+                        deck_player_won=out.get("deck_player_won"),
                     )
                 )
         finally:
@@ -1061,5 +1224,122 @@ def register_mcp_tools(
         }
         return json.dumps(result, indent=2)
 
+    @mcp.tool()
+    def fab_list_dual_agent_training_programs() -> str:
+        """List Talishar dual-agent PPO training scripts available in this repo.
+
+        Programs:
+        - ``sage_precons`` — SAGE precon Assets decks (blitz)
+        - ``silver_age`` — fabrary Silver Age decks
+        - ``classic_constructed`` — fabrary Classic Constructed decks
+
+        Use ``fab_run_dual_agent_training`` to execute one.
+        """
+        return json.dumps(_dual_agent_training_programs_payload(), indent=2)
+
+    @mcp.tool()
+    def fab_run_dual_agent_training(
+        training_program: str,
+        matchup: str = "all",
+        episodes: int = 300,
+        max_steps: Optional[int] = None,
+        game_format: Optional[str] = None,
+        seed: Optional[int] = None,
+        out_dir: Optional[str] = None,
+        cache_dir: Optional[str] = None,
+        talishar_url: Optional[str] = None,
+        timeout_seconds: Optional[int] = None,
+    ) -> str:
+        """Run a repo dual-agent self-play training script against Talishar.
+
+        Parameters
+        ----------
+        training_program:
+            One of ``sage_precons``, ``silver_age``, ``classic_constructed``.
+            Call ``fab_list_dual_agent_training_programs`` for defaults and examples.
+        matchup:
+            ``all`` or a matchup slug (e.g. ``briar-vs-dorinthea``).
+        episodes, max_steps, game_format, seed, out_dir, cache_dir:
+            Forwarded to the underlying script when set.
+        talishar_url:
+            Sets ``TALISHAR_URL`` for the subprocess (default: server default in script).
+        timeout_seconds:
+            Subprocess timeout; omit for no limit (long runs).
+        """
+        program_key = str(training_program).strip().lower().replace("-", "_")
+        if program_key == "classic_constructed" or program_key == "cc":
+            program_key = "classic_constructed"
+        if program_key not in _FAB_DUAL_AGENT_TRAINING_PROGRAMS:
+            return json.dumps(
+                {
+                    "error": (
+                        f"Unknown training_program {training_program!r}. "
+                        f"Choose from: {list(_FAB_DUAL_AGENT_TRAINING_PROGRAMS)}"
+                    ),
+                    "available_programs": _dual_agent_training_programs_payload(),
+                },
+                indent=2,
+            )
+
+        try:
+            cmd, meta = _build_dual_agent_training_command(
+                program_key,
+                matchup=matchup,
+                episodes=episodes,
+                max_steps=max_steps,
+                game_format=game_format,
+                seed=seed,
+                out_dir=out_dir,
+                cache_dir=cache_dir,
+            )
+        except FileNotFoundError as exc:
+            return json.dumps({"error": str(exc), "training_program": program_key}, indent=2)
+
+        env = os.environ.copy()
+        if talishar_url:
+            env["TALISHAR_URL"] = str(talishar_url)
+
+        try:
+            run = subprocess.run(  # noqa: S603
+                cmd,
+                cwd=str(_FAB_REPO_ROOT),
+                capture_output=True,
+                text=True,
+                check=False,
+                env=env,
+                timeout=int(timeout_seconds) if timeout_seconds is not None else None,
+            )
+        except subprocess.TimeoutExpired as exc:
+            log.exception("fab_run_dual_agent_training timeout")
+            return json.dumps(
+                {
+                    "error": f"Training subprocess timed out after {timeout_seconds}s",
+                    "command": cmd,
+                    "meta": meta,
+                    "partial_stdout": (exc.stdout or "")[-4000:] if exc.stdout else "",
+                    "partial_stderr": (exc.stderr or "")[-4000:] if exc.stderr else "",
+                },
+                indent=2,
+            )
+        except Exception as exc:
+            log.exception("fab_run_dual_agent_training error")
+            return json.dumps(
+                {"error": f"Failed to run training script: {exc}", "command": cmd, "meta": meta},
+                indent=2,
+            )
+
+        return json.dumps(
+            {
+                "success": run.returncode == 0,
+                "exit_code": run.returncode,
+                "command": cmd,
+                "meta": meta,
+                "talishar_url": env.get("TALISHAR_URL"),
+                "stdout": run.stdout.strip()[-8000:],
+                "stderr": run.stderr.strip()[-8000:],
+            },
+            indent=2,
+        )
+
     _FAB_CUSTOM_TOOLS_REGISTERED = True
-    return 8
+    return 10
