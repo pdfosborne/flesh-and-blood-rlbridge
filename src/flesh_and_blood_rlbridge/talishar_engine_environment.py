@@ -39,8 +39,9 @@ HTTP API summary
 * ``GET  /GetNextTurn.php``      — query: ``{gameName, playerID, authKey, lastUpdate}``
   Returns the full game-state JSON.
 * ``GET  /ProcessInput.php``     — query: ``{gameName, playerID, authKey, mode, buttonInput}``
-  Submits a player action.  After this call the server runs ``CombatDummyAI()``
-  automatically for player 2, so we just poll until ``havePriority`` is true.
+  Submits a player action.  In AI practice mode the server runs ``CombatDummyAI()``
+  / ``EncounterAI()`` for player 2 after each call.  In self-play mode (see
+  ``self_play``) both players are controlled via this API and P2 AI is disabled.
 """
 
 from __future__ import annotations
@@ -67,11 +68,10 @@ _DEFAULT_DECK_LINK = "https://fabrary.net/decks/01GJG7Z4WGWSZ95FY74KX4M557"
 class TalisharEngineEnvironment(rlbridgeEnvironment):
     """RL environment that uses a live Talishar server as its game engine.
 
-    The agent plays as player 1 against the built-in Combat Dummy AI (player 2).
-    After each action submitted by the agent the server automatically runs the AI
-    for player 2 via ``CombatDummyAI()``.  The environment polls
-    ``GetNextTurn.php`` until ``havePriority`` is ``true`` (or the game ends)
-    before returning control to the agent.
+    By default the agent plays as player 1 against the built-in Combat Dummy AI
+    (player 2).  With ``self_play=True``, a single policy controls whichever
+    player currently has priority (mirror match; requires Talishar
+    ``CreateLocalGame.php`` with ``selfPlay`` support).
 
     Parameters
     ----------
@@ -83,6 +83,8 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         Fabrary/FaBDB deck link for the agent's deck.
     game_format:
         Game format string accepted by Talishar (e.g. ``"blitz"``, ``"cc"``).
+    self_play:
+        When ``True``, disable P2 AI and alternate control by priority.
     timeout:
         HTTP request timeout in seconds.
     max_turns:
@@ -102,6 +104,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         render_mode: Optional[str] = None,
         local_deck_name: Optional[str] = "Ira",
         opponent_deck_name: Optional[str] = None,
+        self_play: bool = False,
     ) -> None:
         self._base_url = (
             base_url or os.environ.get("TALISHAR_URL", "http://localhost")
@@ -109,6 +112,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         self._deck_link = deck_link
         self._local_deck_name = local_deck_name  # use CreateLocalGame.php when set
         self._opponent_deck_name = opponent_deck_name
+        self._self_play = self_play
         self._format = game_format
         self._timeout = timeout
         self._max_turns = max_turns
@@ -123,6 +127,9 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         # Per-episode state
         self._game_name: Optional[str] = None
         self._auth_key: str = ""
+        self._p1_auth_key: str = ""
+        self._p2_auth_key: str = ""
+        self._acting_player_id: int = 1
         self._last_state: dict[str, Any] = {}
         self._last_update: int = 0
         self._steps: int = 0
@@ -180,27 +187,41 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
 
     # ── Game lifecycle ────────────────────────────────────────────────────────
 
-    def _create_game(self) -> tuple[str, str]:
-        """Create an AI practice game.
+    def _create_game(self) -> tuple[str, str, str]:
+        """Create a Talishar game.
 
         Uses ``CreateLocalGame.php`` (no external deck API) when
         ``local_deck_name`` is set, otherwise falls back to ``CreateGame.php``
-        with the configured ``deck_link``.
+        with the configured ``deck_link``.  Self-play requires the local-game
+        API with ``selfPlay`` enabled on the server.
 
         Returns
         -------
-        (game_name, auth_key)
+        (game_name, p1_auth_key, p2_auth_key)
         """
+        if self._self_play and not self._local_deck_name:
+            raise ValueError(
+                "Talishar self-play requires local_deck_name (CreateLocalGame.php)"
+            )
         if self._local_deck_name:
             payload: dict[str, Any] = {
                 "deckName": self._local_deck_name,
                 "format": self._format,
                 "visibility": "private",
             }
-            if self._opponent_deck_name:
-                payload["opponentDeckName"] = self._opponent_deck_name
+            opponent = self._opponent_deck_name
+            if opponent:
+                payload["opponentDeckName"] = opponent
+            elif self._self_play:
+                payload["opponentDeckName"] = self._local_deck_name
+            if self._self_play:
+                payload["selfPlay"] = "1"
             endpoint = "/APIs/CreateLocalGame.php"
         else:
+            if self._self_play:
+                raise ValueError(
+                    "Talishar self-play requires local_deck_name (CreateLocalGame.php)"
+                )
             payload = {
                 "fabdb": self._deck_link,
                 "format": self._format,
@@ -214,12 +235,18 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         if "error" in resp:
             raise RuntimeError(f"CreateGame failed: {resp['error']}")
         game_name = str(resp.get("gameName", ""))
-        auth_key = str(resp.get("authKey", ""))
+        p1_auth_key = str(resp.get("authKey", ""))
+        p2_auth_key = str(resp.get("p2AuthKey", ""))
         if not game_name:
             raise RuntimeError(
                 f"CreateGame returned no gameName.  Full response: {resp}"
             )
-        return game_name, auth_key
+        if self._self_play and not p2_auth_key:
+            raise RuntimeError(
+                "CreateLocalGame selfPlay did not return p2AuthKey.  "
+                "Ensure Talishar/APIs/CreateLocalGame.php supports selfPlay."
+            )
+        return game_name, p1_auth_key, p2_auth_key
 
     def _start_game(self, game_name: str) -> str:
         """Call Start.php to write the initial gamestate file.
@@ -231,22 +258,38 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         returned_key = resp.get("authKey", "")
         return str(returned_key) if returned_key else self._auth_key
 
-    def _fetch_state(self) -> dict[str, Any]:
+    def _auth_key_for(self, player_id: int) -> str:
+        if player_id == 2:
+            return self._p2_auth_key
+        return self._p1_auth_key
+
+    def _fetch_state(
+        self,
+        player_id: Optional[int] = None,
+        *,
+        last_update: Optional[int] = None,
+    ) -> dict[str, Any]:
         """Fetch the current game state from GetNextTurn.php."""
+        pid = player_id if player_id is not None else self._acting_player_id
+        lu = self._last_update if last_update is None else last_update
         params: dict[str, str] = {
             "gameName": self._game_name or "",
-            "playerID": "1",
-            "authKey": self._auth_key,
-            "lastUpdate": str(self._last_update),
+            "playerID": str(pid),
+            "authKey": self._auth_key_for(pid),
+            "lastUpdate": str(lu),
         }
         state = self._http_get("/GetNextTurn.php", params)
-        try:
-            self._last_update = int(state.get("lastUpdate", self._last_update))
-        except (ValueError, TypeError):
-            pass
+        if last_update is None:
+            self._apply_last_update(state)
         return state
 
-    def _submit_action(self, mode: int, button_input: str = "") -> None:
+    def _submit_action(
+        self,
+        mode: int,
+        button_input: str = "",
+        *,
+        player_id: Optional[int] = None,
+    ) -> None:
         """Submit a player action via ProcessInput.php (GET endpoint).
 
         Most card-zone modes (27 = play from hand, 3 = equipment, 5 = arsenal,
@@ -256,10 +299,11 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         read from ``$buttonInput``.  Sending the value under both keys satisfies
         both families without any mode-specific branching.
         """
+        pid = player_id if player_id is not None else self._acting_player_id
         params: dict[str, str] = {
             "gameName": self._game_name or "",
-            "playerID": "1",
-            "authKey": self._auth_key,
+            "playerID": str(pid),
+            "authKey": self._auth_key_for(pid),
             "mode": str(mode),
         }
         if button_input:
@@ -267,19 +311,38 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             params["cardID"] = button_input  # card-zone modes (27, 3, 5, …) index via $cardID
         self._http_get("/ProcessInput.php", params)
 
+    def _apply_last_update(self, state: dict[str, Any]) -> None:
+        try:
+            self._last_update = int(state.get("lastUpdate", self._last_update))
+        except (ValueError, TypeError):
+            pass
+
+    def _sync_acting_player(self) -> dict[str, Any]:
+        """Set ``_acting_player_id`` to whichever player currently has priority."""
+        # Full snapshots per player — sharing ``_last_update`` across player IDs
+        # returns empty deltas and breaks priority detection.
+        for pid in (1, 2):
+            probe = self._fetch_state(player_id=pid, last_update=0)
+            if probe.get("havePriority", False) or self._is_game_over(probe):
+                self._acting_player_id = pid
+                self._auth_key = self._auth_key_for(pid)
+                self._apply_last_update(probe)
+                return probe
+        return self._fetch_state(player_id=self._acting_player_id, last_update=0)
+
     def _poll_until_priority(
         self,
         max_polls: int = 600,
         interval: float = 0.1,
     ) -> dict[str, Any]:
-        """Poll GetNextTurn.php until it is the agent's turn or the game ends."""
+        """Poll until the acting player has priority or the game ends."""
+        target = self._acting_player_id
         for _ in range(max_polls):
-            state = self._fetch_state()
+            state = self._fetch_state(player_id=target)
             if state.get("havePriority", False) or self._is_game_over(state):
                 return state
             time.sleep(interval)
-        # Timeout fallthrough — return whatever the last state is
-        return self._fetch_state()
+        return self._fetch_state(player_id=target)
 
     # ── State helpers ─────────────────────────────────────────────────────────
 
@@ -417,6 +480,8 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             if isinstance(c, dict)
         ]
         obs: dict[str, Any] = {
+            "actingPlayerID": self._acting_player_id,
+            "selfPlay": self._self_play,
             "playerHealth": state.get("playerHealth", 0),
             "opponentHealth": state.get("opponentHealth", 0),
             "turnNo": state.get("turnNo", 0),
@@ -468,11 +533,18 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         )
         self._last_update = 0
 
-        self._game_name, self._auth_key = self._create_game()
-        self._auth_key = self._start_game(self._game_name)
+        self._game_name, self._p1_auth_key, self._p2_auth_key = self._create_game()
+        self._acting_player_id = 1
+        started_key = self._start_game(self._game_name)
+        if started_key:
+            self._p1_auth_key = started_key
+        self._auth_key = self._p1_auth_key
 
         # Wait for initial state with priority (equipment selection or main phase)
-        self._last_state = self._poll_until_priority()
+        if self._self_play:
+            self._last_state = self._sync_acting_player()
+        else:
+            self._last_state = self._poll_until_priority()
         self._player_hp = int(self._last_state.get("playerHealth", 20))
         self._opp_hp = int(self._last_state.get("opponentHealth", 20))
         self._steps = 0
@@ -488,6 +560,8 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                 "legal_actions": legal_actions,
                 "player_hp": self._player_hp,
                 "opponent_hp": self._opp_hp,
+                "acting_player_id": self._acting_player_id,
+                "self_play": self._self_play,
             },
         )
 
@@ -498,7 +572,11 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         mode, button_input = self._parse_action(action, legal_actions)
         self._submit_action(mode, button_input)
 
-        new_state = self._poll_until_priority()
+        if self._self_play:
+            new_state = self._poll_until_priority()
+            new_state = self._sync_acting_player()
+        else:
+            new_state = self._poll_until_priority()
         new_player_hp = int(new_state.get("playerHealth", self._player_hp))
         new_opp_hp = int(new_state.get("opponentHealth", self._opp_hp))
         self._steps += 1
@@ -531,12 +609,17 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                 "turn": new_state.get("turnNo", 0),
                 "player_hp": new_player_hp,
                 "opponent_hp": new_opp_hp,
+                "acting_player_id": self._acting_player_id,
+                "self_play": self._self_play,
             },
         )
 
     def close(self) -> None:
         self._game_name = None
         self._auth_key = ""
+        self._p1_auth_key = ""
+        self._p2_auth_key = ""
+        self._acting_player_id = 1
         self._last_state = {}
         self._initialized = False
 
@@ -554,18 +637,21 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
 
         state = self._last_state
         phase = self._phase_str(state)
+        role = f"P{self._acting_player_id}" if self._self_play else "P1"
         lines = [
             "=== Flesh and Blood (Talishar Engine) ===",
             f"Game: {self._game_name}  Turn: {state.get('turnNo', '?')}  Phase: {phase}",
             (
-                f"You (P1): {state.get('playerHealth', '?')} HP  |  "
+                f"You ({role}): {state.get('playerHealth', '?')} HP  |  "
                 f"Opponent: {state.get('opponentHealth', '?')} HP"
             ),
-            (
-                f"Hand: {len(state.get('playerHand', []))} cards  |  "
-                f"Deck: {state.get('playerDeckCount', '?')} cards"
-            ),
         ]
+        if self._self_play:
+            lines.insert(2, f"Self-play — acting as player {self._acting_player_id}")
+        lines.append(
+            f"Hand: {len(state.get('playerHand', []))} cards  |  "
+            f"Deck: {state.get('playerDeckCount', '?')} cards"
+        )
 
         legal_actions = self._extract_legal_actions(state)
         if legal_actions:

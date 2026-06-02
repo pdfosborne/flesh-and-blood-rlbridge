@@ -11,6 +11,7 @@ __all__ = [
     "FLESH_AND_BLOOD_DECKBUILD_TALISHAR_V0",
     "FLESH_AND_BLOOD_SELFPLAY_V0",
     "FLESH_AND_BLOOD_TALISHAR_V0",
+    "FLESH_AND_BLOOD_TALISHAR_SELFPLAY_V0",
     "FleshAndBloodDeckBuilderEnvironment",
     "FleshAndBloodEnvironment",
     "FleshAndBloodFactory",
@@ -108,6 +109,7 @@ if TYPE_CHECKING:  # Static type-checkers and IDEs still see the real symbols.
         FLESH_AND_BLOOD_DECKBUILD_TALISHAR_V0,
         FLESH_AND_BLOOD_SELFPLAY_V0,
         FLESH_AND_BLOOD_TALISHAR_V0,
+        FLESH_AND_BLOOD_TALISHAR_SELFPLAY_V0,
         FleshAndBloodFactory,
         TalisharDeckBuilderFactory,
     )

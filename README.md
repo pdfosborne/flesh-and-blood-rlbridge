@@ -8,8 +8,9 @@ This package is **not** bundled with rlbridge. Install it separately when you wa
 
 | Env ID | Description |
 |--------|-------------|
-| `FleshAndBlood-Talishar-v0` | Agent vs scripted opponent |
-| `FleshAndBlood-SelfPlay-v0` | Single policy controls both heroes |
+| `FleshAndBlood-Talishar-v0` | Agent vs CombatDummy AI (live Talishar server) |
+| `FleshAndBlood-Talishar-SelfPlay-v0` | One policy controls both players (live Talishar server) |
+| `FleshAndBlood-SelfPlay-v0` | Single policy controls both heroes (local simulator) |
 | `FleshAndBlood-DeckBuild-v0` | Two-phase deck selection before play |
 
 ## Install
