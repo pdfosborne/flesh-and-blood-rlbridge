@@ -29,6 +29,9 @@ A running Talishar Docker instance is required.  Run once to set up::
     docker compose up -d
 
 Then set ``TALISHAR_URL=http://localhost`` or pass ``base_url`` to the constructor.
+For visual rendering (``render_mode="human"``), run Talishar-FE locally
+(``npm run dev`` in Talishar-FE, default ``http://localhost:5173``) or set
+``TALISHAR_FE_URL``.
 
 HTTP API summary
 ----------------
@@ -54,6 +57,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import webbrowser
 from typing import Any, Optional
 
 from rlbridge.environments.base import rlbridgeEnvironment
@@ -90,13 +94,18 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
     max_turns:
         Maximum number of agent steps before the episode is truncated.
     render_mode:
-        Rendering mode (``"ansi"`` or ``None``).
+        Rendering mode (``"human"``, ``"ansi"``, or ``None``).
+    frontend_url:
+        Base URL of the Talishar-FE dev server used by ``"human"`` rendering.
+        Defaults to the ``TALISHAR_FE_URL`` environment variable or
+        ``"http://localhost:5173"``.
     """
 
     def __init__(
         self,
         *,
         base_url: Optional[str] = None,
+        frontend_url: Optional[str] = None,
         deck_link: str = _DEFAULT_DECK_LINK,
         game_format: str = "blitz",
         timeout: float = 15.0,
@@ -109,6 +118,9 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         self._base_url = (
             base_url or os.environ.get("TALISHAR_URL", "http://localhost")
         ).rstrip("/")
+        self._frontend_url = (
+            frontend_url or os.environ.get("TALISHAR_FE_URL", "http://localhost:5173")
+        ).rstrip("/")
         self._deck_link = deck_link
         self._local_deck_name = local_deck_name  # use CreateLocalGame.php when set
         self._opponent_deck_name = opponent_deck_name
@@ -117,6 +129,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         self._timeout = timeout
         self._max_turns = max_turns
         self._render_mode = render_mode
+        self._opened_frontend_url: Optional[str] = None
 
         # HTTP session (rebuilt each episode so cookies/sessions don't leak)
         self._cookie_jar: http.cookiejar.CookieJar = http.cookiejar.CookieJar()
@@ -136,6 +149,13 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         self._player_hp: int = 20
         self._opp_hp: int = 20
         self._initialized: bool = False
+
+        # Persistent Playwright worker thread for rgb_array rendering
+        self._pw_page: Any = None
+        self._pw_browser: Any = None
+        self._pw_playwright: Any = None
+        self._pw_cmd_queue: Any = None
+        self._pw_worker_thread: Any = None
 
     # ── HTTP helpers ──────────────────────────────────────────────────────────
 
@@ -500,6 +520,73 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         }
         return json.dumps(obs, separators=(",", ":"))
 
+    def _render_player_id(self) -> int:
+        """Player ID used for Talishar-FE rendering."""
+        if self._self_play:
+            return self._acting_player_id
+        return 1
+
+    def _frontend_game_url(self) -> Optional[str]:
+        """Build a Talishar-FE URL that opens the live game board."""
+        if not self._game_name:
+            return None
+        player_id = self._render_player_id()
+        params: dict[str, str] = {
+            "gameName": self._game_name,
+            "playerID": str(player_id),
+        }
+        auth_key = self._auth_key_for(player_id)
+        if auth_key:
+            params["authKey"] = auth_key
+        query = urllib.parse.urlencode(params)
+        return f"{self._frontend_url}/game/play?{query}"
+
+    def _open_frontend(self) -> Optional[str]:
+        """Open the Talishar-FE game board in the default browser once per URL."""
+        url = self._frontend_game_url()
+        if not url:
+            return None
+        if url != self._opened_frontend_url:
+            webbrowser.open(url, new=0, autoraise=True)
+            self._opened_frontend_url = url
+        return url
+
+    def _render_ansi(self) -> RenderResult:
+        if not self._last_state:
+            return RenderResult(mode="ansi", text="No game state available.")
+
+        state = self._last_state
+        phase = self._phase_str(state)
+        role = f"P{self._acting_player_id}" if self._self_play else "P1"
+        lines = [
+            "=== Flesh and Blood (Talishar Engine) ===",
+            f"Game: {self._game_name}  Turn: {state.get('turnNo', '?')}  Phase: {phase}",
+            (
+                f"You ({role}): {state.get('playerHealth', '?')} HP  |  "
+                f"Opponent: {state.get('opponentHealth', '?')} HP"
+            ),
+        ]
+        if self._self_play:
+            lines.insert(2, f"Self-play — acting as player {self._acting_player_id}")
+        lines.append(
+            f"Hand: {len(state.get('playerHand', []))} cards  |  "
+            f"Deck: {state.get('playerDeckCount', '?')} cards"
+        )
+
+        legal_actions = self._extract_legal_actions(state)
+        if legal_actions:
+            lines.append("Legal actions:")
+            for i, a in enumerate(legal_actions[:12]):
+                lines.append(f"  [{i}] {a['label']} ({a['zone']})")
+            if len(legal_actions) > 12:
+                lines.append(f"  … and {len(legal_actions) - 12} more")
+
+        fe_url = self._frontend_game_url()
+        if fe_url:
+            lines.append(f"Talishar FE: {fe_url}")
+
+        return RenderResult(mode="ansi", text="\n".join(lines))
+
     def _parse_action(
         self,
         action: Any,
@@ -549,6 +636,11 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         self._opp_hp = int(self._last_state.get("opponentHealth", 20))
         self._steps = 0
         self._initialized = True
+        self._opened_frontend_url = None
+        if self._render_mode == "human":
+            self._open_frontend()
+        elif self._render_mode == "rgb_array":
+            self._open_playwright_page()
 
         legal_actions = self._extract_legal_actions(self._last_state)
         obs = self._encode_observation(self._last_state, legal_actions)
@@ -590,7 +682,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         else:
             dmg_dealt = max(0, self._opp_hp - new_opp_hp)
             dmg_taken = max(0, self._player_hp - new_player_hp)
-            reward = dmg_dealt * 0.01 - dmg_taken * 0.01 - 0.005
+            reward = dmg_dealt * 0.01 - dmg_taken * 0.01
 
         self._player_hp = new_player_hp
         self._opp_hp = new_opp_hp
@@ -614,7 +706,99 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             },
         )
 
+    def _open_playwright_page(self) -> None:
+        """
+        Spawn a dedicated Playwright worker thread that owns the browser for its
+        entire lifetime.  All browser calls (open + screenshots) are queued to
+        that thread so Playwright's single-thread constraint is satisfied even
+        when the caller runs inside asyncio.
+        """
+        url = self._frontend_game_url()
+        if not url:
+            return
+        try:
+            from playwright.sync_api import sync_playwright as _sync_playwright
+        except ImportError:
+            return
+
+        import queue as _queue
+        import threading as _threading
+
+        self._close_playwright_page()
+
+        # cmd_queue: (fn, result_event, result_box)  fn=None → shutdown
+        cmd_queue: _queue.Queue = _queue.Queue()
+        self._pw_cmd_queue = cmd_queue
+
+        ready = _threading.Event()
+        error_box: list[Exception] = []
+
+        def _worker() -> None:
+            try:
+                pw = _sync_playwright().start()
+                browser = pw.chromium.launch(headless=True)
+                ctx = browser.new_context(viewport={"width": 1280, "height": 800})
+                page = ctx.new_page()
+                page.add_init_script(
+                    "localStorage.setItem('gdpr-analytics-enabled','true');"
+                    "localStorage.setItem('gdpr-consent-accepted','true');"
+                )
+                page.goto(url, timeout=20000)
+                page.wait_for_load_state("domcontentloaded", timeout=15000)
+                page.wait_for_timeout(5000)
+                try:
+                    btn = page.locator("button", has_text="Agree").first
+                    if btn.is_visible(timeout=500):
+                        btn.click()
+                        page.wait_for_timeout(1500)
+                except Exception:
+                    pass
+                self._pw_page = page
+                ready.set()
+                # Process commands from other threads
+                while True:
+                    item = cmd_queue.get()
+                    if item is None:
+                        break
+                    fn, done_event, result_box = item
+                    try:
+                        result_box.append(fn(page))
+                    except Exception:
+                        pass
+                    finally:
+                        done_event.set()
+                browser.close()
+                pw.stop()
+            except Exception as exc:
+                error_box.append(exc)
+                ready.set()
+
+        t = _threading.Thread(target=_worker, daemon=True)
+        t.start()
+        self._pw_worker_thread = t
+        ready.wait(timeout=35)
+        if error_box:
+            self._close_playwright_page()
+
+    def _close_playwright_page(self) -> None:
+        """Shut down the Playwright worker thread."""
+        q = getattr(self, "_pw_cmd_queue", None)
+        if q is not None:
+            try:
+                q.put_nowait(None)  # signal worker to exit
+            except Exception:
+                pass
+        t = getattr(self, "_pw_worker_thread", None)
+        if t is not None:
+            t.join(timeout=5)
+        self._pw_page = None
+        self._pw_cmd_queue = None
+        self._pw_worker_thread = None
+        self._pw_browser = None
+        self._pw_playwright = None
+
     def close(self) -> None:
+        self._close_playwright_page()
         self._game_name = None
         self._auth_key = ""
         self._p1_auth_key = ""
@@ -622,6 +806,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         self._acting_player_id = 1
         self._last_state = {}
         self._initialized = False
+        self._opened_frontend_url = None
 
     @property
     def observation_space(self) -> TextSpace:
@@ -631,37 +816,42 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
     def action_space(self) -> TextSpace:
         return TextSpace(min_length=1, max_length=64)
 
+    def _render_rgb_array(self) -> RenderResult:
+        """Queue a screenshot request to the Playwright worker thread."""
+        q = getattr(self, "_pw_cmd_queue", None)
+        if q is None or self._pw_page is None:
+            return RenderResult(mode="rgb_array")
+        import base64, threading
+        result_box: list[bytes] = []
+        done = threading.Event()
+
+        def _shot(page: Any) -> bytes:
+            page.wait_for_timeout(800)
+            return page.screenshot(full_page=False)
+
+        q.put((_shot, done, result_box))
+        done.wait(timeout=12)
+        if not result_box:
+            return RenderResult(mode="rgb_array")
+        b64 = base64.b64encode(result_box[0]).decode()
+        return RenderResult(mode="rgb_array", data=b64, width=1280, height=800)
+
     def render(self) -> RenderResult:
-        if not self._last_state:
-            return RenderResult(mode="ansi", text="No game state available.")
+        if self._render_mode == "human":
+            if not self._last_state:
+                return RenderResult(mode="human", text="No game state available.")
+            url = self._open_frontend()
+            if not url:
+                return RenderResult(mode="human", text="No active game.")
+            return RenderResult(mode="human", text=url)
 
-        state = self._last_state
-        phase = self._phase_str(state)
-        role = f"P{self._acting_player_id}" if self._self_play else "P1"
-        lines = [
-            "=== Flesh and Blood (Talishar Engine) ===",
-            f"Game: {self._game_name}  Turn: {state.get('turnNo', '?')}  Phase: {phase}",
-            (
-                f"You ({role}): {state.get('playerHealth', '?')} HP  |  "
-                f"Opponent: {state.get('opponentHealth', '?')} HP"
-            ),
-        ]
-        if self._self_play:
-            lines.insert(2, f"Self-play — acting as player {self._acting_player_id}")
-        lines.append(
-            f"Hand: {len(state.get('playerHand', []))} cards  |  "
-            f"Deck: {state.get('playerDeckCount', '?')} cards"
-        )
+        if self._render_mode == "rgb_array":
+            return self._render_rgb_array()
 
-        legal_actions = self._extract_legal_actions(state)
-        if legal_actions:
-            lines.append("Legal actions:")
-            for i, a in enumerate(legal_actions[:12]):
-                lines.append(f"  [{i}] {a['label']} ({a['zone']})")
-            if len(legal_actions) > 12:
-                lines.append(f"  … and {len(legal_actions) - 12} more")
+        if self._render_mode != "ansi":
+            return RenderResult(mode=self._render_mode or "none", text="")
 
-        return RenderResult(mode="ansi", text="\n".join(lines))
+        return self._render_ansi()
 
     def sample_action(self) -> str:
         """Return a random legal action index as a string."""

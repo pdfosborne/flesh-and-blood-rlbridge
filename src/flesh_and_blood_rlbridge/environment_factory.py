@@ -151,7 +151,7 @@ class TalisharEngineFactory(rlbridgeEnvironmentFactory):
                 *(["self-play"] if self._self_play else []),
             ],
             namespace="flesh_and_blood",
-            render_modes=["ansi"],
+            render_modes=["human", "ansi"],
             max_episode_steps=self._max_turns,
             suggested_hyperparameters=SuggestedHyperparameters(
                 agent_type="ppo",
@@ -177,6 +177,7 @@ class TalisharEngineFactory(rlbridgeEnvironmentFactory):
         opponent_deck = kwargs.get("opponent_deck_name", None)
         return TalisharEngineEnvironment(
             base_url=kwargs.get("base_url"),
+            frontend_url=kwargs.get("frontend_url"),
             deck_link=str(kwargs.get("deck_link", self._deck_link)),
             game_format=str(kwargs.get("game_format", self._game_format)),
             max_turns=int(kwargs.get("max_turns", self._max_turns)),
