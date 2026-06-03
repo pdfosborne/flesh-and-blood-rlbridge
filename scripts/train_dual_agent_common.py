@@ -16,7 +16,7 @@ from typing import Optional
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FAB_SRC = REPO_ROOT / "src"
-RL_SRC = Path("~/Documents/RL-IP/src").expanduser()
+RL_SRC = Path("~/Documents/RL/rlbridge/src").expanduser()
 FAB_DB_DIR = FAB_SRC / "flesh_and_blood_rlbridge" / "card_db"
 FABRARY_DECKS_PATH = FAB_DB_DIR / "fabrary_decks.json"
 CARDS_DB_PATH = FAB_DB_DIR / "cards.json"
@@ -237,6 +237,8 @@ def train_agents_from_both_perspectives(
     cur_p1_r = cur_p2_r = 0.0
     total_steps = n_episodes * max_steps
     global_step = 0
+    progress_every = max(1, n_episodes // 100)  # ~1% cadence after warmup
+    progress_t0 = time.time()
 
     while completed < n_episodes and global_step < total_steps:
         acting = env._acting_player_id
@@ -279,6 +281,25 @@ def train_agents_from_both_perspectives(
             p1_ep_rewards.append(cur_p1_r)
             p2_ep_rewards.append(cur_p2_r)
             completed += 1
+
+            if (
+                completed <= 10  # dense startup visibility
+                or completed == n_episodes
+                or completed % progress_every == 0
+            ):
+                elapsed = time.time() - progress_t0
+                pct = (completed / max(1, n_episodes)) * 100.0
+                p1_avg = float(np.mean(p1_ep_rewards)) if p1_ep_rewards else 0.0
+                p2_avg = float(np.mean(p2_ep_rewards)) if p2_ep_rewards else 0.0
+                ep_rate = completed / max(elapsed, 1e-9)
+                eta_secs = (n_episodes - completed) / ep_rate if ep_rate > 0 else float("inf")
+                print(
+                    f"  [train-progress] episodes={completed}/{n_episodes} "
+                    f"({pct:6.2f}%) elapsed={elapsed:.1f}s "
+                    f"rate={ep_rate:.3f}ep/s eta={eta_secs/60:.1f}m "
+                    f"p1_avg={p1_avg:+.3f} p2_avg={p2_avg:+.3f}"
+                )
+
             cur_p1_r = cur_p2_r = 0.0
             ep_seed = (seed + completed) if seed is not None else None
             reset_out = env.reset(seed=ep_seed)
@@ -401,7 +422,7 @@ def train_matchup(
     eval_env_ids: dict[str, str],
     cache_store: Optional["AgentCacheStore"] = None,
     seed: Optional[int] = None,
-    game_format: str = "blitz",
+    game_format: str = "sage",
 ) -> dict:
     from agent_cache import AgentCacheStore
     print(f"\n{'=' * 60}")

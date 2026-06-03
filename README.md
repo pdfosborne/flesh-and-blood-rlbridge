@@ -26,7 +26,7 @@ pip install git+https://github.com/pdfosborne/flesh-and-blood-rlbridge.git
 For local development from a checkout:
 
 ```bash
-cd /path/to/RL-IP
+cd /path/to/rlbridge
 pip install -e .
 
 cd /path/to/flesh-and-blood

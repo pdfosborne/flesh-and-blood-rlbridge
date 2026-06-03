@@ -16,7 +16,7 @@ Options
 -------
     --url URL       Talishar base URL  (default: $TALISHAR_URL or http://localhost)
     --deck NAME     Skip selection and use a pre-built deck from Assets/  (e.g. Ira)
-    --format FMT    Game format: blitz, classic_constructed, ...  (default: blitz)
+    --format FMT    Game format: sage, classic_constructed, ...  (default: sage)
     --agent FILE    Pickle file containing a trained rlbridge agent
     --episodes N    Number of episodes to play  (default: 1)
     --delay SECS    Seconds between actions in agent mode  (default: 0.5)
@@ -359,7 +359,7 @@ def main() -> None:
         default=None,
         help="Skip selection and use this deck from Assets/ (e.g. Ira, FaiCC)",
     )
-    parser.add_argument("--format", default="blitz", dest="game_format", help="Game format (default: blitz)")
+    parser.add_argument("--format", default="sage", dest="game_format", help="Game format (default: sage)")
     parser.add_argument("--agent", default=None, metavar="FILE", help="Pickled RL agent to auto-play")
     parser.add_argument("--episodes", type=int, default=1, help="Number of episodes (default: 1)")
     parser.add_argument("--delay", type=float, default=0.5, help="Seconds between agent actions (default: 0.5)")

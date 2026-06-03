@@ -1,19 +1,19 @@
 <?php
 
 ob_start();
-include "HostFiles/Redirector.php";
-include "Libraries/HTTPLibraries.php";
-include_once "Libraries/SHMOPLibraries.php";
-include "Libraries/NetworkingLibraries.php";
-include "GameLogic.php";
-include "GameTerms.php";
-include "Libraries/StatFunctions.php";
-include "Libraries/PlayerSettings.php";
-include "Libraries/UILibraries.php";
-include "AI/CombatDummy.php";
-include_once "./includes/dbh.inc.php";
-include_once "./includes/functions.inc.php";
-include_once "./MenuFiles/StartHelper.php";
+include __DIR__ . "/HostFiles/Redirector.php";
+include __DIR__ . "/Libraries/HTTPLibraries.php";
+include_once __DIR__ . "/Libraries/SHMOPLibraries.php";
+include __DIR__ . "/Libraries/NetworkingLibraries.php";
+include __DIR__ . "/GameLogic.php";
+include __DIR__ . "/GameTerms.php";
+include __DIR__ . "/Libraries/StatFunctions.php";
+include __DIR__ . "/Libraries/PlayerSettings.php";
+include __DIR__ . "/Libraries/UILibraries.php";
+include __DIR__ . "/AI/CombatDummy.php";
+include_once __DIR__ . "/includes/dbh.inc.php";
+include_once __DIR__ . "/includes/functions.inc.php";
+include_once __DIR__ . "/MenuFiles/StartHelper.php";
 ob_end_clean();
 
 $gameName = $_GET["gameName"];
@@ -124,8 +124,8 @@ $isReplay = 0;
 WriteCache($gameName, ($currentUpdate + 1) . "!" . $currentTime . "!" . $currentTime . "!-1!-1!" . $currentTime . "!"  . $p1Hero . "!" . $p2Hero . "!" . $visibility . "!" . $isReplay . "!0!0!" . $format . "!" . $MGS_GameStarted . "!" . $p1chatEnabled . "!" . $p2chatEnabled); //Initialize SHMOP cache for this game
 
 ob_start();
-include "ParseGamestate.php";
-include "StartEffects.php";
+include __DIR__ . "/ParseGamestate.php";
+include __DIR__ . "/StartEffects.php";
 ob_end_clean();
 //Update the game file to show that the game has started and other players can join to spectate
 $gameStatus = $MGS_GameStarted;

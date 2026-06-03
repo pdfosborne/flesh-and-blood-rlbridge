@@ -118,7 +118,7 @@ class TalisharEngineFactory(rlbridgeEnvironmentFactory):
         env_id: str,
         *,
         deck_link: str = _TALISHAR_DEFAULT_DECK,
-        game_format: str = "sage",
+        game_format: str = "silver_age",
         max_turns: int = 200,
         self_play: bool = True,
     ) -> None:
@@ -199,7 +199,7 @@ class TalisharDeckBuilderFactory(rlbridgeEnvironmentFactory):
         *,
         hero_id: str = "ira_crimson_haze",
         hero_class: str = "Ninja",
-        game_format: str = "blitz",
+        game_format: str = "silver_age",
         num_eval_games: int = 5,
         max_build_steps: int = 200,
     ) -> None:

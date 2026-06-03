@@ -28,10 +28,10 @@ _FAB_DUAL_AGENT_TRAINING_PROGRAMS: dict[str, dict[str, Any]] = {
     "sage_precons": {
         "script": _FAB_REPO_ROOT / "scripts" / "train_sage_precons.py",
         "description": (
-            "Train PPO agents on all SAGE precon cross-matchups (Assets decks, blitz)."
+            "Train PPO agents on all SAGE precon cross-matchups (Assets decks, silver_age)."
         ),
-        "default_format": "blitz",
-        "default_max_steps": 60,
+        "default_format": "silver_age",
+        "default_max_steps": 200,
         "default_out_dir": "results/sage_precon_agents",
         "matchup_example": "briar-vs-dorinthea",
     },
@@ -42,7 +42,7 @@ _FAB_DUAL_AGENT_TRAINING_PROGRAMS: dict[str, dict[str, Any]] = {
             "(fabrary_decks.json, four-tier cache)."
         ),
         "default_format": "silver_age",
-        "default_max_steps": 60,
+        "default_max_steps": 200,
         "default_out_dir": "results/silver_age_agents",
         "matchup_example": "ira_crimson_haze_sage_aggro-vs-fai_sage_chain",
     },
@@ -53,7 +53,7 @@ _FAB_DUAL_AGENT_TRAINING_PROGRAMS: dict[str, dict[str, Any]] = {
             "(fabrary_decks.json, four-tier cache)."
         ),
         "default_format": "classic_constructed",
-        "default_max_steps": 120,
+        "default_max_steps": 200,
         "default_out_dir": "results/classic_constructed_agents",
         "matchup_example": "dorinthea_ironsong_cc_aggro-vs-chane_cc_shadow",
     },
@@ -419,7 +419,7 @@ def register_mcp_tools(
     def _resolve_supported_formats(format_names_csv: Optional[str]) -> list[str]:
         if format_names_csv:
             return [f.strip() for f in str(format_names_csv).split(",") if f.strip()]
-        return ["blitz", "classic_constructed"]
+        return ["silver_age", "classic_constructed"]
 
     def _evaluate_deck_vs_matchup(
         *,
@@ -1229,7 +1229,7 @@ def register_mcp_tools(
         """List Talishar dual-agent PPO training scripts available in this repo.
 
         Programs:
-        - ``sage_precons`` — SAGE precon Assets decks (blitz)
+        - ``sage_precons`` — SAGE precon Assets decks (sage)
         - ``silver_age`` — fabrary Silver Age decks
         - ``classic_constructed`` — fabrary Classic Constructed decks
 

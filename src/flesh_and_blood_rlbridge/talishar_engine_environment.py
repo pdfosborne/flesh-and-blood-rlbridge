@@ -9,7 +9,9 @@ list in the latest observation, or the special string ``"pass"`` to pass priorit
 
 Prerequisites
 -------------
-A running Talishar Docker instance is required.  Run once to set up::
+A running Talishar Docker instance is required.
+
+**Linux** — run once to set up::
 
     # 1. Install Docker Compose V2 plugin (if not already present)
     DOCKER_CONFIG=${DOCKER_CONFIG:-$HOME/.docker}
@@ -27,6 +29,21 @@ A running Talishar Docker instance is required.  Run once to set up::
     git clone https://github.com/Talishar/Talishar-FE
     cd Talishar
     docker compose up -d
+
+**Windows** — run once to set up (PowerShell)::
+
+    # 1. Install Docker Desktop for Windows (includes Docker Compose V2):
+    #    https://docs.docker.com/desktop/install/windows-install/
+    #    Enable WSL 2 backend when prompted and restart if required.
+
+    # 2. Clone Talishar and its front-end, then start the server
+    git clone https://github.com/Talishar/Talishar
+    git clone https://github.com/Talishar/Talishar-FE
+    Set-Location Talishar
+    docker compose up -d
+
+    # The server will be accessible at http://localhost once the containers
+    # are healthy (check with: docker compose ps).
 
 Then set ``TALISHAR_URL=http://localhost`` or pass ``base_url`` to the constructor.
 For visual rendering (``render_mode="human"``), run Talishar-FE locally
@@ -65,13 +82,20 @@ from rlbridge.protocol.messages import RenderResult, ResetResult, StepResult, Te
 
 from .talishar_oracle import TalisharConnectionError
 
-# Default practice deck: Ira Crimson Haze (young hero, blitz-legal)
+# Default practice deck: Ira Crimson Haze (young hero, silver_age-legal)
 _DEFAULT_DECK_LINK = "https://fabrary.net/decks/01GJG7Z4WGWSZ95FY74KX4M557"
 _DEFAULT_RENDER_WIDTH = 1920
 _DEFAULT_RENDER_HEIGHT = 1080
 _TRUNCATION_PENALTY = -1.0
 _REPEAT_ACTION_THRESHOLD = 3
 _REPEAT_ACTION_PENALTY = -0.1
+
+
+def _normalize_game_format(fmt: str) -> str:
+    token = str(fmt or "").strip().lower()
+    if token in {"silver age", "silver_age", "sage"}:
+        return "silver_age"
+    return token or "silver_age"
 
 
 class TalisharEngineEnvironment(rlbridgeEnvironment):
@@ -91,7 +115,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
     deck_link:
         Fabrary/FaBDB deck link for the agent's deck.
     game_format:
-        Game format string accepted by Talishar (e.g. ``"blitz"``, ``"cc"``).
+        Game format string accepted by Talishar (e.g. ``"silver_age"``, ``"cc"``).
     self_play:
         When ``True``, disable P2 AI and alternate control by priority.
     timeout:
@@ -117,7 +141,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         base_url: Optional[str] = None,
         frontend_url: Optional[str] = None,
         deck_link: str = _DEFAULT_DECK_LINK,
-        game_format: str = "sage",
+        game_format: str = "silver_age",
         timeout: float = 15.0,
         max_turns: int = 1000,
         render_mode: Optional[str] = None,
@@ -137,7 +161,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         self._local_deck_name = local_deck_name  # use CreateLocalGame.php when set
         self._opponent_deck_name = opponent_deck_name
         self._self_play = self_play
-        self._format = game_format
+        self._format = _normalize_game_format(game_format)
         self._timeout = timeout
         self._max_turns = max_turns
         self._render_mode = render_mode
@@ -183,7 +207,14 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
 
     # ── HTTP helpers ──────────────────────────────────────────────────────────
 
-    def _http_get(self, path: str, params: dict[str, str], _retries: int = 3) -> dict[str, Any]:
+    def _http_get(
+        self,
+        path: str,
+        params: dict[str, str],
+        _retries: int = 3,
+        *,
+        allow_empty_body: bool = False,
+    ) -> dict[str, Any]:
         url = self._base_url + path + "?" + urllib.parse.urlencode(params)
         req = urllib.request.Request(url, headers={"User-Agent": "TalisharRLEnv/1.0"})
         last_exc: Exception = RuntimeError("no attempts")
@@ -197,10 +228,21 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                     )
                 with self._opener.open(req, timeout=self._timeout) as resp:  # noqa: S310
                     body = resp.read()
-                data = json.loads(body)
+                    resp_status = resp.status
+                # Strip any PHP warnings / notices printed before the JSON object
+                body_text = body.decode("utf-8", errors="replace")
+                if allow_empty_body and body_text.strip() == "":
+                    return {}
+                json_start = body_text.find("{")
+                if json_start > 0:
+                    body_text = body_text[json_start:]
+                data = json.loads(body_text)
                 return data if isinstance(data, dict) else {"_raw": data}
             except json.JSONDecodeError:
-                return {}
+                raw_text = body.decode("utf-8", errors="replace") if body else "<empty>"
+                raise RuntimeError(
+                    f"GET {url} returned non-JSON response (HTTP {resp_status}):\n{raw_text[:2000]}"
+                ) from None
             except (urllib.error.URLError, OSError) as exc:
                 last_exc = exc
         raise TalisharConnectionError(f"GET {url} failed: {last_exc}") from last_exc
@@ -221,10 +263,21 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                 )
                 with self._opener.open(req, timeout=self._timeout) as resp:  # noqa: S310
                     resp_body = resp.read()
-                data = json.loads(resp_body)
+                    resp_status = resp.status
+                # Strip any PHP warnings / notices printed before the JSON object
+                resp_text = resp_body.decode("utf-8", errors="replace")
+                json_start = resp_text.find("{")
+                if json_start > 0:
+                    resp_text = resp_text[json_start:]
+                data = json.loads(resp_text)
                 return data if isinstance(data, dict) else {"_raw": data}
             except json.JSONDecodeError:
-                return {}
+                # Server replied but body is not JSON — surface the raw text so the
+                # caller can diagnose the real problem (PHP error page, redirect, etc.)
+                raw_text = resp_body.decode("utf-8", errors="replace") if resp_body else "<empty>"
+                raise RuntimeError(
+                    f"POST {url} returned non-JSON response (HTTP {resp_status}):\n{raw_text[:2000]}"
+                ) from None
             except (urllib.error.URLError, OSError) as exc:
                 last_exc = exc
         raise TalisharConnectionError(f"POST {url} failed: {last_exc}") from last_exc
@@ -342,18 +395,32 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         Prompt/decision modes (17 = BUTTONINPUT, 20 = YESNO, 99 = pass, etc.)
         read from ``$buttonInput``.  Sending the value under both keys satisfies
         both families without any mode-specific branching.
+
+        If the server returns ``{"notYourTurn": true}`` the acting player ID is
+        corrected to the server's ``currentPlayer`` and the action is retried
+        once, which handles the race between start-of-game priority assignment
+        and the first Python call.
         """
         pid = player_id if player_id is not None else self._acting_player_id
-        params: dict[str, str] = {
-            "gameName": self._game_name or "",
-            "playerID": str(pid),
-            "authKey": self._auth_key_for(pid),
-            "mode": str(mode),
-        }
-        if button_input:
-            params["buttonInput"] = button_input
-            params["cardID"] = button_input  # card-zone modes (27, 3, 5, …) index via $cardID
-        self._http_get("/ProcessInput.php", params)
+        for attempt in range(2):
+            params: dict[str, str] = {
+                "gameName": self._game_name or "",
+                "playerID": str(pid),
+                "authKey": self._auth_key_for(pid),
+                "mode": str(mode),
+            }
+            if button_input:
+                params["buttonInput"] = button_input
+                params["cardID"] = button_input  # card-zone modes (27, 3, 5, …) index via $cardID
+            resp = self._http_get("/ProcessInput.php", params, allow_empty_body=True)
+            if resp.get("notYourTurn"):
+                # Server says it's the other player's turn — correct and retry once
+                server_current = int(resp.get("currentPlayer", 3 - pid))
+                pid = server_current
+                self._acting_player_id = pid
+                self._auth_key = self._auth_key_for(pid)
+            else:
+                break
 
     def _apply_last_update(self, state: dict[str, Any]) -> None:
         try:

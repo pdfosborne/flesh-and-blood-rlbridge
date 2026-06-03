@@ -9,7 +9,7 @@ deck's win rate as player 1.
 
 Deck construction rules (from FaB Comprehensive Rules)
 -------------------------------------------------------
-* **Blitz**: minimum 40 deck cards, maximum 2 copies of each non-token/non-hero
+* **Silver Age**: maximum 40 deck cards, maximum 2 copies of each non-token/non-hero
   card pitch variant.
 * **Classic Constructed**: minimum 60 deck cards, maximum 3 copies.
 * Equipment cards occupy dedicated slots outside the main deck and are fixed
@@ -64,11 +64,18 @@ _FORMAT_RULES: dict[str, dict[str, int]] = {
     "upf": {"min_deck_size": 60, "max_copies": 3},
 }
 
-_DEFAULT_FORMAT = "blitz"
+_DEFAULT_FORMAT = "silver_age"
 
-# Ira Crimson Haze hero + blitz equipment (matches Talishar Assets/Ira.txt line 1)
+
+def _normalize_game_format(game_format: str) -> str:
+    token = str(game_format or "").strip().lower()
+    if token in {"silver age", "silver_age", "sage"}:
+        return "silver_age"
+    return token or _DEFAULT_FORMAT
+
+# Ira Crimson Haze hero + silver age equipment (matches Talishar Assets/Ira.txt line 1)
 _IRA_HERO_ID = "ira_crimson_haze"
-_IRA_BLITZ_HEADER = (
+_IRA_SILVER_AGE_HEADER = (
     "ira_crimson_haze harmonized_kodachi harmonized_kodachi "
     "blade_beckoner_helm blood_scent tearing_shuko pouncing_paws"
 )
@@ -86,7 +93,7 @@ _TALISHAR_ID_RE = re.compile(r"^[a-z][a-z0-9_]+$")
 
 def _load_card_pool(
     hero_class: str = "Ninja",
-    game_format: str = "blitz",
+    game_format: str = _DEFAULT_FORMAT,
     *,
     card_db_path: Optional[str] = None,
 ) -> list[dict[str, Any]]:
@@ -107,6 +114,8 @@ def _load_card_pool(
         Path(card_db_path).read_text(encoding="utf-8")
     )
 
+    normalized_format = _normalize_game_format(game_format)
+
     pool: list[dict[str, Any]] = []
     for card in all_cards:
         cid = card.get("id", "")
@@ -120,7 +129,7 @@ def _load_card_pool(
         legality = card.get("legality", {})
         if not legality:
             continue
-        if legality.get(game_format) == "banned":
+        if legality.get(normalized_format) == "banned":
             continue
         pool.append(card)
     return pool
@@ -145,7 +154,7 @@ class TalisharDeckBuilderEnvironment(rlbridgeEnvironment):
 
         {
             "hero": "ira_crimson_haze",
-            "format": "blitz",
+            "format": "silver_age",
             "currentDeck": [{"id": "flying_kick_red", "name": "Flying Kick", "count": 2}],
             "deckSize": 2,
             "targetMinSize": 40,
@@ -182,9 +191,9 @@ class TalisharDeckBuilderEnvironment(rlbridgeEnvironment):
     hero_equipment_header:
         Full first line of the deck file (hero + equipment IDs, space-separated).
         Defaults to reading from ``Assets/Ira.txt``, falling back to a hardcoded
-        Ira-blitz header.
+        Ira-silver_age header.
     game_format:
-        FaB format string — ``"blitz"``, ``"classic_constructed"``, etc.
+        FaB format string — ``"silver_age"``, ``"classic_constructed"``, etc.
     num_eval_games:
         Number of Talishar self-play games to play when evaluating a finalized deck.
     opponent_deck_name:
@@ -229,7 +238,7 @@ class TalisharDeckBuilderEnvironment(rlbridgeEnvironment):
     ) -> None:
         self._hero_id = hero_id
         self._hero_class = hero_class
-        self._game_format = game_format
+        self._game_format = _normalize_game_format(game_format)
         self._num_eval_games = num_eval_games
         self._opponent_deck_name = opponent_deck_name
         self._eval_p1_agent = eval_p1_agent
@@ -253,10 +262,10 @@ class TalisharDeckBuilderEnvironment(rlbridgeEnvironment):
                     encoding="utf-8"
                 ).splitlines()[0].strip()
             else:
-                self._equipment_header = _IRA_BLITZ_HEADER
+                self._equipment_header = _IRA_SILVER_AGE_HEADER
 
         # Format constraints
-        rules = _FORMAT_RULES.get(game_format, _FORMAT_RULES["blitz"])
+        rules = _FORMAT_RULES.get(self._game_format, _FORMAT_RULES["silver_age"])
         self._min_deck_size: int = rules["min_deck_size"]
         self._max_copies: int = rules["max_copies"]
 
@@ -264,7 +273,7 @@ class TalisharDeckBuilderEnvironment(rlbridgeEnvironment):
         if card_pool is not None:
             self._card_pool = card_pool
         else:
-            self._card_pool = _load_card_pool(hero_class, game_format)
+            self._card_pool = _load_card_pool(hero_class, self._game_format)
         self._pool_by_id: dict[str, dict[str, Any]] = {
             c["id"]: c for c in self._card_pool
         }

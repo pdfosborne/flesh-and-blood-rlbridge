@@ -6,23 +6,23 @@ error_reporting(E_ALL);
 @set_time_limit(1);
 @ini_set('max_execution_time', '1');
 
-include "WriteLog.php";
-include "GameLogic.php";
-include "GameTerms.php";
-include "HostFiles/Redirector.php";
-include_once "Libraries/SHMOPLibraries.php";
-include "Libraries/StatFunctions.php";
-include "Libraries/UILibraries.php";
-include "Libraries/PlayerSettings.php";
-include "Libraries/NetworkingLibraries.php";
-include "Libraries/CacheLibraries.php";
-include "AI/CombatDummy.php";
-include "Libraries/HTTPLibraries.php";
-require_once "Libraries/CoreLibraries.php";
-include_once "./includes/dbh.inc.php";
-include_once "./includes/functions.inc.php";
-include_once "APIKeys/APIKeys.php";
-include_once "./Libraries/ValidationLibraries.php";
+include __DIR__ . "/WriteLog.php";
+include __DIR__ . "/GameLogic.php";
+include __DIR__ . "/GameTerms.php";
+include __DIR__ . "/HostFiles/Redirector.php";
+include_once __DIR__ . "/Libraries/SHMOPLibraries.php";
+include __DIR__ . "/Libraries/StatFunctions.php";
+include __DIR__ . "/Libraries/UILibraries.php";
+include __DIR__ . "/Libraries/PlayerSettings.php";
+include __DIR__ . "/Libraries/NetworkingLibraries.php";
+include __DIR__ . "/Libraries/CacheLibraries.php";
+include __DIR__ . "/AI/CombatDummy.php";
+include __DIR__ . "/Libraries/HTTPLibraries.php";
+require_once __DIR__ . "/Libraries/CoreLibraries.php";
+include_once __DIR__ . "/includes/dbh.inc.php";
+include_once __DIR__ . "/includes/functions.inc.php";
+include_once __DIR__ . "/APIKeys/APIKeys.php";
+include_once __DIR__ . "/Libraries/ValidationLibraries.php";
 
 //We should always have a player ID as a URL parameter
 $gameName = $_GET["gameName"] ?? "";
@@ -84,7 +84,7 @@ SetHeaders();
 
 $numPass = 0;
 //First we need to parse the game state from the file
-include "ParseGamestate.php";
+include __DIR__ . "/ParseGamestate.php";
 
 if (IsReplay() && $mode == 99) {
   $filename = "./Games/$gameName/replayCommands.txt";
@@ -157,6 +157,7 @@ if(!IsReplay()) {
     $currentTime = round(microtime(true) * 1000);
     SetCachePiece($gameName, 2, $currentTime);
     SetCachePiece($gameName, 3, $currentTime);
+    echo json_encode(["notYourTurn" => true, "currentPlayer" => $currentPlayer, "playerID" => $playerID]);
     exit;
   }
 }
@@ -183,12 +184,12 @@ ProcessInput($playerID, $mode, $buttonInput, $cardID, $chkCount, $chkInput, fals
 
 ProcessMacros();
 if ($inGameStatus == $GameStatus_Rematch) {
-  include "MenuFiles/ParseGamefile.php";
+  include __DIR__ . "/MenuFiles/ParseGamefile.php";
   $origDeck = "./Games/{$gameName}/p1DeckOrig.txt";
   if (file_exists($origDeck)) copy($origDeck, "./Games/{$gameName}/p1Deck.txt");
   $origDeck = "./Games/{$gameName}/p2DeckOrig.txt";
   if (file_exists($origDeck)) copy($origDeck, "./Games/{$gameName}/p2Deck.txt");
-  include "MenuFiles/WriteGamefile.php";
+  include __DIR__ . "/MenuFiles/WriteGamefile.php";
   $p2IsAILocal = $p2IsAI == "1";
   $gameStatus = ($p2IsAILocal ? $MGS_ReadyToStart : $MGS_ChooseFirstPlayer);
   SetCachePiece($gameName, 14, $gameStatus);
@@ -199,7 +200,7 @@ if ($inGameStatus == $GameStatus_Rematch) {
   WriteLog("Player $firstPlayerChooser lost and will choose first player for the rematch.");
   WriteGameFile();
   $turn[0] = "REMATCH";
-  include "WriteGamestate.php";
+  include __DIR__ . "/WriteGamestate.php";
   $currentTime = round(microtime(true) * 1000);
   SetCachePiece($gameName, 2, $currentTime);
   SetCachePiece($gameName, 3, $currentTime);
@@ -207,7 +208,7 @@ if ($inGameStatus == $GameStatus_Rematch) {
   GamestateUpdated($gameName);
   exit;
 } else if ($inGameStatus == $GameStatus_SwapRematch) {
-  include "MenuFiles/ParseGamefile.php";
+  include __DIR__ . "/MenuFiles/ParseGamefile.php";
   // Swap the deck files (p1DeckOrig.txt <-> p2DeckOrig.txt)
   $p1OrigPath = "./Games/{$gameName}/p1DeckOrig.txt";
   $p2OrigPath = "./Games/{$gameName}/p2DeckOrig.txt";
@@ -221,7 +222,7 @@ if ($inGameStatus == $GameStatus_Rematch) {
   if (file_exists($p1OrigPath)) copy($p1OrigPath, "./Games/{$gameName}/p1Deck.txt");
   if (file_exists($p2OrigPath)) copy($p2OrigPath, "./Games/{$gameName}/p2Deck.txt");
   // Swap deck metadata so the lobby shows the correct hero for each player
-  include "MenuFiles/WriteGamefile.php";
+  include __DIR__ . "/MenuFiles/WriteGamefile.php";
   [$p1DeckLink, $p2DeckLink] = [$p2DeckLink, $p1DeckLink];
   [$p1deckbuilderID, $p2deckbuilderID] = [$p2deckbuilderID, $p1deckbuilderID];
   [$p1StartingEquipment, $p2StartingEquipment] = [$p2StartingEquipment, $p1StartingEquipment];
@@ -237,7 +238,7 @@ if ($inGameStatus == $GameStatus_Rematch) {
   WriteLog("🔁 Heroes swapped! Player $firstPlayerChooser will choose who goes first.", highlight: true, highlightColor: "darkblue");
   WriteGameFile();
   $turn[0] = "REMATCH";
-  include "WriteGamestate.php";
+  include __DIR__ . "/WriteGamestate.php";
   $currentTime = round(microtime(true) * 1000);
   SetCachePiece($gameName, 2, $currentTime);
   SetCachePiece($gameName, 3, $currentTime);
@@ -282,7 +283,7 @@ if (!$skipWriteGamestate) {
     SetCachePiece($gameName, 3, $currentTime);
   }
   DoGamestateUpdate();
-  include "WriteGamestate.php";
+  include __DIR__ . "/WriteGamestate.php";
 }
 
 // Consolidate backup operations

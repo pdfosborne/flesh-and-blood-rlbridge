@@ -7,7 +7,7 @@ function GetStringArray($line)
   return explode(" ", $line);
 }
 
-if(!is_numeric($gameName)) exit;
+if(!is_numeric($gameName)) { echo json_encode(["error" => "ParseGamestate: gameName not numeric: " . var_export($gameName, true)]); exit; }
 if(!isset($filename) || !str_contains($filename, "gamestate.txt")) $filename = "./Games/" . $gameName . "/gamestate.txt";
 if(!isset($filepath)) $filepath = "./Games/" . $gameName . "/";
 
@@ -49,7 +49,7 @@ function ParseGamestate()
 
   $gamestateContent = ReadCache(GamestateID($gameName));
   $gamestateContent = explode("\r\n", $gamestateContent);
-  if(count($gamestateContent) < 60) exit;
+  if(count($gamestateContent) < 60) { echo json_encode(["error" => "ParseGamestate: gamestate too short (" . count($gamestateContent) . " lines) for game " . $gameName]); exit; }
 
   $playerHealths = GetStringArray($gamestateContent[0]); // 1
 

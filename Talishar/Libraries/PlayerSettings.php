@@ -88,7 +88,7 @@ function IsPatron($player)
 {
   global $SET_IsPatron;
   $settings = GetSettings($player);
-  if(count($settings) < $SET_IsPatron) return false;
+  if(!is_array($settings) || count($settings) < $SET_IsPatron) return false;
   return $settings[$SET_IsPatron] ?? "0" == "1";
 }
 

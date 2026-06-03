@@ -9,9 +9,22 @@ and a separate PPO agent trains from each player's perspective simultaneously.
 45 unique matchups are generated across 10 SAGE precon decks (C(10,2) pairs).
 
 Usage:
-    TALISHAR_URL=http://localhost:8080/game python scripts/train_sage_precons.py
-    TALISHAR_URL=http://localhost:8080/game python scripts/train_sage_precons.py \\
-        --episodes 500 --matchup briar-vs-dorinthea
+    Linux / macOS:
+        TALISHAR_URL=http://localhost:8080/game python scripts/train_sage_precons.py
+        TALISHAR_URL=http://localhost:8080/game python scripts/train_sage_precons.py \\
+            --episodes 500 --matchup briar-vs-dorinthea
+
+    Windows (PowerShell):
+        $env:TALISHAR_URL="http://localhost:8080/game"; python scripts/train_sage_precons.py
+        $env:TALISHAR_URL="http://localhost:8080/game"; python scripts/train_sage_precons.py `
+            --episodes 500 --matchup briar-vs-dorinthea
+
+    Windows (Command Prompt):
+        set "TALISHAR_URL=http://localhost:8080/game" && python scripts/train_sage_precons.py
+        set "TALISHAR_URL=http://localhost:8080/game" && python scripts/train_sage_precons.py ^
+            --episodes 500 --matchup briar-vs-dorinthea
+        Note: always use quoted ``set "VAR=value"`` syntax — unquoted ``set VAR=value &&``
+        captures the space before ``&&`` as part of the value, causing URL path errors.
 """
 
 from __future__ import annotations
@@ -74,7 +87,7 @@ EVAL_ENV_IDS: dict[str, str] = {
     for m in SAGE_MATCHUPS
 }
 
-DEFAULT_MAX_STEPS = 60
+DEFAULT_MAX_STEPS = 200
 
 
 def main() -> None:
@@ -107,8 +120,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--format",
-        default="blitz",
-        help="Talishar game format (default: blitz).",
+        default="sage",
+        help="Talishar game format (default: sage).",
     )
     parser.add_argument(
         "--seed",

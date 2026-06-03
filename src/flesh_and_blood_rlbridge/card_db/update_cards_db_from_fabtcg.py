@@ -77,7 +77,7 @@ def _canonical_name_key(name: str) -> str:
     text = re.sub(r"[^a-z0-9]+", " ", text)
     tokens = [tok for tok in text.split() if tok]
     # Remove common non-card suffix tokens from deck exports.
-    while tokens and tokens[-1] in {"blitz", "cc", "constructed"}:
+    while tokens and tokens[-1] in {"silver_age", "cc", "constructed"}:
         tokens.pop()
     return " ".join(tokens).strip()
 

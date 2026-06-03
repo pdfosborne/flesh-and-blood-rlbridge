@@ -22,7 +22,7 @@ from typing import Any
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _FAB_SRC = _REPO_ROOT / "src"
-_RL_SRC = Path("~/Documents/RL-IP/src").expanduser()
+_RL_SRC = Path("~/Documents/RL/rlbridge/src").expanduser()
 
 for p in (_FAB_SRC, _RL_SRC):
     s = str(p)
@@ -119,7 +119,7 @@ def main() -> None:
     parser.add_argument("--p2-deck", default="DorintheSAGEPrecon")
     parser.add_argument("--episodes", type=int, default=20)
     parser.add_argument("--max-steps", type=int, default=60)
-    parser.add_argument("--format", default="blitz")
+    parser.add_argument("--format", default="sage")
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--out", default=None, help="Save JSON results to this path.")

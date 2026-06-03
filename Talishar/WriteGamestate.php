@@ -14,7 +14,7 @@ while (!flock($handler, LOCK_EX | LOCK_NB) && $lockTries < 5) {
   ++$lockTries;
 }
 
-if ($lockTries == 5) { fclose($handler); exit; }
+if ($lockTries == 5) { fclose($handler); echo json_encode(["error" => "WriteGamestate: could not acquire file lock for game " . $gameName]); exit; }
 
 $gamestateLines = [
   implode(" ", $playerHealths),

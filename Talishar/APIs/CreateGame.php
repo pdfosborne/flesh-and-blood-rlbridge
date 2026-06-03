@@ -1,16 +1,16 @@
 <?php
 
-include "../HostFiles/Redirector.php";
-include "../Libraries/HTTPLibraries.php";
-include_once "../Libraries/SHMOPLibraries.php";
-include_once "../Libraries/PlayerSettings.php";
-include_once '../Assets/patreon-php-master/src/PatreonDictionary.php';
-require_once '../Assets/patreon-php-master/src/API.php';
-include_once '../Assets/patreon-php-master/src/PatreonLibraries.php';
-include_once "../AccountFiles/AccountDatabaseAPI.php";
-include_once '../includes/functions.inc.php';
-include_once '../includes/dbh.inc.php';
-include_once '../Database/ConnectionManager.php';
+include __DIR__ . "/../HostFiles/Redirector.php";
+include __DIR__ . "/../Libraries/HTTPLibraries.php";
+include_once __DIR__ . "/../Libraries/SHMOPLibraries.php";
+include_once __DIR__ . "/../Libraries/PlayerSettings.php";
+include_once __DIR__ . '/../Assets/patreon-php-master/src/PatreonDictionary.php';
+require_once __DIR__ . '/../Assets/patreon-php-master/src/API.php';
+include_once __DIR__ . '/../Assets/patreon-php-master/src/PatreonLibraries.php';
+include_once __DIR__ . "/../AccountFiles/AccountDatabaseAPI.php";
+include_once __DIR__ . '/../includes/functions.inc.php';
+include_once __DIR__ . '/../includes/dbh.inc.php';
+include_once __DIR__ . '/../Database/ConnectionManager.php';
 SetHeaders();
 
 $response = new stdClass();
@@ -123,7 +123,7 @@ $gameGUID = GenerateGameGUID();
 
 $filename = "../Games/" . $gameName . "/GameFile.txt";
 $gameFileHandler = fopen($filename, "w");
-include "../MenuFiles/WriteGamefile.php";
+include __DIR__ . "/../MenuFiles/WriteGamefile.php";
 WriteGameFile();
 
 $filename = "../Games/" . $gameName . "/gamelog.txt";

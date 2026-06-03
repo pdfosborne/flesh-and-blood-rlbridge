@@ -26,7 +26,7 @@ from train_dual_agent_common import (  # noqa: E402
     run_matchup_training,
 )
 
-DEFAULT_MAX_STEPS = 60
+DEFAULT_MAX_STEPS = 200
 FORMAT_NAME = "silver_age"
 ENV_SUFFIX = "SA"
 

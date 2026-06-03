@@ -26,7 +26,8 @@ function WriteCache($name, $data)
   $serData = trim(serialize(trim($data)));
   $id = @shmop_open($name, "c", 0644, 128);
   if ($id == false) {
-    exit;
+    error_log("WriteCache: shmop_open failed for key " . $name);
+    return; // non-fatal: game can continue without the small cache
   } else {
     $serData = str_pad($serData, 128, "\0");
     $rv = shmop_write($id, $serData, 0);
@@ -39,10 +40,15 @@ function WriteGamestateCache($name, $data)
   $serData = trim(serialize(trim($data)));
   $gsID = shmop_open(GamestateID($name), "c", 0644, 32768);
   if ($gsID == false) {
+    echo json_encode(["error" => "WriteGamestateCache: shmop_open failed for game " . $name . " (segment key=" . GamestateID($name) . ")"]);
     exit;
   } else {
     $serData = str_pad($serData, 32768, "\0");
     $rv = shmop_write($gsID, $serData, 0);
+    if ($rv === false) {
+      echo json_encode(["error" => "WriteGamestateCache: shmop_write failed for game " . $name . " (data length=" . strlen($serData) . ")"]);
+      exit;
+    }
   }
 }
 
