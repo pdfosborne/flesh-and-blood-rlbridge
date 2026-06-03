@@ -21,7 +21,7 @@ class FleshAndBloodFactory(rlbridgeEnvironmentFactory):
         *,
         agent_hero_id: str = "hero_dorinthea_ironsong",
         opponent_hero_id: str = "hero_rhinar_reckless_rampage",
-        max_turns: int = 200,
+    max_turns: int = 100,
         deck_size: int = 36,
         format: str = "classic_constructed",
         two_phase_deckbuild: bool = False,
@@ -119,7 +119,7 @@ class TalisharEngineFactory(rlbridgeEnvironmentFactory):
         *,
         deck_link: str = _TALISHAR_DEFAULT_DECK,
         game_format: str = "silver_age",
-        max_turns: int = 200,
+    max_turns: int = 100,
         self_play: bool = True,
     ) -> None:
         self._env_id = env_id

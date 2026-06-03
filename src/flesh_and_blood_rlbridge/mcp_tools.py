@@ -31,7 +31,7 @@ _FAB_DUAL_AGENT_TRAINING_PROGRAMS: dict[str, dict[str, Any]] = {
             "Train PPO agents on all SAGE precon cross-matchups (Assets decks, silver_age)."
         ),
         "default_format": "silver_age",
-        "default_max_steps": 200,
+    "default_max_steps": 100,
         "default_out_dir": "results/sage_precon_agents",
         "matchup_example": "briar-vs-dorinthea",
     },
@@ -42,7 +42,7 @@ _FAB_DUAL_AGENT_TRAINING_PROGRAMS: dict[str, dict[str, Any]] = {
             "(fabrary_decks.json, four-tier cache)."
         ),
         "default_format": "silver_age",
-        "default_max_steps": 200,
+    "default_max_steps": 100,
         "default_out_dir": "results/silver_age_agents",
         "matchup_example": "ira_crimson_haze_sage_aggro-vs-fai_sage_chain",
     },
@@ -53,7 +53,7 @@ _FAB_DUAL_AGENT_TRAINING_PROGRAMS: dict[str, dict[str, Any]] = {
             "(fabrary_decks.json, four-tier cache)."
         ),
         "default_format": "classic_constructed",
-        "default_max_steps": 200,
+    "default_max_steps": 100,
         "default_out_dir": "results/classic_constructed_agents",
         "matchup_example": "dorinthea_ironsong_cc_aggro-vs-chane_cc_shadow",
     },

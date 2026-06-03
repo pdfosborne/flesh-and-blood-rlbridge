@@ -16,6 +16,7 @@ import subprocess
 import sys
 import textwrap
 import time
+import urllib.parse
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -66,6 +67,16 @@ def _run_training(args: argparse.Namespace) -> None:
     ]
     if args.seed is not None:
         cmd.extend(["--seed", str(args.seed)])
+    if bool(getattr(args, "show_frontend_training", False)):
+        cmd.append("--show-frontend")
+    frontend_url = getattr(args, "frontend_url", None)
+    if bool(getattr(args, "show_frontend_training", False)) and not frontend_url:
+        frontend_url = os.environ.get("TALISHAR_FE_URL") or "http://localhost:5173"
+    if frontend_url:
+        cmd.extend(["--frontend-url", str(frontend_url)])
+    workers = int(getattr(args, "workers", 1))
+    if workers > 1:
+        cmd.extend(["--workers", str(workers)])
 
     print("\n[1/3] Training agents...")
     print(
@@ -149,12 +160,16 @@ def _eval_agents(
     episodes: int,
     max_steps: int,
     seed: int | None,
+    *,
+    show_frontend: bool = False,
+    live_image_path: Path | None = None,
 ) -> dict[str, Any]:
     print("\n[2/3] Evaluating trained agents...")
     print(f"  Progress: {episodes} evaluation episodes (max_steps={max_steps})")
     p1_agent = _load_agent(p1_weights)
     p2_agent = _load_agent(p2_weights)
 
+    render_mode = "rgb_array" if show_frontend else None
     env = TalisharEngineEnvironment(
         base_url=base_url,
         local_deck_name=p1_deck,
@@ -162,11 +177,16 @@ def _eval_agents(
         game_format=game_format,
         self_play=True,
         max_turns=max_steps,
+        render_mode=render_mode,
     )
+    if show_frontend and live_image_path is not None:
+        live_image_path.parent.mkdir(parents=True, exist_ok=True)
+        print(f"  Live eval image path → {live_image_path}")
 
     p1_wins = 0
     p2_wins = 0
     draws = 0
+    timeouts = 0
     episodes_log: list[dict[str, Any]] = []
     try:
         for ep in range(1, episodes + 1):
@@ -188,6 +208,8 @@ def _eval_agents(
                 terminated = bool(step.terminated)
                 truncated = bool(step.truncated)
                 steps = step_no
+                if show_frontend and live_image_path is not None:
+                    _save_state_image(env, obs, live_image_path)
                 if terminated or truncated:
                     break
 
@@ -222,6 +244,8 @@ def _eval_agents(
                     "winner": winner,
                 }
             )
+            if truncated:
+                timeouts += 1
             pct = (ep / max(1, episodes)) * 100.0
             print(
                 f"  [eval {ep:3d}/{episodes:3d} | {pct:6.2f}%] "
@@ -236,12 +260,16 @@ def _eval_agents(
         "p1_wins": p1_wins,
         "p2_wins": p2_wins,
         "draws": draws,
+        "timeouts": timeouts,
         "p1_win_rate": p1_wins / total,
         "p2_win_rate": p2_wins / total,
+        "timeout_rate": timeouts / total,
         "episodes_log": episodes_log,
     }
     print(
-        f"  Eval summary: p1={p1_wins}/{episodes}, p2={p2_wins}/{episodes}, draws={draws}/{episodes}"
+        "  Eval summary: "
+        f"p1={p1_wins}/{episodes}, p2={p2_wins}/{episodes}, "
+        f"draws={draws}/{episodes}, timeouts={timeouts}/{episodes}"
     )
     return summary
 
@@ -383,7 +411,28 @@ def main() -> int:
     )
     parser.add_argument("--matchup", required=True, help="Matchup name to train/eval/render.")
     parser.add_argument("--episodes", type=int, default=300, help="Training episodes.")
-    parser.add_argument("--max-steps", type=int, default=200, help="Training max steps.")
+    parser.add_argument("--max-steps", type=int, default=100, help="Training max steps.")
+    parser.add_argument(
+        "--show-frontend-training",
+        action="store_true",
+        help="Write a live training-state image during training stage (no browser tabs).",
+    )
+    parser.add_argument(
+        "--show-frontend-eval",
+        action="store_true",
+        help="Write a live eval-state image during evaluation stage (overwrites same file each step).",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Number of parallel game sessions for training (default: 1). Set to 2-4 for speedup.",
+    )
+    parser.add_argument(
+        "--frontend-url",
+        default=None,
+        help="Talishar FE URL override for training stage.",
+    )
     parser.add_argument("--format", default="sage", help="Talishar game format.")
     parser.add_argument("--seed", type=int, default=None, help="Optional random seed.")
     parser.add_argument(
@@ -399,11 +448,11 @@ def main() -> int:
         help="Cache directory for training tiers.",
     )
     parser.add_argument("--eval-episodes", type=int, default=20, help="Evaluation episodes.")
-    parser.add_argument("--eval-max-steps", type=int, default=120, help="Evaluation max steps.")
+    parser.add_argument("--eval-max-steps", type=int, default=100, help="Evaluation max steps.")
     parser.add_argument(
         "--render-max-steps",
         type=int,
-        default=120,
+        default=100,
         help="Max steps for the rendered rollout.",
     )
     parser.add_argument(
@@ -433,6 +482,12 @@ def main() -> int:
         episodes=args.eval_episodes,
         max_steps=args.eval_max_steps,
         seed=args.seed,
+        show_frontend=bool(getattr(args, "show_frontend_eval", False)),
+        live_image_path=(
+            args.out_dir / args.matchup / "eval_live_state.png"
+            if getattr(args, "show_frontend_eval", False)
+            else None
+        ),
     )
 
     optimal_role = "p1" if eval_summary["p1_wins"] >= eval_summary["p2_wins"] else "p2"

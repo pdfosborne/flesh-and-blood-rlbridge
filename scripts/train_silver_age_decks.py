@@ -28,7 +28,7 @@ from train_dual_agent_common import (  # noqa: E402
     run_matchup_training,
 )
 
-DEFAULT_MAX_STEPS = 200
+DEFAULT_MAX_STEPS = 100
 FORMAT_NAME = "silver_age"
 ENV_SUFFIX = "SA"
 
@@ -78,6 +78,16 @@ def main() -> None:
         default=str(REPO_ROOT / "results" / "agent_cache"),
         help="Root directory for four-tier agent weight cache.",
     )
+    parser.add_argument(
+        "--show-frontend",
+        action="store_true",
+        help="Write a live training-state image during training (no browser tabs).",
+    )
+    parser.add_argument(
+        "--frontend-url",
+        default=None,
+        help="Talishar FE URL override (default: TALISHAR_URL host:port when --show-frontend is set).",
+    )
     args = parser.parse_args()
 
     if args.matchup == "all":
@@ -110,6 +120,8 @@ def main() -> None:
         cache_dir=Path(args.cache_dir),
         warmup_episodes=args.warmup_episodes,
         warmup_baseline_eval_episodes=args.warmup_baseline_eval_episodes,
+        show_frontend=args.show_frontend,
+        frontend_url=args.frontend_url,
     )
     print_training_summary(summary, failed, out_dir)
     if failed:

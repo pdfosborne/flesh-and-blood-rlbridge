@@ -8,7 +8,9 @@ import re
 import subprocess
 import sys
 import time
+import urllib.parse
 import uuid
+import base64
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -78,14 +80,28 @@ def make_env(
     base_url: str,
     game_format: str,
     max_turns: int,
+    *,
+    show_frontend: bool = False,
+    frontend_url: Optional[str] = None,
 ) -> TalisharEngineEnvironment:
+    resolved_frontend_url = frontend_url
+    if show_frontend and not resolved_frontend_url:
+        parsed = urllib.parse.urlsplit(base_url)
+        if parsed.scheme and parsed.netloc:
+            resolved_frontend_url = os.environ.get("TALISHAR_FE_URL")
+            if not resolved_frontend_url:
+                # Default FE dev URL for local training visualisation.
+                resolved_frontend_url = "http://localhost:5173"
+
     return TalisharEngineEnvironment(
         base_url=base_url,
+        frontend_url=resolved_frontend_url,
         local_deck_name=matchup.p1_deck,
         opponent_deck_name=matchup.p2_deck,
         game_format=game_format,
         self_play=True,
         max_turns=max_turns,
+        render_mode=("rgb_array" if show_frontend else None),
     )
 
 
@@ -206,6 +222,391 @@ def _ppo_update_all_tiers(
         _ppo_update(agent, buf, next_obs_vec)
 
 
+def _obs_to_text(obs: Any) -> str:
+    if isinstance(obs, str):
+        try:
+            parsed = json.loads(obs)
+        except json.JSONDecodeError:
+            parsed = {"raw": obs}
+    elif isinstance(obs, dict):
+        parsed = obs
+    else:
+        parsed = {"raw": repr(obs)}
+
+    lines: list[str] = ["Talishar Training State"]
+    lines.append(f"turnNo: {parsed.get('turnNo', '?')}")
+    lines.append(f"turnPhase: {parsed.get('turnPhase', '?')}")
+    lines.append(f"actingPlayerID: {parsed.get('actingPlayerID', '?')}")
+    lines.append(f"playerHealth: {parsed.get('playerHealth', '?')}")
+    lines.append(f"opponentHealth: {parsed.get('opponentHealth', '?')}")
+    lines.append(f"legalActions: {len(parsed.get('legalActions', []) or [])}")
+    lines.append("")
+    lines.append("Observation JSON:")
+    lines.append(json.dumps(parsed, indent=2, ensure_ascii=False))
+    return "\n".join(lines)
+
+
+def _write_state_image(obs: Any, out_path: Path, header: str = "") -> None:
+    text = _obs_to_text(obs)
+    if header:
+        text = f"{header}\n\n{text}"
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+
+        font = ImageFont.load_default()
+        lines = text.splitlines()
+        line_height = 14
+        width = 1800
+        height = max(300, 20 + line_height * (len(lines) + 2))
+        img = Image.new("RGB", (width, height), color=(18, 18, 18))
+        draw = ImageDraw.Draw(img)
+        y = 10
+        for line in lines:
+            draw.text((10, y), line, fill=(235, 235, 235), font=font)
+            y += line_height
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        img.save(out_path)
+    except Exception:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.with_suffix(".txt").write_text(text, encoding="utf-8")
+
+
+def _write_live_state_snapshot(
+    env: TalisharEngineEnvironment,
+    obs: Any,
+    out_path: Path,
+    header: str = "",
+) -> None:
+    try:
+        render_out = env.render()
+        b64_data = getattr(render_out, "data", None)
+        if isinstance(b64_data, str) and b64_data.strip():
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_bytes(base64.b64decode(b64_data))
+            if header:
+                out_path.with_suffix(".meta.txt").write_text(header, encoding="utf-8")
+            return
+    except Exception:
+        pass
+
+    _write_state_image(obs, out_path, header=header)
+
+
+def _run_one_episode(
+    env: TalisharEngineEnvironment,
+    p1_policy: PPOAgent,
+    p2_policy: PPOAgent,
+    max_steps: int,
+    seed: Optional[int],
+    warmup: bool,
+    p1_rng: np.random.Generator,
+    p2_rng: np.random.Generator,
+) -> dict[str, Any]:
+    """Run one complete episode and return all transitions for both players.
+
+    Weight arrays on the policy objects are accessed read-only so this function
+    is safe to call from multiple threads simultaneously.  Each caller must
+    supply its own ``p1_rng`` / ``p2_rng`` instances so there is no shared
+    mutable RNG state between threads.
+    """
+    p1_trans: list[dict[str, Any]] = []
+    p2_trans: list[dict[str, Any]] = []
+    cur_p1_r = cur_p2_r = 0.0
+
+    reset_out = env.reset(seed=seed)
+    obs = _get(reset_out, "observation", reset_out)
+    terminated = truncated = False
+
+    for _ in range(max_steps):
+        acting = env._acting_player_id
+        policy = p1_policy if acting == 1 else p2_policy
+        rng    = p1_rng    if acting == 1 else p2_rng
+
+        obs_vec = policy._obs_to_vec(obs)
+        logits  = policy._masked_logits(policy._actor.forward(obs_vec[None, :]), obs)
+        lp_all  = _log_softmax(logits)[0]
+        probs   = _softmax(logits)[0]
+        value   = float(policy._critic.predict(obs_vec[None, :]).flatten()[0])
+        n_legal = _n_legal_of(obs)
+
+        if warmup:
+            env_action = str(env.sample_action())
+            try:
+                action = int(env_action)
+            except (TypeError, ValueError):
+                action = 0
+            action = max(0, min(action, policy.n_actions - 1))
+        else:
+            action     = int(rng.choice(policy.n_actions, p=probs))
+            env_action = _to_env_action(obs, action, policy._mask_actions)
+
+        step_out    = env.step(env_action)
+        env_reward  = float(_get(step_out, "reward", 0.0))
+        terminated  = bool(_get(step_out, "terminated", False))
+        truncated   = bool(_get(step_out, "truncated",  False))
+        done        = terminated or truncated
+        next_obs    = _get(step_out, "observation", obs)
+        next_obs_vec = policy._obs_to_vec(next_obs)
+
+        agent_reward = env_reward if acting == 1 else -env_reward
+        trans = {
+            "obs_vec":     obs_vec,
+            "action":      action,
+            "reward":      agent_reward,
+            "value":       value,
+            "log_prob":    float(lp_all[action]),
+            "done":        float(done),
+            "n_legal":     n_legal if n_legal is not None else policy.n_actions,
+            "next_obs_vec": next_obs_vec,
+        }
+        if acting == 1:
+            p1_trans.append(trans)
+            cur_p1_r += env_reward
+        else:
+            p2_trans.append(trans)
+            cur_p2_r += -env_reward
+
+        if done:
+            break
+        obs = next_obs
+
+    return {
+        "p1_transitions": p1_trans,
+        "p2_transitions": p2_trans,
+        "p1_reward":      cur_p1_r,
+        "p2_reward":      cur_p2_r,
+        "terminated":     terminated,
+        "truncated":      truncated,
+    }
+
+
+def _transitions_to_buf(transitions: list[dict[str, Any]]) -> dict[str, Any]:
+    """Flatten a list of transition dicts into a PPO rollout buffer dict."""
+    buf = _empty_buf()
+    for t in transitions:
+        buf["obs"].append(t["obs_vec"])
+        buf["actions"].append(t["action"])
+        buf["rewards"].append(t["reward"])
+        buf["values"].append(t["value"])
+        buf["log_probs"].append(t["log_prob"])
+        buf["dones"].append(t["done"])
+        buf["n_legal"].append(t["n_legal"])
+    return buf
+
+
+def _safe_run_one_episode(
+    env: TalisharEngineEnvironment,
+    p1_policy: PPOAgent,
+    p2_policy: PPOAgent,
+    max_steps: int,
+    seed: Optional[int],
+    warmup: bool,
+    p1_rng: np.random.Generator,
+    p2_rng: np.random.Generator,
+    matchup: "Matchup",
+    base_url: str,
+    game_format: str,
+) -> dict[str, Any]:
+    """Run one episode, recycling the env on any exception."""
+    try:
+        return _run_one_episode(env, p1_policy, p2_policy, max_steps, seed, warmup, p1_rng, p2_rng)
+    except Exception as exc:
+        # Try to recycle the environment rather than leaving it in a bad state.
+        try:
+            env.close()
+        except Exception:
+            pass
+        try:
+            new_env = make_env(matchup, base_url=base_url, game_format=game_format, max_turns=max_steps)
+            # Reuse the same object slot so the caller's envs[] reference stays valid.
+            env.__dict__.update(new_env.__dict__)
+        except Exception:
+            pass
+        raise exc
+
+
+def train_agents_from_both_perspectives_parallel(
+    matchup: Matchup,
+    base_url: str,
+    game_format: str,
+    p1_tiers: list[PPOAgent],
+    p2_tiers: list[PPOAgent],
+    n_episodes: int,
+    max_steps: int,
+    seed: Optional[int] = None,
+    warmup_episodes: int = DEFAULT_WARMUP_EPISODES,
+    n_workers: int = 2,
+    live_state_image_path: Optional[Path] = None,
+) -> tuple[list[float], list[float], dict[str, Any]]:
+    """Parallel rollout version of ``train_agents_from_both_perspectives``.
+
+    Creates ``n_workers`` independent Talishar game sessions.  Each worker
+    runs one complete episode concurrently using ``ThreadPoolExecutor``.  After
+    every worker batch the PPO update runs single-threaded on the merged
+    buffer, then the next batch starts with the updated weights.
+
+    Each worker has its own ``np.random.default_rng`` so there is no shared
+    mutable state between threads.  Agent weight arrays are accessed read-only
+    during the forward passes which is safe for simultaneous reads in NumPy.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    p1_policy = p1_tiers[0]
+    p2_policy = p2_tiers[0]
+
+    # ── bootstrap: infer dims and init nets on a throw-away env ──────────────
+    probe_env = make_env(matchup, base_url=base_url, game_format=game_format, max_turns=max_steps)
+    n_actions_p1, mask_p1 = _infer_action_capacity(probe_env, seed=seed)
+    n_actions_p2, mask_p2 = _infer_action_capacity(probe_env, seed=seed)
+    probe_reset = probe_env.reset(seed=seed)
+    probe_obs   = _get(probe_reset, "observation", probe_reset)
+    obs_vec     = p1_policy._obs_to_vec(probe_obs)
+    probe_env.close()
+
+    _sync_tier_agent_config(p1_tiers, n_actions_p1, mask_p1)
+    _sync_tier_agent_config(p2_tiers, n_actions_p2, mask_p2)
+    _init_tier_nets(p1_tiers, obs_vec.shape[0])
+    _init_tier_nets(p2_tiers, obs_vec.shape[0])
+
+    # ── create worker envs ────────────────────────────────────────────────────
+    print(f"  [parallel] spawning {n_workers} worker game sessions…")
+    envs: list[TalisharEngineEnvironment] = []
+    for w in range(n_workers):
+        envs.append(
+            make_env(matchup, base_url=base_url, game_format=game_format, max_turns=max_steps)
+        )
+    print(f"  [parallel] {n_workers} sessions ready")
+
+    p1_ep_rewards:  list[float] = []
+    p2_ep_rewards:  list[float] = []
+    timeout_episodes  = 0
+    terminated_episodes = 0
+    skipped_episodes    = 0
+    completed          = 0
+    progress_every     = max(1, n_episodes // 100)
+    progress_t0        = time.time()
+    # Per-episode wall-clock timeout: max_steps * 5 s per step, floor at 120 s.
+    episode_timeout_secs = max(120, max_steps * 5)
+    shutdown_flag = False
+
+    try:
+        with ThreadPoolExecutor(max_workers=n_workers) as pool:
+            while completed < n_episodes and not shutdown_flag:
+                batch_size = min(n_workers, n_episodes - completed)
+                in_warmup  = completed < warmup_episodes
+
+                # Submit one episode per worker in this batch.
+                seed_base = (seed + completed) if seed is not None else None
+                futures = {}
+                for w in range(batch_size):
+                    ep_seed    = (seed_base + w) if seed_base is not None else None
+                    p1_rng     = np.random.default_rng(
+                        (ep_seed * 31 + 7)  if ep_seed is not None else None
+                    )
+                    p2_rng     = np.random.default_rng(
+                        (ep_seed * 31 + 13) if ep_seed is not None else None
+                    )
+                    fut = pool.submit(
+                        _safe_run_one_episode,
+                        envs[w], p1_policy, p2_policy,
+                        max_steps, ep_seed, in_warmup, p1_rng, p2_rng,
+                        matchup, base_url, game_format,
+                    )
+                    futures[fut] = w
+
+                # Collect results and merge buffers.
+                batch_p1_trans: list[dict] = []
+                batch_p2_trans: list[dict] = []
+                from concurrent.futures import TimeoutError as FutureTimeoutError
+                for fut in as_completed(futures, timeout=episode_timeout_secs + 30):
+                    try:
+                        result = fut.result(timeout=episode_timeout_secs)
+                    except FutureTimeoutError:
+                        print(f"  [parallel] episode timed out after {episode_timeout_secs}s — skipping")
+                        skipped_episodes += 1
+                        completed += 1
+                        continue
+                    except KeyboardInterrupt:
+                        shutdown_flag = True
+                        break
+                    except Exception as exc:
+                        print(f"  [parallel] episode failed ({exc!r}) — skipping")
+                        skipped_episodes += 1
+                        completed += 1
+                        continue
+                    batch_p1_trans.extend(result["p1_transitions"])
+                    batch_p2_trans.extend(result["p2_transitions"])
+                    p1_ep_rewards.append(result["p1_reward"])
+                    p2_ep_rewards.append(result["p2_reward"])
+                    if result["truncated"]:
+                        timeout_episodes += 1
+                    if result["terminated"]:
+                        terminated_episodes += 1
+                    completed += 1
+                if shutdown_flag:
+                    break
+
+                # Write live snapshot from last episode result if requested.
+                if live_state_image_path is not None and batch_p1_trans:
+                    last_obs_vec = batch_p1_trans[-1]["obs_vec"]
+                    _write_state_image(
+                        {"obs_vec_shape": str(last_obs_vec.shape)},
+                        live_state_image_path,
+                        header=f"episode={completed}/{n_episodes} parallel_workers={n_workers}",
+                    )
+
+                # PPO update on merged buffer (single-threaded, safe).
+                if batch_p1_trans:
+                    p1_buf = _transitions_to_buf(batch_p1_trans)
+                    next_p1 = batch_p1_trans[-1]["next_obs_vec"]
+                    _ppo_update_all_tiers(p1_tiers, p1_buf, next_p1)
+
+                if batch_p2_trans:
+                    p2_buf = _transitions_to_buf(batch_p2_trans)
+                    next_p2 = batch_p2_trans[-1]["next_obs_vec"]
+                    _ppo_update_all_tiers(p2_tiers, p2_buf, next_p2)
+
+                # Progress logging.
+                if (
+                    completed <= 10
+                    or completed == n_episodes
+                    or completed % progress_every == 0
+                ):
+                    elapsed  = time.time() - progress_t0
+                    pct      = (completed / max(1, n_episodes)) * 100.0
+                    p1_avg   = float(np.mean(p1_ep_rewards)) if p1_ep_rewards else 0.0
+                    p2_avg   = float(np.mean(p2_ep_rewards)) if p2_ep_rewards else 0.0
+                    ep_rate  = completed / max(elapsed, 1e-9)
+                    eta_secs = (n_episodes - completed) / ep_rate if ep_rate > 0 else float("inf")
+                    t_rate   = timeout_episodes / max(1, completed)
+                    print(
+                        f"  [train-progress] episodes={completed}/{n_episodes} "
+                        f"({pct:6.2f}%) elapsed={elapsed:.1f}s "
+                        f"rate={ep_rate:.3f}ep/s eta={eta_secs / 60:.1f}m "
+                        f"workers={n_workers} "
+                        f"warmup={'yes' if in_warmup else 'no '} "
+                        f"timeouts={timeout_episodes} ({t_rate * 100:.1f}%) "
+                        f"skipped={skipped_episodes} "
+                        f"p1_avg={p1_avg:+.3f} p2_avg={p2_avg:+.3f}"
+                    )
+    finally:
+        for env in envs:
+            try:
+                env.close()
+            except Exception:
+                pass
+
+    total_eps = len(p1_ep_rewards)
+    stats = {
+        "episodes":   total_eps,
+        "timeouts":   timeout_episodes,
+        "terminated": terminated_episodes,
+        "skipped":    skipped_episodes,
+        "timeout_rate": timeout_episodes / max(1, total_eps),
+    }
+    return p1_ep_rewards, p2_ep_rewards, stats
+
+
 def train_agents_from_both_perspectives(
     env: TalisharEngineEnvironment,
     p1_tiers: list[PPOAgent],
@@ -214,7 +615,8 @@ def train_agents_from_both_perspectives(
     max_steps: int,
     seed: Optional[int] = None,
     warmup_episodes: int = DEFAULT_WARMUP_EPISODES,
-) -> tuple[list[float], list[float]]:
+    live_state_image_path: Optional[Path] = None,
+) -> tuple[list[float], list[float], dict[str, Any]]:
     p1_policy = p1_tiers[0]
     p2_policy = p2_tiers[0]
 
@@ -239,8 +641,11 @@ def train_agents_from_both_perspectives(
 
     completed = 0
     cur_p1_r = cur_p2_r = 0.0
+    timeout_episodes = 0
+    terminated_episodes = 0
     total_steps = n_episodes * max_steps
     global_step = 0
+    episode_step = 0
     progress_every = max(1, n_episodes // 100)  # ~1% cadence after warmup
     progress_t0 = time.time()
 
@@ -273,6 +678,16 @@ def train_agents_from_both_perspectives(
         terminated = bool(_get(step_out, "terminated", False))
         truncated = bool(_get(step_out, "truncated", False))
         done = terminated or truncated
+        episode_step += 1
+
+        if live_state_image_path is not None:
+            current_obs = _get(step_out, "observation", obs)
+            header = (
+                f"episode={completed + 1}/{n_episodes} "
+                f"step={episode_step} acting={acting} reward={env_reward:+.3f} "
+                f"terminated={terminated} truncated={truncated}"
+            )
+            _write_live_state_snapshot(env, current_obs, live_state_image_path, header=header)
 
         agent_reward = env_reward if acting == 1 else -env_reward
         if acting == 1:
@@ -294,6 +709,10 @@ def train_agents_from_both_perspectives(
             p1_ep_rewards.append(cur_p1_r)
             p2_ep_rewards.append(cur_p2_r)
             completed += 1
+            if truncated:
+                timeout_episodes += 1
+            if terminated:
+                terminated_episodes += 1
 
             if (
                 completed <= 10  # dense startup visibility
@@ -306,15 +725,18 @@ def train_agents_from_both_perspectives(
                 p2_avg = float(np.mean(p2_ep_rewards)) if p2_ep_rewards else 0.0
                 ep_rate = completed / max(elapsed, 1e-9)
                 eta_secs = (n_episodes - completed) / ep_rate if ep_rate > 0 else float("inf")
+                timeout_rate = timeout_episodes / max(1, completed)
                 print(
                     f"  [train-progress] episodes={completed}/{n_episodes} "
                     f"({pct:6.2f}%) elapsed={elapsed:.1f}s "
                     f"rate={ep_rate:.3f}ep/s eta={eta_secs/60:.1f}m "
                     f"warmup={'yes' if completed < warmup_episodes else 'no '} "
+                    f"timeouts={timeout_episodes} ({timeout_rate * 100:.1f}%) "
                     f"p1_avg={p1_avg:+.3f} p2_avg={p2_avg:+.3f}"
                 )
 
             cur_p1_r = cur_p2_r = 0.0
+            episode_step = 0
             ep_seed = (seed + completed) if seed is not None else None
             reset_out = env.reset(seed=ep_seed)
             obs = _get(reset_out, "observation", reset_out)
@@ -333,7 +755,14 @@ def train_agents_from_both_perspectives(
             next_vec = tiers[0]._obs_to_vec(obs)
             _ppo_update_all_tiers(tiers, buf_ref, next_vec)
 
-    return p1_ep_rewards, p2_ep_rewards
+    total_eps = len(p1_ep_rewards)
+    stats = {
+        "episodes": total_eps,
+        "timeouts": timeout_episodes,
+        "terminated": terminated_episodes,
+        "timeout_rate": (timeout_episodes / max(1, total_eps)),
+    }
+    return p1_ep_rewards, p2_ep_rewards, stats
 
 
 def save_agent(
@@ -348,6 +777,7 @@ def save_agent(
     role: str,
     eval_env_ids: dict[str, str],
     warmup_baseline: Optional[dict[str, Any]] = None,
+    training_stats: Optional[dict[str, Any]] = None,
 ) -> dict:
     eval_env_id = eval_env_ids.get(matchup.name, "")
     avg_reward = float(np.mean(episode_rewards)) if episode_rewards else 0.0
@@ -375,6 +805,7 @@ def save_agent(
                 "training_mode": "both_perspectives",
                 "game_format": game_format,
                 "warmup_baseline": warmup_baseline,
+                "training_stats": training_stats,
             },
             indent=2,
         )
@@ -390,6 +821,7 @@ def save_agent(
                 "eval_std": 0.0,
                 "eval_rewards": [],
                 "warmup_baseline": warmup_baseline,
+                "training_stats": training_stats,
             },
             indent=2,
         )
@@ -409,6 +841,7 @@ def save_agent(
         "avg_reward": avg_reward,
         "best_reward": best_reward,
         "warmup_baseline": warmup_baseline,
+        "training_stats": training_stats,
     }
 
 
@@ -529,6 +962,9 @@ def train_matchup(
     game_format: str = "sage",
     warmup_episodes: int = DEFAULT_WARMUP_EPISODES,
     warmup_baseline_eval_episodes: int = DEFAULT_WARMUP_BASELINE_EVAL_EPISODES,
+    show_frontend: bool = False,
+    frontend_url: Optional[str] = None,
+    n_workers: int = 1,
 ) -> dict:
     from agent_cache import AgentCacheStore
     print(f"\n{'=' * 60}")
@@ -537,26 +973,11 @@ def train_matchup(
     print(
         f"  Mode    : both-perspectives training | {n_episodes} episodes | "
         f"max {max_steps} steps | warmup {warmup_episodes} episodes"
+        + (f" | workers={n_workers}" if n_workers > 1 else "")
     )
+    if show_frontend:
+        print("  Live state image rendering: enabled (no browser tabs)")
     print(f"{'=' * 60}")
-
-    for attempt in range(2):
-        env = make_env(matchup, base_url=base_url, game_format=game_format, max_turns=max_steps)
-        try:
-            env.reset()
-            break
-        except Exception as exc:
-            if attempt == 0:
-                print(f"  CreateGame failed ({exc}), restarting Talishar Docker...")
-                subprocess.run(
-                    ["docker", "compose", "restart"],
-                    cwd=REPO_ROOT / "Talishar",
-                    capture_output=True,
-                    check=False,
-                )
-                time.sleep(5)
-            else:
-                raise
 
     if cache_store is None:
         cache_store = AgentCacheStore(REPO_ROOT / "results" / "agent_cache", game_format)
@@ -578,71 +999,165 @@ def train_matchup(
     warmup_count = max(0, min(warmup_episodes, n_episodes))
     p1_rewards: list[float] = []
     p2_rewards: list[float] = []
+    overall_stats: dict[str, Any] = {
+        "episodes": 0,
+        "timeouts": 0,
+        "terminated": 0,
+        "timeout_rate": 0.0,
+    }
+    live_state_image_path: Optional[Path] = None
+    if show_frontend:
+        live_state_image_path = out_dir / matchup.name / "training_live_state.png"
+        live_state_image_path.parent.mkdir(parents=True, exist_ok=True)
+        print(f"  Live state image path → {live_state_image_path}")
 
-    if warmup_count > 0:
-        print(f"  Warmup  : training first {warmup_count} episode(s) with Talishar default policy")
-        warm_p1, warm_p2 = train_agents_from_both_perspectives(
-            env,
-            p1_bundle.agents,
-            p2_bundle.agents,
-            n_episodes=warmup_count,
+    # ── parallel path ─────────────────────────────────────────────────────────
+    if n_workers > 1:
+        print(f"  [parallel] Using {n_workers} worker game sessions for training")
+        rem_p1, rem_p2, rem_stats = train_agents_from_both_perspectives_parallel(
+            matchup=matchup,
+            base_url=base_url,
+            game_format=game_format,
+            p1_tiers=p1_bundle.agents,
+            p2_tiers=p2_bundle.agents,
+            n_episodes=n_episodes,
             max_steps=max_steps,
             seed=seed,
             warmup_episodes=warmup_count,
-        )
-        p1_rewards.extend(warm_p1)
-        p2_rewards.extend(warm_p2)
-
-        print(
-            f"  Warmup baseline eval: {warmup_baseline_eval_episodes} episode(s) before PPO handoff"
-        )
-        baseline = _evaluate_policy_pair(
-            matchup,
-            base_url=base_url,
-            game_format=game_format,
-            max_steps=max_steps,
-            p1_policy=p1_bundle.policy,
-            p2_policy=p2_bundle.policy,
-            episodes=warmup_baseline_eval_episodes,
-            seed=(seed + 100_000) if seed is not None else None,
-        )
-        ckpt_dir = _save_warmup_handoff_checkpoint(
-            out_dir=out_dir,
-            matchup=matchup,
-            p1_policy=p1_bundle.policy,
-            p2_policy=p2_bundle.policy,
-            baseline=baseline,
-        )
-        warmup_baseline = {
-            **baseline,
-            "checkpoint_dir": str(ckpt_dir),
-        }
-        print(
-            "  Warmup baseline: "
-            f"P1 win%={baseline['p1_win_rate'] * 100:.1f} "
-            f"P2 win%={baseline['p2_win_rate'] * 100:.1f} "
-            f"draw%={baseline['draw_rate'] * 100:.1f}"
-        )
-        print(f"  Warmup checkpoint saved → {ckpt_dir}")
-
-    remaining_episodes = n_episodes - warmup_count
-    if remaining_episodes > 0:
-        print(f"  PPO     : training remaining {remaining_episodes} episode(s) with agent policy")
-        rem_seed = (seed + warmup_count) if seed is not None else None
-        rem_p1, rem_p2 = train_agents_from_both_perspectives(
-            env,
-            p1_bundle.agents,
-            p2_bundle.agents,
-            n_episodes=remaining_episodes,
-            max_steps=max_steps,
-            seed=rem_seed,
-            warmup_episodes=0,
+            n_workers=n_workers,
+            live_state_image_path=live_state_image_path,
         )
         p1_rewards.extend(rem_p1)
         p2_rewards.extend(rem_p2)
+        overall_stats["episodes"]   += int(rem_stats.get("episodes", 0))
+        overall_stats["timeouts"]   += int(rem_stats.get("timeouts", 0))
+        overall_stats["terminated"] += int(rem_stats.get("terminated", 0))
+
+        # Run warmup-baseline eval so we still get a checkpoint/baseline record.
+        if warmup_count > 0 and warmup_baseline_eval_episodes > 0:
+            print(
+                f"  Warmup baseline eval: {warmup_baseline_eval_episodes} episode(s)"
+            )
+            baseline = _evaluate_policy_pair(
+                matchup,
+                base_url=base_url,
+                game_format=game_format,
+                max_steps=max_steps,
+                p1_policy=p1_bundle.policy,
+                p2_policy=p2_bundle.policy,
+                episodes=warmup_baseline_eval_episodes,
+                seed=(seed + 100_000) if seed is not None else None,
+            )
+            ckpt_dir = _save_warmup_handoff_checkpoint(
+                out_dir=out_dir,
+                matchup=matchup,
+                p1_policy=p1_bundle.policy,
+                p2_policy=p2_bundle.policy,
+                baseline=baseline,
+            )
+            warmup_baseline = {**baseline, "checkpoint_dir": str(ckpt_dir)}
+
+    else:
+        # ── serial path (original) ─────────────────────────────────────────
+        for attempt in range(2):
+            env = make_env(
+                matchup,
+                base_url=base_url,
+                game_format=game_format,
+                max_turns=max_steps,
+                show_frontend=show_frontend,
+                frontend_url=frontend_url,
+            )
+            try:
+                env.reset()
+                break
+            except Exception as exc:
+                if attempt == 0:
+                    print(f"  CreateGame failed ({exc}), restarting Talishar Docker...")
+                    subprocess.run(
+                        ["docker", "compose", "restart"],
+                        cwd=REPO_ROOT / "Talishar",
+                        capture_output=True,
+                        check=False,
+                    )
+                    time.sleep(5)
+                else:
+                    raise
+
+        if warmup_count > 0:
+            print(f"  Warmup  : training first {warmup_count} episode(s) with Talishar default policy")
+            warm_p1, warm_p2, warm_stats = train_agents_from_both_perspectives(
+                env,
+                p1_bundle.agents,
+                p2_bundle.agents,
+                n_episodes=warmup_count,
+                max_steps=max_steps,
+                seed=seed,
+                warmup_episodes=warmup_count,
+                live_state_image_path=live_state_image_path,
+            )
+            p1_rewards.extend(warm_p1)
+            p2_rewards.extend(warm_p2)
+            overall_stats["episodes"]   += int(warm_stats.get("episodes", 0))
+            overall_stats["timeouts"]   += int(warm_stats.get("timeouts", 0))
+            overall_stats["terminated"] += int(warm_stats.get("terminated", 0))
+
+            print(
+                f"  Warmup baseline eval: {warmup_baseline_eval_episodes} episode(s) before PPO handoff"
+            )
+            baseline = _evaluate_policy_pair(
+                matchup,
+                base_url=base_url,
+                game_format=game_format,
+                max_steps=max_steps,
+                p1_policy=p1_bundle.policy,
+                p2_policy=p2_bundle.policy,
+                episodes=warmup_baseline_eval_episodes,
+                seed=(seed + 100_000) if seed is not None else None,
+            )
+            ckpt_dir = _save_warmup_handoff_checkpoint(
+                out_dir=out_dir,
+                matchup=matchup,
+                p1_policy=p1_bundle.policy,
+                p2_policy=p2_bundle.policy,
+                baseline=baseline,
+            )
+            warmup_baseline = {**baseline, "checkpoint_dir": str(ckpt_dir)}
+            print(
+                "  Warmup baseline: "
+                f"P1 win%={baseline['p1_win_rate'] * 100:.1f} "
+                f"P2 win%={baseline['p2_win_rate'] * 100:.1f} "
+                f"draw%={baseline['draw_rate'] * 100:.1f}"
+            )
+            print(f"  Warmup checkpoint saved → {ckpt_dir}")
+
+        remaining_episodes = n_episodes - warmup_count
+        if remaining_episodes > 0:
+            print(f"  PPO     : training remaining {remaining_episodes} episode(s) with agent policy")
+            rem_seed = (seed + warmup_count) if seed is not None else None
+            rem_p1, rem_p2, rem_stats = train_agents_from_both_perspectives(
+                env,
+                p1_bundle.agents,
+                p2_bundle.agents,
+                n_episodes=remaining_episodes,
+                max_steps=max_steps,
+                seed=rem_seed,
+                warmup_episodes=0,
+                live_state_image_path=live_state_image_path,
+            )
+            p1_rewards.extend(rem_p1)
+            p2_rewards.extend(rem_p2)
+            overall_stats["episodes"]   += int(rem_stats.get("episodes", 0))
+            overall_stats["timeouts"]   += int(rem_stats.get("timeouts", 0))
+            overall_stats["terminated"] += int(rem_stats.get("terminated", 0))
+
+        env.close()
+
+    overall_stats["timeout_rate"] = overall_stats["timeouts"] / max(
+        1, int(overall_stats["episodes"])
+    )
 
     elapsed = time.time() - t0
-    env.close()
 
     cache_store.persist_player(p1_bundle)
     cache_store.persist_player(p2_bundle)
@@ -650,7 +1165,9 @@ def train_matchup(
     print(
         f"  Done in {elapsed:.1f}s — "
         f"P1 avg={np.mean(p1_rewards):+.3f}  "
-        f"P2 avg={np.mean(p2_rewards):+.3f}"
+        f"P2 avg={np.mean(p2_rewards):+.3f}  "
+        f"timeouts={overall_stats['timeouts']}/{overall_stats['episodes']} "
+        f"({overall_stats['timeout_rate'] * 100:.1f}%)"
     )
 
     p1_id = f"{matchup.name}-p1-{uuid.uuid4().hex[:8]}"
@@ -660,11 +1177,13 @@ def train_matchup(
         p1_bundle.policy, p1_id, out_dir, matchup, p1_rewards,
         n_episodes, elapsed, game_format, "p1", eval_env_ids,
         warmup_baseline=warmup_baseline,
+        training_stats=overall_stats,
     )
     meta_p2 = save_agent(
         p2_bundle.policy, p2_id, out_dir, matchup, p2_rewards,
         n_episodes, elapsed, game_format, "p2", eval_env_ids,
         warmup_baseline=warmup_baseline,
+        training_stats=overall_stats,
     )
     return {"p1": meta_p1, "p2": meta_p2}
 
@@ -677,11 +1196,19 @@ def print_training_summary(summary: list[dict], failed: list[str], out_dir: Path
         baseline = m.get("p1", {}).get("warmup_baseline")
         for role in ("p1", "p2"):
             r = m[role]
+            tstats = r.get("training_stats") or {}
+            timeout_line = ""
+            if tstats:
+                timeout_line = (
+                    f"\n  {'timeouts':<28} {tstats.get('timeouts', 0)}/"
+                    f"{tstats.get('episodes', 0)} ({tstats.get('timeout_rate', 0.0) * 100:.1f}%)"
+                )
             print(
                 f"  {r['matchup']}/{role:<4}  avg={r['avg_reward']:+.3f}  "
                 f"best={r['best_reward']:+.3f}  ({r['elapsed_secs']:.0f}s)\n"
                 f"  {'agent_id':<28} {r['agent_id']}\n"
                 f"  {'package_dir':<28} {r['package_dir']}"
+                f"{timeout_line}"
             )
         if isinstance(baseline, dict) and baseline.get("episodes", 0) > 0:
             print(
@@ -714,6 +1241,9 @@ def run_matchup_training(
     cache_dir: Optional[Path] = None,
     warmup_episodes: int = DEFAULT_WARMUP_EPISODES,
     warmup_baseline_eval_episodes: int = DEFAULT_WARMUP_BASELINE_EVAL_EPISODES,
+    show_frontend: bool = False,
+    frontend_url: Optional[str] = None,
+    n_workers: int = 1,
 ) -> tuple[list[dict], list[str]]:
     from agent_cache import AgentCacheStore
 
@@ -736,6 +1266,9 @@ def run_matchup_training(
                 game_format=game_format,
                 warmup_episodes=warmup_episodes,
                 warmup_baseline_eval_episodes=warmup_baseline_eval_episodes,
+                show_frontend=show_frontend,
+                frontend_url=frontend_url,
+                n_workers=n_workers,
             )
             summary.append(meta)
         except Exception as exc:

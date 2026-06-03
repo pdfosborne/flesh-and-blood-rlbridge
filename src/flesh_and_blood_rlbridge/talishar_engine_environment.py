@@ -143,7 +143,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         deck_link: str = _DEFAULT_DECK_LINK,
         game_format: str = "silver_age",
         timeout: float = 15.0,
-        max_turns: int = 1000,
+    max_turns: int = 100,
         render_mode: Optional[str] = None,
         local_deck_name: Optional[str] = "Ira",
         opponent_deck_name: Optional[str] = None,
@@ -157,6 +157,9 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         self._frontend_url = (
             frontend_url or os.environ.get("TALISHAR_FE_URL", "http://localhost:5173")
         ).rstrip("/")
+        self._frontend_game_url_template = os.environ.get(
+            "TALISHAR_FE_GAME_URL_TEMPLATE", ""
+        ).strip()
         self._deck_link = deck_link
         self._local_deck_name = local_deck_name  # use CreateLocalGame.php when set
         self._opponent_deck_name = opponent_deck_name
@@ -671,6 +674,22 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         if auth_key:
             params["authKey"] = auth_key
         query = urllib.parse.urlencode(params)
+        if self._frontend_game_url_template:
+            try:
+                return self._frontend_game_url_template.format(
+                    gameName=self._game_name,
+                    playerID=player_id,
+                    authKey=auth_key,
+                )
+            except Exception:
+                # Fall back to built-in URL conventions.
+                pass
+
+        parsed = urllib.parse.urlsplit(self._frontend_url)
+        is_vite_dev = parsed.port == 5173
+        if is_vite_dev:
+            # Vite FE dev server generally serves from root and expects router/query handling client-side.
+            return f"{self._frontend_url}/?{query}"
         return f"{self._frontend_url}/game/play?{query}"
 
     def _open_frontend(self) -> Optional[str]:
@@ -886,6 +905,13 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         try:
             from playwright.sync_api import sync_playwright as _sync_playwright
         except ImportError:
+            import warnings
+            warnings.warn(
+                "playwright is not installed – rgb_array rendering will fall back to text.\n"
+                "Fix: pip install playwright && playwright install chromium",
+                RuntimeWarning,
+                stacklevel=2,
+            )
             return
 
         import queue as _queue
@@ -947,6 +973,14 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         self._pw_worker_thread = t
         ready.wait(timeout=35)
         if error_box:
+            import warnings
+            warnings.warn(
+                f"Playwright browser failed to launch – rgb_array rendering will fall back to text.\n"
+                f"Error: {error_box[0]}\n"
+                f"Make sure Chromium is installed: playwright install chromium",
+                RuntimeWarning,
+                stacklevel=2,
+            )
             self._close_playwright_page()
 
     def _close_playwright_page(self) -> None:

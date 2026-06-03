@@ -89,7 +89,7 @@ EVAL_ENV_IDS: dict[str, str] = {
     for m in SAGE_MATCHUPS
 }
 
-DEFAULT_MAX_STEPS = 200
+DEFAULT_MAX_STEPS = 100
 
 
 def main() -> None:
@@ -159,6 +159,23 @@ def main() -> None:
         default=str(REPO_ROOT / "results" / "agent_cache"),
         help="Root directory for four-tier agent weight cache.",
     )
+    parser.add_argument(
+        "--show-frontend",
+        action="store_true",
+        help="Write a live training-state image during training (no browser tabs).",
+    )
+    parser.add_argument(
+        "--frontend-url",
+        default=None,
+        help="Talishar FE URL override (default: TALISHAR_URL host:port when --show-frontend is set).",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Number of parallel game sessions for training (default: 1). "
+             "Set to 2-4 to saturate Talishar HTTP throughput.",
+    )
     args = parser.parse_args()
 
     if args.matchup == "all":
@@ -190,6 +207,9 @@ def main() -> None:
         cache_dir=Path(args.cache_dir),
         warmup_episodes=args.warmup_episodes,
         warmup_baseline_eval_episodes=args.warmup_baseline_eval_episodes,
+        show_frontend=args.show_frontend,
+        frontend_url=args.frontend_url,
+        n_workers=args.workers,
     )
     print_training_summary(summary, failed, out_dir)
     if failed:

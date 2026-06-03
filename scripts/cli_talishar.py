@@ -20,7 +20,7 @@ Options
     --agent FILE    Pickle file containing a trained rlbridge agent
     --episodes N    Number of episodes to play  (default: 1)
     --delay SECS    Seconds between actions in agent mode  (default: 0.5)
-    --max-steps N   Maximum steps per episode before truncation  (default: 120)
+    --max-steps N   Maximum steps per episode before truncation  (default: 100)
 """
 
 from __future__ import annotations
@@ -363,7 +363,7 @@ def main() -> None:
     parser.add_argument("--agent", default=None, metavar="FILE", help="Pickled RL agent to auto-play")
     parser.add_argument("--episodes", type=int, default=1, help="Number of episodes (default: 1)")
     parser.add_argument("--delay", type=float, default=0.5, help="Seconds between agent actions (default: 0.5)")
-    parser.add_argument("--max-steps", type=int, default=120, dest="max_steps", help="Max steps per episode (default: 120)")
+    parser.add_argument("--max-steps", type=int, default=100, dest="max_steps", help="Max steps per episode (default: 100)")
     args = parser.parse_args()
 
     # Resolve Talishar URL and Assets path
