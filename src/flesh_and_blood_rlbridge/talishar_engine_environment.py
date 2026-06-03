@@ -86,9 +86,10 @@ from .talishar_oracle import TalisharConnectionError
 _DEFAULT_DECK_LINK = "https://fabrary.net/decks/01GJG7Z4WGWSZ95FY74KX4M557"
 _DEFAULT_RENDER_WIDTH = 1920
 _DEFAULT_RENDER_HEIGHT = 1080
-_TRUNCATION_PENALTY = -1.0
+_TRUNCATION_PENALTY = 0
 _REPEAT_ACTION_THRESHOLD = 3
 _REPEAT_ACTION_PENALTY = -0.1
+_STEP_PENALTY = -0.005  # small per-step penalty to encourage faster game completion
 
 
 def _normalize_game_format(fmt: str) -> str:
@@ -972,7 +973,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         else:
             dmg_dealt = max(0, self._opp_hp - new_opp_hp)
             dmg_taken = max(0, self._player_hp - new_player_hp)
-            reward = dmg_dealt * 0.01 - dmg_taken * 0.01
+            reward = dmg_dealt * 0.01 - dmg_taken * 0.01 + _STEP_PENALTY
         reward += repeat_penalty
 
         self._player_hp = new_player_hp

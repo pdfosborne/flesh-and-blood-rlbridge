@@ -45,6 +45,10 @@ from rlbridge.rl_agents.ppo import (  # noqa: E402
     _softmax,
     _to_env_action,
 )
+from episode_cache import (  # noqa: E402
+    EpisodeCache,
+    DEFAULT_WARMUP_SKIP_THRESHOLD,
+)
 
 FORMAT_DECK_RULES: dict[str, dict[str, int]] = {
     "silver_age": {"max_copies": 2, "deck_size": 40},
@@ -416,6 +420,84 @@ def _transitions_to_buf(transitions: list[dict[str, Any]]) -> dict[str, Any]:
     return buf
 
 
+def warm_start_from_episode_cache(
+    episode_cache: EpisodeCache,
+    p1_deck: str,
+    p2_deck: str,
+    p1_tiers: list[PPOAgent],
+    p2_tiers: list[PPOAgent],
+    obs_dim: int,
+    *,
+    max_load: Optional[int] = None,
+) -> int:
+    """Replay cached episodes as PPO updates to warm-start both agent sets.
+
+    Loads all compatible episodes (matching *obs_dim*) for the given matchup,
+    runs PPO updates on each episode's P1 and P2 buffers, then returns the
+    number of episodes replayed.  Returns 0 if the cache is empty or no
+    compatible episodes exist.
+
+    Parameters
+    ----------
+    max_load:
+        Cap on how many episodes to replay.  Defaults to loading all compatible
+        episodes (up to the cache's stored maximum).
+    """
+    episodes = episode_cache.load_episodes(
+        p1_deck, p2_deck, obs_dim=obs_dim, max_load=max_load
+    )
+    if not episodes:
+        return 0
+
+    replayed = 0
+    for ep in episodes:
+        p1_trans = ep["p1_transitions"]
+        p2_trans = ep["p2_transitions"]
+
+        if p1_trans:
+            p1_buf = _transitions_to_buf(p1_trans)
+            next_p1 = p1_trans[-1]["next_obs_vec"]
+            _ppo_update_all_tiers(p1_tiers, p1_buf, next_p1)
+
+        if p2_trans:
+            p2_buf = _transitions_to_buf(p2_trans)
+            next_p2 = p2_trans[-1]["next_obs_vec"]
+            _ppo_update_all_tiers(p2_tiers, p2_buf, next_p2)
+
+        replayed += 1
+
+    return replayed
+
+
+def _save_episode_to_cache(
+    episode_cache: EpisodeCache,
+    result: dict[str, Any],
+    p1_deck: str,
+    p2_deck: str,
+    obs_dim: int,
+) -> None:
+    """Save a terminated (non-truncated) episode result to the episode cache."""
+    if result.get("truncated") or not result.get("terminated"):
+        return
+    p1_trans = result.get("p1_transitions", [])
+    p2_trans = result.get("p2_transitions", [])
+    if not p1_trans and not p2_trans:
+        return
+    try:
+        episode_cache.add_episode(
+            p1_deck,
+            p2_deck,
+            obs_dim=obs_dim,
+            p1_transitions=p1_trans,
+            p2_transitions=p2_trans,
+            p1_reward=float(result.get("p1_reward", 0.0)),
+            p2_reward=float(result.get("p2_reward", 0.0)),
+            steps=int(result.get("steps", 0)),
+        )
+    except Exception:
+        pass  # never let caching errors abort training
+
+
 def _safe_run_one_episode(
     env: TalisharEngineEnvironment,
     p1_policy: PPOAgent,
@@ -459,6 +541,7 @@ def train_agents_from_both_perspectives_parallel(
     warmup_episodes: int = DEFAULT_WARMUP_EPISODES,
     n_workers: int = 2,
     live_state_image_path: Optional[Path] = None,
+    episode_cache: Optional[EpisodeCache] = None,
 ) -> tuple[list[float], list[float], dict[str, Any]]:
     """Parallel rollout version of ``train_agents_from_both_perspectives``.
 
@@ -489,6 +572,35 @@ def train_agents_from_both_perspectives_parallel(
     _sync_tier_agent_config(p2_tiers, n_actions_p2, mask_p2)
     _init_tier_nets(p1_tiers, obs_vec.shape[0])
     _init_tier_nets(p2_tiers, obs_vec.shape[0])
+
+    # ── episode-cache warm-start (before any live games) ─────────────────────
+    obs_dim = obs_vec.shape[0]
+    if episode_cache is not None:
+        cached_n = episode_cache.count(matchup.p1_deck, matchup.p2_deck, obs_dim=obs_dim)
+        if cached_n > 0:
+            if episode_cache.should_skip_warmup(matchup.p1_deck, matchup.p2_deck, obs_dim=obs_dim):
+                print(
+                    f"  [cache] {cached_n} cached episodes ≥ threshold "
+                    f"({episode_cache.warmup_skip_threshold}) — skipping default-policy warmup, "
+                    f"warm-starting from cache"
+                )
+                replayed = warm_start_from_episode_cache(
+                    episode_cache, matchup.p1_deck, matchup.p2_deck,
+                    p1_tiers, p2_tiers, obs_dim,
+                )
+                print(f"  [cache] replayed {replayed} cached episode(s) as PPO warm-start")
+                warmup_episodes = 0  # skip default-policy phase
+            else:
+                print(
+                    f"  [cache] {cached_n} cached episodes (below skip threshold "
+                    f"{episode_cache.warmup_skip_threshold}) — partial warm-start from cache, "
+                    f"continuing with default-policy warmup"
+                )
+                replayed = warm_start_from_episode_cache(
+                    episode_cache, matchup.p1_deck, matchup.p2_deck,
+                    p1_tiers, p2_tiers, obs_dim,
+                )
+                print(f"  [cache] replayed {replayed} cached episode(s) as partial warm-start")
 
     # ── create worker envs ────────────────────────────────────────────────────
     print(f"  [parallel] spawning {n_workers} worker game sessions…")
@@ -579,6 +691,13 @@ def train_agents_from_both_perspectives_parallel(
                         print(f"  [unfinished ep #{completed+1}] {hp_str}")
                     if result["terminated"]:
                         terminated_episodes += 1
+                        # Cache this completed episode for future warm-starts.
+                        if episode_cache is not None:
+                            _save_episode_to_cache(
+                                episode_cache, result,
+                                matchup.p1_deck, matchup.p2_deck,
+                                obs_dim=obs_vec.shape[0],
+                            )
                     completed += 1
                 if shutdown_flag:
                     break
@@ -653,6 +772,9 @@ def train_agents_from_both_perspectives(
     seed: Optional[int] = None,
     warmup_episodes: int = DEFAULT_WARMUP_EPISODES,
     live_state_image_path: Optional[Path] = None,
+    episode_cache: Optional[EpisodeCache] = None,
+    p1_deck: str = "",
+    p2_deck: str = "",
 ) -> tuple[list[float], list[float], dict[str, Any]]:
     p1_policy = p1_tiers[0]
     p2_policy = p2_tiers[0]
@@ -676,6 +798,33 @@ def train_agents_from_both_perspectives(
     _init_tier_nets(p1_tiers, obs_vec.shape[0])
     _init_tier_nets(p2_tiers, obs_vec.shape[0])
 
+    # ── episode-cache warm-start (before any live games) ─────────────────────
+    _obs_dim = obs_vec.shape[0]
+    if episode_cache is not None and p1_deck and p2_deck:
+        cached_n = episode_cache.count(p1_deck, p2_deck, obs_dim=_obs_dim)
+        if cached_n > 0:
+            if episode_cache.should_skip_warmup(p1_deck, p2_deck, obs_dim=_obs_dim):
+                print(
+                    f"  [cache] {cached_n} cached episodes ≥ threshold "
+                    f"({episode_cache.warmup_skip_threshold}) — skipping default-policy warmup, "
+                    f"warm-starting from cache"
+                )
+                replayed = warm_start_from_episode_cache(
+                    episode_cache, p1_deck, p2_deck, p1_tiers, p2_tiers, _obs_dim,
+                )
+                print(f"  [cache] replayed {replayed} cached episode(s) as PPO warm-start")
+                warmup_episodes = 0  # skip default-policy phase in the loop
+            else:
+                print(
+                    f"  [cache] {cached_n} cached episodes (below skip threshold "
+                    f"{episode_cache.warmup_skip_threshold}) — partial warm-start from cache, "
+                    f"continuing with default-policy warmup"
+                )
+                replayed = warm_start_from_episode_cache(
+                    episode_cache, p1_deck, p2_deck, p1_tiers, p2_tiers, _obs_dim,
+                )
+                print(f"  [cache] replayed {replayed} cached episode(s) as partial warm-start")
+
     completed = 0
     cur_p1_r = cur_p2_r = 0.0
     timeout_episodes = 0
@@ -685,6 +834,10 @@ def train_agents_from_both_perspectives(
     episode_step = 0
     progress_every = max(1, n_episodes // 100)  # ~1% cadence after warmup
     progress_t0 = time.time()
+    # Per-episode transition accumulators for episode caching (only populated
+    # when episode_cache is provided to avoid overhead when unused).
+    _ep_p1_trans: list[dict[str, Any]] = []
+    _ep_p2_trans: list[dict[str, Any]] = []
 
     while completed < n_episodes and global_step < total_steps:
         acting = env._acting_player_id
@@ -740,6 +893,24 @@ def train_agents_from_both_perspectives(
         buf["dones"].append(float(done))
         buf["n_legal"].append(n_legal if n_legal is not None else policy.n_actions)
 
+        # Accumulate per-episode transitions for episode caching.
+        if episode_cache is not None:
+            _next_obs_vec = policy._obs_to_vec(_get(step_out, "observation", obs))
+            _ep_trans: dict[str, Any] = {
+                "obs_vec":     obs_vec,
+                "action":      action,
+                "reward":      agent_reward,
+                "value":       value,
+                "log_prob":    float(lp_all[action]),
+                "done":        float(done),
+                "n_legal":     n_legal if n_legal is not None else policy.n_actions,
+                "next_obs_vec": _next_obs_vec,
+            }
+            if acting == 1:
+                _ep_p1_trans.append(_ep_trans)
+            else:
+                _ep_p2_trans.append(_ep_trans)
+
         global_step += 1
 
         if done:
@@ -750,6 +921,24 @@ def train_agents_from_both_perspectives(
                 timeout_episodes += 1
             if terminated:
                 terminated_episodes += 1
+                # Cache this completed episode for future warm-starts.
+                if episode_cache is not None and p1_deck and p2_deck:
+                    try:
+                        episode_cache.add_episode(
+                            p1_deck, p2_deck,
+                            obs_dim=_obs_dim,
+                            p1_transitions=list(_ep_p1_trans),
+                            p2_transitions=list(_ep_p2_trans),
+                            p1_reward=cur_p1_r,
+                            p2_reward=cur_p2_r,
+                            steps=episode_step,
+                        )
+                    except Exception:
+                        pass
+
+            # Reset per-episode accumulators regardless of outcome.
+            _ep_p1_trans = []
+            _ep_p2_trans = []
 
             if (
                 completed <= 10  # dense startup visibility
@@ -1019,6 +1208,20 @@ def train_matchup(
     if cache_store is None:
         cache_store = AgentCacheStore(REPO_ROOT / "results" / "agent_cache", game_format)
 
+    # Create a persistent episode cache for this game format.  Completed
+    # (non-truncated) episodes are stored per deck matchup and replayed as PPO
+    # warm-start data on future runs.  The cache root sits alongside the agent
+    # cache so both can be shared across training scripts.
+    episode_cache = EpisodeCache(
+        cache_root=REPO_ROOT / "results" / "agent_cache",
+        game_format=game_format,
+    )
+    _ep_cache_info = episode_cache.info(matchup.p1_deck, matchup.p2_deck)
+    print(
+        f"  Episode cache: {_ep_cache_info['total_episodes']} stored episode(s) for this matchup "
+        f"(skip threshold: {episode_cache.warmup_skip_threshold})"
+    )
+
     def _make_p1() -> PPOAgent:
         return make_agent(seed=seed)
 
@@ -1063,6 +1266,7 @@ def train_matchup(
             warmup_episodes=warmup_count,
             n_workers=n_workers,
             live_state_image_path=live_state_image_path,
+            episode_cache=episode_cache,
         )
         p1_rewards.extend(rem_p1)
         p2_rewards.extend(rem_p2)
@@ -1132,6 +1336,9 @@ def train_matchup(
                 seed=seed,
                 warmup_episodes=warmup_count,
                 live_state_image_path=live_state_image_path,
+                episode_cache=episode_cache,
+                p1_deck=matchup.p1_deck,
+                p2_deck=matchup.p2_deck,
             )
             p1_rewards.extend(warm_p1)
             p2_rewards.extend(warm_p2)
@@ -1181,6 +1388,9 @@ def train_matchup(
                 seed=rem_seed,
                 warmup_episodes=0,
                 live_state_image_path=live_state_image_path,
+                episode_cache=episode_cache,
+                p1_deck=matchup.p1_deck,
+                p2_deck=matchup.p2_deck,
             )
             p1_rewards.extend(rem_p1)
             p2_rewards.extend(rem_p2)
