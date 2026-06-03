@@ -13,15 +13,20 @@
 include 'Libraries/HTTPLibraries.php';
 include "HostFiles/Redirector.php";
 include_once "Libraries/SHMOPLibraries.php";
-include "WriteLog.php";
+include "Libraries/CacheLibraries.php";
 include_once "./Assets/patreon-php-master/src/PatreonDictionary.php";
 include_once "./Assets/MetafyDictionary.php";
 include_once "./AccountFiles/AccountSessionAPI.php";
-include_once "Libraries/CacheLibraries.php";
 include_once "includes/dbh.inc.php";
 include_once "includes/MetafyHelper.php";
+include_once 'GameLogic.php';
+include_once "GameTerms.php";
+include_once "Libraries/UILibraries.php";
+include_once "Libraries/StatFunctions.php";
+include_once "Libraries/PlayerSettings.php";
+include "WriteLog.php";
 include_once "BuildGameState.php";
-include_once "BuildPlayerInputPopup.php";
+include_once "BuildPlayerInputPopup.php"
 
 // Set CORS headers
 SetHeaders();
