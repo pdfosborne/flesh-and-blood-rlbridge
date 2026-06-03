@@ -1,0 +1,297 @@
+<?php
+
+error_reporting(E_ALL);
+
+// Limit script execution time to 1 second to avoid long-running requests
+@set_time_limit(1);
+@ini_set('max_execution_time', '1');
+
+include "WriteLog.php";
+include "GameLogic.php";
+include "GameTerms.php";
+include "HostFiles/Redirector.php";
+include_once "Libraries/SHMOPLibraries.php";
+include "Libraries/StatFunctions.php";
+include "Libraries/UILibraries.php";
+include "Libraries/PlayerSettings.php";
+include "Libraries/NetworkingLibraries.php";
+include "Libraries/CacheLibraries.php";
+include "AI/CombatDummy.php";
+include "Libraries/HTTPLibraries.php";
+require_once "Libraries/CoreLibraries.php";
+include_once "./includes/dbh.inc.php";
+include_once "./includes/functions.inc.php";
+include_once "APIKeys/APIKeys.php";
+include_once "./Libraries/ValidationLibraries.php";
+
+//We should always have a player ID as a URL parameter
+$gameName = $_GET["gameName"] ?? "";
+if (!IsGameNameValid($gameName)) {
+  echo "Invalid game name.";
+  exit;
+}
+$playerID = $_GET["playerID"];
+$authKey = $_GET["authKey"];
+$mode = $_GET["mode"];
+
+// Validate player ID
+if (!validatePlayerID($playerID)) {
+  echo "Invalid player ID.";
+  exit;
+}
+
+// Validate mode is a valid integer
+if (!validateInteger($mode, 1, 999999)) {
+  echo "Invalid mode.";
+  exit;
+}
+
+if ($mode == 100015) {
+  if ($playerID == 1 && intval(GetCachePiece($gameName, 15)) == 1)
+    exit;
+  else if ($playerID == 2 && intval(GetCachePiece($gameName, 16)) == 1)
+    exit;
+  else if ($playerID != 1 && $playerID != 2)
+    exit;
+}
+
+//We should also have some information on the type of command
+$buttonInput = isset($_GET["buttonInput"]) ? sanitizeString($_GET["buttonInput"]) : ""; //The player that is the target of the command - e.g. for changing life total
+$cardID = isset($_GET["cardID"]) ? sanitizeString($_GET["cardID"]) : "";
+$numMode = isset($_GET["numMode"]) ? intval($_GET["numMode"]) : 0;
+$chkCount = isset($_GET["chkCount"]) ? intval($_GET["chkCount"]) : 0;
+
+// Validate card ID if provided
+if (!empty($cardID) && !validateCardID($cardID)) {
+  echo "Invalid card ID.";
+  exit;
+}
+
+// Validate check count
+if ($chkCount < 0 || $chkCount > 100) {
+  echo "Invalid check count.";
+  exit;
+}
+$chkInput = [];
+for ($i = 0; $i < $chkCount; ++$i) {
+  $chk = isset($_GET[("chk" . $i)]) ? sanitizeString($_GET[("chk" . $i)]) : "";
+  if ($chk != "")
+    $chkInput[] = $chk;
+}
+$inputText = isset($_GET["inputText"]) ? sanitizeString($_GET["inputText"]) : "";
+
+SetHeaders();
+
+$numPass = 0;
+//First we need to parse the game state from the file
+include "ParseGamestate.php";
+
+if (IsReplay() && $mode == 99) {
+  $filename = "./Games/$gameName/replayCommands.txt";
+  $commands = file($filename);
+  $pointer = intval(trim($commands[0] ?? "0")) + 1;
+  $line = $commands[$pointer] ?? "";
+  $params = explode(" ", $line);
+  $playerID = $params[0] ?? "";
+  $mode = $params[1] ?? "";
+  $buttonInput = $params[2] ?? "";
+  $cardID = $params[3] ?? "";
+  $chkCount = $params[4] ?? "0";
+  $chkInput = isset($params[5]) ? explode("|", $params[5]) : [];
+  $chkInputCount = count($chkInput);
+  for ($i = 0; $i < $chkInputCount; ++$i) {
+    $chkInput[$i] = trim($chkInput[$i]);
+  }
+  //skip any inputs where the non-active player tries something
+  if ($mode == "StartTurn" || $playerID != $currentPlayer) {
+    ++$pointer;
+    $line = $commands[$pointer] ?? "";
+    $params = explode(" ", $line);
+    $playerID = $params[0] ?? "";
+    $mode = $params[1] ?? "";
+    $buttonInput = $params[2] ?? "";
+    $cardID = $params[3] ?? "";
+    $chkCount = $params[4] ?? "0";
+    $chkInput = isset($params[5]) ? explode("|", $params[5]) : [];
+    $chkInputCount = count($chkInput);
+    for ($i = 0; $i < $chkInputCount; ++$i) {
+      $chkInput[$i] = trim($chkInput[$i]);
+    }
+  }
+  //Automate extra passes
+  // for($i=1; $i<count($commands); ++$i)
+  // {
+  //   $line = $commands[$pointer+1];
+  //   $params = explode(" ", $line);
+  //   if(intval($mode) != 99 || intval($params[1]) != 99) break;
+  //   ++$numPass;
+  //   ++$pointer;
+  // }
+  $commands[0] = "$pointer\r\n";
+  file_put_contents($filename, $commands);
+}
+
+$isProcessInput = true;
+
+$otherPlayer = $currentPlayer == 1 ? 2 : 1;
+$skipWriteGamestate = false;
+$mainPlayerGamestateStillBuilt = 0;
+$makeCheckpoint = 0;
+$makeBlockBackup = 0;
+$MakeStartTurnBackup = false;
+$MakeStartGameBackup = false;
+$targetAuth = ($playerID == 1 ? $p1Key : $p2Key);
+$conceded = false;
+$randomSeeded = false;
+
+if(!IsReplay()) {
+  if (($playerID == 1 || $playerID == 2) && $authKey == "") {
+    if (isset($_COOKIE["lastAuthKey"])) $authKey = $_COOKIE["lastAuthKey"];
+  }
+  if ($playerID != 3 && $authKey !== $targetAuth) {
+    // Failsafe: Use game file's auth key if mismatch (lost on page refresh)
+    $authKey = $targetAuth;
+  }
+  if ($playerID == 3 && !IsModeAllowedForSpectators($mode)) exit;
+  if (!IsModeAsync($mode) && $currentPlayer != $playerID) {
+    $currentTime = round(microtime(true) * 1000);
+    SetCachePiece($gameName, 2, $currentTime);
+    SetCachePiece($gameName, 3, $currentTime);
+    exit;
+  }
+}
+
+$afterResolveEffects = [];
+
+$animations = [];
+$events = [];//Clear events each time so it's only updated ones that get sent
+
+if ($mode == 27) { //TODO add this to other play/activate modes
+  $hand = GetHand($playerID);
+  $index = intval($cardID);
+  $buttonInput = $hand[$index] ?? "";
+}
+// if ((IsPatron(1) || IsPatron(2)) && !IsReplay()) {
+if (SaveReplay() && !IsReplay()) {
+  $commandFile = fopen("./Games/$gameName/commandfile.txt", "a");
+  fwrite($commandFile, "$playerID $mode $buttonInput $cardID $chkCount " . implode("|", $chkInput) . "\r\n");
+  fclose($commandFile);
+}
+
+//Now we can process the command
+ProcessInput($playerID, $mode, $buttonInput, $cardID, $chkCount, $chkInput, false, $inputText);
+
+ProcessMacros();
+if ($inGameStatus == $GameStatus_Rematch) {
+  include "MenuFiles/ParseGamefile.php";
+  $origDeck = "./Games/{$gameName}/p1DeckOrig.txt";
+  if (file_exists($origDeck)) copy($origDeck, "./Games/{$gameName}/p1Deck.txt");
+  $origDeck = "./Games/{$gameName}/p2DeckOrig.txt";
+  if (file_exists($origDeck)) copy($origDeck, "./Games/{$gameName}/p2Deck.txt");
+  include "MenuFiles/WriteGamefile.php";
+  $p2IsAILocal = $p2IsAI == "1";
+  $gameStatus = ($p2IsAILocal ? $MGS_ReadyToStart : $MGS_ChooseFirstPlayer);
+  SetCachePiece($gameName, 14, $gameStatus);
+  $firstPlayer = 1;
+  $firstPlayerChooser = ($winner == 1 ? 2 : 1);
+  $p1SideboardSubmitted = "0";
+  $p2SideboardSubmitted = ($p2IsAILocal ? "1" : "0");
+  WriteLog("Player $firstPlayerChooser lost and will choose first player for the rematch.");
+  WriteGameFile();
+  $turn[0] = "REMATCH";
+  include "WriteGamestate.php";
+  $currentTime = round(microtime(true) * 1000);
+  SetCachePiece($gameName, 2, $currentTime);
+  SetCachePiece($gameName, 3, $currentTime);
+  InvalidateGamestateCache($gameName); // Clear cached gamestate once at end
+  GamestateUpdated($gameName);
+  exit;
+} else if ($inGameStatus == $GameStatus_SwapRematch) {
+  include "MenuFiles/ParseGamefile.php";
+  // Swap the deck files (p1DeckOrig.txt <-> p2DeckOrig.txt)
+  $p1OrigPath = "./Games/{$gameName}/p1DeckOrig.txt";
+  $p2OrigPath = "./Games/{$gameName}/p2DeckOrig.txt";
+  $tempPath = "./Games/{$gameName}/p_swap_temp.txt";
+  if (file_exists($p1OrigPath) && file_exists($p2OrigPath)) {
+    rename($p1OrigPath, $tempPath);
+    rename($p2OrigPath, $p1OrigPath);
+    rename($tempPath, $p2OrigPath);
+  }
+  // Restore swapped original decks as active decks
+  if (file_exists($p1OrigPath)) copy($p1OrigPath, "./Games/{$gameName}/p1Deck.txt");
+  if (file_exists($p2OrigPath)) copy($p2OrigPath, "./Games/{$gameName}/p2Deck.txt");
+  // Swap deck metadata so the lobby shows the correct hero for each player
+  include "MenuFiles/WriteGamefile.php";
+  [$p1DeckLink, $p2DeckLink] = [$p2DeckLink, $p1DeckLink];
+  [$p1deckbuilderID, $p2deckbuilderID] = [$p2deckbuilderID, $p1deckbuilderID];
+  [$p1StartingEquipment, $p2StartingEquipment] = [$p2StartingEquipment, $p1StartingEquipment];
+  [$p1MetafyTiers, $p2MetafyTiers] = [$p2MetafyTiers, $p1MetafyTiers];
+  [$p1MetafyCommunities, $p2MetafyCommunities] = [$p2MetafyCommunities, $p1MetafyCommunities];
+  $p2IsAILocal = $p2IsAI == "1";
+  $gameStatus = ($p2IsAILocal ? $MGS_ReadyToStart : $MGS_ChooseFirstPlayer);
+  SetCachePiece($gameName, 14, $gameStatus);
+  $firstPlayer = 1;
+  $firstPlayerChooser = ($winner == 1 ? 2 : 1);
+  $p1SideboardSubmitted = "0";
+  $p2SideboardSubmitted = ($p2IsAILocal ? "1" : "0");
+  WriteLog("🔁 Heroes swapped! Player $firstPlayerChooser will choose who goes first.", highlight: true, highlightColor: "darkblue");
+  WriteGameFile();
+  $turn[0] = "REMATCH";
+  include "WriteGamestate.php";
+  $currentTime = round(microtime(true) * 1000);
+  SetCachePiece($gameName, 2, $currentTime);
+  SetCachePiece($gameName, 3, $currentTime);
+  InvalidateGamestateCache($gameName);
+  GamestateUpdated($gameName);
+  exit;
+} else if ($winner != 0 && ($turn[0] ?? "") != "YESNO") {
+  $inGameStatus = $GameStatus_Over;
+  $turn[0] = "OVER";
+  $currentPlayer = 1;
+  // Clear events to prevent infinite event loops when game is over
+  global $events;
+  $events = [];
+}
+
+CombatDummyAI(); //Only does anything if applicable
+if ($p2IsAI == "1") {
+  EncounterAI();
+}
+CacheCombatResult();
+
+if (!IsGameOver()) {
+  $update = time() - intval($lastUpdateTime);
+  switch ($playerID) {
+    case 1:
+      $p1TotalTime = is_numeric($p1TotalTime) ? $p1TotalTime + $update : $update;
+      break;
+    case 2:
+      $p2TotalTime = is_numeric($p2TotalTime) ? $p2TotalTime + $update : $update;
+      break;
+  }
+  $lastUpdateTime = time();
+}
+
+//Now write out the game state
+if (!$skipWriteGamestate) {
+  if(!IsModeAsync($mode))
+  {
+    $currentTime = round(microtime(true) * 1000);
+    SetCachePiece($gameName, 12, "0");
+    SetCachePiece($gameName, 2, $currentTime);
+    SetCachePiece($gameName, 3, $currentTime);
+  }
+  DoGamestateUpdate();
+  include "WriteGamestate.php";
+}
+
+// Consolidate backup operations
+if ($makeCheckpoint) MakeGamestateBackup();
+if ($makeBlockBackup) MakeGamestateBackup("preBlockBackup.txt");
+if ($MakeStartTurnBackup) MakeStartTurnBackup();
+if ($MakeStartGameBackup) MakeGamestateBackup("origGamestate.txt");
+
+InvalidateGamestateCache($gameName); // Clear cached gamestate once after all updates
+GamestateUpdated($gameName);
+
+exit;

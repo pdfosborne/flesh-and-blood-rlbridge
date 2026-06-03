@@ -1,0 +1,594 @@
+<?php
+
+function PlayAlly($cardID, $player, $subCards = "-", $number = 1, $isToken = false, $firstTransform = true, $tapped = 0, $from = "-", $playerSource = "-")
+{
+  global $EffectContext;
+  $otherPlayer = $player == 1 ? 2 : 1;
+  if ($playerSource == "-") $playerSource = $player;
+  if (TypeContains($cardID, "T", $player)) $isToken = true;
+  $numMinusTokens = 0;
+  $numMinusTokens = CountCurrentTurnEffects("ripple_away_blue", $player) + CountCurrentTurnEffects("ripple_away_blue", $otherPlayer);
+  if (TypeContains($EffectContext, "C", $player) && (SearchAurasForCard("preach_modesty_red", 1) != "" || SearchAurasForCard("preach_modesty_red", 2) != "")) {
+    WriteLog("🙇 " . CardLink("preach_modesty_red", "preach_modesty_red") . " prevents the creation of " . CardLink($cardID, $cardID));
+    return;
+  }
+  if ($numMinusTokens > 0 && $isToken && (TypeContains($EffectContext, "AA", $player) || TypeContains($EffectContext, "A", $player)) && $firstTransform) {
+    $number -= $numMinusTokens;
+    if ($number <= 0) {
+      WriteLog(CardLink("ripple_away_blue") . " prevented the creation of a " . CardLink($cardID) . " token");
+    } else {
+      WriteLog(CardLink("ripple_away_blue") . " reduced by 1 the creation of " . CardLink($cardID) . " tokens");
+    }
+  }
+  $allies = &GetAllies($player);
+  for ($i = 0; $i < $number; ++$i) {
+    $index = count($allies);
+    array_push($allies, $cardID);
+    array_push($allies, 2);
+    array_push($allies, AllyHealth($cardID));
+    array_push($allies, 0); //Frozen
+    array_push($allies, $subCards); //Subcards
+    array_push($allies, GetUniqueId($cardID, $player)); //Unique ID
+    array_push($allies, AllyEnduranceCounters($cardID)); //Endurance Counters
+    array_push($allies, 0); //Life Counters
+    array_push($allies, 1); //Ability/effect uses
+    array_push($allies, AllyPowerCounters($cardID)); //Power Counters
+    array_push($allies, 0); //Damage dealt to the opponent
+    array_push($allies, $tapped); //tapped
+    array_push($allies, AllySteamCounters($cardID)); //steam counters
+    array_push($allies, $from); //where it's played from
+    array_push($allies, 0); //Modifier - e.g "Temporary" for cards that get stolen for a turn.
+    if ($cardID == "ouvia") {
+      WriteLog(CardLink($cardID, $cardID) . " lets you transform up to 1 ash into an Ashwing.");
+      Transform($player, "Ash", "aether_ashwing", true);
+    }
+    if (HasCrank($cardID, $player)) Crank($player, $index, zone:"MYALLY");
+  }
+  if ($isToken) {
+    $ClassState = new ClassState($playerSource);
+    $ClassState->SetCreatedCardsThisTurn($ClassState->CreatedCardsThisTurn() + $number);
+  }
+  return count($allies) - AllyPieces();
+}
+
+function CheckAllyDeath($player)
+{
+  $allies = &GetAllies($player);
+  $countAllies = count($allies);
+  $allyPieces = AllyPieces();
+  for ($i = $countAllies - $allyPieces; $i >= 0; $i -= $allyPieces) {
+    if ($allies[$i + 2] <= 0) DestroyAlly($player, $i, false, true, $allies[$i + 5] ?? "");
+  }
+}
+
+function DestroyAlly($player, $index, $skipDestroy = false, $fromCombat = false, $uniqueID = "", $toBanished = false)
+{
+  if ($index < 0) return "";
+  $allies = &GetAllies($player);
+  $allyPieces = AllyPieces();
+  $otherPlayer = $player == 1 ? 2 : 1;
+  $owner = (($allies[$index+14] ?? "") == "Temporary") ? $otherPlayer : $player;
+  if (!$skipDestroy) AllyDestroyedAbility($player, $index);
+  RemoveAllyEffects($player, $uniqueID);
+  if (IsSpecificAllyAttacking($player, $index)) {
+    CloseCombatChain();
+  }
+  $cardID = $allies[$index];
+  AllyAddGraveyard($owner, $cardID, toBanished:$toBanished);
+  AllyAddGraveyard($owner, $allies[$index + 4], toBanished:$toBanished);
+  for ($j = $index + $allyPieces - 1; $j >= $index; --$j) unset($allies[$j]);
+  $allies = array_values($allies);
+  return $cardID;
+}
+
+function RemoveAllyEffects($player, $uniqueID)
+{
+  $otherPlayer = $player == 1 ? 2 : 1;
+  if ($uniqueID == SearchCurrentTurnEffects("chum_friendly_first_mate_yellow", $otherPlayer, returnUniqueID: true)) SearchCurrentTurnEffects("chum_friendly_first_mate_yellow", $otherPlayer, true);
+}
+
+function AllyAddGraveyard($player, $cardID, $toBanished=false)
+{
+  if ($cardID == "-") return;
+  if (!TypeContains($cardID, "T")) {
+    if (SubtypeContains($cardID, "Ash", $player)) AddGraveyard($cardID, $player, "PLAY", $player);
+    $id = match($cardID) {
+      "suraya_archangel_of_erudition" => "figment_of_erudition_yellow",
+      "themis_archangel_of_judgment" => "figment_of_judgment_yellow",
+      "aegis_archangel_of_protection" => "figment_of_protection_yellow",
+      "sekem_archangel_of_ravages" => "figment_of_ravages_yellow",
+      "avalon_archangel_of_rebirth" => "figment_of_rebirth_yellow",
+      "metis_archangel_of_tenacity" => "figment_of_tenacity_yellow",
+      "victoria_archangel_of_triumph" => "figment_of_triumph_yellow",
+      "bellona_archangel_of_war" => "figment_of_war_yellow",
+      "dracona_optimai" => "invoke_dracona_optimai_red",
+      "tomeltai" => "invoke_tomeltai_red",
+      "dominia" => "invoke_dominia_red",
+      "azvolai" => "invoke_azvolai_red",
+      "cromai" => "invoke_cromai_red",
+      "kyloria" => "invoke_kyloria_red",
+      "miragai" => "invoke_miragai_red",
+      "nekria" => "invoke_nekria_red",
+      "ouvia" => "invoke_ouvia_red",
+      "themai" => "invoke_themai_red",
+      "vynserakai" => "invoke_vynserakai_red",
+      "yendurai" => "invoke_yendurai_red",
+      "suraya_archangel_of_knowledge" => "invoke_suraya_yellow",
+      "polly_cranka_ally" => "polly_cranka",
+      "sticky_fingers_ally" => "sticky_fingers",
+      default => $cardID
+    };
+    if (!$toBanished) AddGraveyard($id, $player, "PLAY", $player);
+    else BanishCardForPlayer($id, $player, "PLAY");
+  }
+}
+
+function AllyHealth($cardID)
+{
+  $cardID = BlindCard($cardID, true);
+  return match($cardID) {
+    "polly_cranka_ally" => 1,
+    "sticky_fingers_ally" => 2,
+    "gallow_end_of_the_line_yellow" => 3, //missing from fabcube
+    "boo_resident_spook_yellow" => 2, //missing from fabcube
+    "bubba_lubba_run_aground_yellow" => 5, //missing from fabcube
+    default => GeneratedCharacterHealth($cardID)
+  };
+}
+
+function AllyDestroyedAbility($player, $index)
+{
+  global $mainPlayer;
+  $allies = &GetAllies($player);
+  $cardID = $allies[$index];
+  switch ($cardID) {
+    case "cromai":
+      if ($player == $mainPlayer && $allies[$index + 8] > 0) {
+        GainActionPoints(1, $player);
+        --$allies[$index + 8];
+      }
+      break;
+    case "UPR551":
+      $charIndex = FindCharacterIndex($player, "ghostly_touch");
+      if ($charIndex > -1) DestroyCharacter($player, $charIndex);
+      break;
+    case "oysten_heart_of_gold_yellow":
+      PutItemIntoPlayForPlayer("gold", $player, isToken:true, from:$cardID, effectSource:$cardID);
+      break;
+    default:
+      break;
+  }
+  if (HasWard($cardID, $player)) WardPoppedAbility($player, $cardID);
+}
+
+function AllyStartTurnAbilities($player)
+{
+  $allies = &GetAllies($player);
+  $countAllies = count($allies);
+  $allyPieces = AllyPieces();
+  for ($i = 0; $i < $countAllies; $i += $allyPieces) {
+    switch ($allies[$i]) {
+      case "ouvia":
+        WriteLog(CardLink($allies[$i], $allies[$i]) . " lets you transform up to 1 ash into an ".CardLink("aether_ashwing", "aether_ashwing").".");
+        Transform($player, "Ash", "aether_ashwing", true);
+        break;
+      default:
+        break;
+    }
+  }
+}
+
+function AllyEnduranceCounters($cardID)
+{
+  switch ($cardID) {
+    case "yendurai":
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+function AllyPowerCounters($cardID)
+{
+  switch ($cardID) {
+    case "bubba_lubba_run_aground_yellow":
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+function AllySteamCounters($cardID)
+{
+  switch ($cardID) {
+    case "polly_cranka_ally":
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+function AllyDamagePrevention($player, $index, $damage, $type = "", $source = "-")
+{
+  global $currentTurnEffects;
+  $allies = &GetAllies($player);
+  $cardID = $allies[$index];
+  $preventedDamage = 0;
+  $canBePrevented = CanDamageBePrevented($player, $damage, $type, $source);
+  $countCurrentTurnEffects = count($currentTurnEffects);
+  $currentTurnEffectPieces = CurrentTurnEffectPieces();
+  //checking for effects that prevent damage on allies
+  for ($i = $countCurrentTurnEffects - $currentTurnEffectPieces; $i >= 0; $i -= $currentTurnEffectPieces) {
+    if ($preventedDamage < $damage && $currentTurnEffects[$i + 1] == $player) {
+      switch ($currentTurnEffects[$i]) {
+        case "sawbones_dock_hand_yellow":
+          if(ClassContains($cardID, "PIRATE", $player)) {
+            if ($canBePrevented) $preventedDamage += 1;
+            RemoveCurrentTurnEffect($i);
+          }
+          break;
+        case "light_up_the_leaves_red":
+          if ($source == $currentTurnEffects[$i + 2]) {
+            if ($canBePrevented && $type == "ARCANE") {
+              $sourceDamage = $damage;
+              $preventedDamage += $currentTurnEffects[$i + 3];
+              $currentTurnEffects[$i + 3] -= $sourceDamage;
+              if ($currentTurnEffects[$i + 3] <= 0) $remove = true;
+              if ($source == "spectral_shield" || $source == "runechant" || $source == "aether_ashwing") $remove = true;
+              if (!IsStaticType(CardType($source))) $remove = true;
+            }
+          }
+        default:
+          break;
+      }
+    }
+    elseif ($preventedDamage < $damage) {
+      switch ($currentTurnEffects[$i]) {
+        case "light_up_the_leaves_red":
+          if ($source == $currentTurnEffects[$i + 2]) {
+            if ($canBePrevented && $type == "ARCANE") {
+              $sourceDamage = $damage;
+              $preventedDamage += $currentTurnEffects[$i + 3];
+              $currentTurnEffects[$i + 3] -= $sourceDamage;
+              if ($currentTurnEffects[$i + 3] <= 0) $remove = true;
+              if ($source == "spectral_shield" || $source == "runechant" || $source == "aether_ashwing") $remove = true;
+              if (!IsStaticType(CardType($source))) $remove = true;
+            }
+          }
+        default:
+          break;
+      }
+    }
+  }
+  //checking for allies that can prevent damage
+  switch ($cardID) {
+    case "yendurai":
+      if ($allies[$index + 6] > 0) {
+        if ($damage > 0) --$allies[$index + 6];
+        if ($canBePrevented) $preventedDamage += 3;
+      }
+      break;
+    default:
+      break;
+  }
+  if ($preventedDamage > 0 && SearchCurrentTurnEffects("vambrace_of_determination", $player) != "") {
+    $preventedDamage -= 1;
+    SearchCurrentTurnEffects("vambrace_of_determination", $player, remove:true);
+  }
+  $damage -= $preventedDamage;
+  if ($damage < 0) $damage = 0;
+  return $damage;
+}
+
+//NOTE: This is for ally abilities that trigger when any ally attacks (for example miragai GRANTS an ability)
+function AllyAttackAbilities($attackID)
+{
+  global $mainPlayer, $CS_NumDragonAttacks;
+  $allies = &GetAllies($mainPlayer);
+  $countAllies = count($allies);
+  $allyPieces = AllyPieces();
+  for ($i = 0; $i < $countAllies; $i += $allyPieces) {
+    switch ($allies[$i]) {
+      case "miragai":
+        if ($allies[$i + 8] > 0 && DelimStringContains(CardSubType($attackID), "Dragon") && GetClassState($mainPlayer, $CS_NumDragonAttacks) <= 1) {
+          AddCurrentTurnEffect("miragai", $mainPlayer);
+          --$allies[$i + 8];
+        }
+        break;
+      default:
+        break;
+    }
+  }
+}
+
+//NOTE: This is for the actual attack abilities that allies have
+function SpecificAllyAttackAbilities($attackID)
+{
+  global $mainPlayer, $combatChainState, $CCS_WeaponIndex, $defPlayer, $CS_ArcaneTargetsSelected;
+  $allies = &GetAllies($mainPlayer);
+  $i = $combatChainState[$CCS_WeaponIndex];
+  if (isset($allies[$i]) && $attackID == $allies[$i]) {
+    switch ($allies[$i]) {
+      case "dracona_optimai":
+      case "tomeltai":
+      case "dominia":
+        if (IsHeroAttackTarget()) {
+          AddLayer("TRIGGER", $mainPlayer, $allies[$i], "-", "-", $allies[$i + 5]);
+        }
+        return "";
+      case "azvolai":
+        AddDecisionQueue("PASSPARAMETER", $mainPlayer, $allies[$i]);
+        AddDecisionQueue("SETDQVAR", $mainPlayer, "0", 1);
+        AddDecisionQueue("FINDINDICES", $mainPlayer, "ARCANETARGET,2", 1);
+        AddDecisionQueue("SETDQCONTEXT", $mainPlayer, "Choose a first target for Azvolai", 1);
+        if (ShouldAutotargetOpponent($mainPlayer) && CountAllies($mainPlayer) <= 0 && CountAllies($defPlayer) <= 0) {
+          AddDecisionQueue("PASSPARAMETER", $mainPlayer, "THEIRCHAR-0", 1);
+        }
+        AddDecisionQueue("MAYCHOOSEMULTIZONE", $mainPlayer, "<-", 1);
+        AddDecisionQueue("SETDQVAR", $mainPlayer, "0", 1);
+        AddDecisionQueue("SETCLASSSTATE", $mainPlayer, $CS_ArcaneTargetsSelected, 1);
+        AddDecisionQueue("FINDINDICES", $mainPlayer, "ARCANETARGET,2", 1);
+        AddDecisionQueue("SETDQCONTEXT", $mainPlayer, "Choose a second target for Azvolai", 1);
+        AddDecisionQueue("MAYCHOOSEMULTIZONE", $mainPlayer, "<-", 1);
+        AddDecisionQueue("APPENDLASTRESULT", $mainPlayer, ",{0}", 1);
+        AddDecisionQueue("SETCLASSSTATE", $mainPlayer, $CS_ArcaneTargetsSelected, 1);
+        AddDecisionQueue("ADDTRIGGER", $mainPlayer, $allies[$i], 1);
+        
+        AddDecisionQueue("ELSE", $mainPlayer, "-");
+        AddDecisionQueue("GETCLASSSTATE", $mainPlayer, $CS_ArcaneTargetsSelected, 1);
+        AddDecisionQueue("ADDTRIGGER", $mainPlayer, $allies[$i], 1);
+        AddDecisionQueue("PASSPARAMETER", $mainPlayer, "-");
+        AddDecisionQueue("SETCLASSSTATE", $mainPlayer, $CS_ArcaneTargetsSelected);
+        return "";
+      case "cromai":
+        if ($attackID == $allies[$i] && $allies[$i + 8] > 0) {
+          GainActionPoints(1);
+          --$allies[$i + 8];
+          WriteLog("Gained 1 action point from " . CardLink($allies[$i], $allies[$i]));
+        }
+        break;
+      case "suraya_archangel_of_erudition":
+      case "themis_archangel_of_judgment":
+      case "aegis_archangel_of_protection":
+      case "avalon_archangel_of_rebirth":
+      case "metis_archangel_of_tenacity":
+      case "victoria_archangel_of_triumph":
+      case "bellona_archangel_of_war":
+        AddLayer("TRIGGER", $mainPlayer, $attackID);
+        break;
+      case "sekem_archangel_of_ravages":
+        SetArcaneTarget($mainPlayer, $attackID, 2);
+        AddDecisionQueue("SHOWSELECTEDTARGET", $mainPlayer, "<-", 1);
+        AddDecisionQueue("ADDTRIGGER", $mainPlayer, $attackID, 1);
+        break;
+      default:
+        break;
+    }
+  }
+}
+
+function AllyDamageTakenAbilities($player, $i)
+{
+  $allies = &GetAllies($player);
+  switch ($allies[$i]) {
+    case "nekria":
+      $allies[$i + 2] -= 1;
+      $allies[$i + 7] -= 1;
+      PutPermanentIntoPlay($player, "ash");
+      WriteLog(CardLink($allies[$i], $allies[$i]) . " got a -1 life counter and created an ".CardLink("ash", "ash")." token");
+      break;
+    default:
+      break;
+  }
+  $otherPlayer = $player == 1 ? 2 : 1;
+  $otherAuras = &GetAuras($otherPlayer);
+  $countOtherAuras = count($otherAuras);
+  $auraPieces = AuraPieces();
+  for ($i = $countOtherAuras - $auraPieces; $i >= 0; $i -= $auraPieces) {
+    $remove = 0;
+    switch ($otherAuras[$i]) {
+      // case "bloodspill_invocation_red": //need to check if damage was dealt by an AA card?
+      // case "bloodspill_invocation_yellow":
+      // case "bloodspill_invocation_blue":
+      case "arcane_cussing_red":
+      case "arcane_cussing_yellow":
+      case "arcane_cussing_blue":
+        $remove = 1;
+        break;
+      case "ley_line_of_the_old_ones_blue":
+        AddLayer("TRIGGER", $otherPlayer, $otherAuras[$i]);
+        break;
+      default:
+        break;
+    }
+    if ($remove) DestroyAura($otherPlayer, $i);
+  }
+}
+
+function AllyTakeDamageAbilities($player, $index, $damage, $preventable)
+{
+  $allies = &GetAllies($player);
+  //CR 2.1 6.4.10f If an effect states that a prevention effect can not prevent the damage of an event, the prevention effect still applies to the event but its prevention amount is not reduced. Any additional modifications to the event by the prevention effect still occur.
+  $remove = false;
+  $preventedDamage = 0;
+  if ($damage > 0 && HasWard($allies[$index], $player)) {
+    if ($preventable) $preventedDamage += WardAmount($allies[$index], $player);
+    $remove = true;
+    WardPoppedAbility($player, $allies[$index]);
+  }
+  switch ($allies[$index]) {
+    default:
+      break;
+  }
+  if ($remove) DestroyAlly($player, $index, uniqueID: $allies[$index + 5]);
+  if ($preventedDamage > 0 && SearchCurrentTurnEffects("vambrace_of_determination", $player) != "") {
+    $preventedDamage -= 1;
+    SearchCurrentTurnEffects("vambrace_of_determination", $player, remove:true);
+  }
+  $damage -= $preventedDamage;
+  if ($damage <= 0) $damage = 0;
+  return $damage;
+}
+
+function AllyBeginEndTurnEffects()
+{
+  global $mainPlayer, $defPlayer;
+  //CR 2.0 4.4.3a Reset life for all allies
+  $mainAllies = &GetAllies($mainPlayer);
+  UpdateAllyHealth($mainAllies);
+
+  $defAllies = &GetAllies($defPlayer);
+  UpdateAllyHealth($defAllies);
+
+  $mainChar = &GetPlayerCharacter($mainPlayer);
+  UpdatePerchedAllyHealth($mainChar);
+
+  $defChar = &GetPlayerCharacter($defPlayer);
+  UpdatePerchedAllyHealth($defChar);
+}
+
+function UpdateAllyHealth(&$allies)
+{
+  $pieces = AllyPieces();
+  $count = count($allies);
+  for ($i = 0; $i < $count; $i += $pieces) {
+    if(isset($allies[$i + 1]) && $allies[$i + 1] != 0) {
+      $allies[$i + 1] = 2;
+      $allies[$i + 2] = AllyHealth($allies[$i]) + $allies[$i + 7];
+      $allies[$i + 8] = 1;
+      $allies[$i + 10] = 0;
+    }
+  }
+}
+
+function UpdatePerchedAllyHealth(&$char)
+{
+  $pieces = CharacterPieces();
+  $count = count($char);
+  for ($i = 0; $i < $count; $i += $pieces) {
+    if(HasPerched($char[$i]) && isset($char[$i + 1]) && $char[$i + 1] != 0) {
+      $char[$i + 4] = 0;
+    }
+  }
+}
+
+function AllyEndTurnAbilities()
+{
+  global $mainPlayer;
+  $allies = &GetAllies($mainPlayer);
+  $countAllies = count($allies);
+  $allyPieces = AllyPieces();
+  for ($i = $countAllies - $allyPieces; $i >= 0; $i -= $allyPieces) {
+    //untap
+    Tap("MYALLY-$i", $mainPlayer, 0, endStepUntap:true);
+    switch ($allies[$i]) {
+      case "UPR551":
+        DestroyAlly($mainPlayer, $i, true);
+        break;
+      default:
+        break;
+    }
+  }
+}
+
+function AllyPayAdditionalCosts($cardIndex, $from)
+{
+  global $currentPlayer;
+  $ally = &GetAllies($currentPlayer);
+  $cardID = $ally[$cardIndex];
+  // $card = GetClass($cardID, $currentPlayer);
+  // if ($card != "-") $card->PayAdditionalCosts($from, $cardIndex);
+  switch ($cardID) {
+    case "chum_friendly_first_mate_yellow":
+    case "riggermortis_yellow":
+    case "swabbie_yellow":
+    case "limpit_hop_a_long_yellow":
+    case "sawbones_dock_hand_yellow":
+    case "chowder_hearty_cook_yellow":
+    case "wailer_humperdinck_yellow":
+    case "barnacle_yellow":
+    case "kelpie_tangled_mess_yellow":
+    case "scooba_salty_sea_dog_yellow":
+    case "shelly_hardened_traveler_yellow":
+    case "moray_le_fay_yellow":
+    case "sticky_fingers_ally":
+    case "oysten_heart_of_gold_yellow":
+    case "anka_drag_under_yellow":
+      Tap("MYALLY-$cardIndex", $currentPlayer);
+      $ally[$cardIndex + 1] = 2;//Not once per turn effects
+      break;
+    case "polly_cranka_ally":
+      Tap("MYALLY-$cardIndex", $currentPlayer);
+      if ($ally[$cardIndex+14] == "Temporary") {
+        //indicator to  give it back to the opponent
+        AddCurrentTurnEffect("polly_cranka", $currentPlayer);
+      }
+      DestroyAlly($currentPlayer, $cardIndex, skipDestroy:true, toBanished:true);
+      
+      break;
+    case "cutty_shark_quick_clip_yellow":
+      if(GetResolvedAbilityType($cardID, $from, $currentPlayer) == "AA") {
+        Tap("MYALLY-$cardIndex", $currentPlayer);
+        if($ally[$cardIndex + 8] > 0) $ally[$cardIndex + 1] = 2;//Not once per turn effects
+      }
+      else {
+        $ally[$cardIndex + 8] = 0;//Once per turn ability used
+      }
+      break; 
+    default: break;
+  }
+}
+
+function GetPerchedAllies($player)
+{
+  $perchedAllies = [];
+  $char = GetPlayerCharacter($player);
+  $countChar = count($char);
+  $charPieces = CharacterPieces();
+  for ($i = 0; $i < $countChar; $i += $charPieces) {
+    if (HasPerched($char[$i]) && $char[$i + 1] != 0) array_push($perchedAllies, $i);
+  }
+  return implode(",", $perchedAllies);
+}
+
+function StealAlly($srcPlayer, $index, $destPlayer, $from, $mod=0, $tapState=0)
+{
+  $srcAlly = &GetAllies($srcPlayer);
+  $destAlly = &GetAllies($destPlayer);
+  $allyPieces = AllyPieces();
+  for ($i = 0; $i < $allyPieces; ++$i) {
+    if ($i == 11 && $tapState != "-") {
+      $srcAlly[$index + $i] = $tapState;
+    }
+    if($i == 14 && $mod != 0) {
+      $srcAlly[$index + $i] = $mod; //14 - Modifier or e.g "Temporary" for cards that get stolen for a turn.
+    }
+    if($i == 13) //13 - Where it's played from ... Important for where it'll go when destroyed for example.
+    {
+      if (strpos($srcAlly[$index + $i], 'MY') === 0) {
+          $srcAlly[$index + $i] = 'THEIR' . substr($srcAlly[$index + $i], 2);
+      } elseif (strpos($srcAlly[$index + $i], 'THEIR') === 0) {
+          $srcAlly[$index + $i] = 'MY' . substr($srcAlly[$index + $i], 5);
+      } else {
+          $srcAlly[$index + $i] = 'THEIR' . $srcAlly[$index + $i];
+      }
+    }
+    array_push($destAlly, $srcAlly[$index + $i]);
+    unset($srcAlly[$index + $i]);
+  }
+  $srcAlly = array_values($srcAlly);
+}
+
+function DamageAlly($targetPlayer, $targetInd, $damage, $type) {
+  $allies = &GetAllies($targetPlayer);
+  if ($allies[$targetInd + 6] > 0) {
+    $damage -= 3;
+    if ($damage < 0) $damage = 0;
+    --$allies[$targetInd + 6];
+  }
+  $damage = AllyDamagePrevention($targetPlayer, $targetInd, $damage, $type);
+  $allies[$targetInd + 2] -= $damage;
+  if ($damage > 0) AllyDamageTakenAbilities($targetPlayer, $targetInd);
+  if ($allies[$targetInd + 2] <= 0) DestroyAlly($targetPlayer, $targetInd, uniqueID: $allies[$targetInd + 5]);
+  return $damage;
+}
