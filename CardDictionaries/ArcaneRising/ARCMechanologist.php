@@ -1,0 +1,297 @@
+<?php
+
+function ARCMechanologistPlayAbility($cardID, $from, $resourcesPaid, $target = "-", $additionalCosts = "")
+{
+  global $currentPlayer, $CS_NumBoosted, $actionPoints, $CS_PlayIndex;
+  global $CombatChain, $CS_LastDynCost;
+  $rv = "";
+  switch($cardID) {
+    case "teklo_plasma_pistol":
+      $abilityType = GetResolvedAbilityType($cardID);
+      if($abilityType == "A")
+      {
+        $index = GetClassState($currentPlayer, $CS_PlayIndex);
+        $character = new Character($currentPlayer, $index);
+        $character->numCounters = 1;
+        $character->Finished();
+      }
+      return "";
+    case "teklo_foundry_heart":
+      $deck = new Deck($currentPlayer);
+      for($i = 0; $i < 2 && !$deck->Empty(); ++$i) {
+        $banished = $deck->BanishTop();
+        if(ClassContains($banished, "MECHANOLOGIST", $currentPlayer)) GainResources($currentPlayer, 1);
+      }
+      return "";
+    case "achilles_accelerator":
+      GainActionPoints(1, $currentPlayer);
+      return "";
+    case "high_octane_red":
+      Draw($currentPlayer);
+      AddCurrentTurnEffect($cardID, $currentPlayer);
+      return "";
+    case "spark_of_genius_yellow":
+      AddDecisionQueue("MULTIZONEINDICES", $currentPlayer, "MYDECK:subtype=Item;class=MECHANOLOGIST;minCost=" . (GetClassState($currentPlayer, $CS_LastDynCost) / 2) . ";maxCost=" . (GetClassState($currentPlayer, $CS_LastDynCost) / 2));
+      AddDecisionQueue("MAYCHOOSEMULTIZONE", $currentPlayer, "<-", 1);
+      AddDecisionQueue("MZREMOVE", $currentPlayer, "-", 1);
+      AddDecisionQueue("PUTPLAY", $currentPlayer, 0, 1);
+      AddDecisionQueue("SHUFFLEDECK", $currentPlayer, "-");
+      if(GetClassState($currentPlayer, $CS_NumBoosted) > 0) AddDecisionQueue("DRAW", $currentPlayer, "-");
+      return "";
+    case "induction_chamber_red":
+      if($from == "PLAY") {
+        $items = &GetItems($currentPlayer);
+        if($CombatChain->HasCurrentLink()) GiveAttackGoAgain();
+        else $items[GetClassState($currentPlayer, $CS_PlayIndex)+1] = 1;
+      }
+      return $rv;
+    case "pour_the_mold_red": case "pour_the_mold_yellow": case "pour_the_mold_blue":
+      if($cardID == "pour_the_mold_red") $maxCost = 2;
+      else if($cardID == "pour_the_mold_yellow") $maxCost = 1;
+      else $maxCost = 0;
+      AddDecisionQueue("MULTIZONEINDICES", $currentPlayer, "MYHAND:subtype=Item;maxCost=$maxCost;class=MECHANOLOGIST");
+      AddDecisionQueue("MAYCHOOSEMULTIZONE", $currentPlayer, "<-", 1);
+      AddDecisionQueue("MZREMOVE", $currentPlayer, "-", 1);
+      AddDecisionQueue("PUTPLAY", $currentPlayer, (GetClassState($currentPlayer, $CS_NumBoosted) > 0 ? 1 : 0), 1);
+      return "";
+    case "aether_sink_yellow":
+      $index = GetClassState($currentPlayer, $CS_PlayIndex);
+      $items = &GetItems($currentPlayer);
+      if($index != -1) {
+        $items[$index+1] = ($items[$index + 1] == 0 ? 1 : 0);
+        if($items[$index+1] == 0) {
+          AddCurrentTurnEffect($cardID, $currentPlayer);
+          $items[$index+2] = 2;
+        }
+      }
+      return $rv;
+    case "convection_amplifier_red":
+      if ($from == "PLAY") {
+        $index = GetClassState($currentPlayer, $CS_PlayIndex);
+        $items = &GetItems($currentPlayer);
+        if($index != -1) {
+          AddCurrentTurnEffect($cardID, $currentPlayer);
+          --$items[$index+1];
+          if($items[$index+1] <= 0) DestroyItemForPlayer($currentPlayer, $index);
+          $rv = "Gives your next attack this turn Dominate";
+        }
+      }
+      return $rv;
+    case "locked_and_loaded_red": case "locked_and_loaded_yellow": case "locked_and_loaded_blue":
+      AddCurrentTurnEffect($cardID, $currentPlayer);
+      $boosted = GetClassState($currentPlayer, $CS_NumBoosted) > 0;
+      if($boosted) Opt($cardID, 1);
+      return "";
+    case "dissipation_shield_yellow":
+      AddCurrentTurnEffect($cardID . "-" . $additionalCosts, $currentPlayer, "PLAY");
+      $rv = "";
+      return $rv;
+    case "optekal_monocle_blue":
+      if($from == "PLAY") {
+        $index = GetClassState($currentPlayer, $CS_PlayIndex);
+        $items = &GetItems($currentPlayer);
+        if($index != -1) {
+          PlayerOpt($currentPlayer, 1);
+          --$items[$index+1];
+          if($items[$index+1] <= 0) DestroyItemForPlayer($currentPlayer, $index);
+        }
+      }
+      return $rv;
+    default: return "";
+  }
+}
+
+function ARCMechanologistHitEffect($cardID, $from)
+{
+  global $mainPlayer, $combatChainState, $CCS_GoesWhereAfterLinkResolves;
+  switch ($cardID) {
+    case "pedal_to_the_metal_red": case "pedal_to_the_metal_yellow": case "pedal_to_the_metal_blue":
+      AddCurrentTurnEffectFromCombat($cardID, $mainPlayer);
+      break;
+    case "over_loop_red": case "over_loop_yellow": case "over_loop_blue":
+      if(substr($from, 0, 5) != "THEIR") $combatChainState[$CCS_GoesWhereAfterLinkResolves] = "BOTDECK";
+      else $combatChainState[$CCS_GoesWhereAfterLinkResolves] = "THEIRBOTDECK";
+      break;
+    default: break;
+  }
+  return "";
+}
+
+function HasBoost($cardID, $player)
+{
+  if(SearchCurrentTurnEffects("evo_speedslip_blue", $player) && TypeContains($cardID, "AA", $player)) return true;
+  return GeneratedHasBoost($cardID);
+}
+
+function Boost($cardID)
+{
+  global $currentPlayer;
+  if(SearchCurrentTurnEffects("evo_speedslip_blue", $currentPlayer, true) && HasBoost($cardID, $currentPlayer)) {
+      $amountBoostChoices = "0,1,2";
+      AddDecisionQueue("SETDQCONTEXT", $currentPlayer, "Choose how many times you want to activate boost on " . CardLink($cardID, $cardID));
+      AddDecisionQueue("BUTTONINPUT", $currentPlayer, $amountBoostChoices);
+      AddDecisionQueue("OP", $currentPlayer, "BOOST-".$cardID, 1);
+  } else {
+    AddDecisionQueue("YESNO", $currentPlayer, "if_you_want_to_boost");
+    AddDecisionQueue("NOPASS", $currentPlayer, "-", 1);
+    AddDecisionQueue("OP", $currentPlayer, "BOOST-".$cardID, 1);
+  }
+}
+
+function DoBoost($player, $cardID, $boostCount=1)
+{
+  global $combatChainState, $CS_NumBoosted, $CCS_NumBoosted, $CCS_IsBoosted, $CS_EvosBoosted, $Stack;
+  $deck = new Deck($player);
+  $isGoAgainGranted = false;
+  for ($i = 0; $i < $boostCount; $i++) {
+    if($deck->Empty()) { WriteLog("⚠️ Cannot boost!"); return; }
+    GainActionPoints(CountCurrentTurnEffects("high_octane_red", $player), $player);
+    GainResources($player, CountCurrentTurnEffects("heavy_industry_power_plant", $player));
+    $boostedCardID = $deck->Top(remove:true);
+    ItemBoostEffects();
+    SelfBoostEffects($player, $boostedCardID, $cardID);
+    CharacterBoostAbilities($player);
+    OnBoostedEffects($player, $boostedCardID);
+    BanishCardForPlayer($boostedCardID, $player, "DECK", "BOOST");
+    $banish = GetBanish($player);
+    $topInd = count($banish) - BanishPieces(); // index of card that just got banished
+    if (SubtypeContains($boostedCardID, "Evo")) {
+      IncrementClassState($player, $CS_EvosBoosted);
+    }
+    if (CardNameContains($boostedCardID, "Hyper Driver", $player) && SearchCharacterActive($player, "hyper_x3")) {
+      //give it the uid of the banished card as a target
+      AddLayer("TRIGGER", $player, "hyper_x3", $banish[$topInd + 2]);
+    }
+    if(SubtypeContains($boostedCardID, "Item") && CardCost($boostedCardID) <= 2 && ClassContains($boostedCardID, "MECHANOLOGIST", $player) && SearchCurrentTurnEffects("bios_update_red-2", $player, true)) {
+      //give it the uid of the banished card as a target
+      AddLayer("TRIGGER", $player, "bios_update_red", $banish[$topInd + 2]);
+    }
+    if(SearchCurrentTurnEffects("viziertronic_model_i", $player)) {
+      AddLayer("TRIGGER", $player, "viziertronic_model_i");
+    }
+    $char = GetPlayerCharacter($player);
+    for ($j = 0; $j < count($char); $j += CharacterPieces()) {
+      if ($char[$j + 1] == 2) {
+        switch ($char[$j]) {
+          case "drive_brake":
+            if (CardNameContains($boostedCardID, "Hyper Driver", $player)) {
+              AddLayer("TRIGGER", $player, $char[$j], $j);
+            }
+            break;
+          case "fist_pump":
+            if (CardNameContains($boostedCardID, "Hyper Driver", $player)) {
+              AddDecisionQueue("MULTIZONEINDICES", $player, "MYCHAR:subtype=Wrench&LAYER:subtype=Wrench");
+              AddDecisionQueue("SETDQCONTEXT", $player, "Choose a Wrench to " . CardLink("fist_pump"));
+              AddDecisionQueue("CHOOSEMULTIZONE", $player, "<-", 1);
+              AddDecisionQueue("SHOWSELECTEDTARGET", $player, "<-", 1);
+              AddDecisionQueue("ADDTRIGGER", $player, $char[$j], 1);
+            }
+            break;
+          default:
+            break;
+        }
+      }
+    }
+    $grantsGA = ClassContains($boostedCardID, "MECHANOLOGIST", $player);
+    WriteLog("Boost banished " . CardLink($boostedCardID, $boostedCardID) . " and " . ($grantsGA ? "gets" : "doesn't get") . " <b>go again</b>.");
+    IncrementClassState($player, $CS_NumBoosted);
+    ++$combatChainState[$CCS_NumBoosted];
+    $combatChainState[$CCS_IsBoosted] = 1;
+    if($grantsGA) {
+      GiveAttackGoAgain();
+      $isGoAgainGranted = true;
+    }
+  }
+  return $isGoAgainGranted;
+}
+
+function OnBoostedEffects($player, $boosted)
+{
+  switch($boosted)
+  {
+    case "big_bertha_red": case "big_bertha_yellow": case "big_bertha_blue":
+      AddLayer("TRIGGER", $player, $boosted);
+      break;
+    case "fast_and_furious_red":
+      AddLayer("TRIGGER", $player, $boosted);
+      break;
+    default: break;
+  }
+}
+
+function SelfBoostEffects($player, $boosted, $cardID)
+{
+  switch($cardID) {
+    case "sprocket_rocket_red": case "sprocket_rocket_yellow": case "sprocket_rocket_blue":
+    case "dumpster_dive_red": case "dumpster_dive_yellow": case "dumpster_dive_blue":
+      if(SubtypeContains($boosted, "Item", $player) || IsEquipment($boosted, $player)) AddCurrentTurnEffect($cardID, $player);
+      break;
+    default: break;
+  }
+}
+
+function ItemBoostEffects()
+{
+  global $currentPlayer;
+  $Items = new Items($currentPlayer);
+  for ($i = $Items->NumItems() - 1; $i >=0; $i -= 1) {
+    $Item = $Items->Card($i, true);
+    switch ($Item->CardID()) {
+      case "hyper_driver_red": case "hyper_driver_yellow": case "hyper_driver_blue": case "hyper_driver":
+        if($Item->Status() == 2) {
+          AddLayer("TRIGGER", $currentPlayer, $Item->CardID(), $Item->Index(), "-", $Item->UniqueID());
+          $Item->SetStatus(1);
+        }
+        break;
+      case "teklo_pounder_blue":
+        if($Item->Status() == 2) {
+          WriteLog(CardLink($Item->CardID(), $Item->CardID()) . " gives the attack +2");
+          $Item->AddCounters(-1);
+          $Item->SetStatus(1);
+          AddCurrentTurnEffect("teklo_pounder_blue", $currentPlayer, "PLAY");
+          if($Item->NumCounters() <= 0) DestroyItemForPlayer($currentPlayer, $Item->Index());
+        }
+        break;
+      case "hadron_collider_red": case "hadron_collider_yellow": case "hadron_collider_blue":
+        AddLayer("TRIGGER", $currentPlayer, $Item->CardID(), $Item->Index(), "-", $Item->UniqueID());
+        break;
+    }
+  }
+}
+
+function EquipmentBoostEffect($player, $charID, $cardID) {
+  if (!FindCharacterIndex($player, "hyper_x3")) return false;
+  if (SearchCharacterForCard($player, $charID)) {
+    $chars = &GetPlayerCharacter($player);
+    $index = FindCharacterIndex($player, $charID);
+    AddSubcardToChar($chars, $index, $cardID);
+    OnBoostCardPutUnderCharacter($chars, $index, $charID, $player);
+    return true;
+  }
+  return false;
+}
+
+function OnBoostCardPutUnderCharacter(&$chars, $index, $charID, $player) {
+  switch ($charID) {
+    case "hyper_x3":
+      if ($chars[$index+1] != 1 && $chars[$index+2] >= 3) {
+        Draw($player, true, true);
+        $chars[$index+1] = 1;
+      }
+      break;
+    default:
+      break;
+  }
+}
+
+function AddSubcardToChar(&$chars, $index, $cardID) {
+  if (isSubcardEmpty($chars, $index)) $chars[$index+10] = $cardID;
+  else $chars[$index+10] = $chars[$index+10] . "," . $cardID;
+  $chars[$index+2]++;
+}
+
+function isSubcardEmpty($chars, $index)
+{
+  if (!isset($chars[$index+10])) return true;
+  return $chars[$index+10] == '-' || $chars[$index + 10] == "";
+}

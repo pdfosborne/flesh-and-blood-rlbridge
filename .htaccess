@@ -1,0 +1,60 @@
+# Case-insensitive routing for game API files
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  
+  # Allow direct access to AccountFiles directory (OAuth callbacks, etc)
+  RewriteCond %{REQUEST_URI} ^/AccountFiles/ [OR]
+  RewriteCond %{REQUEST_URI} ^/game/AccountFiles/
+  RewriteRule ^ - [L]
+  
+  # Redirect ads.txt to rev.iq external ads.txt (301 permanent redirect)
+  RewriteRule ^ads\.txt$ https://rev.iq/talishar.net/ads.txt [R=301,L]
+  
+  # Handle case-insensitive requests for game API endpoints
+  # processinput.php -> ProcessInput.php
+  RewriteCond %{REQUEST_FILENAME} !-f
+  RewriteCond %{REQUEST_FILENAME} !-d
+  RewriteRule ^(?i)processinput\.php$ ProcessInput.php [L,QSA]
+  
+  # getnextturn.php -> GetNextTurn.php
+  RewriteCond %{REQUEST_FILENAME} !-f
+  RewriteCond %{REQUEST_FILENAME} !-d
+  RewriteRule ^(?i)getnextturn\.php$ GetNextTurn.php [L,QSA]
+  
+  # getpopupapi.php -> GetPopupAPI.php
+  RewriteCond %{REQUEST_FILENAME} !-f
+  RewriteCond %{REQUEST_FILENAME} !-d
+  RewriteRule ^(?i)getpopupapi\.php$ GetPopupAPI.php [L,QSA]
+  
+  # joingame.php -> JoinGame.php
+  RewriteCond %{REQUEST_FILENAME} !-f
+  RewriteCond %{REQUEST_FILENAME} !-d
+  RewriteRule ^(?i)joingame\.php$ JoinGame.php [L,QSA]
+  
+  # joingameinput.php -> JoinGame.php (if it's an alias)
+  RewriteCond %{REQUEST_FILENAME} !-f
+  RewriteCond %{REQUEST_FILENAME} !-d
+  RewriteRule ^(?i)joingameinput\.php$ JoinGame.php [L,QSA]
+</IfModule>
+
+# compress text, html, javascript, css, xml:
+<IfModule mod_deflate.c>
+  AddOutputFilterByType DEFLATE text/plain
+  AddOutputFilterByType DEFLATE text/html
+  AddOutputFilterByType DEFLATE text/xmlin
+  AddOutputFilterByType DEFLATE text/css
+  AddOutputFilterByType DEFLATE application/xml
+  AddOutputFilterByType DEFLATE application/xhtml+xml
+  AddOutputFilterByType DEFLATE application/rss+xml
+  AddOutputFilterByType DEFLATE application/javascript
+  AddOutputFilterByType DEFLATE application/x-javascript
+  AddOutputFilterByType DEFLATE application/json
+  # Or, compress certain file types by extension:
+  <files *.html>
+  SetOutputFilter DEFLATE
+  </files>
+  # For Olders Browsers Which Can Not Handle Compression
+  BrowserMatch ^Mozilla/4 gzip-only-text/html
+  BrowserMatch ^Mozilla/4\.0[678] no-gzip
+  BrowserMatch \bMSIE !no-gzip !gzip-only-text/html
+</IfModule>

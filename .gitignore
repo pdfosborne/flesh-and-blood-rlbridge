@@ -1,0 +1,44 @@
+/CardImages/
+/Games/
+/Roguelike/Games/
+HostFiles/Redirector.php
+/HostFiles/Redirector.php
+DraftFiles/Games/46/gamelog.txt
+DraftFiles/Games/46/LimitedDeck.txt
+DraftFiles/Games/46/GameFile.txt
+DraftFiles/HostFiles/Counter.txt
+Nero's Levia Deck.txt
+HostFiles/GameIDCounter.txt
+/BugReports/
+Images/.DS_Store
+.DS_Store
+/SealedFiles
+includes/dbh.inc.php
+/Replays/
+WTRDraftFiles/HostFiles/Counter.txt
+.DS_Store
+CardDictionaries/.DS_Store
+Images/.DS_Store
+vendor
+.DS_Store
+CardDictionaries/.DS_Store
+Roguelike/HostFiles
+RogueLike/Games
+/mysql-data/
+/APIKeys/ApiKeys.php
+/APIKeys/APIKeys.php
+BugReports/CreateGameFailsafe.txt
+.idea
+APIKeys/APIKeys.php
+/APIKeys
+.env
+private_messaging_errors.log
+/__pycache__
+.claude/
+
+# Composer artifacts (created by composer-setup, not part of the project)
+composer.phar
+composer-setup.php
+
+# PHPUnit test runner cache
+.phpunit.result.cache
