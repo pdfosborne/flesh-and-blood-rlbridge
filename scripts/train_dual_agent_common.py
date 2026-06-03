@@ -316,6 +316,9 @@ def _run_one_episode(
     reset_out = env.reset(seed=seed)
     obs = _get(reset_out, "observation", reset_out)
     terminated = truncated = False
+    steps_taken = 0
+    final_p1_hp = final_p2_hp = final_turn_no = None
+    final_p1_deck = final_p2_deck = None
 
     for _ in range(max_steps):
         acting = env._acting_player_id
@@ -346,6 +349,19 @@ def _run_one_episode(
         truncated   = bool(_get(step_out, "truncated",  False))
         done        = terminated or truncated
         next_obs    = _get(step_out, "observation", obs)
+        steps_taken += 1
+        # Track final game state for diagnostics
+        try:
+            _s = json.loads(next_obs) if isinstance(next_obs, str) else next_obs
+            # playerHealth is from acting player's POV — use env's tracked HP instead
+            final_p1_hp  = int(env._player_hp)
+            final_p2_hp  = int(env._opp_hp)
+            final_turn_no = int(_s.get("turnNo", 0) or 0)
+            _raw = env._last_state
+            final_p1_deck = _raw.get("playerDeckCount")
+            final_p2_deck = _raw.get("opponentDeckCount")
+        except Exception:
+            pass
         next_obs_vec = policy._obs_to_vec(next_obs)
 
         agent_reward = env_reward if acting == 1 else -env_reward
@@ -377,6 +393,12 @@ def _run_one_episode(
         "p2_reward":      cur_p2_r,
         "terminated":     terminated,
         "truncated":      truncated,
+        "steps":          steps_taken,
+        "p1_hp":          final_p1_hp,
+        "p2_hp":          final_p2_hp,
+        "turn_no":        final_turn_no,
+        "p1_deck":        final_p1_deck,
+        "p2_deck":        final_p2_deck,
     }
 
 
@@ -540,6 +562,21 @@ def train_agents_from_both_perspectives_parallel(
                     p2_ep_rewards.append(result["p2_reward"])
                     if result["truncated"]:
                         timeout_episodes += 1
+                        p1_hp    = result.get("p1_hp")
+                        p2_hp    = result.get("p2_hp")
+                        turn_no  = result.get("turn_no")
+                        steps    = result.get("steps")
+                        p1_deck  = result.get("p1_deck")
+                        p2_deck  = result.get("p2_deck")
+                        deck_str = (
+                            f"  deck={p1_deck}/{p2_deck}"
+                            if p1_deck is not None else ""
+                        )
+                        hp_str   = (
+                            f"P1={p1_hp}hp  P2={p2_hp}hp  turn={turn_no}  steps={steps}{deck_str}"
+                            if p1_hp is not None else "hp=unknown"
+                        )
+                        print(f"  [unfinished ep #{completed+1}] {hp_str}")
                     if result["terminated"]:
                         terminated_episodes += 1
                     completed += 1

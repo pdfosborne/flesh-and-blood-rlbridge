@@ -8,11 +8,11 @@ python main.py train-eval-render `
     --matchup briar-vs-dorinthea `
     --format sage `
     --episodes 300 `
-    --max-steps 100 `
+    --max-steps 500 `
     --eval-episodes 20 `
-    --eval-max-steps 100 `
-    --render-max-steps 100 `
+    --eval-max-steps 500 `
+    --render-max-steps 200 `
     --show-frontend-eval `
-    --workers 8 `
+    --workers 4 `
     --out-dir results/sage_precon_agents `
     --cache-dir results/agent_cache

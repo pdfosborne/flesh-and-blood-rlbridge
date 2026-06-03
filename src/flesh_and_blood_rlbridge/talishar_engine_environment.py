@@ -150,6 +150,8 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         self_play: bool = True,
         render_width: Optional[int] = None,
         render_height: Optional[int] = None,
+        block_max_pitch_value: int = 3,
+        block_min_resource_cost: int = 0,
     ) -> None:
         self._base_url = (
             base_url or os.environ.get("TALISHAR_URL", "http://localhost")
@@ -167,6 +169,8 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         self._format = _normalize_game_format(game_format)
         self._timeout = timeout
         self._max_turns = max_turns
+        self._block_max_pitch_value = block_max_pitch_value
+        self._block_min_resource_cost = block_min_resource_cost
         self._render_mode = render_mode
         self._render_width = int(
             render_width
@@ -200,6 +204,13 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         self._repeat_acting_player: int = 0
         self._last_action_key: Optional[tuple[int, str]] = None
         self._repeat_streak: int = 0
+        # Cycle-breaker for sample_action: tracks (legal_action_fingerprint, last_idx)
+        self._sample_action_last_fp: Optional[str] = None
+        self._sample_action_repeat: int = 0
+        # Pitch-window "unaffordable card" loop prevention
+        self._last_m_label: Optional[str] = None
+        self._unaffordable_labels: set[str] = set()
+        self._last_turn_no_for_unaffordable: int = -1
 
         # Persistent Playwright worker thread for rgb_array rendering
         self._pw_page: Any = None
@@ -483,7 +494,51 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             return True
         if isinstance(opp_hp, (int, float)) and int(opp_hp) <= 0:
             return True
+        # Draw detection: both decks exhausted with neither player at 0 HP.
+        p_deck = state.get("playerDeckCount")
+        o_deck = state.get("opponentDeckCount")
+        if (
+            p_deck is not None and o_deck is not None
+            and int(p_deck) == 0 and int(o_deck) == 0
+        ):
+            return True
+        # Resource exhaustion: acting player has empty deck AND empty hand —
+        # they cannot play another card and will lose to fatigue.  End now.
+        if p_deck is not None and int(p_deck) == 0:
+            hand = state.get("playerHand", [])
+            if isinstance(hand, list) and len(hand) == 0:
+                return True
         return False
+
+    def _is_draw(self, state: dict[str, Any]) -> bool:
+        """Return True when the game ended as a draw (both decks empty, no winner)."""
+        if self._phase_str(state) == "OVER":
+            return False
+        p_hp = int(state.get("playerHealth", 1))
+        o_hp = int(state.get("opponentHealth", 1))
+        if p_hp <= 0 or o_hp <= 0:
+            return False
+        p_deck = state.get("playerDeckCount")
+        o_deck = state.get("opponentDeckCount")
+        return (
+            p_deck is not None and o_deck is not None
+            and int(p_deck) == 0 and int(o_deck) == 0
+        )
+
+    def _is_resource_exhausted_loss(self, state: dict[str, Any]) -> bool:
+        """Return True when the acting player ran out of deck AND hand cards.
+
+        The acting player is the one whose perspective the state is rendered from.
+        An empty deck + empty hand means they can never play again → treat as a
+        loss for the acting player (not a draw).
+        """
+        if self._is_draw(state):
+            return False  # both empty → draw, handled separately
+        p_deck = state.get("playerDeckCount")
+        if p_deck is None or int(p_deck) != 0:
+            return False
+        hand = state.get("playerHand", [])
+        return isinstance(hand, list) and len(hand) == 0
 
     def _did_player_win(self, player_hp: int, opp_hp: int) -> bool:
         """Return True if the agent (player 1) won the game."""
@@ -575,13 +630,15 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                 mode = btn.get("mode", 0)
                 if not mode:
                     continue
+                # Talishar uses "caption" on button objects, not "label".
+                btn_label = btn.get("caption") or btn.get("label") or f"btn_{mode}"
                 actions.append(
                     {
                         "action_code": int(mode),
                         "button_input": str(btn.get("buttonInput", "")),
                         "card_id": "",
                         "zone": "button",
-                        "label": str(btn.get("label", f"btn_{mode}")),
+                        "label": str(btn_label),
                     }
                 )
 
@@ -594,18 +651,54 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                 mode = btn.get("mode", 0)
                 if not mode:
                     continue
+                # Talishar uses "caption" on button objects, not "label".
+                btn_label = btn.get("caption") or btn.get("label") or f"btn_{mode}"
                 actions.append(
                     {
                         "action_code": int(mode),
                         "button_input": str(btn.get("buttonInput", "")),
                         "card_id": "",
                         "zone": "popup",
-                        "label": str(btn.get("label", f"popup_{mode}")),
+                        "label": str(btn_label),
                     }
                 )
 
-        # Always guarantee at least a pass action
-        if not actions:
+            # Also extract selectable CARDS inside the popup (e.g. choosemultizone
+            # "Choose which card to reveal for Fusion" — cards array has action codes).
+            inner = popup.get("popup", {})
+            if isinstance(inner, dict):
+                for i, card in enumerate(inner.get("cards", [])):
+                    if not isinstance(card, dict):
+                        continue
+                    card_action = card.get("action", 0)
+                    if not card_action:
+                        continue
+                    card_label = card.get("cardNumber") or card.get("label") or f"popup_card_{i}"
+                    actions.append(
+                        {
+                            "action_code": int(card_action),
+                            "button_input": str(card.get("actionDataOverride", str(i))),
+                            "card_id": str(card.get("cardNumber", "")),
+                            "zone": "popup",
+                            "label": str(card_label),
+                        }
+                    )
+
+        # Always guarantee at least one pass action in the legal action list.
+        # This ensures the policy can always choose to end its priority window
+        # (e.g. confirm equipment selection) even when Talishar sends no explicit
+        # pass button for that phase.
+        # NOTE: 10000 (Cancel) and 10001 (Undo Block) are intentionally excluded —
+        # they undo committed plays and must never substitute for a real pass.
+        has_pass = any(
+            int(a.get("action_code", 0)) in (99, 101, 105)
+            or any(
+                tok in str(a.get("label", "")).strip().lower()
+                for tok in ("pass", "end turn", "no block", "skip")
+            )
+            for a in actions
+        )
+        if not has_pass or not actions:
             actions.append(
                 {
                     "action_code": 99,
@@ -786,6 +879,11 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         self._player_hp = int(self._last_state.get("playerHealth", 20))
         self._opp_hp = int(self._last_state.get("opponentHealth", 20))
         self._steps = 0
+        self._sample_action_last_fp = None
+        self._sample_action_repeat = 0
+        self._last_m_label = None
+        self._unaffordable_labels = set()
+        self._last_turn_no_for_unaffordable = -1
         self._reset_repeat_tracking(
             turn_no=int(self._last_state.get("turnNo", 0) or 0),
             acting_player_id=self._acting_player_id,
@@ -859,7 +957,16 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
 
         if terminated:
             won = self._did_player_win(new_player_hp, new_opp_hp)
-            reward = 1.0 if won else -1.0
+            draw = self._is_draw(new_state)
+            exhausted_loss = self._is_resource_exhausted_loss(new_state)
+            if draw:
+                reward = 0.0
+            elif exhausted_loss:
+                # Acting player ran out of cards — they lose.
+                # Reward is from P1's perspective: loss if P1 was acting, win if P2 was.
+                reward = -1.0 if self._acting_player_id == 1 else 1.0
+            else:
+                reward = 1.0 if won else -1.0
         elif truncated:
             reward = _TRUNCATION_PENALTY
         else:
@@ -1062,13 +1169,94 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         return self._render_ansi()
 
     def sample_action(self) -> str:
-        """Return a heuristic legal action index as a string."""
+        """Return a heuristic legal action index as a string.
+
+        Includes a safety cycle-breaker: if the identical set of legal actions
+        is presented 5 times in a row (same codes + labels) the policy is
+        clearly looping, so pick a uniformly random legal action to break out.
+        """
         if not self._last_state:
             return "pass"
         legal = self._extract_legal_actions(self._last_state)
         if not legal:
             return "pass"
-        idx = choose_talishar_action_index(legal, self._last_state)
+
+        # Fingerprint the legal-action set (codes + labels, order-stable)
+        fp = "|".join(
+            f"{a.get('action_code',0)}:{a.get('label','')}" for a in legal
+        )
+        if fp == self._sample_action_last_fp:
+            self._sample_action_repeat += 1
+        else:
+            self._sample_action_last_fp = fp
+            self._sample_action_repeat = 1
+
+        if self._sample_action_repeat >= 4:
+            # Stuck: policy keeps choosing the same action on the same state.
+            # Pick a uniformly random legal action to break the loop.
+            self._sample_action_repeat = 0
+            import random as _random
+            return str(_random.randrange(len(legal)))
+
+        # Detect turn change — reset unaffordable card blacklist each turn.
+        _turn_no = int(self._last_state.get("turnNo", 0) or 0)
+        if _turn_no != self._last_turn_no_for_unaffordable:
+            self._last_turn_no_for_unaffordable = _turn_no
+            self._unaffordable_labels = set()
+
+        # Extract current phase inline (mirrors _get_phase in the policy module).
+        _tp = self._last_state.get("turnPhase", {})
+        _phase = str(
+            (_tp.get("turnPhase", "") if isinstance(_tp, dict) else _tp) or ""
+        ).strip().lower()
+
+        # ── Empty pitch window: the played card is unaffordable ───────────────
+        # If we're in the pitch phase (p) and there are NO hand cards to pitch,
+        # the card we just played cannot be paid for.  Pressing Pass (99) undoes
+        # the play silently and returns to the main phase with the same card still
+        # in hand, creating an infinite play→pitch→pass→play loop.
+        # Fix: (a) press Cancel (10000) to explicitly abort, and (b) add the card
+        # to the per-turn blacklist so the main phase won't retry it.
+        if _phase == "p":
+            _pitch_cards = [
+                a for a in legal
+                if a.get("zone") == "hand" and int(a.get("action_code", 0)) == 27
+            ]
+            if not _pitch_cards:
+                # Blacklist the card that triggered this empty pitch window.
+                if self._last_m_label:
+                    self._unaffordable_labels.add(self._last_m_label)
+                    self._last_m_label = None
+                # Return Cancel (10000) to abort the play, else fall back to Pass.
+                for _ci, _ca in enumerate(legal):
+                    if int(_ca.get("action_code", 0)) == 10000:
+                        return str(_ci)
+                _pi = next(
+                    (i for i, a in enumerate(legal) if int(a.get("action_code", 0)) == 99),
+                    0,
+                )
+                return str(_pi)
+
+        idx = choose_talishar_action_index(
+            legal, self._last_state,
+            unaffordable=frozenset(self._unaffordable_labels),
+            max_pitch_value=self._block_max_pitch_value,
+            min_resource_cost=self._block_min_resource_cost,
+        )
+
+        # Track the last card played in the main phase so we can blacklist it
+        # if the subsequent pitch window turns out to be empty (unaffordable).
+        if _phase == "m":
+            _chosen = legal[idx] if 0 <= idx < len(legal) else None
+            if (
+                _chosen is not None
+                and int(_chosen.get("action_code", 0)) == 27
+                and _chosen.get("zone") == "hand"
+            ):
+                self._last_m_label = _chosen.get("label", "")
+            else:
+                self._last_m_label = None
+
         return str(idx)
 
 
