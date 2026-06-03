@@ -1,0 +1,378 @@
+<?php
+
+error_reporting(E_ALL);
+
+// Limit script execution time to 1 second to avoid long-running requests
+@set_time_limit(1);
+@ini_set('max_execution_time', '1');
+
+session_start();
+
+// CRITICAL: Capture session data immediately and release the lock
+// PHP sessions use exclusive file locks - holding the lock during game processing
+// blocks all other requests from this user, causing session deadlock.
+$sessionUserId = $_SESSION["userid"] ?? null;
+
+// Release session lock NOW - before any file I/O or game processing
+session_write_close();
+
+include "WriteLog.php";
+include "GameLogic.php";
+include "GameTerms.php";
+include "HostFiles/Redirector.php";
+include_once "Libraries/SHMOPLibraries.php";
+include "Libraries/StatFunctions.php";
+include "Libraries/UILibraries.php";
+include "Libraries/PlayerSettings.php";
+include "Libraries/NetworkingLibraries.php";
+include "AI/CombatDummy.php";
+include "Libraries/HTTPLibraries.php";
+require_once "Libraries/CoreLibraries.php";
+include_once "./includes/dbh.inc.php";
+include_once "./includes/functions.inc.php";
+include_once "APIKeys/APIKeys.php";
+
+SetHeaders();
+$_POST = json_decode(file_get_contents('php://input'), true) ?? [];
+
+// Start output buffering to catch any accidental output
+ob_start();
+
+//We should always have a player ID as a URL parameter
+// Check if the "gameName" key exists in the $_POST array
+$gameName = $_POST["gameName"] ?? null;
+$playerID = $_POST["playerID"] ?? null;
+
+// For profile settings (playerID == 0), allow gameName to be 0
+if ($playerID != 0 && !IsGameNameValid($gameName)) {
+  http_response_code(400);
+  echo json_encode(['error' => 'Invalid game name.']);
+  exit;
+}
+$authKey = $_POST["authKey"] ?? "";
+
+//We should also have some information on the type of command
+$mode = $_POST["mode"] ?? null;
+$submission = $_POST["submission"] ?? [];
+$submission = json_encode($submission);
+$submission = json_decode($submission); //I don't know why it's not correctly parsing as objects all the way down here
+
+//First we need to parse the game state from the file
+// For profile settings updates (playerID == 0), skip gamestate parsing
+if ($playerID != 0) {
+  include "ParseGamestate.php";
+} else {
+  // Initialize minimal state for profile-only operations
+  $currentPlayer = 0;
+  $p1id = "";
+  $p2id = "";
+  $p1Key = "";
+  $p2Key = "";
+}
+
+$otherPlayer = $currentPlayer == 1 ? 2 : 1;
+$skipWriteGamestate = false;
+$mainPlayerGamestateStillBuilt = 0;
+$makeCheckpoint = 0;
+$makeBlockBackup = 0;
+$MakeStartTurnBackup = false;
+$MakeStartGameBackup = false;
+$targetAuth = ($playerID == 1 ? $p1Key : $p2Key);
+$conceded = false;
+$randomSeeded = false;
+
+// Skip auth and game checks for profile operations (playerID == 0)
+try {
+  if (!IsReplay() && $playerID != 0) {
+    if (($playerID == 1 || $playerID == 2) && $authKey == "") {
+      if (isset($_COOKIE["lastAuthKey"])) $authKey = $_COOKIE["lastAuthKey"];
+    }
+    if ($playerID != 3 && $authKey !== $targetAuth) exit;
+    if ($playerID == 3 && !IsModeAllowedForSpectators($mode)) exit;
+    if (!IsModeAsync($mode) && $currentPlayer != $playerID) {
+      $currentTime = round(microtime(true) * 1000);
+      SetCachePiece($gameName, 2, $currentTime);
+      SetCachePiece($gameName, 3, $currentTime);
+      exit;
+    }
+  }
+} catch (Exception $e) {
+  // If there's an issue with auth checks, only exit if it's a real game
+  if ($playerID != 0) {
+    http_response_code(400);
+    echo json_encode(['error' => 'Auth check failed']);
+    exit;
+  }
+}
+
+$afterResolveEffects = [];
+
+$animations = [];
+$events = []; //Clear events each time so it's only updated ones that get sent
+
+$isSimulation = false;
+$response = new stdClass();
+
+//Now we can process the command
+try {
+  switch ($mode) {
+    case 26: //Change setting
+      $userID = "";
+      if (!$isSimulation) {
+        include_once "./includes/dbh.inc.php";
+        include_once "./includes/functions.inc.php";
+        if ($playerID == 0) {
+          // Profile settings update - prefer userID from frontend (more reliable than session)
+          // Only use POST userID if it's actually a valid numeric ID (guards against JS String(null) = "null")
+          $postUserID = $_POST["userID"] ?? "";
+          if (is_numeric($postUserID)) {
+            $userID = $postUserID;
+          } elseif ($sessionUserId !== null) {
+            $userID = $sessionUserId;
+          }
+        } else {
+          // In-game settings update - get userID from game file
+          $preservedP1IsAI = $p1IsAI ?? "0";
+          $preservedP2IsAI = $p2IsAI ?? "0";
+          $preservedAIHasInfiniteHP = $AIHasInfiniteHP ?? "0";
+          include "MenuFiles/ParseGamefile.php";
+          $userID = ($playerID == 1) ? $p1id : $p2id;
+          $p1IsAI = $preservedP1IsAI;
+          $p2IsAI = $preservedP2IsAI;
+          $AIHasInfiniteHP = $preservedAIHasInfiniteHP;
+        }
+      }
+      $countSettings = count($submission->settings);
+      for ($i = 0; $i < $countSettings; ++$i) {
+        $setting = $submission->settings[$i];
+        $parsedId = ParseSettingsStringValueToIdInt($setting->name);
+        $setting->id = $parsedId ?? ($setting->id ?? null);
+        if ($setting->id !== null) {
+          ChangeSetting($playerID, $setting->id, $setting->value, $userID);
+          if ($playerID != 0 && !IsReplay()) {
+            $commandFile = fopen("./Games/$gameName/commandfile.txt", "a");
+            if ($commandFile !== false) {
+              fwrite($commandFile, "$playerID SETTINGS $setting->id $setting->value 0\r\n");
+              fclose($commandFile);
+            }
+          }
+        }
+      }
+      $response->message = "Settings changed successfully.";
+      break;
+  case 33: //Fully re-order layers
+    //First validate
+    $isValid = true;
+    $layerPieces = LayerPieces();
+    $submittedLayers = $submission->layers;
+    $submittedLayersCount = count($submittedLayers);
+    $layersCount = count($layers);
+    if ($submittedLayersCount < $dqState[8] / $layerPieces) {
+      $response->error = "Not enough layers.";
+      $isValid = false;
+      break;
+    }
+    $seenLayerIDs = [];
+    for ($i = 0; $i < $submittedLayersCount; ++$i) {
+      $layerID = $submittedLayers[$i];
+      if ($layerID % $layerPieces != 0) {
+        $response->error = "Not a layer ID.";
+        $isValid = false;
+        break;
+      }
+      if ($layerID < 0 || $layerID > $dqState[8]) {
+        $response->error = "Layer ID out of range.";
+        $isValid = false;
+        break;
+      }
+      if (isset($seenLayerIDs[$layerID])) {
+        $response->error = "Layer ID is duplicated.";
+        $isValid = false;
+        break;
+      }
+      $seenLayerIDs[$layerID] = true;
+    }
+    //Now if it's valid, do the swap
+    $newLayers = [];
+    for($i = 0; $i < $submittedLayersCount; ++$i) {
+      for($j = $submittedLayers[$i]; $j < $submittedLayers[$i] + $layerPieces; ++$j) {
+        if(isset($layers[$j])) $newLayers[] = $layers[$j];
+      }
+    }
+    if($layersCount > count($newLayers)) {
+      $upperBound = $dqState[8] + $layerPieces * $layersCount;
+      for($i = $dqState[8] + $layerPieces; $i < $upperBound; ++$i) {
+        if(isset($layers[$i])) $newLayers[] = $layers[$i];
+      }
+    }
+    $layers = $newLayers;
+    break;
+  case 106: // change opt order
+      $deck = new Deck($playerID);
+      $cardListTop = $submission->cardListTop;
+      $cardListBottom = $submission->cardListBottom;
+      $cardListTopString = implode(",", $cardListTop);
+      $cardListBottomString = implode(",", $cardListBottom);
+      $newOptions = $cardListTopString . ";" . $cardListBottomString;
+      $turn[2] = $newOptions;
+      break;
+    case 107: //submit Opt
+      $deck = new Deck($playerID);
+      $cardListTop = $submission->cardListTop;
+      $cardListBottom = $submission->cardListBottom;
+      $origDeckSize = GetClassState($playerID, $CS_CardsInDeckBeforeOpt);
+      $proposedDeckSize = $deck->RemainingCards() + count($cardListTop) + count($cardListBottom);
+      if ($origDeckSize == "-" || $origDeckSize == $proposedDeckSize) {
+        if (!IsReplay()) {
+          $commandFile = fopen("./Games/$gameName/commandfile.txt", "a");
+          $top = implode(",", $cardListTop);
+          $bot = implode(",", $cardListBottom);
+          fwrite($commandFile, "$playerID OPT $top $bot 0\r\n");
+          fclose($commandFile);
+        }
+        $deck->Opt($cardListTop, $cardListBottom);
+        $topCount = count($cardListTop);
+        $bottomCount = count($cardListBottom);
+        $message = "";
+        if ($topCount > 0) {
+          $message .= $topCount . " card" . ($topCount > 1 ? "s" : "") . " on top";
+        }
+        if ($bottomCount > 0) {
+          if ($message !== "") {
+            $message .= " and ";
+          }
+          $message .= $bottomCount . " card" . ($bottomCount > 1 ? "s" : "") . " on the bottom";
+        }
+        WriteLog("Player " . $playerID . " has put " . $message . " of their deck.");
+      }
+      else {
+        WriteLog("Something funny happened while opting. I attempted to catch the behavior, but it may have caused issues. If you believe the opt resolved incorrectly, please submit a bug report.", highlight:true);
+      }
+      ContinueDecisionQueue();
+      break;
+    case 108: // change trigger order
+      $cardListTop = $submission->cardListTop;
+      $cardListTopString = implode(",", $cardListTop);
+      $turn[2] = $cardListTopString;
+      break;
+    case 109: // reorder triggers
+      $cardList = $submission->cardListTop;
+      $layerPieces = LayerPieces();
+      if (!IsReplay()) {
+          $commandFile = fopen("./Games/$gameName/commandfile.txt", "a");
+          $cards = implode(",", $cardList);
+          fwrite($commandFile, "$playerID REORDER $cards 0 0\r\n");
+          fclose($commandFile);
+        }
+      foreach ($cardList as $card) {
+        $index = -1;
+        $layersCount = count($layers);
+        for ($i = 0; $i < $layersCount; $i += $layerPieces) {
+          if ($layers[$i] == "PRETRIGGER" && $layers[$i+1] == $playerID && $layers[$i+2] == $card) {
+            $index = $i;
+          }
+        }
+        if ($index != -1) {
+          $pretrigger = array_splice($layers, $index, $layerPieces);
+          $pretrigger[0] = "TRIGGER";
+          array_unshift($layers, ...$pretrigger);
+        }
+      }
+      $layersCount = count($layers);
+      for ($i = 0; $i < $layersCount; $i += $layerPieces) {
+        if ($layers[$i] == "PRETRIGGER" && $layers[$i+1] == $playerID) {
+          WriteLog("Something went wrong with adding triggers and we missed adding " . $layers[$i+2] . " to the stack", highlight: true);
+          $layers[$i] = "TRIGGER";
+        }
+      }
+      ContinueDecisionQueue();
+      break;
+  case 110: // rearranging the top card of the opponent's deck
+    $otherPlayer = $playerID == 1 ? 2 : 1;
+    $deck = new Deck($otherPlayer);
+    $cardList = $submission->cardListTop;
+    for ($i = count($cardList) - 1; $i >= 0; --$i) {
+      $deck->AddTop($cardList[$i]);
+    }
+    ContinueDecisionQueue();
+    break;
+  case 100011: //Resume adventure (roguelike)
+    if($roguelikeGameID == "") {
+      $response->error = "Cannot resume adventure - not a roguelike game.";
+      $isValid = false;
+      break;
+    }
+    $response->redirectLink = $redirectPath . "/Roguelike/ContinueAdventure.php?gameName=" . $roguelikeGameID . "&playerID=1&health=" . GetHealth(1);
+    break;
+  default:
+    break;
+  }
+} catch (Exception $e) {
+  // Log the exception and return error response
+  error_log("ProcessInputAPI error: " . $e->getMessage());
+  $response->error = "An error occurred processing your request";
+}
+// Clean any accidental output before sending JSON
+ob_clean();
+echo json_encode($response);
+
+// For profile settings updates, exit here to avoid further processing
+if ($playerID == 0) {
+  exit;
+}
+
+ProcessMacros();
+if ($inGameStatus == $GameStatus_Rematch) {
+  $origDeck = "./Games/" . $gameName . "/p1DeckOrig.txt";
+  if (file_exists($origDeck)) copy($origDeck, "./Games/" . $gameName . "/p1Deck.txt");
+  $origDeck = "./Games/" . $gameName . "/p2DeckOrig.txt";
+  if (file_exists($origDeck)) copy($origDeck, "./Games/" . $gameName . "/p2Deck.txt");
+  include "MenuFiles/ParseGamefile.php";
+  include "MenuFiles/WriteGamefile.php";
+  $gameStatus = (IsPlayerAI(2) ? $MGS_ReadyToStart : $MGS_ChooseFirstPlayer);
+  SetCachePiece($gameName, 14, $gameStatus);
+  $firstPlayer = 1;
+  $firstPlayerChooser = ($winner == 1 ? 2 : 1);
+  $p1SideboardSubmitted = "0";
+  $p2SideboardSubmitted = (IsPlayerAI(2) ? "1" : "0");
+  WriteLog("Player $firstPlayerChooser lost and will choose first player for the rematch.");
+  WriteGameFile();
+  $turn[0] = "REMATCH";
+  include "WriteGamestate.php";
+  $currentTime = round(microtime(true) * 1000);
+  SetCachePiece($gameName, 2, $currentTime);
+  SetCachePiece($gameName, 3, $currentTime);
+  GamestateUpdated($gameName);
+  exit;
+} else if ($winner != 0 && $turn[0] != "YESNO") {
+  $inGameStatus = $GameStatus_Over;
+  $turn[0] = "OVER";
+  $currentPlayer = 1;
+}
+
+CombatDummyAI(); //Only does anything if applicable
+if ($p2IsAI == "1") {
+  EncounterAI();
+}
+CacheCombatResult();
+
+if (!IsGameOver()) {
+  if ($playerID == 1) $p1TotalTime += time() - intval($lastUpdateTime);
+  else if ($playerID == 2) $p2TotalTime += time() - intval($lastUpdateTime);
+  $lastUpdateTime = time();
+}
+
+//Now write out the game state
+if (!$skipWriteGamestate) {
+  DoGamestateUpdate();
+  include "WriteGamestate.php";
+}
+
+if ($makeCheckpoint) MakeGamestateBackup();
+if ($makeBlockBackup) MakeGamestateBackup("preBlockBackup.txt");
+if ($MakeStartTurnBackup) MakeStartTurnBackup();
+if ($MakeStartGameBackup) MakeGamestateBackup("origGamestate.txt");
+
+GamestateUpdated($gameName);
+
+exit;
