@@ -20,6 +20,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from train_dual_agent_common import (  # noqa: E402
     DEFAULT_N_EPISODES,
+    DEFAULT_WARMUP_BASELINE_EVAL_EPISODES,
+    DEFAULT_WARMUP_EPISODES,
     REPO_ROOT,
     init_fabrary_training,
     print_training_summary,
@@ -53,6 +55,18 @@ def main() -> None:
     )
     parser.add_argument("--episodes", type=int, default=DEFAULT_N_EPISODES)
     parser.add_argument("--max-steps", type=int, default=DEFAULT_MAX_STEPS)
+    parser.add_argument(
+        "--warmup-episodes",
+        type=int,
+        default=DEFAULT_WARMUP_EPISODES,
+        help="Episodes to bootstrap with Talishar default heuristic policy.",
+    )
+    parser.add_argument(
+        "--warmup-baseline-eval-episodes",
+        type=int,
+        default=DEFAULT_WARMUP_BASELINE_EVAL_EPISODES,
+        help="Episodes to evaluate baseline win% at warmup handoff.",
+    )
     parser.add_argument("--format", default=FORMAT_NAME)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument(
@@ -94,6 +108,8 @@ def main() -> None:
         seed=args.seed,
         game_format=args.format,
         cache_dir=Path(args.cache_dir),
+        warmup_episodes=args.warmup_episodes,
+        warmup_baseline_eval_episodes=args.warmup_baseline_eval_episodes,
     )
     print_training_summary(summary, failed, out_dir)
     if failed:

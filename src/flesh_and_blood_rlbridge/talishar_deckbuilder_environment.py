@@ -4,7 +4,7 @@ The agent constructs a Flesh and Blood deck card-by-card.  When the agent
 finalizes a valid deck, it is evaluated by playing ``num_eval_games`` Talishar
 self-play games using :class:`TalisharEngineEnvironment`.  Optional
 ``eval_p1_agent`` / ``eval_p2_agent`` policies control both sides; otherwise
-actions are chosen uniformly at random.  The episode reward reflects the built
+actions are chosen by a smart heuristic default policy.  The episode reward reflects the built
 deck's win rate as player 1.
 
 Deck construction rules (from FaB Comprehensive Rules)
@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import json
 import os
-import random
 import re
 import uuid
 from pathlib import Path
@@ -521,9 +520,7 @@ class TalisharDeckBuilderEnvironment(rlbridgeEnvironment):
                         step_result: Optional[StepResult] = None
                         done = False
                         while not done:
-                            legal = obs_data.get("legalActions", [])
-                            idx = random.randint(0, max(0, len(legal) - 1))
-                            step_result = env.step(str(idx))
+                            step_result = env.step(env.sample_action())
                             done = step_result.terminated or step_result.truncated
                             if not done:
                                 obs_data = json.loads(step_result.observation)

@@ -12,7 +12,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FAB_SRC = REPO_ROOT / "src"
@@ -31,6 +31,7 @@ import numpy as np  # noqa: E402
 
 from flesh_and_blood_rlbridge.talishar_engine_environment import (  # noqa: E402
     TalisharEngineEnvironment,
+    run_talishar_eval_episode,
 )
 from rlbridge.rl_agents.ppo import (  # noqa: E402
     PPOAgent,
@@ -57,6 +58,8 @@ DEFAULT_CLIP_EPS = 0.2
 DEFAULT_N_STEPS = 256
 DEFAULT_PPO_EPOCHS = 4
 DEFAULT_MINI_BATCH = 64
+DEFAULT_WARMUP_EPISODES = 100
+DEFAULT_WARMUP_BASELINE_EVAL_EPISODES = 20
 
 
 @dataclass
@@ -210,6 +213,7 @@ def train_agents_from_both_perspectives(
     n_episodes: int,
     max_steps: int,
     seed: Optional[int] = None,
+    warmup_episodes: int = DEFAULT_WARMUP_EPISODES,
 ) -> tuple[list[float], list[float]]:
     p1_policy = p1_tiers[0]
     p2_policy = p2_tiers[0]
@@ -245,15 +249,24 @@ def train_agents_from_both_perspectives(
         policy = p1_policy if acting == 1 else p2_policy
         tier_agents = p1_tiers if acting == 1 else p2_tiers
         buf = p1_buf if acting == 1 else p2_buf
+        in_warmup = completed < warmup_episodes
 
         obs_vec = policy._obs_to_vec(obs)
         logits = policy._masked_logits(policy._actor.forward(obs_vec[None, :]), obs)
         lp_all = _log_softmax(logits)[0]
         probs = _softmax(logits)[0]
-        action = int(policy._rng_np.choice(policy.n_actions, p=probs))
+        if in_warmup:
+            env_action = str(env.sample_action())
+            try:
+                action = int(env_action)
+            except (TypeError, ValueError):
+                action = 0
+            action = max(0, min(action, policy.n_actions - 1))
+        else:
+            action = int(policy._rng_np.choice(policy.n_actions, p=probs))
+            env_action = _to_env_action(obs, action, policy._mask_actions)
         value = float(policy._critic.predict(obs_vec[None, :]).flatten()[0])
         n_legal = _n_legal_of(obs)
-        env_action = _to_env_action(obs, action, policy._mask_actions)
 
         step_out = env.step(env_action)
         env_reward = float(_get(step_out, "reward", 0.0))
@@ -297,6 +310,7 @@ def train_agents_from_both_perspectives(
                     f"  [train-progress] episodes={completed}/{n_episodes} "
                     f"({pct:6.2f}%) elapsed={elapsed:.1f}s "
                     f"rate={ep_rate:.3f}ep/s eta={eta_secs/60:.1f}m "
+                    f"warmup={'yes' if completed < warmup_episodes else 'no '} "
                     f"p1_avg={p1_avg:+.3f} p2_avg={p2_avg:+.3f}"
                 )
 
@@ -333,6 +347,7 @@ def save_agent(
     game_format: str,
     role: str,
     eval_env_ids: dict[str, str],
+    warmup_baseline: Optional[dict[str, Any]] = None,
 ) -> dict:
     eval_env_id = eval_env_ids.get(matchup.name, "")
     avg_reward = float(np.mean(episode_rewards)) if episode_rewards else 0.0
@@ -359,6 +374,7 @@ def save_agent(
                 "p2_deck": matchup.p2_deck,
                 "training_mode": "both_perspectives",
                 "game_format": game_format,
+                "warmup_baseline": warmup_baseline,
             },
             indent=2,
         )
@@ -373,6 +389,7 @@ def save_agent(
                 "eval_mean": avg_reward,
                 "eval_std": 0.0,
                 "eval_rewards": [],
+                "warmup_baseline": warmup_baseline,
             },
             indent=2,
         )
@@ -391,7 +408,94 @@ def save_agent(
         "elapsed_secs": round(elapsed, 1),
         "avg_reward": avg_reward,
         "best_reward": best_reward,
+        "warmup_baseline": warmup_baseline,
     }
+
+
+def _evaluate_policy_pair(
+    matchup: Matchup,
+    *,
+    base_url: str,
+    game_format: str,
+    max_steps: int,
+    p1_policy: PPOAgent,
+    p2_policy: PPOAgent,
+    episodes: int,
+    seed: Optional[int],
+) -> dict[str, Any]:
+    """Evaluate current P1/P2 policies head-to-head and return win-rate summary."""
+    if episodes <= 0:
+        return {
+            "episodes": 0,
+            "p1_wins": 0,
+            "p2_wins": 0,
+            "draws": 0,
+            "p1_win_rate": 0.0,
+            "p2_win_rate": 0.0,
+            "draw_rate": 0.0,
+            "max_steps": max_steps,
+        }
+
+    env = make_env(matchup, base_url=base_url, game_format=game_format, max_turns=max_steps)
+    p1_wins = 0
+    p2_wins = 0
+    draws = 0
+    try:
+        for ep in range(episodes):
+            ep_seed = (seed + ep) if seed is not None else None
+            out = run_talishar_eval_episode(
+                env,
+                p1_policy,
+                max_steps=max_steps,
+                seed=ep_seed,
+                p2_agent=p2_policy,
+                deck_player_id=1,
+            )
+            won = out.get("deck_player_won")
+            if won is True:
+                p1_wins += 1
+            elif won is False:
+                p2_wins += 1
+            else:
+                draws += 1
+    finally:
+        env.close()
+
+    total = max(1, episodes)
+    return {
+        "episodes": episodes,
+        "p1_wins": p1_wins,
+        "p2_wins": p2_wins,
+        "draws": draws,
+        "p1_win_rate": p1_wins / total,
+        "p2_win_rate": p2_wins / total,
+        "draw_rate": draws / total,
+        "max_steps": max_steps,
+    }
+
+
+def _save_warmup_handoff_checkpoint(
+    *,
+    out_dir: Path,
+    matchup: Matchup,
+    p1_policy: PPOAgent,
+    p2_policy: PPOAgent,
+    baseline: dict[str, Any],
+) -> Path:
+    """Persist policy weights + baseline evaluation right before PPO handoff."""
+    ckpt_dir = out_dir / matchup.name / "warmup_handoff_baseline"
+    p1_dir = ckpt_dir / "p1"
+    p2_dir = ckpt_dir / "p2"
+    p1_dir.mkdir(parents=True, exist_ok=True)
+    p2_dir.mkdir(parents=True, exist_ok=True)
+
+    p1_policy.save(p1_dir / "agent_weights.json")
+    p2_policy.save(p2_dir / "agent_weights.json")
+    (ckpt_dir / "baseline_metrics.json").write_text(
+        json.dumps(baseline, indent=2),
+        encoding="utf-8",
+    )
+    return ckpt_dir
 
 
 def _player_context(matchup: Matchup, *, as_p1: bool) -> "PlayerCacheContext":
@@ -423,6 +527,8 @@ def train_matchup(
     cache_store: Optional["AgentCacheStore"] = None,
     seed: Optional[int] = None,
     game_format: str = "sage",
+    warmup_episodes: int = DEFAULT_WARMUP_EPISODES,
+    warmup_baseline_eval_episodes: int = DEFAULT_WARMUP_BASELINE_EVAL_EPISODES,
 ) -> dict:
     from agent_cache import AgentCacheStore
     print(f"\n{'=' * 60}")
@@ -430,7 +536,7 @@ def train_matchup(
     print(f"  Decks   : {matchup.p1_deck} (P1) vs {matchup.p2_deck} (P2)")
     print(
         f"  Mode    : both-perspectives training | {n_episodes} episodes | "
-        f"max {max_steps} steps"
+        f"max {max_steps} steps | warmup {warmup_episodes} episodes"
     )
     print(f"{'=' * 60}")
 
@@ -468,14 +574,73 @@ def train_matchup(
     print("  P2 cache init:", ", ".join(p2_bundle.init_sources))
 
     t0 = time.time()
-    p1_rewards, p2_rewards = train_agents_from_both_perspectives(
-        env,
-        p1_bundle.agents,
-        p2_bundle.agents,
-        n_episodes=n_episodes,
-        max_steps=max_steps,
-        seed=seed,
-    )
+    warmup_baseline: Optional[dict[str, Any]] = None
+    warmup_count = max(0, min(warmup_episodes, n_episodes))
+    p1_rewards: list[float] = []
+    p2_rewards: list[float] = []
+
+    if warmup_count > 0:
+        print(f"  Warmup  : training first {warmup_count} episode(s) with Talishar default policy")
+        warm_p1, warm_p2 = train_agents_from_both_perspectives(
+            env,
+            p1_bundle.agents,
+            p2_bundle.agents,
+            n_episodes=warmup_count,
+            max_steps=max_steps,
+            seed=seed,
+            warmup_episodes=warmup_count,
+        )
+        p1_rewards.extend(warm_p1)
+        p2_rewards.extend(warm_p2)
+
+        print(
+            f"  Warmup baseline eval: {warmup_baseline_eval_episodes} episode(s) before PPO handoff"
+        )
+        baseline = _evaluate_policy_pair(
+            matchup,
+            base_url=base_url,
+            game_format=game_format,
+            max_steps=max_steps,
+            p1_policy=p1_bundle.policy,
+            p2_policy=p2_bundle.policy,
+            episodes=warmup_baseline_eval_episodes,
+            seed=(seed + 100_000) if seed is not None else None,
+        )
+        ckpt_dir = _save_warmup_handoff_checkpoint(
+            out_dir=out_dir,
+            matchup=matchup,
+            p1_policy=p1_bundle.policy,
+            p2_policy=p2_bundle.policy,
+            baseline=baseline,
+        )
+        warmup_baseline = {
+            **baseline,
+            "checkpoint_dir": str(ckpt_dir),
+        }
+        print(
+            "  Warmup baseline: "
+            f"P1 win%={baseline['p1_win_rate'] * 100:.1f} "
+            f"P2 win%={baseline['p2_win_rate'] * 100:.1f} "
+            f"draw%={baseline['draw_rate'] * 100:.1f}"
+        )
+        print(f"  Warmup checkpoint saved → {ckpt_dir}")
+
+    remaining_episodes = n_episodes - warmup_count
+    if remaining_episodes > 0:
+        print(f"  PPO     : training remaining {remaining_episodes} episode(s) with agent policy")
+        rem_seed = (seed + warmup_count) if seed is not None else None
+        rem_p1, rem_p2 = train_agents_from_both_perspectives(
+            env,
+            p1_bundle.agents,
+            p2_bundle.agents,
+            n_episodes=remaining_episodes,
+            max_steps=max_steps,
+            seed=rem_seed,
+            warmup_episodes=0,
+        )
+        p1_rewards.extend(rem_p1)
+        p2_rewards.extend(rem_p2)
+
     elapsed = time.time() - t0
     env.close()
 
@@ -494,10 +659,12 @@ def train_matchup(
     meta_p1 = save_agent(
         p1_bundle.policy, p1_id, out_dir, matchup, p1_rewards,
         n_episodes, elapsed, game_format, "p1", eval_env_ids,
+        warmup_baseline=warmup_baseline,
     )
     meta_p2 = save_agent(
         p2_bundle.policy, p2_id, out_dir, matchup, p2_rewards,
         n_episodes, elapsed, game_format, "p2", eval_env_ids,
+        warmup_baseline=warmup_baseline,
     )
     return {"p1": meta_p1, "p2": meta_p2}
 
@@ -507,6 +674,7 @@ def print_training_summary(summary: list[dict], failed: list[str], out_dir: Path
     print("  TRAINING SUMMARY")
     print(f"{'=' * 60}")
     for m in summary:
+        baseline = m.get("p1", {}).get("warmup_baseline")
         for role in ("p1", "p2"):
             r = m[role]
             print(
@@ -515,6 +683,17 @@ def print_training_summary(summary: list[dict], failed: list[str], out_dir: Path
                 f"  {'agent_id':<28} {r['agent_id']}\n"
                 f"  {'package_dir':<28} {r['package_dir']}"
             )
+        if isinstance(baseline, dict) and baseline.get("episodes", 0) > 0:
+            print(
+                "  "
+                f"warmup baseline ({baseline['episodes']} ep): "
+                f"P1 win%={baseline.get('p1_win_rate', 0.0) * 100:.1f} "
+                f"P2 win%={baseline.get('p2_win_rate', 0.0) * 100:.1f} "
+                f"draw%={baseline.get('draw_rate', 0.0) * 100:.1f}"
+            )
+            ckpt = baseline.get("checkpoint_dir")
+            if ckpt:
+                print(f"  {'warmup_checkpoint':<28} {ckpt}")
     for name in failed:
         print(f"  {name:<28} FAILED")
 
@@ -533,6 +712,8 @@ def run_matchup_training(
     seed: Optional[int],
     game_format: str,
     cache_dir: Optional[Path] = None,
+    warmup_episodes: int = DEFAULT_WARMUP_EPISODES,
+    warmup_baseline_eval_episodes: int = DEFAULT_WARMUP_BASELINE_EVAL_EPISODES,
 ) -> tuple[list[dict], list[str]]:
     from agent_cache import AgentCacheStore
 
@@ -553,6 +734,8 @@ def run_matchup_training(
                 cache_store=cache_store,
                 seed=seed,
                 game_format=game_format,
+                warmup_episodes=warmup_episodes,
+                warmup_baseline_eval_episodes=warmup_baseline_eval_episodes,
             )
             summary.append(meta)
         except Exception as exc:

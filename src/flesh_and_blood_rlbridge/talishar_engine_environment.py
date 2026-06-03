@@ -69,7 +69,6 @@ from __future__ import annotations
 import http.cookiejar
 import json
 import os
-import random
 import time
 import urllib.error
 import urllib.parse
@@ -80,6 +79,7 @@ from typing import Any, Optional
 from rlbridge.environments.base import rlbridgeEnvironment
 from rlbridge.protocol.messages import RenderResult, ResetResult, StepResult, TextSpace
 
+from .talishar_default_policy import choose_talishar_action_index
 from .talishar_oracle import TalisharConnectionError
 
 # Default practice deck: Ira Crimson Haze (young hero, silver_age-legal)
@@ -233,9 +233,17 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                 body_text = body.decode("utf-8", errors="replace")
                 if allow_empty_body and body_text.strip() == "":
                     return {}
-                json_start = body_text.find("{")
-                if json_start > 0:
-                    body_text = body_text[json_start:]
+                obj_start = body_text.find("{")
+                arr_start = body_text.find("[")
+                starts = [i for i in (obj_start, arr_start) if i >= 0]
+                if allow_empty_body and not starts:
+                    # ProcessInput.php can emit PHP warnings/notices with no JSON body.
+                    # Treat this as an empty acknowledgement so callers can continue.
+                    return {}
+                if starts:
+                    json_start = min(starts)
+                    if json_start > 0:
+                        body_text = body_text[json_start:]
                 data = json.loads(body_text)
                 return data if isinstance(data, dict) else {"_raw": data}
             except json.JSONDecodeError:
@@ -790,7 +798,18 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         legal_actions = self._extract_legal_actions(state)
 
         mode, button_input = self._parse_action(action, legal_actions)
-        self._submit_action(mode, button_input)
+        try:
+            self._submit_action(mode, button_input)
+        except RuntimeError as exc:
+            msg = str(exc)
+            if "ProcessInput.php" not in msg or "non-JSON response" not in msg:
+                raise
+            # Defensive fallback for Talishar PHP warning pages on specific card
+            # interactions: pass priority and continue the episode.
+            try:
+                self._submit_action(99, "")
+            except Exception:
+                pass
 
         if self._self_play:
             new_state = self._poll_until_priority()
@@ -1009,13 +1028,14 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         return self._render_ansi()
 
     def sample_action(self) -> str:
-        """Return a random legal action index as a string."""
+        """Return a heuristic legal action index as a string."""
         if not self._last_state:
             return "pass"
         legal = self._extract_legal_actions(self._last_state)
         if not legal:
             return "pass"
-        return str(random.randrange(len(legal)))
+        idx = choose_talishar_action_index(legal, self._last_state)
+        return str(idx)
 
 
 def parse_acting_player_id(env: Any, obs: Any) -> int:
