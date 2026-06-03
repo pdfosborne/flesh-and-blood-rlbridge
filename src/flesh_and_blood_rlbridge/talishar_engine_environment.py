@@ -69,6 +69,9 @@ from .talishar_oracle import TalisharConnectionError
 _DEFAULT_DECK_LINK = "https://fabrary.net/decks/01GJG7Z4WGWSZ95FY74KX4M557"
 _DEFAULT_RENDER_WIDTH = 1920
 _DEFAULT_RENDER_HEIGHT = 1080
+_TRUNCATION_PENALTY = -1.0
+_REPEAT_ACTION_THRESHOLD = 3
+_REPEAT_ACTION_PENALTY = -0.1
 
 
 class TalisharEngineEnvironment(rlbridgeEnvironment):
@@ -95,6 +98,8 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         HTTP request timeout in seconds.
     max_turns:
         Maximum number of agent steps before the episode is truncated.
+        Truncation (no winner) applies a negative reward to discourage idle loops.
+        Repeating the same action within a turn (3+ times) incurs a small penalty.
     render_mode:
         Rendering mode (``"human"``, ``"ansi"``, or ``None``).
     frontend_url:
@@ -112,7 +117,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         base_url: Optional[str] = None,
         frontend_url: Optional[str] = None,
         deck_link: str = _DEFAULT_DECK_LINK,
-        game_format: str = "blitz",
+        game_format: str = "sage",
         timeout: float = 15.0,
         max_turns: int = 1000,
         render_mode: Optional[str] = None,
@@ -164,6 +169,10 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         self._player_hp: int = 20
         self._opp_hp: int = 20
         self._initialized: bool = False
+        self._repeat_turn_no: int = 0
+        self._repeat_acting_player: int = 0
+        self._last_action_key: Optional[tuple[int, str]] = None
+        self._repeat_streak: int = 0
 
         # Persistent Playwright worker thread for rgb_array rendering
         self._pw_page: Any = None
@@ -401,6 +410,39 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
     def _did_player_win(self, player_hp: int, opp_hp: int) -> bool:
         """Return True if the agent (player 1) won the game."""
         return opp_hp <= 0 and player_hp > 0
+
+    def _reset_repeat_tracking(self, *, turn_no: int, acting_player_id: int) -> None:
+        self._repeat_turn_no = turn_no
+        self._repeat_acting_player = acting_player_id
+        self._last_action_key = None
+        self._repeat_streak = 0
+
+    def _repeat_action_penalty(
+        self,
+        action_key: tuple[int, str],
+        *,
+        turn_no: int,
+        acting_player_id: int,
+    ) -> float:
+        """Penalize submitting the same action repeatedly within one turn."""
+        turn_changed = turn_no != self._repeat_turn_no
+        player_changed = acting_player_id != self._repeat_acting_player
+        if turn_changed or player_changed:
+            self._repeat_turn_no = turn_no
+            self._repeat_acting_player = acting_player_id
+            self._last_action_key = action_key
+            self._repeat_streak = 1
+            return 0.0
+
+        if action_key == self._last_action_key:
+            self._repeat_streak += 1
+        else:
+            self._last_action_key = action_key
+            self._repeat_streak = 1
+
+        if self._repeat_streak >= _REPEAT_ACTION_THRESHOLD:
+            return _REPEAT_ACTION_PENALTY
+        return 0.0
 
     def _extract_legal_actions(self, state: dict[str, Any]) -> list[dict[str, Any]]:
         """Extract all legal actions from the current game state.
@@ -650,6 +692,10 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         self._player_hp = int(self._last_state.get("playerHealth", 20))
         self._opp_hp = int(self._last_state.get("opponentHealth", 20))
         self._steps = 0
+        self._reset_repeat_tracking(
+            turn_no=int(self._last_state.get("turnNo", 0) or 0),
+            acting_player_id=self._acting_player_id,
+        )
         self._initialized = True
         self._opened_frontend_url = None
         if self._render_mode == "human":
@@ -691,13 +737,31 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         terminated = self._is_game_over(new_state)
         truncated = not terminated and self._steps >= self._max_turns
 
+        action_key = (mode, button_input)
+        turn_no = int(new_state.get("turnNo", 0) or 0)
+        if terminated or truncated:
+            self._reset_repeat_tracking(
+                turn_no=turn_no,
+                acting_player_id=self._acting_player_id,
+            )
+            repeat_penalty = 0.0
+        else:
+            repeat_penalty = self._repeat_action_penalty(
+                action_key,
+                turn_no=turn_no,
+                acting_player_id=self._acting_player_id,
+            )
+
         if terminated:
             won = self._did_player_win(new_player_hp, new_opp_hp)
             reward = 1.0 if won else -1.0
+        elif truncated:
+            reward = _TRUNCATION_PENALTY
         else:
             dmg_dealt = max(0, self._opp_hp - new_opp_hp)
             dmg_taken = max(0, self._player_hp - new_player_hp)
             reward = dmg_dealt * 0.01 - dmg_taken * 0.01
+        reward += repeat_penalty
 
         self._player_hp = new_player_hp
         self._opp_hp = new_opp_hp
@@ -718,6 +782,8 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                 "opponent_hp": new_opp_hp,
                 "acting_player_id": self._acting_player_id,
                 "self_play": self._self_play,
+                "repeat_streak": self._repeat_streak,
+                "repeat_penalty": repeat_penalty,
             },
         )
 
