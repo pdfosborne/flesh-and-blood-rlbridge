@@ -1031,6 +1031,160 @@ def _save_all_agents(agents: PhaseAgents, out_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _ensure_playwright() -> None:
+    """Install Playwright + Chromium if not already available."""
+    try:
+        import playwright  # noqa: F401
+    except ImportError:
+        import subprocess, sys  # noqa: PLC0415
+        print("  [render] Installing playwright Python package…")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright"])
+    # Ensure Chromium browser binaries are present
+    try:
+        from playwright.sync_api import sync_playwright  # noqa: PLC0415
+        with sync_playwright() as pw:
+            pw.chromium.launch(headless=True)  # will throw if binaries missing
+    except Exception:
+        import subprocess, sys  # noqa: PLC0415
+        print("  [render] Installing Playwright Chromium browser…")
+        subprocess.check_call([sys.executable, "-m", "playwright", "install", "chromium"])
+
+
+def _render_game_with_talishar_frontend(
+    *,
+    agents: Any,
+    opponent_agents: Optional[Any],
+    opponent_mode: str,
+    base_url: str,
+    fe_url: str,
+    game_format: str,
+    deck_name: str,
+    opp_name: str,
+    max_steps: int,
+    render_dir: Path,
+    player_label: str,
+) -> list[Path]:
+    """Play one game via the HTTP Talishar backend, screenshot the live frontend
+    after every step using Playwright, and return the list of saved PNG paths.
+
+    Args:
+        agents:          PhaseAgents for the primary player.
+        opponent_agents: PhaseAgents for the opponent (dual mode only).
+        opponent_mode:   "dual" or "preset".
+        base_url:        Talishar backend URL (e.g. ``http://localhost:8080/game``).
+        fe_url:          Talishar-FE base URL (e.g. ``http://localhost:5173``).
+        game_format:     Format string passed to the environment.
+        deck_name:       Local deck name for the primary player.
+        opp_name:        Deck name for the opponent.
+        max_steps:       Max game steps before truncation.
+        render_dir:      Directory to save per-step PNG frames.
+        player_label:    Short label used in log messages (e.g. ``"p1"``).
+
+    Returns:
+        List of Paths to the saved PNG files (may be empty on failure).
+    """
+    _ensure_playwright()
+
+    from playwright.sync_api import sync_playwright  # noqa: PLC0415
+
+    render_dir.mkdir(parents=True, exist_ok=True)
+    frame_paths: list[Path] = []
+
+    try:
+        # ── start a fresh HTTP game so we can get the game_name ──────────────
+        env = TalisharEngineEnvironment(
+            base_url=base_url,
+            game_format=game_format,
+            local_deck_name=deck_name,
+            opponent_deck_name=opp_name,
+            max_turns=max_steps,
+            self_play=True,
+            render_mode=None,
+            use_cpp_engine=False,   # must use HTTP backend so FE can connect
+        )
+
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True, args=["--no-sandbox"])
+            context = browser.new_context(viewport={"width": 1600, "height": 900})
+            page = context.new_page()
+
+            try:
+                result = env.reset()
+                obs = result.observation
+                game_name = getattr(env, "_game_name", None) or ""
+                if not game_name:
+                    print(f"  [{player_label}] WARNING: could not read game_name from env — skipping FE screenshots")
+                    env.close()
+                    browser.close()
+                    return frame_paths
+
+                # Open the frontend for player 1's perspective
+                game_url = f"{fe_url.rstrip('/')}/?gameID={game_name}&playerID=1"
+                print(f"  [{player_label}] Opening FE: {game_url}")
+                try:
+                    page.goto(game_url, timeout=15_000, wait_until="networkidle")
+                except Exception as exc:
+                    print(f"  [{player_label}] WARNING: FE page load error ({exc}) — continuing with fallback screenshots")
+
+                # Screenshot after reset
+                frame_path = render_dir / "frame_0000_reset.png"
+                try:
+                    page.screenshot(path=str(frame_path), full_page=False)
+                    frame_paths.append(frame_path)
+                except Exception:
+                    pass
+
+                done = False
+                step_no = 0
+                while not done and step_no < max_steps:
+                    step_no += 1
+
+                    obs_data = json.loads(obs) if isinstance(obs, str) else (obs or {})
+                    acting = obs_data.get("actingPlayerID", 1)
+
+                    # Route action to the correct agent
+                    active_agents = agents
+                    if opponent_mode == "dual" and opponent_agents is not None and acting != 1:
+                        active_agents = opponent_agents
+
+                    if active_agents.play is not None and hasattr(active_agents.play, "act_greedy"):
+                        action = active_agents.play.act_greedy(obs)
+                    elif active_agents.play is not None and hasattr(active_agents.play, "act"):
+                        action = active_agents.play.act(obs)
+                    else:
+                        action = env.sample_action()
+
+                    step = env.step(action)
+                    obs = step.observation
+                    done = bool(step.terminated) or bool(step.truncated)
+
+                    # Give the frontend a moment to render the new state
+                    try:
+                        page.wait_for_timeout(300)  # 300 ms
+                    except Exception:
+                        pass
+
+                    fname = f"frame_{step_no:04d}_p{acting}.png"
+                    fpath = render_dir / fname
+                    try:
+                        page.screenshot(path=str(fpath), full_page=False)
+                        frame_paths.append(fpath)
+                    except Exception:
+                        pass
+
+            finally:
+                page.close()
+                context.close()
+                browser.close()
+                env.close()
+
+    except Exception as exc:
+        print(f"  [{player_label}] Render error: {exc}")
+
+    print(f"  [{player_label}] Saved {len(frame_paths)} frames → {render_dir}")
+    return frame_paths
+
+
 def _frames_to_gif(frame_paths: list[Path], gif_path: Path, fps: float = 3.0) -> None:
     """Assemble PNG frame paths into an animated GIF (requires Pillow)."""
     try:
@@ -1112,6 +1266,7 @@ def run_final_evaluation(
     max_steps: int,
     assets_path: str,
     base_url: str,
+    fe_url: str,
     out_dir: Path,
     render_gif: bool = True,
     gif_fps: float = 3.0,
@@ -1124,7 +1279,8 @@ def run_final_evaluation(
     2. Write a temporary deck file to Talishar Assets.
     3. Run ``num_eval_episodes`` games with the trained play agent (greedy),
        recording win / loss / draw for each episode.
-    4. Render one full rollout with ``rgb_array`` (or text fallback), saving
+    4. Render one full rollout by screenshotting the live Talishar frontend
+       (Playwright + Chromium headless) after every game step, saving
        per-step PNGs and assembling them into an animated GIF.
     5. Write ``final_eval.json`` to ``out_dir``.
 
@@ -1245,74 +1401,26 @@ def run_final_evaluation(
         f"({wins}W / {losses}L / {draws}D  over {num_eval_episodes} games)"
     )
 
-    # ── render rollout ────────────────────────────────────────────────────────
+    # ── render rollout (Playwright + Talishar frontend) ──────────────────────
     render_dir = out_dir / f"{player}_final_render"
-    render_dir.mkdir(parents=True, exist_ok=True)
     gif_path = out_dir / f"{player}_optimal_policy.gif"
 
-    frame_paths: list[Path] = []
-    render_steps = 0
-    render_terminated = False
-    render_truncated = False
-
-    print(f"\n  [{player}] Rendering optimal-policy rollout → {render_dir}")
-    try:
-        env = TalisharEngineEnvironment(
-            base_url=base_url,
-            game_format=game_format,
-            local_deck_name=deck_name,
-            opponent_deck_name=opp_name,
-            max_turns=max_steps,
-            self_play=True,
-            render_mode="rgb_array",
-        )
-        try:
-            print(f"  [{player}] Runtime backend (render): {_runtime_backend_label(env)}")
-            result = env.reset()
-            obs = result.observation
-            frame_path = render_dir / "frame_0000_reset.png"
-            if _save_state_image(env, obs, frame_path):
-                frame_paths.append(frame_path)
-
-            for step_no in range(1, max_steps + 1):
-                # Greedy policy — try act_greedy first, fall back to act
-                if agents.play is not None and hasattr(agents.play, "act_greedy"):
-                    action = agents.play.act_greedy(obs)
-                elif agents.play is not None and hasattr(agents.play, "act"):
-                    action = agents.play.act(obs)
-                else:
-                    action = env.sample_action()
-
-                # For dual: route to the correct agent based on acting player
-                if opponent_mode == "dual" and opponent_agents is not None:
-                    obs_data = json.loads(obs) if isinstance(obs, str) else (obs or {})
-                    acting = obs_data.get("actingPlayerID", 1)
-                    if acting != 1:
-                        if opponent_agents.play is not None and hasattr(opponent_agents.play, "act_greedy"):
-                            action = opponent_agents.play.act_greedy(obs)
-                        elif opponent_agents.play is not None and hasattr(opponent_agents.play, "act"):
-                            action = opponent_agents.play.act(obs)
-
-                step = env.step(action)
-                obs = step.observation
-                render_terminated = bool(step.terminated)
-                render_truncated = bool(step.truncated)
-                render_steps = step_no
-
-                obs_data = json.loads(obs) if isinstance(obs, str) else (obs or {})
-                acting = obs_data.get("actingPlayerID", "?")
-                fname = f"frame_{step_no:04d}_p{acting}.png"
-                if _save_state_image(env, obs, render_dir / fname):
-                    frame_paths.append(render_dir / fname)
-
-                if render_terminated or render_truncated:
-                    break
-        finally:
-            env.close()
-    except Exception as exc:
-        print(f"  [{player}] Render error: {exc}")
-
-    print(f"  [{player}] Saved {len(frame_paths)} frames")
+    print(f"\n  [{player}] Rendering optimal-policy rollout via Talishar FE → {render_dir}")
+    frame_paths = _render_game_with_talishar_frontend(
+        agents=agents,
+        opponent_agents=opponent_agents,
+        opponent_mode=opponent_mode,
+        base_url=base_url,
+        fe_url=fe_url,
+        game_format=game_format,
+        deck_name=deck_name,
+        opp_name=opp_name,
+        max_steps=max_steps,
+        render_dir=render_dir,
+        player_label=player,
+    )
+    render_steps = len(frame_paths)
+    render_terminated = render_steps > 0
 
     if render_gif and frame_paths:
         _frames_to_gif(frame_paths, gif_path, fps=gif_fps)
@@ -1338,7 +1446,7 @@ def run_final_evaluation(
             "frames_saved": len(frame_paths),
             "steps": render_steps,
             "terminated": render_terminated,
-            "truncated": render_truncated,
+            "truncated": False,
             "gif": str(gif_path) if (render_gif and frame_paths) else None,
         },
     }
@@ -1456,7 +1564,7 @@ def main() -> None:
         help="Play episodes per outer iteration")
     parser.add_argument("--max-build-steps", type=int, default=200)
     parser.add_argument("--max-sideboard-steps", type=int, default=100)
-    parser.add_argument("--max-play-steps", type=int, default=60)
+    parser.add_argument("--max-play-steps", type=int, default=200)
     parser.add_argument("--num-eval-games", type=int, default=3,
         help="Talishar games per deckbuilder/sideboard finalize (lower = faster)")
     parser.add_argument("--num-sideboard-episodes", type=int, default=5,
@@ -1480,10 +1588,13 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--workers", type=int, default=1,
+        "--workers", type=int, default=None,
         help=(
             "Parallel game sessions for Phase 3 play training.  "
-            "≥2 enables the parallel path in train_dual_agent_common."
+            ">=2 enables the parallel path in train_dual_agent_common.  "
+            "Default: auto (4 for C++ engine, 1 for HTTP Talishar).  "
+            "The C++ engine is thread-safe so high worker counts are safe; "
+            "PPO gradient updates always run on GPU when CUDA is available."
         ),
     )
     parser.add_argument(
@@ -1536,6 +1647,9 @@ def main() -> None:
         help="Override path for results JSON (default: <out-dir>/results.json)")
     parser.add_argument("--talishar-url",
         default=os.environ.get("TALISHAR_URL", "http://localhost:8080/game"))
+    parser.add_argument("--talishar-fe-url",
+        default=os.environ.get("TALISHAR_FE_URL", "http://localhost:5173"),
+        help="Talishar frontend URL for Playwright render screenshots (default: http://localhost:5173)")
     parser.add_argument("--assets-path",
         default=os.environ.get("TALISHAR_ASSETS_PATH", ""))
 
@@ -1559,8 +1673,42 @@ def main() -> None:
 
     args = parser.parse_args()
 
-      
-    # Ensure warmup is at least 1/5 of play episodes (but no more than play episodes)
+    # ── auto-detect worker count ──────────────────────────────────────────────
+    # C++ engine: each worker has its own GameState (thread-safe, no shared
+    # mutable state).  Use physical CPU cores capped at 8 for C++ engine,
+    # always 1 for HTTP Talishar (server is the bottleneck).
+    if args.workers is None:
+        import os as _os
+        _cpp_cache = _os.path.join(str(_REPO_ROOT), "results", "cpp_engines")
+        _cpp_deck1 = getattr(args, "hero_id", "") or ""
+        _cpp_deck2 = getattr(args, "p2_hero_id", "") or _cpp_deck1
+        _cpp_key   = f"{_cpp_deck1}_vs_{_cpp_deck2}"
+        _cpp_dir   = _os.path.join(_cpp_cache, _cpp_key)
+        _has_cpp   = any(
+            _os.path.exists(_os.path.join(_cpp_dir, f))
+            for f in _os.listdir(_cpp_dir)
+            if f.startswith("fab_engine") and f.endswith((".pyd", ".so"))
+        ) if _os.path.isdir(_cpp_dir) else False
+        if _has_cpp:
+            _cpu_count = max(1, (_os.cpu_count() or 4) // 2)
+            args.workers = min(_cpu_count, 8)
+            print(f"  [auto] C++ engine detected -> {args.workers} parallel workers "
+                  f"(set --workers to override)")
+        else:
+            args.workers = 1
+            print("  [auto] No C++ engine found -> 1 worker (HTTP Talishar)")
+
+    try:
+        import torch as _torch
+        _gpu_label = (
+            f"GPU ({_torch.cuda.get_device_name(0)})"
+            if _torch.cuda.is_available() else "CPU"
+        )
+    except ImportError:
+        _gpu_label = "CPU (torch not available)"
+    print(f"  [device] PPO gradient updates: {_gpu_label}")
+    print(f"  [workers] Parallel game sessions: {args.workers}")
+
     min_warmup = max(1, math.ceil(args.play_episodes / 5))
     warmup_eps = min(max(args.warmup_episodes, min_warmup), args.play_episodes)
 
@@ -1796,6 +1944,7 @@ def main() -> None:
         max_steps=args.final_eval_max_steps,
         assets_path=assets_path,
         base_url=args.talishar_url,
+        fe_url=args.talishar_fe_url,
         out_dir=final_eval_dir,
         render_gif=not args.no_render_gif,
         gif_fps=args.gif_fps,
@@ -1816,6 +1965,7 @@ def main() -> None:
             max_steps=args.final_eval_max_steps,
             assets_path=assets_path,
             base_url=args.talishar_url,
+            fe_url=args.talishar_fe_url,
             out_dir=final_eval_dir,
             render_gif=not args.no_render_gif,
             gif_fps=args.gif_fps,

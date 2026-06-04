@@ -178,6 +178,56 @@ def discover_deck_cards(
     return p1_ids, p2_ids
 
 
+def resolve_deck_from_json(talishar_src: Path, deck_json_path: str) -> set[str]:
+    """Parse a FaBrary/FABdb deck JSON and return the set of card IDs."""
+    return set(resolve_deck_counts_from_json(talishar_src, deck_json_path).keys())
+
+
+def resolve_deck_counts_from_json(talishar_src: Path, deck_json_path: str) -> dict[str, int]:
+    """Parse a FaBrary/FABdb deck JSON and return {card_id: count}.
+
+    The JSON format stores card names (e.g. ``"arcanic_crackle_red": 2``) in
+    ``deck`` and ``sideboard`` dicts.  Names are resolved to card IDs via the
+    Talishar ``GeneratedCardDictionaries.php`` lookup.
+    """
+    try:
+        with open(deck_json_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as exc:
+        print(f"  WARNING: could not read deck JSON {deck_json_path}: {exc}")
+        return {}
+
+    name_to_id = _build_name_to_id(talishar_src)
+    if not name_to_id:
+        print("  WARNING: GeneratedCardDictionaries.php not found — "
+              "cannot resolve deck JSON card names to IDs")
+        return {}
+
+    counts: dict[str, int] = {}
+    missing: list[str] = []
+    for zone in ("deck", "sideboard"):
+        zone_data = data.get(zone, {})
+        if isinstance(zone_data, dict):
+            items = zone_data.items()
+        elif isinstance(zone_data, list):
+            items = ((n, 1) for n in zone_data)
+        else:
+            continue
+        for name, cnt in items:
+            cid = name_to_id.get(name)
+            if cid:
+                counts[cid] = counts.get(cid, 0) + int(cnt)
+            else:
+                missing.append(name)
+
+    if missing:
+        print(f"  WARNING: {len(missing)} card name(s) from deck JSON not found in "
+              f"dictionary: {missing[:5]}{'...' if len(missing) > 5 else ''}")
+    print(f"  Resolved {len(counts)} card ID(s) ({sum(counts.values())} total) "
+          f"from deck JSON: {deck_json_path}")
+    return counts
+
+
 # ── Asset deck-file resolution ─────────────────────────────────────────────────
 
 _NAME_TO_ID_RE = re.compile(r'"([\w_]+)"\s*=>\s*"([A-Z]{2,4}\d+)"')
@@ -190,6 +240,47 @@ def _build_name_to_id(talishar_src: Path) -> dict[str, str]:
         return {}
     text = dict_file.read_text(encoding="utf-8", errors="replace")
     return dict(_NAME_TO_ID_RE.findall(text))
+
+
+def _build_id_to_name(talishar_src: Path) -> dict[str, str]:
+    """Parse GeneratedCardDictionaries.php to build a card-ID→card-name map."""
+    name_to_id = _build_name_to_id(talishar_src)
+    return {v: k for k, v in name_to_id.items()}
+
+
+def _parse_generated_stat_block(text: str, fn_name: str) -> dict[str, int]:
+    """Extract name→value mapping from a Generated*Value PHP match() function."""
+    start = text.find(f"function {fn_name}(")
+    if start == -1:
+        return {}
+    # Find the next closing brace at the same depth
+    end = text.find("\n}", start)
+    if end == -1:
+        end = start + 20_000  # fallback
+    block = text[start:end]
+    return {name: int(val) for name, val in _MATCH_STAT_RE.findall(block)}
+
+
+def _build_generated_stats(talishar_src: Path) -> dict[str, dict[str, int]]:
+    """Build a card-name→{power,pitch,cost,defense} map from GeneratedCardDictionaries.php."""
+    dict_file = talishar_src / "GeneratedCode" / "GeneratedCardDictionaries.php"
+    if not dict_file.exists():
+        return {}
+    text = dict_file.read_text(encoding="utf-8", errors="replace")
+    power   = _parse_generated_stat_block(text, "GeneratedPowerValue")
+    pitch   = _parse_generated_stat_block(text, "GeneratedPitchValue")
+    cost    = _parse_generated_stat_block(text, "GeneratedCardCost")
+    defense = _parse_generated_stat_block(text, "GeneratedBlockValue")
+    all_names = set(power) | set(pitch) | set(cost) | set(defense)
+    return {
+        name: {
+            "power":   power.get(name, 0),
+            "pitch":   pitch.get(name, 0),
+            "cost":    cost.get(name, 0),
+            "defense": defense.get(name, 0),
+        }
+        for name in all_names
+    }
 
 
 def resolve_deck_from_assets(talishar_src: Path, deck_name: str) -> set[str]:
@@ -227,6 +318,9 @@ _POWER_RE   = re.compile(r'["\']power["\']\s*=>\s*(\d+)')
 _DEF_RE     = re.compile(r'["\']defense["\']\s*=>\s*(\d+)')
 _NAME_RE    = re.compile(r'["\']name["\']\s*=>\s*["\']([^"\']+)["\']')
 _TYPE_RE    = re.compile(r'["\']type_text["\']\s*=>\s*["\']([^"\']+)["\']')
+
+# Matches PHP match() entries: "card_name" => integer_value
+_MATCH_STAT_RE = re.compile(r'"([\w_]+)"\s*=>\s*(-?\d+)')
 
 
 def _extract_block_for_card(php_text: str, card_id: str, window: int = 60) -> str:
@@ -267,6 +361,24 @@ def scan_php_sources(
 ) -> dict[str, CardMeta]:
     """Walk all PHP files and extract metadata + logic for each card_id."""
     metas: dict[str, CardMeta] = {cid: CardMeta(card_id=cid) for cid in card_ids}
+
+    # ── Fast path: read stats from Generated*Value functions (keyed by card name) ──
+    id_to_name = _build_id_to_name(talishar_src)
+    gen_stats = _build_generated_stats(talishar_src)
+    stats_applied = 0
+    for cid, meta in metas.items():
+        card_name = id_to_name.get(cid, "")
+        if card_name and card_name in gen_stats:
+            s = gen_stats[card_name]
+            meta.name = meta.name or card_name
+            meta.cost    = s["cost"]
+            meta.pitch   = s["pitch"]
+            meta.power   = s["power"]
+            meta.defense = s["defense"]
+            stats_applied += 1
+    print(f"  Stats from GeneratedCardDictionaries: {stats_applied}/{len(card_ids)} cards")
+
+    # ── Scan PHP files for card-type and PHP logic snippets ─────────────────
     php_files = list(talishar_src.rglob("*.php"))
     print(f"  Scanning {len(php_files)} PHP files for {len(card_ids)} card IDs…")
 
@@ -282,10 +394,11 @@ def scan_php_sources(
             m = _parse_card_array(text, cid)
             ex = metas[cid]
             ex.name = m.name or ex.name
-            ex.cost = m.cost or ex.cost
-            ex.pitch = m.pitch or ex.pitch
-            ex.power = m.power or ex.power
-            ex.defense = m.defense or ex.defense
+            # Only override stats from PHP if they look richer (non-zero)
+            if m.cost and not ex.cost:    ex.cost    = m.cost
+            if m.pitch and not ex.pitch:  ex.pitch   = m.pitch
+            if m.power and not ex.power:  ex.power   = m.power
+            if m.defense and not ex.defense: ex.defense = m.defense
             ex.card_type = m.card_type or ex.card_type
             ex.php_source_file = ex.php_source_file or str(
                 php_file.relative_to(talishar_src)
@@ -366,6 +479,11 @@ struct GameState {{
     int         priority  = 0;   // 0=P1, 1=P2
     bool        game_over = false;
     int         winner    = -1;  // -1=none, 0=P1, 1=P2
+    // Stalemate detection: if both players do nothing but pass this many
+    // times in a row without any card being played, declare a draw.
+    // Prevents infinite loops when card stubs are not yet implemented.
+    int         consecutive_passes     = 0;
+    int         max_consecutive_passes = 20;
 
     using EffectFn = std::function<void(GameState&, int /*player_idx*/)>;
     std::unordered_map<std::string, EffectFn> effects;
@@ -374,9 +492,11 @@ struct GameState {{
     std::vector<LegalAction> get_legal_actions() const;
     void apply_action(const LegalAction& action);
     void register_all_cards();
+    void init_standard_decks();   // deal opening hands from pre-built deck lists
 
 private:
     void _advance_phase();
+    void _draw_cards(int player_idx, int n);
 }};
 """
 
@@ -384,19 +504,22 @@ _GAMESTATE_CPP = """\
 // AUTO-GENERATED — do not edit manually
 #include "gamestate.h"
 #include "cards.h"
+#include <algorithm>
+#include <random>
 
 std::vector<LegalAction> GameState::get_legal_actions() const {{
     std::vector<LegalAction> actions;
     const auto& p = players[priority];
 
-    // Play affordable cards from hand
+    // Play affordable cards from hand: pitch available = sum of pitch of all
+    // OTHER cards (by position) in hand.
     for (size_t i = 0; i < p.hand.size(); ++i) {{
-        const auto& c = p.hand[i];
         int avail = 0;
-        for (const auto& hc : p.hand)
-            if (hc.card_id != c.card_id) avail += hc.pitch;
-        if (c.cost <= avail) {{
-            actions.push_back(LegalAction{{27, std::to_string(i), c.card_id, "hand", c.name}});
+        for (size_t j = 0; j < p.hand.size(); ++j) {{
+            if (j != i) avail += p.hand[j].pitch;
+        }}
+        if (p.hand[i].cost <= avail) {{
+            actions.push_back(LegalAction{{27, std::to_string(i), p.hand[i].card_id, "hand", p.hand[i].name}});
         }}
     }}
     // Always include pass
@@ -406,10 +529,19 @@ std::vector<LegalAction> GameState::get_legal_actions() const {{
 
 void GameState::apply_action(const LegalAction& action) {{
     if (action.action_code == 99) {{
+        // Pass: count consecutive passes for stalemate detection
+        consecutive_passes += 1;
+        if (consecutive_passes >= max_consecutive_passes) {{
+            game_over = true;
+            winner    = -1;  // draw
+            return;
+        }}
         _advance_phase();
         return;
     }}
     if (action.action_code == 27) {{
+        // Any card played resets the stalemate counter
+        consecutive_passes = 0;
         auto& hand = players[priority].hand;
         size_t idx = static_cast<size_t>(std::stoi(action.button_input));
         if (idx < hand.size()) {{
@@ -420,9 +552,36 @@ void GameState::apply_action(const LegalAction& action) {{
                 it->second(*this, priority);
             }}
         }}
+        // Check for game over immediately after damage — this ensures the
+        // reward is attributed to the player who dealt lethal (priority
+        // has NOT yet switched).
+        for (int i = 0; i < 2; ++i) {{
+            if (players[i].health <= 0) {{
+                game_over = true;
+                winner    = 1 - i;
+            }}
+        }}
         return;
     }}
     throw std::runtime_error("Unknown action_code: " + std::to_string(action.action_code));
+}}
+
+void GameState::_draw_cards(int player_idx, int n) {{
+    auto& p = players[player_idx];
+    for (int d = 0; d < n; ++d) {{
+        if (p.deck.empty()) {{
+            // Recycle discard into deck and reshuffle
+            if (p.discard.empty()) break;
+            p.deck = p.discard;
+            p.discard.clear();
+            std::shuffle(p.deck.begin(), p.deck.end(),
+                         std::mt19937{{std::random_device{{}}()}});
+        }}
+        if (!p.deck.empty()) {{
+            p.hand.push_back(p.deck.back());
+            p.deck.pop_back();
+        }}
+    }}
 }}
 
 void GameState::_advance_phase() {{
@@ -432,13 +591,19 @@ void GameState::_advance_phase() {{
         case TurnPhase::ATTACK: phase = TurnPhase::BLOCK;  break;
         case TurnPhase::BLOCK:  phase = TurnPhase::DAMAGE; break;
         case TurnPhase::DAMAGE: phase = TurnPhase::END;    break;
-        case TurnPhase::END:
+        case TurnPhase::END: {{
+            // Discard active player's remaining hand
+            auto& active = players[priority];
+            for (auto& c : active.hand) active.discard.push_back(c);
+            active.hand.clear();
+            // Switch priority
             phase    = TurnPhase::MAIN;
             turn_no += 1;
             priority = 1 - priority;
-            players[0].resources = 0;
-            players[1].resources = 0;
+            // New active player draws 4 cards (intellect)
+            _draw_cards(priority, 4);
             break;
+        }}
         default: break;
     }}
     for (int i = 0; i < 2; ++i) {{
@@ -456,15 +621,13 @@ _CARDS_H_HEADER = """\
 // Card effect stubs for matchup: {deck1} vs {deck2}
 // {n_cards} unique cards detected
 //
-// HOW TO IMPLEMENT:
-//   Each function below has the extracted PHP logic as comments.
-//   Translate the PHP into C++ inside the function body.
-//   Common translations:
-//     $gamestate->playerHealth -= N        →  gs.players[player_idx].health -= N;
-//     $gamestate->opponentHealth -= N      →  gs.players[1-player_idx].health -= N;
-//     AddCardToHand($cardID, $playerID)    →  (add Card to gs.players[...].hand)
-//     DrawCard($playerID, N)               →  (draw N cards from deck to hand)
-//   Remove the throw line once implemented.
+// Each function applies `power` damage to the opponent by default.
+// To implement richer card effects, edit the function body.
+// Common translations from PHP:
+//   $gamestate->playerHealth -= N        ->  gs.players[player_idx].health -= N;
+//   $gamestate->opponentHealth -= N      ->  gs.players[1-player_idx].health -= N;
+//   AddCardToHand($cardID, $playerID)    ->  (add Card to gs.players[...].hand)
+//   DrawCard($playerID, N)               ->  (call gs._draw_cards(player_idx, N))
 
 #include "gamestate.h"
 #include <stdexcept>
@@ -480,9 +643,10 @@ _CARD_STUB = """\
 {php_comment}
 // └──────────────────────────────────────────────────────────────────────────
 inline void effect_{card_id}(GameState& gs, int player_idx) {{
-    (void)gs; (void)player_idx;
-    // TODO: translate PHP logic above into C++
-    throw std::runtime_error("effect_{card_id} ({name}) not yet implemented");
+    // Default effect: deal 'power' damage to the opponent.
+    // For equipment/reactions this is a safe no-op when power == 0.
+    int opp_idx = 1 - player_idx;
+    gs.players[opp_idx].health -= {power};
 }}
 
 """
@@ -494,6 +658,42 @@ _REGISTER_CPP = """\
 
 void GameState::register_all_cards() {{
 {registrations}
+}}
+"""
+
+_INIT_DECKS_CPP = """\
+// AUTO-GENERATED — do not edit manually
+#include "gamestate.h"
+#include "cards.h"
+#include <algorithm>
+#include <random>
+
+// Helper: push N copies of a Card into a vector
+static void _push_card(std::vector<Card>& v, const Card& c, int n) {{
+    for (int i = 0; i < n; ++i) v.push_back(c);
+}}
+
+void GameState::init_standard_decks() {{
+    players[0].deck.clear();
+    players[0].hand.clear();
+    players[1].deck.clear();
+    players[1].hand.clear();
+
+    // ── P1 deck ({deck1}) ────────────────────────────────────────────────
+{p1_cards}
+
+    // ── P2 deck ({deck2}) ────────────────────────────────────────────────
+{p2_cards}
+
+    // Shuffle both decks
+    auto rng0 = std::mt19937{{std::random_device{{}}()}};
+    auto rng1 = std::mt19937{{std::random_device{{}}()}};
+    std::shuffle(players[0].deck.begin(), players[0].deck.end(), rng0);
+    std::shuffle(players[1].deck.begin(), players[1].deck.end(), rng1);
+
+    // Deal starting hands (4 cards each)
+    _draw_cards(0, 4);
+    _draw_cards(1, 4);
 }}
 """
 
@@ -531,6 +731,7 @@ PYBIND11_MODULE(fab_engine, m) {{
     py::class_<GameState>(m, "GameState")
         .def(py::init<>())
         .def("register_all_cards", &GameState::register_all_cards)
+        .def("init_standard_decks", &GameState::init_standard_decks)
         .def("get_legal_actions",  &GameState::get_legal_actions)
         .def("apply_action",       &GameState::apply_action)
         .def_property_readonly("game_over",
@@ -552,7 +753,10 @@ PYBIND11_MODULE(fab_engine, m) {{
         .def_property_readonly("p1_deck_size",
             [](const GameState& g) {{ return (int)g.players[0].deck.size(); }})
         .def_property_readonly("p2_deck_size",
-            [](const GameState& g) {{ return (int)g.players[1].deck.size(); }});
+            [](const GameState& g) {{ return (int)g.players[1].deck.size(); }})
+        .def_property_readonly("consecutive_passes",
+            [](const GameState& g) {{ return g.consecutive_passes; }})
+        .def_readwrite("max_consecutive_passes", &GameState::max_consecutive_passes);
 }}
 """
 
@@ -573,6 +777,7 @@ find_package(pybind11 REQUIRED)
 pybind11_add_module(fab_engine
     gamestate.cpp
     register_cards.cpp
+    init_decks.cpp
     bindings.cpp
 )
 target_include_directories(fab_engine PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -650,7 +855,15 @@ def generate(
     metas: dict[str, CardMeta],
     p1_ids: set[str],
     p2_ids: set[str],
+    p1_counts: dict[str, int] | None = None,
+    p2_counts: dict[str, int] | None = None,
 ) -> None:
+    # Default: 2 copies of each unique card if counts not provided
+    if p1_counts is None:
+        p1_counts = {cid: 2 for cid in p1_ids}
+    if p2_counts is None:
+        p2_counts = {cid: 2 for cid in p2_ids}
+
     out_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     all_ids = sorted(metas.keys())
@@ -692,6 +905,36 @@ def generate(
     )
     (out_dir / "register_cards.cpp").write_text(
         _REGISTER_CPP.format(registrations=reg_lines), encoding="utf-8"
+    )
+
+    # init_decks.cpp — hard-codes the two deck lists and deals opening hands
+    def _card_init_line(cid: str, count: int, player_vec: str) -> str:
+        m = metas.get(cid, CardMeta(card_id=cid))
+        safe_name = (m.name or cid).replace('"', '\\"')
+        safe_type = (m.card_type or "unknown").replace('"', '\\"')
+        return (
+            f'    _push_card({player_vec}, '
+            f'Card{{"{cid}", "{safe_name}", {m.cost}, {m.pitch}, {m.power}, '
+            f'{m.defense}, "{safe_type}", "deck", 27}}, {count});'
+        )
+
+    p1_lines = "\n".join(
+        _card_init_line(cid, cnt, "players[0].deck")
+        for cid, cnt in sorted(p1_counts.items())
+        if cid in metas
+    )
+    p2_lines = "\n".join(
+        _card_init_line(cid, cnt, "players[1].deck")
+        for cid, cnt in sorted(p2_counts.items())
+        if cid in metas
+    )
+    (out_dir / "init_decks.cpp").write_text(
+        _INIT_DECKS_CPP.format(
+            deck1=deck1, deck2=deck2,
+            p1_cards=p1_lines or "    // (no cards)",
+            p2_cards=p2_lines or "    // (no cards)",
+        ),
+        encoding="utf-8",
     )
 
     # bindings.cpp
@@ -786,6 +1029,16 @@ def main() -> None:
     parser.add_argument("--deck1", default="Ira", help="P1 deck name")
     parser.add_argument("--deck2", default="Ira", help="P2 deck name")
     parser.add_argument(
+        "--deck1-json", default=None,
+        help="Path to a FaBrary/FABdb deck JSON for P1 (deck + sideboard card names "
+             "are resolved to card IDs and merged into the engine).  Optional but "
+             "strongly recommended — without it the engine only contains hero cards."
+    )
+    parser.add_argument(
+        "--deck2-json", default=None,
+        help="Path to a FaBrary/FABdb deck JSON for P2 (same as --deck1-json)."
+    )
+    parser.add_argument(
         "--out", default=None,
         help="Output directory (default: results/cpp_engines/<deck1>_vs_<deck2>)"
     )
@@ -810,14 +1063,20 @@ def main() -> None:
     print(f"  Matchup : {args.deck1} vs {args.deck2}")
     print(f"  PHP src : {talishar_src.resolve()}")
     print(f"  Output  : {out_dir.resolve()}")
+    if args.deck1_json:
+        print(f"  P1 JSON : {args.deck1_json}")
+    if args.deck2_json:
+        print(f"  P2 JSON : {args.deck2_json}")
     print()
 
     # Step 1: card discovery
     p1_ids: set[str] = set()
     p2_ids: set[str] = set()
+    p1_counts: dict[str, int] = {}
+    p2_counts: dict[str, int] = {}
 
     if not args.no_server:
-        print("Step 1: Discovering cards via live Talishar game…")
+        print("Step 1: Discovering cards via live Talishar game...")
         try:
             p1_ids, p2_ids = discover_deck_cards(base_url, args.deck1, args.deck2)
         except Exception as exc:
@@ -835,6 +1094,22 @@ def main() -> None:
             if p2_asset:
                 p2_ids = p2_asset
                 print(f"  Resolved {len(p2_ids)} card ID(s) for {args.deck2} from Assets txt")
+
+    # Supplement with FaBrary deck JSON files (deck + sideboard card pools)
+    if args.deck1_json:
+        json_counts = resolve_deck_counts_from_json(talishar_src, args.deck1_json)
+        before = len(p1_ids)
+        p1_ids |= set(json_counts.keys())
+        p1_counts.update(json_counts)
+        print(f"  P1: added {len(p1_ids) - before} new card ID(s) from deck JSON "
+              f"(total {len(p1_ids)}, {sum(p1_counts.values())} cards)")
+    if args.deck2_json:
+        json_counts = resolve_deck_counts_from_json(talishar_src, args.deck2_json)
+        before = len(p2_ids)
+        p2_ids |= set(json_counts.keys())
+        p2_counts.update(json_counts)
+        print(f"  P2: added {len(p2_ids) - before} new card ID(s) from deck JSON "
+              f"(total {len(p2_ids)}, {sum(p2_counts.values())} cards)")
 
     # Step 2: PHP scan
     all_ids = p1_ids | p2_ids
@@ -862,7 +1137,7 @@ def main() -> None:
 
     # Step 3: generate
     print(f"\nStep 3: Generating C++ for {len(metas)} cards…")
-    generate(out_dir, args.deck1, args.deck2, metas, p1_ids, p2_ids)
+    generate(out_dir, args.deck1, args.deck2, metas, p1_ids, p2_ids, p1_counts, p2_counts)
 
 
 if __name__ == "__main__":

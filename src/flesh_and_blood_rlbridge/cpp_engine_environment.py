@@ -146,7 +146,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         self,
         *,
         engine_dir: str | Path,
-        max_turns: int = 200,
+        max_turns: int = 1000,
         deck1: str = "",
         deck2: str = "",
     ) -> None:
@@ -173,6 +173,8 @@ class CppEngineEnvironment(rlbridgeEnvironment):
     def _new_gamestate(self) -> Any:
         gs = self._fab.GameState()
         gs.register_all_cards()
+        if hasattr(gs, "init_standard_decks"):
+            gs.init_standard_decks()
         return gs
 
     def _legal_actions(self) -> list[Any]:
@@ -265,25 +267,23 @@ class CppEngineEnvironment(rlbridgeEnvironment):
     ) -> float:
         gs = self._gs
         if terminated:
-            # Winner is 0-indexed (0=P1, 1=P2); acting_player is 1-indexed
-            acting_idx = self._acting_player - 1
-            if gs.winner == acting_idx:
+            # P1-centric: +1 if P1 won, -1 if P2 won, 0 for draw.
+            # The training loop always negates this for P2's buffer
+            # (agent_reward = env_reward if acting==1 else -env_reward).
+            if gs.winner == 0:       # P1 won (0-indexed)
                 reward = 1.0
-            elif gs.winner == 1 - acting_idx:
+            elif gs.winner == 1:     # P2 won
                 reward = -1.0
             else:
-                reward = 0.0  # draw / unresolved
+                reward = 0.0         # draw / unresolved
         elif truncated:
             reward = float(_TRUNCATION_PENALTY)
         else:
-            # Small intermediate reward for damage dealt/taken
+            # P1-centric intermediate shaping: positive when P2 takes damage,
+            # negative when P1 takes damage, regardless of who is acting.
             p1_now, p2_now = gs.p1_health, gs.p2_health
-            if self._acting_player == 1:
-                dmg_dealt = max(0, prev_p2 - p2_now)
-                dmg_taken = max(0, prev_p1 - p1_now)
-            else:
-                dmg_dealt = max(0, prev_p1 - p1_now)
-                dmg_taken = max(0, prev_p2 - p2_now)
+            dmg_dealt = max(0, prev_p2 - p2_now)   # P2 HP lost  → good for P1
+            dmg_taken = max(0, prev_p1 - p1_now)   # P1 HP lost  → bad for P1
             reward = dmg_dealt * 0.01 - dmg_taken * 0.01 + _STEP_PENALTY
         return reward + repeat_penalty
 
@@ -446,7 +446,7 @@ def get_or_none(
     deck1: str,
     deck2: str,
     cache_dir: str | Path | None = None,
-    max_turns: int = 200,
+    max_turns: int = 1000,
 ) -> Optional["CppEngineEnvironment"]:
     """Return a :class:`CppEngineEnvironment` if one is compiled for this matchup.
 

@@ -63,7 +63,12 @@ param(
     [switch]$NoServer,
     [switch]$NoBuild,
     [string]$CacheDir     = "results\cpp_engines",
-    [string]$PipelineJson = ""
+    [string]$PipelineJson = "",
+    # Optional FaBrary/FABdb deck JSON files for P1/P2.
+    # When supplied, all card names in deck+sideboard are resolved to card IDs
+    # and included in the C++ engine — ensures the engine covers the full pool.
+    [string]$Deck1Json    = "",
+    [string]$Deck2Json    = ""
 )
 
 Set-StrictMode -Version Latest
@@ -144,6 +149,51 @@ if ($Deck1 -eq "" -or $Deck2 -eq "") {
 $MatchupKey = "${Deck1}_vs_${Deck2}"
 $EngineDir  = Join-Path (Join-Path $RepoRoot $CacheDir) $MatchupKey
 
+# ---------------------------------------------------------------------------
+# Compute a content hash of the deck inputs so we can skip rebuilds when
+# nothing has changed.  Hash = SHA256 of sorted (Deck1, Deck2, JSON contents).
+# ---------------------------------------------------------------------------
+
+function Get-DeckInputHash {
+    param([string]$d1, [string]$d2, [string]$j1, [string]$j2)
+    # Keep deck order (d1 vs d2 is directional) but hash JSON contents
+    $jsonHash1 = if ($j1 -ne "" -and (Test-Path $j1)) { (Get-FileHash $j1 -Algorithm SHA256).Hash } else { "none" }
+    $jsonHash2 = if ($j2 -ne "" -and (Test-Path $j2)) { (Get-FileHash $j2 -Algorithm SHA256).Hash } else { "none" }
+    $combined = "$($d1.ToLower())|$($d2.ToLower())|$jsonHash1|$jsonHash2"
+    $bytes    = [System.Text.Encoding]::UTF8.GetBytes($combined)
+    $sha      = [System.Security.Cryptography.SHA256]::Create()
+    $hash     = ($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString("x2") }) -join ""
+    return $hash.Substring(0, 16)   # 16 hex chars is plenty
+}
+
+$InputHash     = Get-DeckInputHash -d1 $Deck1 -d2 $Deck2 -j1 $Deck1Json -j2 $Deck2Json
+$HashFile      = Join-Path $EngineDir "engine_input_hash.txt"
+
+# Check whether a cached engine already covers exactly these inputs
+if (-not $NoBuild) {
+    $existingPyd = $null
+    if (Test-Path $EngineDir) {
+        $existingPyd = Get-ChildItem -Path $EngineDir -Filter "fab_engine*" -File |
+                       Where-Object { $_.Extension -in @(".pyd", ".so") } |
+                       Select-Object -First 1
+    }
+    if ($existingPyd -and (Test-Path $HashFile)) {
+        $storedHash = (Get-Content $HashFile -Raw).Trim()
+        if ($storedHash -eq $InputHash) {
+            Write-Host ""
+            Write-Host "  Engine already up to date (hash $InputHash)." -ForegroundColor Green
+            Write-Host "  Skipping rebuild.  Module: $($existingPyd.FullName)" -ForegroundColor Green
+            Write-Host "  (Delete '$HashFile' or '$($existingPyd.FullName)' to force a rebuild.)"
+            Write-Host ""
+            Pop-Location
+            exit 0
+        } else {
+            Write-Host ""
+            Write-Host "  Deck inputs changed (old=$storedHash  new=$InputHash) -- rebuilding." -ForegroundColor DarkYellow
+        }
+    }
+}
+
 if ($TalisharUrl -ne "") {
     $BaseUrl = $TalisharUrl
 } elseif ($env:TALISHAR_URL) {
@@ -174,6 +224,8 @@ $genArgs = @(
 )
 if ($NoServer) { $genArgs += "--no-server" }
 if ($BaseUrl -ne "http://localhost") { $genArgs += @("--base-url", $BaseUrl) }
+if ($Deck1Json -ne "" -and (Test-Path $Deck1Json)) { $genArgs += @("--deck1-json", $Deck1Json) }
+if ($Deck2Json -ne "" -and (Test-Path $Deck2Json)) { $genArgs += @("--deck2-json", $Deck2Json) }
 
 python @genArgs
 if ($LASTEXITCODE -ne 0) {
@@ -355,6 +407,13 @@ if ($NoBuild) {
             Remove-Item -Recurse -Force $buildDir -ErrorAction SilentlyContinue
         }
 
+        # Remove the existing .pyd/.so so the post-build copy never hits a lock
+        Get-ChildItem -Path $EngineDir -Filter "fab_engine*" -File |
+            Where-Object { $_.Extension -in @(".pyd", ".so") } |
+            ForEach-Object {
+                Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
+            }
+
         Write-Host "  Configuring..."
         $cfgArgs = @("-B", "build", "-DCMAKE_BUILD_TYPE=Release", "-Dpybind11_DIR=$pybind11Dir") + $generatorArgs + @(".")
         cmake @cfgArgs 2>&1 | ForEach-Object { "    $_" }
@@ -369,6 +428,10 @@ if ($NoBuild) {
             Write-Fail "cmake build failed - check errors above"
             exit 1
         }
+
+        # Record the input hash so subsequent runs can skip an identical rebuild
+        Set-Content -Path $HashFile -Value $InputHash -Encoding UTF8 -NoNewline
+        Write-Ok "Cached engine hash: $InputHash -> $HashFile"
     } finally {
         Pop-Location
     }

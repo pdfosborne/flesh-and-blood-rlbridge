@@ -73,7 +73,7 @@ DEFAULT_N_STEPS = 256
 DEFAULT_PPO_EPOCHS = 4
 DEFAULT_MINI_BATCH = 64
 DEFAULT_WARMUP_EPISODES = 100
-DEFAULT_WARMUP_BASELINE_EVAL_EPISODES = 20
+DEFAULT_WARMUP_BASELINE_EVAL_EPISODES = 100
 
 
 @dataclass
@@ -701,6 +701,45 @@ def _run_one_episode(
         if done:
             break
         obs = next_obs
+
+    # ── inject terminal loss for the loser ───────────────────────────────────
+    # The terminal +1 reward only goes to the player who happened to be ACTING
+    # on the final step.  The other player received no terminal signal at all,
+    # leaving their episode reward positive (from intermediate damage) even when
+    # they lost.  Inject a synthetic done=True transition with reward=-1 so:
+    #   • the critic learns V(terminal) ≈ -1 for the loser's perspective
+    #   • cur_p1_r / cur_p2_r correctly reflect the game outcome for reporting
+    if terminated and final_p1_hp is not None and final_p2_hp is not None:
+        if final_p1_hp > final_p2_hp:
+            # P1 won → P2 never saw a terminal -1
+            if p2_trans:
+                last = p2_trans[-1]
+                p2_trans.append({
+                    "obs_vec":      last["next_obs_vec"],
+                    "action":       last["action"],
+                    "reward":       -1.0,
+                    "value":        0.0,
+                    "log_prob":     last["log_prob"],
+                    "done":         1.0,
+                    "n_legal":      last["n_legal"],
+                    "next_obs_vec": np.zeros_like(last["next_obs_vec"]),
+                })
+                cur_p2_r -= 1.0
+        elif final_p2_hp > final_p1_hp:
+            # P2 won → P1 never saw a terminal -1
+            if p1_trans:
+                last = p1_trans[-1]
+                p1_trans.append({
+                    "obs_vec":      last["next_obs_vec"],
+                    "action":       last["action"],
+                    "reward":       -1.0,
+                    "value":        0.0,
+                    "log_prob":     last["log_prob"],
+                    "done":         1.0,
+                    "n_legal":      last["n_legal"],
+                    "next_obs_vec": np.zeros_like(last["next_obs_vec"]),
+                })
+                cur_p1_r -= 1.0
 
     return {
         "p1_transitions": p1_trans,

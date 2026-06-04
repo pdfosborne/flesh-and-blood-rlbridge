@@ -1079,7 +1079,13 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
     ) -> ResetResult:
         # ── Fast-path: delegate entirely to C++ engine ────────────────────────
         if self._using_cpp:
-            return self._cpp_env.reset(seed=seed, options=options)  # type: ignore[union-attr]
+            result = self._cpp_env.reset(seed=seed, options=options)  # type: ignore[union-attr]
+            # Sync wrapper attributes so training code reading env._acting_player_id
+            # (etc.) sees correct values even though the C++ env owns the state.
+            self._acting_player_id = int(self._cpp_env._acting_player)  # type: ignore[union-attr]
+            self._player_hp = int(self._cpp_env._gs.p1_health)          # type: ignore[union-attr]
+            self._opp_hp    = int(self._cpp_env._gs.p2_health)          # type: ignore[union-attr]
+            return result
 
         # Recycle the session's cookie store between episodes so connections
         # stay pooled (keep-alive) but stale cookies don't leak.
@@ -1135,7 +1141,13 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
     def step(self, action: Any) -> StepResult:
         # ── Fast-path: delegate entirely to C++ engine ────────────────────────
         if self._using_cpp:
-            return self._cpp_env.step(action)  # type: ignore[union-attr]
+            result = self._cpp_env.step(action)  # type: ignore[union-attr]
+            # Sync wrapper attributes after each step so training code reading
+            # env._acting_player_id sees the correct (updated) value.
+            self._acting_player_id = int(self._cpp_env._acting_player)  # type: ignore[union-attr]
+            self._player_hp = int(self._cpp_env._gs.p1_health)          # type: ignore[union-attr]
+            self._opp_hp    = int(self._cpp_env._gs.p2_health)          # type: ignore[union-attr]
+            return result
 
         state = self._last_state
         legal_actions = self._legal_actions(state)

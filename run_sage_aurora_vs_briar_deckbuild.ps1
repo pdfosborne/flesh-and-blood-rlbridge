@@ -29,7 +29,7 @@ $TalisharUrl    = if ($env:TALISHAR_URL)    { $env:TALISHAR_URL }    else { "htt
 $AssetsPath     = if ($env:TALISHAR_ASSETS_PATH) { $env:TALISHAR_ASSETS_PATH } else {
     Join-Path $PSScriptRoot "Talishar\Assets"
 }
-$OutDir         = Join-Path $PSScriptRoot "..\results\auroraPaulvanGijssel_vs_briarAjanell"
+$OutDir         = Join-Path $PSScriptRoot "\results\auroraPaulvanGijssel_vs_briarAjanell"
 $DeckDir        = Join-Path $OutDir "sage_decks"
 $ResultsJson    = Join-Path $OutDir "results.json"
 
@@ -54,16 +54,21 @@ $BriarHeroClass    = "Runeblade"
 $BriarEquipment    = "briar star_fall aether_ironweave spellbound_creepers aether_crackers crown_of_dichotomy"
 
 # Training volume  (adjust for longer/faster runs)
-$DeckbuildEpisodes      = 80
-$SideboardEpisodes      = 30
-$PlayEpisodes           = 50
-$NumEvalGames           = 3
-$NumSideboardEpisodes   = 5   # sideboard runs *inside* each deckbuilder eval
+$DeckbuildEpisodes      = 1000
+$SideboardEpisodes      = 1000
+$PlayEpisodes           = 10000
+$NumEvalGames           = 1000
+$NumSideboardEpisodes   = 1000   # sideboard runs *inside* each deckbuilder eval
 $Iterations             = 3
+# Parallel workers for Phase 3 play training.
+# Leave as $null to let train_full_pipeline.py auto-detect based on whether
+# the C++ engine is available (auto -> half physical cores, capped at 8).
+# Set to an integer to override, e.g. $PlayWorkers = 4
+$PlayWorkers            = $null
 
 # Final evaluation (post-training)
-$FinalEvalEpisodes      = 20  # eval games with best deck + optimal policy
-$FinalEvalMaxSteps      = 60
+$FinalEvalEpisodes      = 100  # eval games with best deck + optimal policy
+$FinalEvalMaxSteps      = 100
 $GifFps                 = 1.0
 
 # ─── Setup ────────────────────────────────────────────────────────────────────
@@ -127,11 +132,19 @@ Write-Host ""
 Write-Host "  Building C++ engine for Aurora vs Briar..."
 Write-Host ""
 
-& "$PSScriptRoot\build_cpp_engine_for_matchup.ps1" `
-    -Deck1       $AuroraHeroId `
-    -Deck2       $BriarHeroId `
-    -TalisharSrc (Join-Path $PSScriptRoot "Talishar") `
-    -TalisharUrl $TalisharUrl
+# Pass the FaBrary deck JSONs so the engine includes all cards from both pools
+# Note: -NoServer is a [switch] and must be passed separately, not inside a splatted array
+$CppBuildArgs = @{
+    Deck1        = $AuroraHeroId
+    Deck2        = $BriarHeroId
+    TalisharSrc  = (Join-Path $PSScriptRoot "Talishar")
+    TalisharUrl  = $TalisharUrl
+    NoServer     = $true
+}
+if (Test-Path $AuroraDeckJson) { $CppBuildArgs["Deck1Json"] = $AuroraDeckJson }
+if (Test-Path $BriarDeckJson)  { $CppBuildArgs["Deck2Json"] = $BriarDeckJson  }
+
+& "$PSScriptRoot\build_cpp_engine_for_matchup.ps1" @CppBuildArgs
 
 $CppEngineBuildSucceeded = ($LASTEXITCODE -eq 0)
 if ($LASTEXITCODE -ne 0) {
@@ -179,6 +192,7 @@ Write-Host ""
     --assets-path         $AssetsPath `
     --out-dir             $OutDir `
     --results-json        $ResultsJson `
+    $(if ($null -ne $PlayWorkers) { @("--workers", $PlayWorkers) } else { @() }) `
     @StartingDeckArgs
 
 if ($LASTEXITCODE -ne 0) {
