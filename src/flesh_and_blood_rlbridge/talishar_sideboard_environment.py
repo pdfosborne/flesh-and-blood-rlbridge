@@ -465,6 +465,7 @@ class TalisharSideboardEnvironment(rlbridgeEnvironment):
 
         content = f"{self._equipment_header}\n{' '.join(card_ids)}\n"
         out_path = Path(self._assets_path) / f"{deck_name}.txt"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(content, encoding="utf-8")
         return out_path
 

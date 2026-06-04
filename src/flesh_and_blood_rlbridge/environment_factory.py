@@ -206,6 +206,7 @@ class TalisharDeckBuilderFactory(rlbridgeEnvironmentFactory):
         opponent_hero_id: str = "dorinthea_ironsong",
         num_sideboard_episodes: int = 10,
         max_build_steps: int = 200,
+        starting_deck: Optional[dict[str, int]] = None,
     ) -> None:
         self._env_id = env_id
         self._hero_id = hero_id
@@ -216,6 +217,7 @@ class TalisharDeckBuilderFactory(rlbridgeEnvironmentFactory):
         self._opponent_hero_id = opponent_hero_id
         self._num_sideboard_episodes = num_sideboard_episodes
         self._max_build_steps = max_build_steps
+        self._starting_deck: Optional[dict[str, int]] = starting_deck
 
     @property
     def env_info(self) -> EnvironmentInfo:
@@ -275,6 +277,7 @@ class TalisharDeckBuilderFactory(rlbridgeEnvironmentFactory):
             base_url=kwargs.get("base_url"),
             talishar_assets_path=kwargs.get("talishar_assets_path"),
             max_build_steps=int(kwargs.get("max_build_steps", self._max_build_steps)),
+            starting_deck=kwargs.get("starting_deck", self._starting_deck),
             render_mode=render_mode,
         )
 

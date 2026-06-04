@@ -241,6 +241,7 @@ class TalisharDeckBuilderEnvironment(rlbridgeEnvironment):
         base_url: Optional[str] = None,
         talishar_assets_path: Optional[str] = None,
         card_pool: Optional[list[dict[str, Any]]] = None,
+        starting_deck: Optional[dict[str, int]] = None,
         max_build_steps: int = 200,
         step_penalty: float = 0.005,
         render_mode: Optional[str] = None,
@@ -293,6 +294,12 @@ class TalisharDeckBuilderEnvironment(rlbridgeEnvironment):
             c["id"]: c for c in self._card_pool
         }
 
+        # Optional starting deck: pre-populate each episode with these cards.
+        # Cards outside the pool or exceeding max_copies are silently dropped.
+        self._starting_deck: dict[str, int] = (
+            self._sanitize_starting_deck(starting_deck) if starting_deck else {}
+        )
+
         # Episode state (initialised properly in reset())
         self._deck: dict[str, int] = {}
         self._step_no: int = 0
@@ -314,6 +321,32 @@ class TalisharDeckBuilderEnvironment(rlbridgeEnvironment):
             return str(default)
         return "/tmp"  # noqa: S108 — fallback for environments without the Talishar checkout
 
+    def _sanitize_starting_deck(self, deck: dict[str, int]) -> dict[str, int]:
+        """Validate a starting deck against the loaded pool and format rules.
+
+        Rules applied:
+        * Cards not in ``_pool_by_id`` are dropped (not legal for this hero/format).
+        * Copy counts are clamped to ``[1, max_copies]``.
+        * The total is clamped to ``pool_size`` — a starting deck larger than the
+          target pool would leave no room for the agent to make meaningful decisions.
+
+        Returns the sanitized deck (may be empty if nothing survives).
+        """
+        sanitized: dict[str, int] = {}
+        total = 0
+        for card_id, count in deck.items():
+            if card_id not in self._pool_by_id:
+                continue
+            clamped = max(1, min(int(count), self._max_copies))
+            # Don't overfill — stop adding once pool_size is reached
+            available_slots = self._pool_size - total
+            if available_slots <= 0:
+                break
+            take = min(clamped, available_slots)
+            sanitized[card_id] = take
+            total += take
+        return sanitized
+
     @property
     def _deck_size(self) -> int:
         return sum(self._deck.values())
@@ -325,10 +358,14 @@ class TalisharDeckBuilderEnvironment(rlbridgeEnvironment):
 
     def _available_actions(self) -> list[str]:
         actions: list[str] = []
-        for card_id, card in self._pool_by_id.items():
-            _ = card  # pool iteration; card metadata used in observation only
-            if self._deck.get(card_id, 0) < self._max_copies:
-                actions.append(f"add:{card_id}")
+        # Only offer add actions while the pool hasn't reached its target size.
+        # This enforces the pool_size cap (e.g. 55 cards for Silver Age) so the
+        # agent cannot build an oversized pool that would be illegal in play.
+        if self._deck_size < self._pool_size:
+            for card_id, card in self._pool_by_id.items():
+                _ = card  # pool iteration; card metadata used in observation only
+                if self._deck.get(card_id, 0) < self._max_copies:
+                    actions.append(f"add:{card_id}")
         for card_id, count in self._deck.items():
             if count > 0:
                 actions.append(f"remove:{card_id}")
@@ -391,7 +428,25 @@ class TalisharDeckBuilderEnvironment(rlbridgeEnvironment):
         seed: Optional[int] = None,
         options: Optional[dict[str, Any]] = None,
     ) -> ResetResult:
-        self._deck = {}
+        """Reset the environment for a new deckbuilding episode.
+
+        Parameters
+        ----------
+        options:
+            Optional dict that may contain:
+
+            ``"starting_deck"`` : dict[str, int]
+                Override the starting deck for this episode only.  Useful for
+                curriculum learning (e.g. start from last best pool).
+                Validated against the pool and format rules before use.
+        """
+        # Determine starting deck for this episode
+        if options and "starting_deck" in options:
+            episode_start = self._sanitize_starting_deck(options["starting_deck"])
+        else:
+            episode_start = dict(self._starting_deck)
+
+        self._deck = episode_start
         self._step_no = 0
         self._done = False
         actions = self._available_actions()
@@ -406,6 +461,7 @@ class TalisharDeckBuilderEnvironment(rlbridgeEnvironment):
                 "target_pool_size": self._pool_size,
                 "has_sideboard": self._pool_size > self._min_deck_size,
                 "max_copies": self._max_copies,
+                "starting_deck_size": sum(episode_start.values()),
             },
         )
 
@@ -502,6 +558,7 @@ class TalisharDeckBuilderEnvironment(rlbridgeEnvironment):
 
         content = f"{self._equipment_header}\n{' '.join(card_ids)}\n"
         out_path = Path(self._assets_path) / f"{deck_name}.txt"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(content, encoding="utf-8")
         return out_path
 
@@ -520,8 +577,15 @@ class TalisharDeckBuilderEnvironment(rlbridgeEnvironment):
         performs *after optimal sideboard selection*, not just a greedy cut.
 
         Returns the win rate in ``[0.0, 1.0]``.  Returns ``0.5`` (neutral) if
-        the Talishar server is unreachable or evaluation otherwise fails.
+        ``num_eval_games == 0``, the Talishar server is unreachable, or
+        evaluation otherwise fails.
         """
+        # When num_eval_games == 0 the caller (e.g. pipeline iteration 1) has
+        # chosen to skip internal evaluation — play win rate is the real signal.
+        # Return 0.5 so the mapped reward is 0.0 (neutral) for any valid pool.
+        if self._num_eval_games == 0:
+            return 0.5
+
         game_deck = self._run_sideboard_phase()
 
         deck_name = f"rl_deck_{uuid.uuid4().hex[:12]}"
