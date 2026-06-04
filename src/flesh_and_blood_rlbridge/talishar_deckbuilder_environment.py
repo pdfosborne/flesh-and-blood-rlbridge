@@ -46,21 +46,28 @@ from .talishar_engine_environment import (
     talishar_deck_player_won,
 )
 from .talishar_oracle import TalisharConnectionError
+from .talishar_sideboard_environment import TalisharSideboardEnvironment
 
 # ---------------------------------------------------------------------------
 # Format rules
 # ---------------------------------------------------------------------------
 
 #: Per-format deck construction constraints (FaB CR §4).
+# ``pool_size`` is the total registered card pool (main deck + sideboard inventory).
+# The deckbuilder agent builds to ``pool_size``; the sideboard agent then selects
+# ``min_deck_size`` or more of those cards to form the per-game deck.
+# If ``pool_size`` == ``min_deck_size`` the format has no sideboard (e.g. Blitz).
 _FORMAT_RULES: dict[str, dict[str, int]] = {
-    "blitz": {"min_deck_size": 40, "max_copies": 2},
-    "classic_constructed": {"min_deck_size": 60, "max_copies": 3},
-    "living_legend": {"min_deck_size": 60, "max_copies": 3},
-    # Silver Age: 40-card deck, max 2 copies, Common/Rare only.
+    "blitz": {"min_deck_size": 40, "max_copies": 2, "pool_size": 40},
+    # Classic Constructed: 80-card pool (hero + equipment handled separately via
+    # the equipment header), minimum 60-card game deck per FaB CR §4.
+    "classic_constructed": {"min_deck_size": 60, "max_copies": 3, "pool_size": 80},
+    "living_legend": {"min_deck_size": 60, "max_copies": 3, "pool_size": 80},
+    # Silver Age: 40-card main deck + up to 15-card inventory (sideboard).
     # Rarity restriction is enforced via the ``legality.silver_age`` field in
     # the card database — cards banned in Silver Age are excluded by _load_card_pool.
-    "silver_age": {"min_deck_size": 40, "max_copies": 2},
-    "upf": {"min_deck_size": 60, "max_copies": 3},
+    "silver_age": {"min_deck_size": 40, "max_copies": 2, "pool_size": 55},
+    "upf": {"min_deck_size": 60, "max_copies": 3, "pool_size": 80},
 }
 
 _DEFAULT_FORMAT = "silver_age"
@@ -226,8 +233,11 @@ class TalisharDeckBuilderEnvironment(rlbridgeEnvironment):
         game_format: str = _DEFAULT_FORMAT,
         num_eval_games: int = 5,
         opponent_deck_name: str = "Ira",
+        opponent_hero_id: str = "dorinthea_ironsong",
         eval_p1_agent: Optional[Any] = None,
         eval_p2_agent: Optional[Any] = None,
+        sideboard_agent: Optional[Any] = None,
+        num_sideboard_episodes: int = 10,
         base_url: Optional[str] = None,
         talishar_assets_path: Optional[str] = None,
         card_pool: Optional[list[dict[str, Any]]] = None,
@@ -240,8 +250,11 @@ class TalisharDeckBuilderEnvironment(rlbridgeEnvironment):
         self._game_format = _normalize_game_format(game_format)
         self._num_eval_games = num_eval_games
         self._opponent_deck_name = opponent_deck_name
+        self._opponent_hero_id = opponent_hero_id
         self._eval_p1_agent = eval_p1_agent
         self._eval_p2_agent = eval_p2_agent
+        self._sideboard_agent = sideboard_agent
+        self._num_sideboard_episodes = num_sideboard_episodes
         self._base_url = base_url or os.environ.get("TALISHAR_URL", "http://localhost")
         self._step_penalty = step_penalty
         self._max_build_steps = max_build_steps
@@ -267,6 +280,9 @@ class TalisharDeckBuilderEnvironment(rlbridgeEnvironment):
         rules = _FORMAT_RULES.get(self._game_format, _FORMAT_RULES["silver_age"])
         self._min_deck_size: int = rules["min_deck_size"]
         self._max_copies: int = rules["max_copies"]
+        # Pool size: total registered card count (main deck + sideboard/inventory).
+        # When pool_size > min_deck_size the format supports sideboarding.
+        self._pool_size: int = rules["pool_size"]
 
         # Card pool
         if card_pool is not None:
@@ -304,7 +320,8 @@ class TalisharDeckBuilderEnvironment(rlbridgeEnvironment):
 
     @property
     def _is_valid(self) -> bool:
-        return self._deck_size >= self._min_deck_size
+        """Pool is valid when it reaches the target pool size."""
+        return self._deck_size >= self._pool_size
 
     def _available_actions(self) -> list[str]:
         actions: list[str] = []
@@ -334,6 +351,8 @@ class TalisharDeckBuilderEnvironment(rlbridgeEnvironment):
             "currentDeck": current_deck,
             "deckSize": self._deck_size,
             "targetMinSize": self._min_deck_size,
+            "targetPoolSize": self._pool_size,
+            "hasSideboard": self._pool_size > self._min_deck_size,
             "maxCopies": self._max_copies,
             "isValid": self._is_valid,
             "stepNo": self._step_no,
@@ -384,6 +403,8 @@ class TalisharDeckBuilderEnvironment(rlbridgeEnvironment):
                 "format": self._game_format,
                 "pool_size": len(self._card_pool),
                 "min_deck_size": self._min_deck_size,
+                "target_pool_size": self._pool_size,
+                "has_sideboard": self._pool_size > self._min_deck_size,
                 "max_copies": self._max_copies,
             },
         )
@@ -450,7 +471,8 @@ class TalisharDeckBuilderEnvironment(rlbridgeEnvironment):
         lines = [
             f"=== Deck Builder [{self._hero_id} / {self._game_format}] ===",
             f"Step {self._step_no} | "
-            f"Cards in deck: {self._deck_size} / {self._min_deck_size}+ required | "
+            f"Cards in pool: {self._deck_size} / {self._pool_size} target "
+            f"(min game deck: {self._min_deck_size}) | "
             f"Valid: {self._is_valid}",
         ]
         if self._deck:
@@ -465,13 +487,17 @@ class TalisharDeckBuilderEnvironment(rlbridgeEnvironment):
 
     # ── Evaluation ────────────────────────────────────────────────────────────
 
-    def _write_deck_file(self, deck_name: str) -> Path:
-        """Write the current deck to ``{assets_path}/{deck_name}.txt``.
+    def _write_game_deck_file(
+        self, deck_name: str, game_deck: Optional[dict[str, int]] = None
+    ) -> Path:
+        """Write a game deck to ``{assets_path}/{deck_name}.txt``.
 
+        ``game_deck`` defaults to the current ``self._deck`` (full pool).
         Returns the ``Path`` of the written file.
         """
+        source = game_deck if game_deck is not None else self._deck
         card_ids: list[str] = []
-        for card_id, count in sorted(self._deck.items()):
+        for card_id, count in sorted(source.items()):
             card_ids.extend([card_id] * count)
 
         content = f"{self._equipment_header}\n{' '.join(card_ids)}\n"
@@ -480,17 +506,30 @@ class TalisharDeckBuilderEnvironment(rlbridgeEnvironment):
         return out_path
 
     def _evaluate_deck(self) -> float:
-        """Evaluate the current deck by playing ``num_eval_games`` Talishar games.
+        """Evaluate the current card pool via the sideboard → play pipeline.
+
+        Steps:
+        1. Run :class:`TalisharSideboardEnvironment` for ``num_sideboard_episodes``
+           episodes to find the best game deck selection from the built pool.
+           The sideboard agent (``self._sideboard_agent``) is used when available;
+           otherwise actions are sampled randomly.
+        2. Play ``num_eval_games`` Talishar games with the best-selected deck and
+           return the win rate.
+
+        This means the deckbuilder reward directly reflects how well the pool
+        performs *after optimal sideboard selection*, not just a greedy cut.
 
         Returns the win rate in ``[0.0, 1.0]``.  Returns ``0.5`` (neutral) if
         the Talishar server is unreachable or evaluation otherwise fails.
         """
+        game_deck = self._run_sideboard_phase()
+
         deck_name = f"rl_deck_{uuid.uuid4().hex[:12]}"
         deck_file: Optional[Path] = None
         wins = 0
 
         try:
-            deck_file = self._write_deck_file(deck_name)
+            deck_file = self._write_game_deck_file(deck_name, game_deck)
 
             p1_policy = self._eval_p1_agent
             p2_policy = self._eval_p2_agent
@@ -536,12 +575,94 @@ class TalisharDeckBuilderEnvironment(rlbridgeEnvironment):
                     env.close()
 
         except TalisharConnectionError:
-            # Server unreachable — return neutral score so the episode doesn't crash
             return 0.5
-        except Exception:  # noqa: BLE001 — broad catch to keep evaluation non-fatal
+        except Exception:  # noqa: BLE001
             return 0.5
         finally:
             if deck_file is not None and deck_file.exists():
                 deck_file.unlink(missing_ok=True)
 
         return wins / self._num_eval_games
+
+    def _run_sideboard_phase(self) -> dict[str, int]:
+        """Run the sideboard environment to find the best game deck from the pool.
+
+        Runs ``num_sideboard_episodes`` episodes of :class:`TalisharSideboardEnvironment`
+        against ``opponent_hero_id``.  The episode with the highest reward produces
+        the game deck used for play evaluation.
+
+        Falls back to a greedy top-N cut if all episodes fail to produce a valid deck.
+        """
+        try:
+            sb_env = TalisharSideboardEnvironment(
+                card_pool=self._deck,
+                pool_by_id=self._pool_by_id,
+                opponent_hero_id=self._opponent_hero_id,
+                hero_id=self._hero_id,
+                hero_equipment_header=self._equipment_header,
+                game_format=self._game_format,
+                # Disable recursive play evaluation inside the sideboard env —
+                # the deckbuilder runs play evaluation after sideboard selection.
+                num_eval_games=0,
+                opponent_deck_name=self._opponent_deck_name,
+                base_url=self._base_url,
+                talishar_assets_path=self._assets_path,
+            )
+        except Exception:  # noqa: BLE001
+            return self._greedy_game_deck()
+
+        best_reward = float("-inf")
+        best_deck: dict[str, int] = {}
+
+        for _ in range(self._num_sideboard_episodes):
+            result = sb_env.reset()
+            ep_reward = 0.0
+            done = False
+
+            while not done:
+                if self._sideboard_agent is not None and hasattr(
+                    self._sideboard_agent, "act"
+                ):
+                    action = self._sideboard_agent.act(result.observation)
+                else:
+                    import random  # noqa: PLC0415
+                    avail = json.loads(result.observation).get("availableActions", [])
+                    action = random.choice(avail) if avail else "finalize"
+
+                step = sb_env.step(action)
+                ep_reward += step.reward
+                done = step.terminated or step.truncated
+                result = ResetResult(observation=step.observation, info={})
+
+            candidate = sb_env.get_active_deck()
+            if (
+                sum(candidate.values()) >= sb_env._min_deck_size
+                and ep_reward > best_reward
+            ):
+                best_reward = ep_reward
+                best_deck = candidate
+
+        return best_deck if best_deck else self._greedy_game_deck()
+
+    def _greedy_game_deck(self) -> dict[str, int]:
+        """Fallback: greedily take the highest-copy cards until ``min_deck_size``."""
+        if self._pool_size == self._min_deck_size:
+            return dict(self._deck)
+
+        game_deck: dict[str, int] = {}
+        remaining = self._min_deck_size
+        for card_id, count in sorted(self._deck.items(), key=lambda kv: -kv[1]):
+            if remaining <= 0:
+                break
+            take = min(count, remaining)
+            game_deck[card_id] = take
+            remaining -= take
+        return game_deck
+
+    def get_card_pool(self) -> dict[str, int]:
+        """Return the currently built card pool (card_id → copy count).
+
+        Call after a valid finalize to get the full pool for passing to
+        :class:`TalisharSideboardEnvironment`.
+        """
+        return dict(self._deck)

@@ -10,6 +10,7 @@ __all__ = [
     "FLESH_AND_BLOOD_DECKBUILD_V0",
     "FLESH_AND_BLOOD_DECKBUILD_TALISHAR_V0",
     "FLESH_AND_BLOOD_SELFPLAY_V0",
+    "FLESH_AND_BLOOD_SIDEBOARD_TALISHAR_V0",
     "FLESH_AND_BLOOD_TALISHAR_V0",
     "FLESH_AND_BLOOD_TALISHAR_SELFPLAY_V0",
     "FLESH_AND_BLOOD_TALISHAR_VS_AI_V0",
@@ -21,6 +22,8 @@ __all__ = [
     "TalisharDeckBuilderFactory",
     "TalisharEngineEnvironment",
     "TalisharEngineFactory",
+    "TalisharSideboardEnvironment",
+    "TalisharSideboardFactory",
     "register_environments",
     "register_mcp_tools",
 ]
@@ -83,6 +86,18 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
         "environment_factory",
         "TalisharDeckBuilderFactory",
     ),
+    "FLESH_AND_BLOOD_SIDEBOARD_TALISHAR_V0": (
+        "environment_factory",
+        "FLESH_AND_BLOOD_SIDEBOARD_TALISHAR_V0",
+    ),
+    "TalisharSideboardEnvironment": (
+        "talishar_sideboard_environment",
+        "TalisharSideboardEnvironment",
+    ),
+    "TalisharSideboardFactory": (
+        "environment_factory",
+        "TalisharSideboardFactory",
+    ),
     "FleshAndBloodDeckBuilderEnvironment": (
         "simulator.deck_builder_environment",
         "FleshAndBloodDeckBuilderEnvironment",
@@ -117,11 +132,14 @@ if TYPE_CHECKING:  # Static type-checkers and IDEs still see the real symbols.
         FLESH_AND_BLOOD_DECKBUILD_V0,
         FLESH_AND_BLOOD_DECKBUILD_TALISHAR_V0,
         FLESH_AND_BLOOD_SELFPLAY_V0,
+        FLESH_AND_BLOOD_SIDEBOARD_TALISHAR_V0,
         FLESH_AND_BLOOD_TALISHAR_V0,
         FLESH_AND_BLOOD_TALISHAR_SELFPLAY_V0,
         FLESH_AND_BLOOD_TALISHAR_VS_AI_V0,
         FleshAndBloodFactory,
         TalisharDeckBuilderFactory,
+        TalisharSideboardFactory,
     )
     from .simulator.gameplay_environment import FleshAndBloodGameplayEnvironment
     from .talishar_deckbuilder_environment import TalisharDeckBuilderEnvironment
+    from .talishar_sideboard_environment import TalisharSideboardEnvironment

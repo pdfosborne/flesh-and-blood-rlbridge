@@ -8,6 +8,7 @@ from rlbridge.protocol.messages import EnvironmentInfo, SuggestedHyperparameters
 from .simulator.deck_builder_environment import FleshAndBloodDeckBuilderEnvironment
 from .simulator.gameplay_environment import FleshAndBloodGameplayEnvironment
 from .talishar_deckbuilder_environment import TalisharDeckBuilderEnvironment
+from .talishar_sideboard_environment import TalisharSideboardEnvironment
 from .talishar_engine_environment import (
     TalisharEngineEnvironment,
     _DEFAULT_DECK_LINK as _TALISHAR_DEFAULT_DECK,
@@ -201,6 +202,9 @@ class TalisharDeckBuilderFactory(rlbridgeEnvironmentFactory):
         hero_class: str = "Ninja",
         game_format: str = "silver_age",
         num_eval_games: int = 5,
+        opponent_deck_name: str = "Ira",
+        opponent_hero_id: str = "dorinthea_ironsong",
+        num_sideboard_episodes: int = 10,
         max_build_steps: int = 200,
     ) -> None:
         self._env_id = env_id
@@ -208,6 +212,9 @@ class TalisharDeckBuilderFactory(rlbridgeEnvironmentFactory):
         self._hero_class = hero_class
         self._game_format = game_format
         self._num_eval_games = num_eval_games
+        self._opponent_deck_name = opponent_deck_name
+        self._opponent_hero_id = opponent_hero_id
+        self._num_sideboard_episodes = num_sideboard_episodes
         self._max_build_steps = max_build_steps
 
     @property
@@ -255,6 +262,16 @@ class TalisharDeckBuilderFactory(rlbridgeEnvironmentFactory):
             hero_class=str(kwargs.get("hero_class", self._hero_class)),
             game_format=str(kwargs.get("game_format", self._game_format)),
             num_eval_games=int(kwargs.get("num_eval_games", self._num_eval_games)),
+            opponent_deck_name=str(
+                kwargs.get("opponent_deck_name", self._opponent_deck_name)
+            ),
+            opponent_hero_id=str(
+                kwargs.get("opponent_hero_id", self._opponent_hero_id)
+            ),
+            num_sideboard_episodes=int(
+                kwargs.get("num_sideboard_episodes", self._num_sideboard_episodes)
+            ),
+            sideboard_agent=kwargs.get("sideboard_agent"),
             base_url=kwargs.get("base_url"),
             talishar_assets_path=kwargs.get("talishar_assets_path"),
             max_build_steps=int(kwargs.get("max_build_steps", self._max_build_steps)),
@@ -277,6 +294,112 @@ FLESH_AND_BLOOD_TALISHAR_VS_AI_V0 = TalisharEngineFactory(
 FLESH_AND_BLOOD_DECKBUILD_TALISHAR_V0 = TalisharDeckBuilderFactory(
     "FleshAndBlood-DeckBuild-Talishar-v0"
 )
+
+
+class TalisharSideboardFactory(rlbridgeEnvironmentFactory):
+    """Factory that creates :class:`TalisharSideboardEnvironment` instances.
+
+    Phase 2 of the three-phase FaB pipeline: sideboard selection.  The factory
+    must be seeded with the card pool built in Phase 1 before ``create()`` is
+    called (pass ``card_pool`` and ``pool_by_id`` as ``create()`` kwargs or
+    pre-set them via :meth:`set_pool`).
+    """
+
+    def __init__(
+        self,
+        env_id: str,
+        *,
+        hero_id: str = "ira_crimson_haze",
+        hero_class: str = "Ninja",
+        game_format: str = "silver_age",
+        opponent_hero_id: str = "dorinthea_ironsong",
+        num_eval_games: int = 5,
+        max_sideboard_steps: int = 100,
+    ) -> None:
+        self._env_id = env_id
+        self._hero_id = hero_id
+        self._hero_class = hero_class
+        self._game_format = game_format
+        self._opponent_hero_id = opponent_hero_id
+        self._num_eval_games = num_eval_games
+        self._max_sideboard_steps = max_sideboard_steps
+        # Pool set externally after Phase 1 completes
+        self._card_pool: dict[str, int] = {}
+        self._pool_by_id: dict[str, Any] = {}
+
+    def set_pool(
+        self,
+        card_pool: dict[str, int],
+        pool_by_id: dict[str, Any],
+    ) -> None:
+        """Provide the card pool built by the deckbuilder (Phase 1 output)."""
+        self._card_pool = card_pool
+        self._pool_by_id = pool_by_id
+
+    @property
+    def env_info(self) -> EnvironmentInfo:
+        return EnvironmentInfo(
+            env_id=self._env_id,
+            description=(
+                "Flesh and Blood TCG sideboard environment (Phase 2 of 3).  "
+                "The agent selects which cards from a pre-built pool to include "
+                "in the active game deck for a specific opponent matchup.  "
+                "Reward is based on win rate vs. the configured opponent.  "
+                "Requires a running Talishar Docker instance (set TALISHAR_URL)."
+            ),
+            tags=[
+                "tcg",
+                "flesh-and-blood",
+                "card-game",
+                "sideboard",
+                "talishar",
+            ],
+            namespace="flesh_and_blood",
+            render_modes=["ansi"],
+            max_episode_steps=self._max_sideboard_steps,
+            suggested_hyperparameters=SuggestedHyperparameters(
+                agent_type="ppo",
+                n_episodes=300,
+                max_steps=self._max_sideboard_steps,
+                alpha=0.1,
+                gamma=0.99,
+                epsilon=1.0,
+                epsilon_min=0.05,
+                epsilon_decay=0.995,
+                sub_goal_threshold=0.5,
+                top_k=3,
+                min_episode_visits=2,
+            ),
+        )
+
+    def create(
+        self,
+        render_mode: Optional[str] = None,
+        **kwargs: Any,
+    ) -> rlbridgeEnvironment:
+        card_pool = kwargs.get("card_pool", self._card_pool)
+        pool_by_id = kwargs.get("pool_by_id", self._pool_by_id)
+        return TalisharSideboardEnvironment(
+            card_pool=card_pool,
+            pool_by_id=pool_by_id,
+            opponent_hero_id=str(
+                kwargs.get("opponent_hero_id", self._opponent_hero_id)
+            ),
+            hero_id=str(kwargs.get("hero_id", self._hero_id)),
+            game_format=str(kwargs.get("game_format", self._game_format)),
+            num_eval_games=int(kwargs.get("num_eval_games", self._num_eval_games)),
+            base_url=kwargs.get("base_url"),
+            talishar_assets_path=kwargs.get("talishar_assets_path"),
+            max_sideboard_steps=int(
+                kwargs.get("max_sideboard_steps", self._max_sideboard_steps)
+            ),
+            render_mode=render_mode,
+        )
+
+
+FLESH_AND_BLOOD_SIDEBOARD_TALISHAR_V0 = TalisharSideboardFactory(
+    "FleshAndBlood-Sideboard-Talishar-v0"
+)
 FLESH_AND_BLOOD_SELFPLAY_V0 = FleshAndBloodFactory(
     "FleshAndBlood-SelfPlay-v0",
     self_play=True,
@@ -290,6 +413,7 @@ ALL_FAB_FACTORIES: list[rlbridgeEnvironmentFactory] = [
     FLESH_AND_BLOOD_TALISHAR_SELFPLAY_V0,
     FLESH_AND_BLOOD_TALISHAR_VS_AI_V0,
     FLESH_AND_BLOOD_DECKBUILD_TALISHAR_V0,
+    FLESH_AND_BLOOD_SIDEBOARD_TALISHAR_V0,
     FLESH_AND_BLOOD_SELFPLAY_V0,
     FLESH_AND_BLOOD_DECKBUILD_V0,
 ]
