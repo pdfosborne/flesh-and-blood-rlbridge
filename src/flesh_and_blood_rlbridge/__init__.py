@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 __all__ = [
     "ALL_FAB_FACTORIES",
+    "CppEngineEnvironment",
     "FLESH_AND_BLOOD_DECKBUILD_V0",
     "FLESH_AND_BLOOD_DECKBUILD_TALISHAR_V0",
     "FLESH_AND_BLOOD_SELFPLAY_V0",
@@ -77,6 +78,10 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
         "talishar_engine_environment",
         "TalisharEngineEnvironment",
     ),
+    "CppEngineEnvironment": (
+        "cpp_engine_environment",
+        "CppEngineEnvironment",
+    ),
     "TalisharEngineFactory": ("environment_factory", "TalisharEngineFactory"),
     "TalisharDeckBuilderEnvironment": (
         "talishar_deckbuilder_environment",
@@ -143,3 +148,4 @@ if TYPE_CHECKING:  # Static type-checkers and IDEs still see the real symbols.
     from .simulator.gameplay_environment import FleshAndBloodGameplayEnvironment
     from .talishar_deckbuilder_environment import TalisharDeckBuilderEnvironment
     from .talishar_sideboard_environment import TalisharSideboardEnvironment
+    from .cpp_engine_environment import CppEngineEnvironment

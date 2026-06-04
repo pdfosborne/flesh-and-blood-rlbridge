@@ -93,6 +93,24 @@ from .talishar_default_policy import (
 )
 from .talishar_oracle import TalisharConnectionError
 
+# ── Optional C++ engine integration ──────────────────────────────────────────
+# Import is best-effort: if the module hasn't been built yet the C++ engine
+# feature is simply unavailable and we fall back to HTTP Talishar silently.
+try:
+    from .cpp_engine_environment import (
+        CppEngineEnvironment as _CppEngineEnvironment,
+        get_engine_dir as _cpp_get_engine_dir,
+        get_or_none as _cpp_get_or_none,
+        is_cpp_engine_available as _cpp_is_available,
+    )
+    _CPP_ENGINE_SUPPORT = True
+except Exception:  # pragma: no cover
+    _CPP_ENGINE_SUPPORT = False
+    _CppEngineEnvironment = None  # type: ignore[assignment, misc]
+    _cpp_get_engine_dir = None    # type: ignore[assignment]
+    _cpp_get_or_none = None       # type: ignore[assignment]
+    _cpp_is_available = None      # type: ignore[assignment]
+
 # Default practice deck: Ira Crimson Haze (young hero, silver_age-legal)
 _DEFAULT_DECK_LINK = "https://fabrary.net/decks/01GJG7Z4WGWSZ95FY74KX4M557"
 _DEFAULT_RENDER_WIDTH = 1920
@@ -165,6 +183,14 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         render_height: Optional[int] = None,
         block_max_pitch_value: int = 3,
         block_min_resource_cost: int = 0,
+        # C++ engine options ─────────────────────────────────────────────────
+        use_cpp_engine: bool = True,
+        cpp_engine_cache_dir: Optional[str] = None,
+        # Override the deck names used *only* for C++ engine cache lookup.
+        # Useful when the game files use UUID-based names (Phase 3) but the
+        # compiled engine was built for the original hero/deck IDs.
+        cpp_engine_deck1: Optional[str] = None,
+        cpp_engine_deck2: Optional[str] = None,
     ) -> None:
         self._base_url = (
             base_url or os.environ.get("TALISHAR_URL", "http://localhost")
@@ -231,6 +257,41 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         self._pw_playwright: Any = None
         self._pw_cmd_queue: Any = None
         self._pw_worker_thread: Any = None
+
+        # ── C++ engine fast-path ──────────────────────────────────────────────
+        # If a compiled fab_engine module exists for this matchup in the cache,
+        # delegate all environment calls to it instead of using HTTP Talishar.
+        # Falls back to HTTP silently if the module hasn't been built yet.
+        self._cpp_env: Optional[Any] = None
+        if use_cpp_engine and _CPP_ENGINE_SUPPORT and local_deck_name:
+            deck2 = opponent_deck_name or local_deck_name
+            # Use override names for cache lookup if provided (e.g. when game
+            # files have UUID-based names but the engine was compiled for the
+            # original hero IDs).
+            lookup_deck1 = cpp_engine_deck1 or local_deck_name
+            lookup_deck2 = cpp_engine_deck2 or deck2
+            self._cpp_env = _cpp_get_or_none(  # type: ignore[misc]
+                lookup_deck1,
+                lookup_deck2,
+                cache_dir=cpp_engine_cache_dir,
+                max_turns=max_turns,
+            )
+            if self._cpp_env is not None:
+                import warnings
+                warnings.warn(
+                    f"[TalisharEngineEnvironment] Using C++ engine for "
+                    f"{lookup_deck1} vs {lookup_deck2} (no HTTP required). "
+                    "Pass use_cpp_engine=False to force HTTP Talishar.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+
+    # ── C++ engine delegation helpers ────────────────────────────────────────
+
+    @property
+    def _using_cpp(self) -> bool:
+        """True when all environment calls are delegated to the C++ engine."""
+        return self._cpp_env is not None
 
     # ── HTTP helpers ──────────────────────────────────────────────────────────
 
@@ -1016,6 +1077,10 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         seed: Optional[int] = None,
         options: Optional[dict[str, Any]] = None,
     ) -> ResetResult:
+        # ── Fast-path: delegate entirely to C++ engine ────────────────────────
+        if self._using_cpp:
+            return self._cpp_env.reset(seed=seed, options=options)  # type: ignore[union-attr]
+
         # Recycle the session's cookie store between episodes so connections
         # stay pooled (keep-alive) but stale cookies don't leak.
         self._session.cookies.clear()
@@ -1068,6 +1133,10 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         )
 
     def step(self, action: Any) -> StepResult:
+        # ── Fast-path: delegate entirely to C++ engine ────────────────────────
+        if self._using_cpp:
+            return self._cpp_env.step(action)  # type: ignore[union-attr]
+
         state = self._last_state
         legal_actions = self._legal_actions(state)
 
@@ -1265,6 +1334,10 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         self._pw_playwright = None
 
     def close(self) -> None:
+        if self._using_cpp:
+            self._cpp_env.close()  # type: ignore[union-attr]
+            self._cpp_env = None
+            return
         self._close_playwright_page()
         try:
             self._session.close()
@@ -1336,6 +1409,10 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         is presented 5 times in a row (same codes + labels) the policy is
         clearly looping, so pick a uniformly random legal action to break out.
         """
+        # ── Fast-path: delegate to C++ engine ─────────────────────────────────
+        if self._using_cpp:
+            return self._cpp_env.sample_action()  # type: ignore[union-attr]
+
         if not self._last_state:
             return "pass"
         legal = self._legal_actions(self._last_state)

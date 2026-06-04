@@ -29,7 +29,7 @@ $TalisharUrl    = if ($env:TALISHAR_URL)    { $env:TALISHAR_URL }    else { "htt
 $AssetsPath     = if ($env:TALISHAR_ASSETS_PATH) { $env:TALISHAR_ASSETS_PATH } else {
     Join-Path $PSScriptRoot "Talishar\Assets"
 }
-$OutDir         = Join-Path $PSScriptRoot "..\results\aurora_vs_briar"
+$OutDir         = Join-Path $PSScriptRoot "..\results\auroraPaulvanGijssel_vs_briarAjanell"
 $DeckDir        = Join-Path $OutDir "sage_decks"
 $ResultsJson    = Join-Path $OutDir "results.json"
 
@@ -121,10 +121,40 @@ if ($BriarFetched -and (Test-Path $BriarDeckJson)) {
     $StartingDeckArgs += "--p2-starting-deck"; $StartingDeckArgs += $BriarDeckJson
 }
 
-# ─── Step 2: Run the full pipeline ───────────────────────────────────────────
+# ─── Step 2: Build C++ engine for this matchup ───────────────────────────────
+
+Write-Host ""
+Write-Host "  Building C++ engine for Aurora vs Briar..."
+Write-Host ""
+
+& "$PSScriptRoot\build_cpp_engine_for_matchup.ps1" `
+    -Deck1       $AuroraHeroId `
+    -Deck2       $BriarHeroId `
+    -TalisharSrc (Join-Path $PSScriptRoot "Talishar") `
+    -TalisharUrl $TalisharUrl
+
+$CppEngineBuildSucceeded = ($LASTEXITCODE -eq 0)
+if ($LASTEXITCODE -ne 0) {
+    Write-Host ""
+    Write-Host "  WARNING: C++ engine build failed (exit $LASTEXITCODE)." -ForegroundColor DarkYellow
+    Write-Host "  Continuing — training will fall back to HTTP Talishar." -ForegroundColor DarkYellow
+    Write-Host "  Fix errors above and re-run to get the speed benefit." -ForegroundColor DarkYellow
+    Write-Host ""
+} else {
+    Write-Host "  C++ engine build succeeded."
+    Write-Host "  Expected runtime backend: C++ engine (with automatic HTTP fallback if unavailable per matchup)."
+    Write-Host ""
+}
+
+# ─── Step 3: Run the full pipeline ───────────────────────────────────────────
 
 Write-Host ""
 Write-Host "  Starting train_full_pipeline.py ..."
+if ($CppEngineBuildSucceeded) {
+    Write-Host "  Backend selection: C++ preferred; train_full_pipeline.py will print actual runtime backend."
+} else {
+    Write-Host "  Backend selection: HTTP Talishar expected; train_full_pipeline.py will print actual runtime backend."
+}
 Write-Host ""
 
 & $Python "$ScriptDir\train_full_pipeline.py" `
@@ -157,7 +187,7 @@ if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
-# ─── Step 3: Print summary ───────────────────────────────────────────────────
+# ─── Step 4: Print summary ───────────────────────────────────────────────────
 
 Write-Host ""
 Write-Host "========================================================"

@@ -188,6 +188,8 @@ class TalisharEngineFactory(rlbridgeEnvironmentFactory):
             self_play=bool(kwargs.get("self_play", self._self_play)),
             render_width=kwargs.get("render_width"),
             render_height=kwargs.get("render_height"),
+            use_cpp_engine=bool(kwargs.get("use_cpp_engine", True)),
+            cpp_engine_cache_dir=kwargs.get("cpp_engine_cache_dir"),
         )
 
 

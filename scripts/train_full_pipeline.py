@@ -170,6 +170,16 @@ def _save_agent(agent: Any, path: Path) -> None:
     print(f"  Saved agent → {path}")
 
 
+def _runtime_backend_label(env: Any) -> str:
+    """Return a friendly backend label for a Talishar environment instance."""
+    try:
+        if bool(getattr(env, "_using_cpp", False)):
+            return "C++ engine"
+    except Exception:
+        pass
+    return "HTTP Talishar"
+
+
 # ---------------------------------------------------------------------------
 # Phase data containers
 # ---------------------------------------------------------------------------
@@ -676,6 +686,7 @@ def run_phase3_play(
     # ── write deck files ──────────────────────────────────────────────────────
     p1_deck_name = f"rl_p3_p1_{uuid.uuid4().hex[:8]}"
     p1_deck_file = _write_deck_file(p1_game_deck, p1_equipment_header, p1_deck_name, assets_path)
+    p1.deck_asset_name = p1_deck_name
 
     if opponent_mode == "preset":
         p2_deck_name = p1_opponent_deck_name
@@ -688,6 +699,32 @@ def run_phase3_play(
         p2_deck_file = _write_deck_file(
             p2_game_deck, p2_equipment_header, p2_deck_name, assets_path  # type: ignore[arg-type]
         )
+    if p2 is not None:
+        p2.deck_asset_name = p2_deck_name
+
+    # ── C++ engine lookup key (original hero IDs, not UUID deck names) ───────
+    # The C++ engine is compiled under the original hero/asset IDs
+    # (e.g. "aurora_vs_briar"), but Phase 3 writes deck files with UUID-based
+    # names.  Pass the hero IDs as override lookup keys so the engine is found.
+    _cpp_deck1 = p1_hero_id or None
+    _cpp_deck2 = p2_hero_id or _cpp_deck1
+
+    # ── backend visibility (C++ vs HTTP) ────────────────────────────────────
+    probe_env = TalisharEngineEnvironment(
+        base_url=base_url,
+        game_format=game_format,
+        local_deck_name=p1_deck_name,
+        opponent_deck_name=p2_deck_name,
+        max_turns=max_play_steps,
+        self_play=True,
+        render_mode=None,
+        cpp_engine_deck1=_cpp_deck1,
+        cpp_engine_deck2=_cpp_deck2,
+    )
+    try:
+        print(f"  Runtime backend (Phase 3): {_runtime_backend_label(probe_env)}")
+    finally:
+        probe_env.close()
 
     # ── Matchup + EpisodeCache ────────────────────────────────────────────────
     matchup = Matchup(
@@ -698,6 +735,8 @@ def run_phase3_play(
                     + (p2.player if p2 else p1_opponent_deck_name),
         p1_hero=p1_hero_id.replace("_", "-"),
         p2_hero=p2_hero_id.replace("_", "-"),
+        cpp_engine_deck1=_cpp_deck1,
+        cpp_engine_deck2=_cpp_deck2,
     )
 
     cache_root = cache_dir or (out_dir.parent / "agent_cache")
@@ -921,6 +960,7 @@ def _run_phase3_fallback(
         )
 
     p1_wins = 0
+    backend_printed = False
     try:
         for ep in range(1, n_episodes + 1):
             env = TalisharEngineEnvironment(
@@ -932,6 +972,9 @@ def _run_phase3_fallback(
                 self_play=True,
             )
             try:
+                if not backend_printed:
+                    print(f"  Runtime backend (fallback play): {_runtime_backend_label(env)}")
+                    backend_printed = True
                 result = env.reset()
                 done = False
                 while not done:
@@ -1137,6 +1180,7 @@ def run_final_evaluation(
     draws = 0
     episode_log: list[dict[str, Any]] = []
 
+    backend_printed = False
     try:
         for ep in range(1, num_eval_episodes + 1):
             env = TalisharEngineEnvironment(
@@ -1149,6 +1193,9 @@ def run_final_evaluation(
                 render_mode=None,
             )
             try:
+                if not backend_printed:
+                    print(f"  [{player}] Runtime backend (final eval): {_runtime_backend_label(env)}")
+                    backend_printed = True
                 result = env.reset()
                 obs = result.observation
                 done = False
@@ -1220,6 +1267,7 @@ def run_final_evaluation(
             render_mode="rgb_array",
         )
         try:
+            print(f"  [{player}] Runtime backend (render): {_runtime_backend_label(env)}")
             result = env.reset()
             obs = result.observation
             frame_path = render_dir / "frame_0000_reset.png"
@@ -1325,6 +1373,7 @@ def _write_results_json(
         "opponent_mode": opponent_mode,
         "iterations": iterations,
         "p1": {
+            "deck_asset_name": p1.deck_asset_name,
             "pool_size": sum(p1.card_pool.values()),
             "active_decks": {
                 opp: sum(d.values()) for opp, d in p1.active_decks.items()
@@ -1340,6 +1389,7 @@ def _write_results_json(
         data["p1"]["final_eval_gif"] = p1_final_eval.get("render", {}).get("gif")
     if p2 is not None:
         data["p2"] = {
+            "deck_asset_name": p2.deck_asset_name,
             "pool_size": sum(p2.card_pool.values()),
             "active_decks": {
                 opp: sum(d.values()) for opp, d in p2.active_decks.items()

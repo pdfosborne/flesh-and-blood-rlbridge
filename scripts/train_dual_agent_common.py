@@ -85,6 +85,11 @@ class Matchup:
     tags: list[str] = field(default_factory=list)
     p1_hero: str = ""
     p2_hero: str = ""
+    # Optional override deck names for C++ engine cache lookup.
+    # Set these to the original hero/asset IDs when p1_deck/p2_deck are
+    # UUID-based (Phase 3) but the compiled engine was built for the hero IDs.
+    cpp_engine_deck1: Optional[str] = None
+    cpp_engine_deck2: Optional[str] = None
 
 
 def make_env(
@@ -96,7 +101,25 @@ def make_env(
     show_frontend: bool = False,
     frontend_url: Optional[str] = None,
     request_timeout: float = 30.0,
+    use_cpp_engine: bool = True,
+    cpp_engine_cache_dir: Optional[str] = None,
 ) -> TalisharEngineEnvironment:
+    """Create a :class:`TalisharEngineEnvironment` for *matchup*.
+
+    When ``use_cpp_engine=True`` (default) and a compiled C++ engine exists in
+    the cache for this matchup, the environment will use it instead of HTTP
+    Talishar — roughly 100× faster per step.  Falls back to HTTP silently if
+    no compiled module is found.
+
+    Generate a C++ engine for a matchup with::
+
+        python scripts/generate_cpp_engine.py \\
+            --talishar-src Talishar \\
+            --deck1 {p1_deck} --deck2 {p2_deck}
+
+    Then implement the stubs in ``results/cpp_engines/<matchup>/cards.h`` and
+    build with ``cmake``.
+    """
     resolved_frontend_url = frontend_url
     if show_frontend and not resolved_frontend_url:
         parsed = urllib.parse.urlsplit(base_url)
@@ -105,6 +128,11 @@ def make_env(
             if not resolved_frontend_url:
                 # Default FE dev URL for local training visualisation.
                 resolved_frontend_url = "http://localhost:5173"
+
+    # Resolve the default cache dir relative to the repo root
+    effective_cache_dir = cpp_engine_cache_dir
+    if effective_cache_dir is None:
+        effective_cache_dir = str(REPO_ROOT / "results" / "cpp_engines")
 
     return TalisharEngineEnvironment(
         base_url=base_url,
@@ -116,6 +144,10 @@ def make_env(
         max_turns=max_turns,
         render_mode=("rgb_array" if show_frontend else None),
         request_timeout=request_timeout,
+        use_cpp_engine=use_cpp_engine,
+        cpp_engine_cache_dir=effective_cache_dir,
+        cpp_engine_deck1=matchup.cpp_engine_deck1,
+        cpp_engine_deck2=matchup.cpp_engine_deck2,
     )
 
 
