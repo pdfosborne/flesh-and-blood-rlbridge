@@ -179,11 +179,20 @@ class EpisodeCache:
         p1_reward: float,
         p2_reward: float,
         steps: int,
+        warmup: bool = False,
     ) -> None:
         """Append one completed episode to the cache (thread-safe).
 
         *transitions* lists are serialised by converting numpy arrays to plain
         Python lists so ``pickle`` storage stays portable.
+
+        Parameters
+        ----------
+        warmup:
+            ``True`` when the episode was collected by the heuristic (warmup)
+            policy; ``False`` for episodes collected by the PPO agent.  The
+            flag is stored in the episode dict so callers can distinguish
+            high-quality demonstrations from early-training self-play data.
         """
         key = _matchup_key(p1_deck, p2_deck)
         path = self._cache_path(p1_deck, p2_deck)
@@ -194,6 +203,7 @@ class EpisodeCache:
             "p1_reward": float(p1_reward),
             "p2_reward": float(p2_reward),
             "steps": int(steps),
+            "warmup": bool(warmup),
         }
         with self._key_lock(key):
             episodes = self._load_raw(path)

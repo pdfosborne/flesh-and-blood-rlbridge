@@ -30,6 +30,14 @@ for p in (FAB_SRC, RL_SRC):
         sys.path.insert(0, s)
 
 import numpy as np  # noqa: E402
+try:
+    import torch
+    import torch.nn.functional as _F
+    _TORCH_DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    _TORCH_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    _TORCH_AVAILABLE = False
+    _TORCH_DEVICE = None  # type: ignore[assignment]
 
 from flesh_and_blood_rlbridge.talishar_engine_environment import (  # noqa: E402
     TalisharEngineEnvironment,
@@ -87,6 +95,7 @@ def make_env(
     *,
     show_frontend: bool = False,
     frontend_url: Optional[str] = None,
+    request_timeout: float = 30.0,
 ) -> TalisharEngineEnvironment:
     resolved_frontend_url = frontend_url
     if show_frontend and not resolved_frontend_url:
@@ -106,6 +115,7 @@ def make_env(
         self_play=True,
         max_turns=max_turns,
         render_mode=("rgb_array" if show_frontend else None),
+        request_timeout=request_timeout,
     )
 
 
@@ -129,6 +139,86 @@ def _ppo_update(agent: PPOAgent, buf: dict, next_obs_vec: np.ndarray) -> None:
     if T == 0:
         return
 
+    if _TORCH_AVAILABLE and hasattr(agent._actor, "_net"):
+        # ── GPU-native PPO update (all math stays on _TORCH_DEVICE) ──────────
+        dev = _TORCH_DEVICE
+
+        def _t(x, dtype=torch.float64):
+            return torch.as_tensor(np.asarray(x), dtype=dtype, device=dev)
+
+        obs_t     = _t(buf["obs"])                            # (T, D)
+        act_t     = _t(buf["actions"], torch.int64)           # (T,)
+        rew_t     = _t(buf["rewards"])                        # (T,)
+        done_t    = _t(buf["dones"])                          # (T,)
+        lp_old_t  = _t(buf["log_probs"])                      # (T,)
+        nlegal_t  = _t(buf["n_legal"], torch.int64)           # (T,)
+
+        # Bootstrap value from current critic (no grad needed)
+        with torch.no_grad():
+            vals_t      = agent._critic._net(obs_t).squeeze(-1)   # (T,)
+            next_val_t  = agent._critic._net(
+                _t(next_obs_vec[None, :])
+            ).squeeze(-1).squeeze(0)                              # scalar
+            next_vals_t = torch.cat([vals_t[1:], next_val_t.unsqueeze(0)])  # (T,)
+
+        # GAE on GPU
+        gam, lam = agent.gamma, agent.lam
+        adv_t = torch.zeros(T, dtype=torch.float64, device=dev)
+        last_gae = torch.tensor(0.0, dtype=torch.float64, device=dev)
+        for i in range(T - 1, -1, -1):
+            delta     = rew_t[i] + gam * next_vals_t[i] * (1.0 - done_t[i]) - vals_t[i]
+            last_gae  = delta + gam * lam * (1.0 - done_t[i]) * last_gae
+            adv_t[i]  = last_gae
+        ret_t = adv_t + vals_t
+        if T > 1:
+            adv_t = (adv_t - adv_t.mean()) / (adv_t.std() + 1e-8)
+
+        indices = np.arange(T)
+        for _ in range(agent.ppo_epochs):
+            np.random.shuffle(indices)
+            for start in range(0, T, agent.mini_batch_size):
+                mb_idx = indices[start : start + agent.mini_batch_size]
+                if len(mb_idx) == 0:
+                    continue
+                mb_idx_t = torch.as_tensor(mb_idx, dtype=torch.int64, device=dev)
+                mb_obs    = obs_t[mb_idx_t]
+                mb_acts   = act_t[mb_idx_t]
+                mb_adv    = adv_t[mb_idx_t]
+                mb_ret    = ret_t[mb_idx_t]
+                mb_lp_old = lp_old_t[mb_idx_t]
+                mb_nlegal = nlegal_t[mb_idx_t]
+                B = mb_obs.shape[0]
+
+                # ── Actor ──────────────────────────────────────────────────────
+                agent._actor._opt.zero_grad()
+                logits = agent._actor._net(mb_obs)              # (B, A)
+                if agent._mask_actions:
+                    A = logits.shape[1]
+                    mask = (
+                        torch.arange(A, device=dev).unsqueeze(0)
+                        < mb_nlegal.unsqueeze(1)
+                    )
+                    logits = logits.masked_fill(~mask, -1e9)
+                lp_new = _F.log_softmax(logits, dim=-1)
+                probs  = _F.softmax(logits, dim=-1)
+                lp_a   = lp_new[torch.arange(B, device=dev), mb_acts]  # (B,)
+                ratio  = torch.exp(lp_a - mb_lp_old)
+                clip_r = torch.clamp(ratio, 1.0 - agent.clip_eps, 1.0 + agent.clip_eps)
+                actor_loss = -torch.minimum(ratio * mb_adv, clip_r * mb_adv).mean()
+                entropy = -(probs * lp_new).sum(dim=-1).mean()
+                loss_a = actor_loss - agent.c_ent * entropy
+                loss_a.backward()
+                agent._actor._opt.step()
+
+                # ── Critic ────────────────────────────────────────────────────
+                agent._critic._opt.zero_grad()
+                val_pred = agent._critic._net(mb_obs).squeeze(-1)  # (B,)
+                loss_c = agent.c_vf * _F.mse_loss(val_pred, mb_ret)
+                loss_c.backward()
+                agent._critic._opt.step()
+        return
+
+    # ── Fallback: numpy PPO (no torch available) ──────────────────────────────
     obs_arr = np.array(buf["obs"], dtype=np.float64)
     act_arr = np.array(buf["actions"], dtype=np.int64)
     values_arr = np.array(buf["values"], dtype=np.float64)
@@ -224,6 +314,200 @@ def _ppo_update_all_tiers(
 ) -> None:
     for agent in tier_agents:
         _ppo_update(agent, buf, next_obs_vec)
+
+
+def _bc_update(agent: PPOAgent, buf: dict, next_obs_vec: np.ndarray) -> None:
+    """Behavioural-cloning warm-start update.
+
+    Trains the actor via cross-entropy loss on cached (obs, action) pairs so
+    that the policy imitates the demonstrated actions directly — bypassing the
+    stale log-prob problem that makes PPO ratio ≈ 1 when replaying old episodes.
+
+    Also updates the critic via MSE against GAE returns recomputed from the
+    *current* critic (fresh bootstraps), so the value function is warmed up
+    without relying on stale value estimates stored in the cache.
+
+    Uses PyTorch autograd on _TORCH_DEVICE (GPU when available) to keep all
+    tensors on device throughout.  Falls back to numpy when torch is absent.
+    """
+    T = len(buf["obs"])
+    if T == 0:
+        return
+
+    if _TORCH_AVAILABLE and hasattr(agent._actor, "_net"):
+        # ── GPU-native BC update ──────────────────────────────────────────────
+        dev = _TORCH_DEVICE
+
+        def _t(x, dtype=torch.float64):
+            return torch.as_tensor(np.asarray(x), dtype=dtype, device=dev)
+
+        obs_t    = _t(buf["obs"])                        # (T, D)
+        act_t    = _t(buf["actions"], torch.int64)       # (T,)
+        rew_t    = _t(buf["rewards"])                    # (T,)
+        done_t   = _t(buf["dones"])                      # (T,)
+        nlegal_t = _t(buf["n_legal"], torch.int64)       # (T,)
+
+        # Fresh value estimates from current critic (no grad)
+        with torch.no_grad():
+            vals_t     = agent._critic._net(obs_t).squeeze(-1)       # (T,)
+            next_val_t = agent._critic._net(
+                _t(next_obs_vec[None, :])
+            ).squeeze(-1).squeeze(0)                                  # scalar
+            next_vals_t = torch.cat([vals_t[1:], next_val_t.unsqueeze(0)])  # (T,)
+
+        # GAE returns on GPU (only returns needed for BC critic update)
+        gam, lam = agent.gamma, agent.lam
+        adv_t = torch.zeros(T, dtype=torch.float64, device=dev)
+        last_gae = torch.tensor(0.0, dtype=torch.float64, device=dev)
+        for i in range(T - 1, -1, -1):
+            delta    = rew_t[i] + gam * next_vals_t[i] * (1.0 - done_t[i]) - vals_t[i]
+            last_gae = delta + gam * lam * (1.0 - done_t[i]) * last_gae
+            adv_t[i] = last_gae
+        ret_t = adv_t + vals_t
+
+        indices = np.arange(T)
+        for _ in range(agent.ppo_epochs):
+            np.random.shuffle(indices)
+            for start in range(0, T, agent.mini_batch_size):
+                mb_idx = indices[start : start + agent.mini_batch_size]
+                if len(mb_idx) == 0:
+                    continue
+                mb_idx_t  = torch.as_tensor(mb_idx, dtype=torch.int64, device=dev)
+                mb_obs    = obs_t[mb_idx_t]
+                mb_acts   = act_t[mb_idx_t]
+                mb_nlegal = nlegal_t[mb_idx_t]
+                mb_ret    = ret_t[mb_idx_t]
+                B = mb_obs.shape[0]
+
+                # ── Actor: cross-entropy (behavioural cloning) ────────────────
+                agent._actor._opt.zero_grad()
+                logits = agent._actor._net(mb_obs)          # (B, A)
+                if agent._mask_actions:
+                    A = logits.shape[1]
+                    mask = (
+                        torch.arange(A, device=dev).unsqueeze(0)
+                        < mb_nlegal.unsqueeze(1)
+                    )
+                    logits = logits.masked_fill(~mask, -1e9)
+                loss_ce = _F.cross_entropy(
+                    logits.float(), mb_acts,
+                    reduction="mean",
+                )
+                loss_ce.backward()
+                agent._actor._opt.step()
+
+                # ── Critic: MSE against GAE returns ───────────────────────────
+                agent._critic._opt.zero_grad()
+                val_pred = agent._critic._net(mb_obs).squeeze(-1)  # (B,)
+                loss_c = agent.c_vf * _F.mse_loss(val_pred, mb_ret)
+                loss_c.backward()
+                agent._critic._opt.step()
+        return
+
+    # ── Fallback: numpy BC (no torch available) ───────────────────────────────
+    obs_arr    = np.array(buf["obs"],     dtype=np.float64)
+    act_arr    = np.array(buf["actions"], dtype=np.int64)
+    dones_arr  = np.array(buf["dones"],   dtype=np.float64)
+    nlegal_arr = np.array(buf["n_legal"], dtype=np.int64)
+
+    # Recompute value estimates from the *current* critic (not stale cache values)
+    values_arr = agent._critic.predict(obs_arr).flatten()
+    next_val   = float(agent._critic.predict(next_obs_vec[None, :]).flatten()[0])
+    next_vals  = np.append(values_arr[1:], next_val)
+
+    _, returns = _gae(
+        np.array(buf["rewards"], dtype=np.float64),
+        values_arr,
+        next_vals,
+        dones_arr,
+        agent.gamma,
+        agent.lam,
+    )
+
+    indices = np.arange(T)
+    for _ in range(agent.ppo_epochs):
+        agent._rng_np.shuffle(indices)
+        for start in range(0, T, agent.mini_batch_size):
+            mb_idx = indices[start : start + agent.mini_batch_size]
+            if len(mb_idx) == 0:
+                continue
+            mb_obs    = obs_arr[mb_idx]
+            mb_acts   = act_arr[mb_idx]
+            mb_nlegal = nlegal_arr[mb_idx]
+            mb_ret    = returns[mb_idx]
+            B = mb_obs.shape[0]
+
+            # ── Actor: cross-entropy (behavioural cloning) ────────────────────
+            logits = agent._actor.forward(mb_obs)
+            legal_mask = None
+            if agent._mask_actions:
+                legal_mask = (
+                    np.arange(agent.n_actions)[None, :] < mb_nlegal[:, None]
+                )
+                logits = np.where(legal_mask, logits, -1e9)
+            probs = _softmax(logits)
+            # CE gradient w.r.t. logits: softmax(logits) - one_hot(action)
+            grad_logits = probs.copy()
+            grad_logits[np.arange(B), mb_acts] -= 1.0
+            grad_logits /= B
+            if legal_mask is not None:
+                grad_logits = np.where(legal_mask, grad_logits, 0.0)
+            agent._actor.backward(grad_logits)
+
+            # ── Critic: MSE against GAE returns ───────────────────────────────
+            val_pred = agent._critic.forward(mb_obs).flatten()
+            grad_val = 2.0 * (val_pred - mb_ret) / B
+            agent._critic.backward(agent.c_vf * grad_val[:, None])
+
+
+def _bc_update_all_tiers(
+    tier_agents: list[PPOAgent],
+    buf: dict,
+    next_obs_vec: np.ndarray,
+) -> None:
+    for agent in tier_agents:
+        _bc_update(agent, buf, next_obs_vec)
+
+
+def _env_action_to_index(obs: Any, env_action: str, policy: PPOAgent) -> int:
+    """Convert a Talishar mode-code string to a compact policy action index.
+
+    The PPO actor uses dense indices 0..n_actions-1 where index i maps to the
+    i-th entry in the legal-actions list the environment exposed at that step.
+    Raw mode codes (e.g. "99", "27", "10000") are NOT valid indices — storing
+    them directly corrupts the BC buffer with wrong obs->action mappings.
+
+    Strategy:
+      1. Parse legalActions from the observation.
+      2. Find the position of env_action's mode code in that ordered list.
+      3. That position is the correct policy index.
+      4. Fall back to 0 if not found (e.g. sample_action chose a filtered-out
+         action) — index 0 is safe; it just weakly reinforces the first legal
+         action rather than injecting a garbage index.
+    """
+    try:
+        mode_code = int(env_action)
+    except (TypeError, ValueError):
+        return 0
+    try:
+        raw = json.loads(obs) if isinstance(obs, str) else obs
+        if not isinstance(raw, dict):
+            return 0
+        legal: list[int] = []
+        for entry in raw.get("legalActions", []) or []:
+            try:
+                code = int(
+                    entry.get("actionCode", entry)
+                    if isinstance(entry, dict) else entry
+                )
+                legal.append(code)
+            except (TypeError, ValueError):
+                pass
+        if mode_code in legal:
+            return min(legal.index(mode_code), policy.n_actions - 1)
+    except Exception:
+        pass
+    return 0
 
 
 def _obs_to_text(obs: Any) -> str:
@@ -338,11 +622,7 @@ def _run_one_episode(
 
         if warmup:
             env_action = str(env.sample_action())
-            try:
-                action = int(env_action)
-            except (TypeError, ValueError):
-                action = 0
-            action = max(0, min(action, policy.n_actions - 1))
+            action = _env_action_to_index(obs, env_action, policy)
         else:
             action     = int(rng.choice(policy.n_actions, p=probs))
             env_action = _to_env_action(obs, action, policy._mask_actions)
@@ -397,6 +677,7 @@ def _run_one_episode(
         "p2_reward":      cur_p2_r,
         "terminated":     terminated,
         "truncated":      truncated,
+        "warmup":         warmup,
         "steps":          steps_taken,
         "p1_hp":          final_p1_hp,
         "p2_hp":          final_p2_hp,
@@ -430,12 +711,17 @@ def warm_start_from_episode_cache(
     *,
     max_load: Optional[int] = None,
 ) -> int:
-    """Replay cached episodes as PPO updates to warm-start both agent sets.
+    """Replay cached episodes as behavioural-cloning warm-start for both agents.
 
-    Loads all compatible episodes (matching *obs_dim*) for the given matchup,
-    runs PPO updates on each episode's P1 and P2 buffers, then returns the
-    number of episodes replayed.  Returns 0 if the cache is empty or no
-    compatible episodes exist.
+    Uses cross-entropy (behavioural cloning) instead of PPO to update the
+    actor, which avoids the stale log-prob problem: cached episodes were
+    collected under a previous policy so their stored log_probs are stale,
+    making PPO ratio ≈ exp(random - old_random) ≈ noise — the actor gradient
+    is meaningless.  BC trains the actor directly to reproduce the demonstrated
+    actions regardless of the old policy.
+
+    The critic is updated via MSE against GAE returns recomputed from the
+    *current* critic so value bootstraps are always fresh.
 
     Parameters
     ----------
@@ -457,12 +743,12 @@ def warm_start_from_episode_cache(
         if p1_trans:
             p1_buf = _transitions_to_buf(p1_trans)
             next_p1 = p1_trans[-1]["next_obs_vec"]
-            _ppo_update_all_tiers(p1_tiers, p1_buf, next_p1)
+            _bc_update_all_tiers(p1_tiers, p1_buf, next_p1)
 
         if p2_trans:
             p2_buf = _transitions_to_buf(p2_trans)
             next_p2 = p2_trans[-1]["next_obs_vec"]
-            _ppo_update_all_tiers(p2_tiers, p2_buf, next_p2)
+            _bc_update_all_tiers(p2_tiers, p2_buf, next_p2)
 
         replayed += 1
 
@@ -476,13 +762,20 @@ def _save_episode_to_cache(
     p2_deck: str,
     obs_dim: int,
 ) -> None:
-    """Save a terminated (non-truncated) episode result to the episode cache."""
+    """Save a terminated (non-truncated) episode result to the episode cache.
+
+    Both warmup (heuristic policy) and PPO-policy completed episodes are
+    cached — every game completion is valuable training data regardless of
+    which policy produced it.  The ``warmup`` flag is stored so the cache can
+    report the mix of episode sources.
+    """
     if result.get("truncated") or not result.get("terminated"):
         return
     p1_trans = result.get("p1_transitions", [])
     p2_trans = result.get("p2_transitions", [])
     if not p1_trans and not p2_trans:
         return
+    is_warmup = bool(result.get("warmup", False))
     try:
         episode_cache.add_episode(
             p1_deck,
@@ -493,6 +786,7 @@ def _save_episode_to_cache(
             p1_reward=float(result.get("p1_reward", 0.0)),
             p2_reward=float(result.get("p2_reward", 0.0)),
             steps=int(result.get("steps", 0)),
+            warmup=is_warmup,
         )
     except Exception:
         pass  # never let caching errors abort training
@@ -620,7 +914,9 @@ def train_agents_from_both_perspectives_parallel(
     progress_every     = max(1, n_episodes // 100)
     progress_t0        = time.time()
     # Per-episode wall-clock timeout: max_steps * 5 s per step, floor at 120 s.
-    episode_timeout_secs = max(120, max_steps * 5)
+    # Per-episode wall-clock timeout: 3 s per step (down from 5 s) is sufficient
+    # for a local Docker server.  Floor raised to 180 s to cover game setup time.
+    episode_timeout_secs = max(180, max_steps * 3)
     shutdown_flag = False
 
     try:
@@ -852,11 +1148,7 @@ def train_agents_from_both_perspectives(
         probs = _softmax(logits)[0]
         if in_warmup:
             env_action = str(env.sample_action())
-            try:
-                action = int(env_action)
-            except (TypeError, ValueError):
-                action = 0
-            action = max(0, min(action, policy.n_actions - 1))
+            action = _env_action_to_index(obs, env_action, policy)
         else:
             action = int(policy._rng_np.choice(policy.n_actions, p=probs))
             env_action = _to_env_action(obs, action, policy._mask_actions)
@@ -932,6 +1224,7 @@ def train_agents_from_both_perspectives(
                             p1_reward=cur_p1_r,
                             p2_reward=cur_p2_r,
                             steps=episode_step,
+                            warmup=in_warmup,
                         )
                     except Exception:
                         pass

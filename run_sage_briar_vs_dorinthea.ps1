@@ -13,6 +13,6 @@ python main.py train-eval-render `
     --eval-max-steps 500 `
     --render-max-steps 200 `
     --show-frontend-eval `
-    --workers 4 `
+    --workers 2 `
     --out-dir results/sage_precon_agents `
     --cache-dir results/agent_cache

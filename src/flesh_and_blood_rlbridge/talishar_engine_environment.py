@@ -66,20 +66,31 @@ HTTP API summary
 
 from __future__ import annotations
 
-import http.cookiejar
 import json
 import os
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 import webbrowser
 from typing import Any, Optional
+
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from rlbridge.environments.base import rlbridgeEnvironment
 from rlbridge.protocol.messages import RenderResult, ResetResult, StepResult, TextSpace
 
-from .talishar_default_policy import choose_talishar_action_index
+from .talishar_default_policy import (
+    choose_talishar_action_index,
+    _get_phase as _dp_get_phase,
+    _card_pitch_value,
+    _match_action_card,
+    _to_int as _dp_to_int,
+    _CONFIRM_PHASES as _dp_confirm_phases,
+    _CHOOSE_HAND_PHASES as _dp_choose_hand_phases,
+    _BUTTON_INPUT_PHASES as _dp_button_input_phases,
+    _POPUP_PHASES as _dp_popup_phases,
+)
 from .talishar_oracle import TalisharConnectionError
 
 # Default practice deck: Ira Crimson Haze (young hero, silver_age-legal)
@@ -144,6 +155,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         deck_link: str = _DEFAULT_DECK_LINK,
         game_format: str = "silver_age",
         timeout: float = 15.0,
+        request_timeout: float = 30.0,
     max_turns: int = 100,
         render_mode: Optional[str] = None,
         local_deck_name: Optional[str] = "Ira",
@@ -169,6 +181,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         self._self_play = self_play
         self._format = _normalize_game_format(game_format)
         self._timeout = timeout
+        self._request_timeout = request_timeout
         self._max_turns = max_turns
         self._block_max_pitch_value = block_max_pitch_value
         self._block_min_resource_cost = block_min_resource_cost
@@ -183,11 +196,10 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         )
         self._opened_frontend_url: Optional[str] = None
 
-        # HTTP session (rebuilt each episode so cookies/sessions don't leak)
-        self._cookie_jar: http.cookiejar.CookieJar = http.cookiejar.CookieJar()
-        self._opener = urllib.request.build_opener(
-            urllib.request.HTTPCookieProcessor(self._cookie_jar)
-        )
+        # HTTP session with connection pooling and automatic retry on transient
+        # server errors.  One persistent TCP connection is reused for all steps
+        # in an episode (keep-alive), eliminating per-step TCP handshake cost.
+        self._session: requests.Session = self._make_session()
 
         # Per-episode state
         self._game_name: Optional[str] = None
@@ -222,6 +234,26 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
 
     # ── HTTP helpers ──────────────────────────────────────────────────────────
 
+    def _make_session(self) -> requests.Session:
+        """Build a requests.Session with connection pooling, keep-alive, and retry."""
+        session = requests.Session()
+        retry = Retry(
+            total=3,
+            backoff_factor=0.3,
+            status_forcelist=(500, 502, 503, 504),
+            allowed_methods={"GET", "POST"},
+            raise_on_status=False,
+        )
+        adapter = HTTPAdapter(
+            pool_connections=2,
+            pool_maxsize=8,
+            max_retries=retry,
+        )
+        session.mount("http://",  adapter)
+        session.mount("https://", adapter)
+        session.headers.update({"User-Agent": "TalisharRLEnv/1.0"})
+        return session
+
     def _http_get(
         self,
         path: str,
@@ -230,78 +262,58 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         *,
         allow_empty_body: bool = False,
     ) -> dict[str, Any]:
-        url = self._base_url + path + "?" + urllib.parse.urlencode(params)
-        req = urllib.request.Request(url, headers={"User-Agent": "TalisharRLEnv/1.0"})
+        url = self._base_url + path
         last_exc: Exception = RuntimeError("no attempts")
         for attempt in range(_retries):
             try:
                 if attempt > 0:
-                    time.sleep(2.0 * attempt)
-                    self._cookie_jar = http.cookiejar.CookieJar()
-                    self._opener = urllib.request.build_opener(
-                        urllib.request.HTTPCookieProcessor(self._cookie_jar)
-                    )
-                with self._opener.open(req, timeout=self._timeout) as resp:  # noqa: S310
-                    body = resp.read()
-                    resp_status = resp.status
-                # Strip any PHP warnings / notices printed before the JSON object
-                body_text = body.decode("utf-8", errors="replace")
+                    time.sleep(0.3 * (2 ** attempt))
+                resp = self._session.get(
+                    url, params=params, timeout=self._request_timeout
+                )
+                body_text = resp.text
                 if allow_empty_body and body_text.strip() == "":
                     return {}
+                # Strip any PHP warnings printed before the JSON object
                 obj_start = body_text.find("{")
                 arr_start = body_text.find("[")
                 starts = [i for i in (obj_start, arr_start) if i >= 0]
                 if allow_empty_body and not starts:
-                    # ProcessInput.php can emit PHP warnings/notices with no JSON body.
-                    # Treat this as an empty acknowledgement so callers can continue.
                     return {}
                 if starts:
-                    json_start = min(starts)
-                    if json_start > 0:
-                        body_text = body_text[json_start:]
+                    body_text = body_text[min(starts):]
                 data = json.loads(body_text)
                 return data if isinstance(data, dict) else {"_raw": data}
             except json.JSONDecodeError:
-                raw_text = body.decode("utf-8", errors="replace") if body else "<empty>"
                 raise RuntimeError(
-                    f"GET {url} returned non-JSON response (HTTP {resp_status}):\n{raw_text[:2000]}"
+                    f"GET {url} returned non-JSON (HTTP {resp.status_code}):\n{resp.text[:2000]}"
                 ) from None
-            except (urllib.error.URLError, OSError) as exc:
+            except requests.RequestException as exc:
                 last_exc = exc
         raise TalisharConnectionError(f"GET {url} failed: {last_exc}") from last_exc
 
     def _http_post_json(self, path: str, payload: dict[str, Any], _retries: int = 3) -> dict[str, Any]:
         url = self._base_url + path
-        body = json.dumps(payload).encode()
         last_exc: Exception = RuntimeError("no attempts")
         for attempt in range(_retries):
             try:
                 if attempt > 0:
-                    time.sleep(2.0 * attempt)
-                req = urllib.request.Request(
-                    url,
-                    data=body,
-                    headers={"Content-Type": "application/json", "User-Agent": "TalisharRLEnv/1.0"},
-                    method="POST",
+                    time.sleep(0.3 * (2 ** attempt))
+                resp = self._session.post(
+                    url, json=payload, timeout=self._request_timeout
                 )
-                with self._opener.open(req, timeout=self._timeout) as resp:  # noqa: S310
-                    resp_body = resp.read()
-                    resp_status = resp.status
-                # Strip any PHP warnings / notices printed before the JSON object
-                resp_text = resp_body.decode("utf-8", errors="replace")
+                resp_text = resp.text
+                # Strip any PHP warnings printed before the JSON object
                 json_start = resp_text.find("{")
                 if json_start > 0:
                     resp_text = resp_text[json_start:]
                 data = json.loads(resp_text)
                 return data if isinstance(data, dict) else {"_raw": data}
             except json.JSONDecodeError:
-                # Server replied but body is not JSON — surface the raw text so the
-                # caller can diagnose the real problem (PHP error page, redirect, etc.)
-                raw_text = resp_body.decode("utf-8", errors="replace") if resp_body else "<empty>"
                 raise RuntimeError(
-                    f"POST {url} returned non-JSON response (HTTP {resp_status}):\n{raw_text[:2000]}"
+                    f"POST {url} returned non-JSON (HTTP {resp.status_code}):\n{resp.text[:2000]}"
                 ) from None
-            except (urllib.error.URLError, OSError) as exc:
+            except requests.RequestException as exc:
                 last_exc = exc
         raise TalisharConnectionError(f"POST {url} failed: {last_exc}") from last_exc
 
@@ -712,6 +724,152 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
 
         return actions
 
+    def _filter_legal_actions(
+        self,
+        state: dict[str, Any],
+        legal_actions: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Remove actions that cause the agent to loop or get stuck.
+
+        Each rule falls back to the original filtered list if it would
+        otherwise produce an empty set.
+
+        **Rule 1 — main-phase affordability** (phase ``m``):
+            Strip action-27 hand-card plays whose resource cost exceeds the
+            total pitch value of all *other* hand cards.  Unaffordable cards
+            always open an empty pitch window → Cancel → same main phase →
+            infinite loop.
+
+        **Rule 2 — main-phase equip removal** (phase ``m``):
+            Remove mode-3 (Equip) actions entirely.  Equipping opens a pitch
+            window that may be empty (0-cost equipment has no pitch window
+            exit except Cancel), causing: equip → P phase → Pass no-op or
+            Cancel → equip again → infinite loop.  The default policy
+            explicitly skips mode=3 for this reason (see Pitfall 2 in the
+            interaction guide).
+
+        **Rule 3 — pitch-phase Pass removal** (phase ``p``):
+            Remove Pass (mode=99) from pitch-phase choices.  Phase P is
+            CanPassPhase=0 *until* the played card's cost has been met, so
+            mode=99 is a **silent server no-op** when resources are
+            insufficient — the server returns the same state and the agent
+            loops forever.  The correct choices are: pitch a hand card
+            (mode=27) or Cancel (mode=10000) to abort the unaffordable play.
+            Pass is only meaningful once the server auto-advances out of P
+            (which it does automatically once cost is satisfied), so it is
+            never needed here.
+
+        **Rule 4 — pitch-phase Cancel removal** (phase ``p``):
+            When hand cards are still available to pitch, also remove Cancel
+            (10000).  This forces the agent to pitch at least one card rather
+            than instantly aborting an affordable play.
+
+        **Rule 5 — mandatory-choice phase Pass removal**
+            (phases: ``choosehand``, ``choosehandcancel``, ``choosemultizone``,
+            ``buttoninput``, ``buttoninputnopass``):
+            These are all CanPassPhase=0 phases — mode=99 is a silent no-op.
+            Remove Pass so the agent is forced to make the required pick.
+            Fallback: if removing Pass leaves nothing, keep Pass to avoid an
+            empty action set.
+
+        **Rule 6 — block-phase Undo Block removal** (phase ``b``):
+            Once no blocking hand cards remain (all have been committed),
+            remove Undo Block (10001).  There is nothing useful to undo to,
+            so keeping it only allows a "commit all → undo → re-commit" loop.
+        """
+        phase = _dp_get_phase(state)
+        filtered = list(legal_actions)
+
+        # ── Rules 1 & 2: main-phase ───────────────────────────────────────────
+        if phase == "m":
+            hand_cards = [c for c in state.get("playerHand", []) if isinstance(c, dict)]
+            total_pitch = sum(_card_pitch_value(c) for c in hand_cards)
+            affordable: list[dict[str, Any]] = []
+            for action in filtered:
+                code = _dp_to_int(action.get("action_code", 0))
+                # Rule 2: strip Equip (mode=3) — opens unresolvable pitch windows
+                if code == 3:
+                    continue
+                # Rule 1: strip unaffordable action-27 hand plays
+                if (
+                    action.get("zone") == "hand"
+                    and code == 27
+                ):
+                    card = _match_action_card(action, state)
+                    cost = _dp_to_int((card or {}).get("cost"), 0)
+                    if cost > 0:
+                        card_pitch = _card_pitch_value(card) if card else 0
+                        available = total_pitch - card_pitch
+                        if cost > available:
+                            continue  # cannot afford — omit from legal set
+                affordable.append(action)
+            if affordable:
+                filtered = affordable
+
+        # ── Rules 3 & 4: pitch-phase ──────────────────────────────────────────
+        elif phase == "p":
+            # Rule 3: always remove Pass (99) — it is a silent no-op in P phase
+            # until cost is met; the server auto-advances once cost is satisfied
+            # so Pass is never needed as an explicit choice here.
+            no_pass = [
+                a for a in filtered
+                if _dp_to_int(a.get("action_code", 0)) != 99
+            ]
+            if no_pass:
+                filtered = no_pass
+
+            # Rule 4: when hand cards can still be pitched, remove Cancel too —
+            # force agent to pitch rather than immediately aborting.
+            pitch_cards = [
+                a for a in filtered
+                if a.get("zone") == "hand"
+                and _dp_to_int(a.get("action_code", 0)) == 27
+            ]
+            if pitch_cards:
+                no_cancel = [
+                    a for a in filtered
+                    if _dp_to_int(a.get("action_code", 0)) != 10000
+                ]
+                if no_cancel:
+                    filtered = no_cancel
+
+        # ── Rule 5: mandatory-choice phases (CanPassPhase=0) ─────────────────
+        elif phase in (
+            _dp_choose_hand_phases
+            | _dp_button_input_phases
+            | _dp_popup_phases
+        ):
+            # mode=99 is a silent no-op here — remove it so the agent is
+            # forced to make the required pick.
+            no_pass = [
+                a for a in filtered
+                if _dp_to_int(a.get("action_code", 0)) != 99
+            ]
+            if no_pass:
+                filtered = no_pass
+
+        # ── Rule 6: block-phase Undo Block removal ────────────────────────────
+        elif phase == "b":
+            block_hand_cards = [
+                a for a in filtered
+                if a.get("zone") == "hand"
+                and _dp_to_int(a.get("action_code", 0)) == 27
+            ]
+            if not block_hand_cards:
+                # No blockers left → remove Undo Block to prevent undo-loop.
+                no_undo = [
+                    a for a in filtered
+                    if _dp_to_int(a.get("action_code", 0)) != 10001
+                ]
+                if no_undo:
+                    filtered = no_undo
+
+        return filtered
+
+    def _legal_actions(self, state: dict[str, Any]) -> list[dict[str, Any]]:
+        """Return filtered legal actions for *state* (single call-site helper)."""
+        return self._filter_legal_actions(state, self._extract_legal_actions(state))
+
     def _encode_observation(
         self,
         state: dict[str, Any],
@@ -858,11 +1016,9 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         seed: Optional[int] = None,
         options: Optional[dict[str, Any]] = None,
     ) -> ResetResult:
-        # Fresh HTTP session for each episode
-        self._cookie_jar = http.cookiejar.CookieJar()
-        self._opener = urllib.request.build_opener(
-            urllib.request.HTTPCookieProcessor(self._cookie_jar)
-        )
+        # Recycle the session's cookie store between episodes so connections
+        # stay pooled (keep-alive) but stale cookies don't leak.
+        self._session.cookies.clear()
         self._last_update = 0
 
         self._game_name, self._p1_auth_key, self._p2_auth_key = self._create_game()
@@ -896,7 +1052,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         elif self._render_mode == "rgb_array":
             self._open_playwright_page()
 
-        legal_actions = self._extract_legal_actions(self._last_state)
+        legal_actions = self._legal_actions(self._last_state)
         obs = self._encode_observation(self._last_state, legal_actions)
 
         return ResetResult(
@@ -913,7 +1069,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
 
     def step(self, action: Any) -> StepResult:
         state = self._last_state
-        legal_actions = self._extract_legal_actions(state)
+        legal_actions = self._legal_actions(state)
 
         mode, button_input = self._parse_action(action, legal_actions)
         try:
@@ -980,7 +1136,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         self._opp_hp = new_opp_hp
         self._last_state = new_state
 
-        new_legal_actions = self._extract_legal_actions(new_state)
+        new_legal_actions = self._legal_actions(new_state)
         obs = self._encode_observation(new_state, new_legal_actions)
 
         return StepResult(
@@ -1110,6 +1266,10 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
 
     def close(self) -> None:
         self._close_playwright_page()
+        try:
+            self._session.close()
+        except Exception:
+            pass
         self._game_name = None
         self._auth_key = ""
         self._p1_auth_key = ""
@@ -1178,7 +1338,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         """
         if not self._last_state:
             return "pass"
-        legal = self._extract_legal_actions(self._last_state)
+        legal = self._legal_actions(self._last_state)
         if not legal:
             return "pass"
 

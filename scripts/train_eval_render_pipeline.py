@@ -150,6 +150,33 @@ def _discover_agents(out_dir: Path, matchup: str) -> tuple[Path, Path, dict[str,
     return p1_weights, p2_weights, meta
 
 
+def _frames_to_gif(frame_paths: list[Path], gif_path: Path, fps: float = 4.0) -> None:
+    """Assemble a list of PNG frame paths into an animated GIF."""
+    from PIL import Image
+
+    if not frame_paths:
+        return
+    frames: list[Image.Image] = []
+    for p in frame_paths:
+        try:
+            frames.append(Image.open(p).convert("RGB"))
+        except Exception:
+            pass
+    if not frames:
+        return
+    duration_ms = max(1, int(1000.0 / fps))
+    gif_path.parent.mkdir(parents=True, exist_ok=True)
+    frames[0].save(
+        gif_path,
+        format="GIF",
+        save_all=True,
+        append_images=frames[1:],
+        loop=0,
+        duration=duration_ms,
+    )
+    print(f"  Saved eval animation GIF ({len(frames)} frames) → {gif_path}")
+
+
 def _eval_agents(
     base_url: str,
     p1_weights: Path,
@@ -163,13 +190,15 @@ def _eval_agents(
     *,
     show_frontend: bool = False,
     live_image_path: Path | None = None,
+    gif_path: Path | None = None,
 ) -> dict[str, Any]:
     print("\n[2/3] Evaluating trained agents...")
     print(f"  Progress: {episodes} evaluation episodes (max_steps={max_steps})")
     p1_agent = _load_agent(p1_weights)
     p2_agent = _load_agent(p2_weights)
 
-    render_mode = "rgb_array" if show_frontend else None
+    need_render = show_frontend or gif_path is not None
+    render_mode = "rgb_array" if need_render else None
     env = TalisharEngineEnvironment(
         base_url=base_url,
         local_deck_name=p1_deck,
@@ -182,6 +211,15 @@ def _eval_agents(
     if show_frontend and live_image_path is not None:
         live_image_path.parent.mkdir(parents=True, exist_ok=True)
         print(f"  Live eval image path → {live_image_path}")
+
+    # Temporary directory for GIF frames (one per step across all episodes)
+    gif_frame_paths: list[Path] = []
+    gif_frames_dir: Path | None = None
+    if gif_path is not None:
+        import tempfile
+        gif_frames_dir = gif_path.parent / "_gif_frames_tmp"
+        gif_frames_dir.mkdir(parents=True, exist_ok=True)
+        print(f"  Eval GIF will be saved → {gif_path}")
 
     p1_wins = 0
     p2_wins = 0
@@ -210,6 +248,10 @@ def _eval_agents(
                 steps = step_no
                 if show_frontend and live_image_path is not None:
                     _save_state_image(env, obs, live_image_path)
+                if gif_frames_dir is not None:
+                    frame_path = gif_frames_dir / f"ep{ep:04d}_step{step_no:04d}.png"
+                    _save_state_image(env, obs, frame_path)
+                    gif_frame_paths.append(frame_path)
                 if terminated or truncated:
                     break
 
@@ -254,6 +296,14 @@ def _eval_agents(
     finally:
         env.close()
 
+    # Build the GIF from collected frames
+    if gif_path is not None and gif_frame_paths:
+        _frames_to_gif(gif_frame_paths, gif_path)
+        # Clean up temporary frame images
+        import shutil
+        if gif_frames_dir is not None and gif_frames_dir.is_dir():
+            shutil.rmtree(gif_frames_dir, ignore_errors=True)
+
     total = max(1, episodes)
     summary = {
         "episodes": episodes,
@@ -265,6 +315,7 @@ def _eval_agents(
         "p2_win_rate": p2_wins / total,
         "timeout_rate": timeouts / total,
         "episodes_log": episodes_log,
+        "eval_gif": str(gif_path) if gif_path is not None else None,
     }
     print(
         "  Eval summary: "
@@ -461,6 +512,15 @@ def main() -> int:
         default=None,
         help="Directory to save per-state render images.",
     )
+    parser.add_argument(
+        "--eval-gif",
+        type=Path,
+        default=None,
+        help=(
+            "Path to save the optimal-policy animation GIF recorded during the eval step. "
+            "Defaults to <out-dir>/<matchup>/eval_optimal_policy.gif when not provided."
+        ),
+    )
     args = parser.parse_args()
 
     base_url = os.environ.get("TALISHAR_URL", "http://localhost:8080/game")
@@ -471,6 +531,10 @@ def main() -> int:
     p2_deck = str(meta["p1"].get("p2_deck", ""))
     if not p1_deck or not p2_deck:
         raise RuntimeError("Could not infer p1/p2 deck names from training metadata.")
+
+    eval_gif_path = args.eval_gif
+    if eval_gif_path is None:
+        eval_gif_path = args.out_dir / args.matchup / "eval_optimal_policy.gif"
 
     eval_summary = _eval_agents(
         base_url=base_url,
@@ -488,6 +552,7 @@ def main() -> int:
             if getattr(args, "show_frontend_eval", False)
             else None
         ),
+        gif_path=eval_gif_path,
     )
 
     optimal_role = "p1" if eval_summary["p1_wins"] >= eval_summary["p2_wins"] else "p2"
@@ -536,6 +601,7 @@ def main() -> int:
 
     print("\nPipeline complete.")
     print(f"  Optimal policy : {optimal_role} ({optimal_weights})")
+    print(f"  Eval GIF       : {eval_gif_path}")
     print(f"  Render dir     : {render_dir}")
     print(f"  Summary        : {summary_path}")
     return 0
