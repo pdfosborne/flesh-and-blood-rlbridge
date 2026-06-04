@@ -73,6 +73,14 @@ cd src/flesh_and_blood_rlbridge/card_db
 python import_from_talishar.py --source /path/to/upstream_cards.json --out cards.json
 ```
 
+## Talishar Engine Source
+
+Update with: 
+
+```
+git subtree pull --prefix=Talishar talishar-upstream main --squash
+```
+
 ## Repository
 
 https://github.com/pdfosborne/flesh-and-blood-rlbridge
