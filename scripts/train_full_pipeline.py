@@ -82,6 +82,7 @@ import pickle
 import sys
 import uuid
 import math
+from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -779,6 +780,7 @@ def run_phase3_play(
     cache_dir: Optional[Path],
     seed: Optional[int] = None,
     cpp_engine_dir: Optional[str] = None,
+    checkpoint_interval: int = 10000,
 ) -> tuple[float, float]:
     """Co-evolution play using train_dual_agent_common warmup + episode-cache infrastructure.
 
@@ -918,84 +920,138 @@ def run_phase3_play(
     # ── training ──────────────────────────────────────────────────────────────
     p1_rewards: list[float] = []
     p2_rewards: list[float] = []
+    total_completed = 0
+    warmup_remaining = min(warmup_episodes, n_episodes)
+    baseline_saved = False
+
+    def _maybe_save_checkpoint(force: bool = False) -> None:
+        if checkpoint_interval <= 0:
+            if not force:
+                return
+        elif not force and total_completed % checkpoint_interval != 0:
+            return
+        if total_completed <= 0:
+            return
+        _save_phase3_play_checkpoints(
+            out_dir=out_dir,
+            matchup=matchup,
+            game_format=game_format,
+            p1_agent=p1_agent,
+            p2_agent=p2_agent,
+            p1_rewards=p1_rewards,
+            p2_rewards=p2_rewards,
+            episodes_completed=total_completed,
+            total_target_episodes=n_episodes,
+            opponent_mode=opponent_mode,
+            p1_deck_cards=p1_game_deck,
+            p2_deck_cards=p2_game_deck,
+            p1_equipment_header=p1_equipment_header,
+            p2_equipment_header=p2_equipment_header,
+            p1_opponent_deck_name=p1_opponent_deck_name,
+        )
 
     try:
         if n_workers > 1:
-            # Parallel: warmup + PPO in one call; baseline eval afterwards
-            p1_r, p2_r, _ = train_agents_from_both_perspectives_parallel(
-                matchup=matchup,
-                base_url=base_url,
-                game_format=game_format,
-                p1_tiers=p1_tiers,
-                p2_tiers=p2_tiers,
-                n_episodes=n_episodes,
-                max_steps=max_play_steps,
-                seed=seed,
-                warmup_episodes=warmup_episodes,
-                n_workers=n_workers,
-                live_state_image_path=live_path,
-                episode_cache=episode_cache,
-            )
-            p1_rewards.extend(p1_r)
-            p2_rewards.extend(p2_r)
-            if warmup_episodes > 0 and warmup_baseline_eval_episodes > 0:
-                _run_warmup_baseline(
-                    matchup, p1_agent, p2_agent,
-                    base_url=base_url, game_format=game_format,
-                    max_steps=max_play_steps, out_dir=out_dir,
-                    episodes=warmup_baseline_eval_episodes, seed=seed,
+            while total_completed < n_episodes:
+                remaining = n_episodes - total_completed
+                chunk_size = remaining
+                if checkpoint_interval > 0:
+                    chunk_size = min(chunk_size, checkpoint_interval)
+                chunk_warmup = min(warmup_remaining, chunk_size)
+                chunk_seed = (seed + total_completed) if seed is not None else None
+                mode_label = "warmup" if chunk_warmup == chunk_size else ("mixed" if chunk_warmup > 0 else "ppo")
+                print(
+                    f"  Parallel chunk: {chunk_size} episode(s) "
+                    f"[{mode_label}] starting at ep {total_completed + 1}"
                 )
+                p1_r, p2_r, _ = train_agents_from_both_perspectives_parallel(
+                    matchup=matchup,
+                    base_url=base_url,
+                    game_format=game_format,
+                    p1_tiers=p1_tiers,
+                    p2_tiers=p2_tiers,
+                    n_episodes=chunk_size,
+                    max_steps=max_play_steps,
+                    seed=chunk_seed,
+                    warmup_episodes=chunk_warmup,
+                    n_workers=n_workers,
+                    live_state_image_path=live_path,
+                    episode_cache=episode_cache,
+                )
+                p1_rewards.extend(p1_r)
+                p2_rewards.extend(p2_r)
+                total_completed += chunk_size
+                warmup_remaining -= chunk_warmup
+                if (
+                    not baseline_saved
+                    and warmup_episodes > 0
+                    and warmup_baseline_eval_episodes > 0
+                    and warmup_remaining <= 0
+                ):
+                    _run_warmup_baseline(
+                        matchup, p1_agent, p2_agent,
+                        base_url=base_url, game_format=game_format,
+                        max_steps=max_play_steps, out_dir=out_dir,
+                        episodes=warmup_baseline_eval_episodes, seed=seed,
+                    )
+                    baseline_saved = True
+                _maybe_save_checkpoint()
 
         else:
-            # Serial: explicit warmup phase → baseline eval → PPO phase
+            # Serial: explicit warmup/PPO chunks so long runs can checkpoint.
             env = make_env(
                 matchup, base_url=base_url, game_format=game_format,
                 max_turns=max_play_steps,
             )
             try:
-                warmup_count = min(warmup_episodes, n_episodes)
-                if warmup_count > 0:
-                    print(f"  Warmup: {warmup_count} episode(s) with default policy…")
-                    w_p1, w_p2, _ = train_agents_from_both_perspectives(
+                while total_completed < n_episodes:
+                    remaining = n_episodes - total_completed
+                    chunk_size = remaining
+                    if checkpoint_interval > 0:
+                        chunk_size = min(chunk_size, checkpoint_interval)
+                    chunk_warmup = min(warmup_remaining, chunk_size)
+                    chunk_seed = (seed + total_completed) if seed is not None else None
+                    if chunk_warmup == chunk_size:
+                        print(f"  Warmup chunk: {chunk_size} episode(s) starting at ep {total_completed + 1}…")
+                    elif chunk_warmup > 0:
+                        print(f"  Mixed chunk: {chunk_size} episode(s) ({chunk_warmup} warmup) starting at ep {total_completed + 1}…")
+                    else:
+                        print(f"  PPO chunk: {chunk_size} episode(s) starting at ep {total_completed + 1}…")
+
+                    c_p1, c_p2, _ = train_agents_from_both_perspectives(
                         env, p1_tiers, p2_tiers,
-                        n_episodes=warmup_count,
+                        n_episodes=chunk_size,
                         max_steps=max_play_steps,
-                        seed=seed,
-                        warmup_episodes=warmup_count,
+                        seed=chunk_seed,
+                        warmup_episodes=chunk_warmup,
                         live_state_image_path=live_path,
                         episode_cache=episode_cache,
                         p1_deck=p1_deck_name,
                         p2_deck=p2_deck_name,
                     )
-                    p1_rewards.extend(w_p1)
-                    p2_rewards.extend(w_p2)
-                    if warmup_baseline_eval_episodes > 0:
+                    p1_rewards.extend(c_p1)
+                    p2_rewards.extend(c_p2)
+                    total_completed += chunk_size
+                    warmup_remaining -= chunk_warmup
+
+                    if (
+                        not baseline_saved
+                        and warmup_episodes > 0
+                        and warmup_baseline_eval_episodes > 0
+                        and warmup_remaining <= 0
+                    ):
                         _run_warmup_baseline(
                             matchup, p1_agent, p2_agent,
                             base_url=base_url, game_format=game_format,
                             max_steps=max_play_steps, out_dir=out_dir,
                             episodes=warmup_baseline_eval_episodes, seed=seed,
                         )
-
-                remaining = n_episodes - warmup_count
-                if remaining > 0:
-                    print(f"  PPO: {remaining} episode(s) with learned policy…")
-                    r_seed = (seed + warmup_count) if seed is not None else None
-                    r_p1, r_p2, _ = train_agents_from_both_perspectives(
-                        env, p1_tiers, p2_tiers,
-                        n_episodes=remaining,
-                        max_steps=max_play_steps,
-                        seed=r_seed,
-                        warmup_episodes=0,
-                        live_state_image_path=live_path,
-                        episode_cache=episode_cache,
-                        p1_deck=p1_deck_name,
-                        p2_deck=p2_deck_name,
-                    )
-                    p1_rewards.extend(r_p1)
-                    p2_rewards.extend(r_p2)
+                        baseline_saved = True
+                    _maybe_save_checkpoint()
             finally:
                 env.close()
+
+        _maybe_save_checkpoint(force=True)
 
     finally:
         # Clean up temp deck files
@@ -1177,6 +1233,117 @@ def _save_all_agents(agents: PhaseAgents, out_dir: Path) -> None:
         _save_agent(agents.sideboard, prefix.parent / f"{agents.player}_sideboard.pkl")
     if agents.play is not None:
         _save_agent(agents.play, prefix.parent / f"{agents.player}_play.pkl")
+
+
+def _save_play_checkpoint_package(
+    *,
+    agent: Any,
+    out_dir: Path,
+    matchup: "Matchup",
+    game_format: str,
+    role: str,
+    episodes_completed: int,
+    total_target_episodes: int,
+    reward_history: list[float],
+    deck_cards: dict[str, int],
+    equipment_header: str,
+    opponent_mode: str,
+    opponent_deck_name: str,
+) -> Optional[Path]:
+    """Persist a discoverable phase-3 checkpoint package under results/."""
+    if not hasattr(agent, "save"):
+        return None
+
+    checkpoint_dir = out_dir / matchup.name / role / f"episode_{episodes_completed:06d}"
+    weights_dir = checkpoint_dir / "weights"
+    weights_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        agent.save(weights_dir / "agent_weights.json")
+    except Exception as exc:
+        print(f"  [{role}] WARNING: could not save play checkpoint at ep {episodes_completed}: {exc}")
+        return None
+
+    rewards = reward_history[:episodes_completed]
+    avg_reward = float(sum(rewards) / len(rewards)) if rewards else 0.0
+    metadata = {
+        "checkpoint_type": "phase3_play",
+        "created_at": datetime.now().isoformat(),
+        "matchup": matchup.name,
+        "role": role,
+        "game_format": game_format,
+        "weights_file": "agent_weights.json",
+        "episodes_completed": episodes_completed,
+        "target_episodes": total_target_episodes,
+        "p1_deck": matchup.p1_deck,
+        "p2_deck": matchup.p2_deck,
+        "p1_hero": matchup.p1_hero,
+        "p2_hero": matchup.p2_hero,
+        "avg_reward": avg_reward,
+        "opponent_mode": opponent_mode,
+        "opponent_deck_name": opponent_deck_name,
+        "deck_spec": {
+            "equipment_header": equipment_header,
+            "cards": deck_cards,
+        },
+    }
+    (checkpoint_dir / "metadata.json").write_text(
+        json.dumps(metadata, indent=2),
+        encoding="utf-8",
+    )
+    return checkpoint_dir
+
+
+def _save_phase3_play_checkpoints(
+    *,
+    out_dir: Path,
+    matchup: "Matchup",
+    game_format: str,
+    p1_agent: Any,
+    p2_agent: Any,
+    p1_rewards: list[float],
+    p2_rewards: list[float],
+    episodes_completed: int,
+    total_target_episodes: int,
+    opponent_mode: str,
+    p1_deck_cards: dict[str, int],
+    p2_deck_cards: Optional[dict[str, int]],
+    p1_equipment_header: str,
+    p2_equipment_header: str,
+    p1_opponent_deck_name: str,
+) -> None:
+    p1_ckpt = _save_play_checkpoint_package(
+        agent=p1_agent,
+        out_dir=out_dir,
+        matchup=matchup,
+        game_format=game_format,
+        role="p1",
+        episodes_completed=episodes_completed,
+        total_target_episodes=total_target_episodes,
+        reward_history=p1_rewards,
+        deck_cards=p1_deck_cards,
+        equipment_header=p1_equipment_header,
+        opponent_mode=opponent_mode,
+        opponent_deck_name=p1_opponent_deck_name,
+    )
+    if p1_ckpt is not None:
+        print(f"  [p1] Phase-3 checkpoint → {p1_ckpt}")
+
+    p2_ckpt = _save_play_checkpoint_package(
+        agent=p2_agent,
+        out_dir=out_dir,
+        matchup=matchup,
+        game_format=game_format,
+        role="p2",
+        episodes_completed=episodes_completed,
+        total_target_episodes=total_target_episodes,
+        reward_history=p2_rewards,
+        deck_cards=p2_deck_cards or {},
+        equipment_header=p2_equipment_header,
+        opponent_mode=opponent_mode,
+        opponent_deck_name=(matchup.p1_deck if opponent_mode == "dual" else p1_opponent_deck_name),
+    )
+    if p2_ckpt is not None:
+        print(f"  [p2] Phase-3 checkpoint → {p2_ckpt}")
 
 
 # ---------------------------------------------------------------------------
@@ -1679,6 +1846,8 @@ def main() -> None:
         help="Sideboard episodes per opponent per outer iteration")
     parser.add_argument("--play-episodes", type=int, default=30,
         help="Play episodes per outer iteration")
+    parser.add_argument("--play-checkpoint-interval", type=int, default=10000,
+        help="Save phase-3 play weights every N episodes into results/.")
     parser.add_argument("--max-build-steps", type=int, default=200)
     parser.add_argument("--max-sideboard-steps", type=int, default=100)
     parser.add_argument("--max-play-steps", type=int, default=200)
@@ -2011,6 +2180,7 @@ def main() -> None:
             cache_dir=Path(args.cache_dir) if args.cache_dir else None,
             seed=args.seed,
             cpp_engine_dir=args.cpp_engine_dir,
+            checkpoint_interval=args.play_checkpoint_interval,
         )
         p1.last_play_win_rate = p1_wr
         if p2 is not None:
