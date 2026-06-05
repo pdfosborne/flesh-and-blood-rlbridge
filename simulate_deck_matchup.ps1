@@ -69,7 +69,7 @@ $Format = "silver_age"   # silver_age | classic_constructed | blitz | upf
 # ── Simulation volumes ────────────────────────────────────────────────────────
 # Play episodes train the agents enough to produce a meaningful win rate.
 # Final-eval episodes are used for the reported win %.
-$PlayEpisodes         = 200    # Phase 3 training games per iteration
+$PlayEpisodes         = 1000    # Phase 3 training games per iteration
 $FinalEvalEpisodes    = 500    # Games for the final win % measurement
 $FinalEvalMaxSteps    = 200    # Max turns per evaluation game
 $SideboardEpisodes    = 30     # Sideboard episodes (only used if deck < min size)
@@ -298,7 +298,7 @@ if ($CppEngineBuildSucceeded) {
 
 if (-not $CppEngineBuildSucceeded) {
     Write-Host ""
-    Write-Host "  WARNING: C++ engine build failed — falling back to HTTP Talishar." -ForegroundColor DarkYellow
+    Write-Host "  WARNING: C++ engine build failed -- falling back to HTTP Talishar." -ForegroundColor DarkYellow
     Write-Host ""
 } else {
     Write-Host "  C++ engine ready."
@@ -362,7 +362,7 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host ""
 Write-Host "================================================================"
-Write-Host "  Simulation Results — $MatchupLabel"
+Write-Host "  Simulation Results -- $MatchupLabel"
 Write-Host "================================================================"
 
 if (Test-Path $ResultsJson) {
