@@ -5,6 +5,8 @@ import os
 import re
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any, Optional
 
@@ -17,9 +19,10 @@ _REPO     = Path(__file__).resolve().parent.parent.parent
 _SCRIPTS  = _REPO / "scripts"
 _RESULTS  = _REPO / "results"
 
-_SIMULATE_SCRIPT  = _REPO / "simulate_deck_matchup.ps1"
-_FIXED_OPP_SCRIPT = _REPO / "run_aurora_vs_briar_fixed_opponent.ps1"
-_FULL_PIPE_SCRIPT  = _REPO / "run_sage_aurora_vs_briar_deckbuild.ps1"
+_SIMULATE_SCRIPT       = _REPO / "simulate_deck_matchup.ps1"
+_FIXED_OPP_SCRIPT      = _REPO / "run_aurora_vs_briar_fixed_opponent.ps1"
+_FULL_PIPE_SCRIPT       = _REPO / "run_sage_aurora_vs_briar_deckbuild.ps1"
+_START_TALISHAR_SCRIPT = _REPO / "start_talishar.ps1"
 
 _FAB_CUSTOM_TOOLS_REGISTERED = False
 
@@ -96,6 +99,56 @@ def _format_output(proc: dict, out_dir: Optional[Path] = None) -> str:
     return "\n".join(lines)
 
 
+def _check_url_reachable(url: str, timeout: int = 3) -> bool:
+    """Return True if *url* responds with HTTP status < 500 within *timeout* s."""
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310
+            return int(resp.status) < 500
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _ensure_talishar_running(
+    talishar_url: str = "http://localhost:8080",
+    need_fe: bool = False,
+    fe_url: str = "http://localhost:5173",
+) -> dict[str, Any]:
+    """Ensure the Talishar backend (and optionally FE) are reachable.
+
+    If either required service is down, ``start_talishar.ps1`` is invoked
+    automatically with the appropriate flags so callers never need to start
+    Talishar by hand.  Returns a status dict that tools can surface to the
+    caller.
+    """
+    backend_up = _check_url_reachable(talishar_url)
+    fe_up      = _check_url_reachable(fe_url) if need_fe else None
+
+    already_ready = backend_up and (not need_fe or fe_up)
+    if already_ready:
+        return {
+            "backend_was_running": True,
+            "fe_was_running":      fe_up,
+            "started":             False,
+            "start_result":        None,
+        }
+
+    # Determine which flags to pass to start_talishar.ps1
+    ps_args: list[str] = []
+    if backend_up and need_fe and not fe_up:
+        ps_args = ["-FeOnly"]          # backend fine; only start FE
+    elif fe_up is not None and fe_up and not backend_up:
+        ps_args = ["-BackendOnly"]     # FE fine; only start backend
+    # else: start everything (no flags = default)
+
+    result = _run_ps(_START_TALISHAR_SCRIPT, ps_args, timeout=120)
+    return {
+        "backend_was_running": backend_up,
+        "fe_was_running":      fe_up,
+        "started":             True,
+        "start_result":        result,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Tool registration
 # ---------------------------------------------------------------------------
@@ -167,6 +220,10 @@ def register_mcp_tools(
         d2 = _resolve_deck_source(deck2_source)
         if not d1 or not d2:
             return "ERROR: both deck1_source and deck2_source are required."
+
+        _talishar_status = _ensure_talishar_running(
+            talishar_url=talishar_url or os.environ.get("TALISHAR_URL", "http://localhost:8080"),
+        )
 
         effective_out = Path(out_dir) if out_dir else (
             _RESULTS / "matchup_sims" / f"{re.sub(r'[^A-Za-z0-9]', '_', d1[:20])}_vs_{re.sub(r'[^A-Za-z0-9]', '_', d2[:20])}"
@@ -292,6 +349,10 @@ def register_mcp_tools(
         if not training or not fixed:
             return "ERROR: both training_deck_source and fixed_opponent_source are required."
 
+        _talishar_status = _ensure_talishar_running(
+            talishar_url=talishar_url or os.environ.get("TALISHAR_URL", "http://localhost:8080"),
+        )
+
         effective_out = Path(out_dir) if out_dir else (
             _RESULTS / "vs_fixed" / f"{re.sub(r'[^A-Za-z0-9]', '_', training[:20])}_vs_{re.sub(r'[^A-Za-z0-9]', '_', fixed[:20])}"
         )
@@ -390,6 +451,11 @@ def register_mcp_tools(
         if not p1 or not p2:
             return "ERROR: both p1_source and p2_source are required."
 
+        _talishar_status = _ensure_talishar_running(
+            talishar_url=talishar_url or os.environ.get("TALISHAR_URL", "http://localhost:8080"),
+            need_fe=gif_fps > 0,
+        )
+
         effective_out = Path(out_dir) if out_dir else (
             _RESULTS / "full_pipeline" / f"{re.sub(r'[^A-Za-z0-9]', '_', p1[:20])}_vs_{re.sub(r'[^A-Za-z0-9]', '_', p2[:20])}"
         )
@@ -414,6 +480,77 @@ def register_mcp_tools(
 
         return _format_output(proc_result, effective_out)
 
+    # ── Tool 4 ────────────────────────────────────────────────────────────────
+
+    @mcp.tool()
+    def fab_start_talishar(
+        action: str = "start",
+        backend_only: bool = False,
+        fe_only: bool = False,
+        talishar_url: str = "http://localhost:8080",
+        fe_url: str = "http://localhost:5173",
+        timeout_seconds: int = 120,
+    ) -> str:
+        """Start, stop, or check the Talishar game engine stack.
+
+        Talishar must be running before any simulation or training tool can
+        function.  This tool manages the Docker Compose backend and the Vite
+        frontend dev server via ``start_talishar.ps1``.
+
+        Parameters
+        ----------
+        action:
+            ``start``  — start backend (Docker Compose) and/or Vite frontend.
+            ``stop``   — stop the Docker Compose backend containers.
+            ``status`` — check whether backend and frontend are reachable;
+                         start automatically if the backend is down.
+        backend_only:
+            When *action* is ``start``, skip the Vite frontend dev server.
+        fe_only:
+            When *action* is ``start``, skip Docker Compose (backend already
+            running; only launch the Vite dev server).
+        talishar_url:
+            Backend URL to probe (default ``http://localhost:8080``).
+        fe_url:
+            Frontend URL to probe (default ``http://localhost:5173``).
+        timeout_seconds:
+            Wall-clock timeout for the PowerShell script (default 120 s).
+        """
+        action = action.lower().strip()
+
+        if action == "status":
+            backend_up = _check_url_reachable(talishar_url)
+            fe_up      = _check_url_reachable(fe_url)
+            status = {
+                "backend":            {"url": talishar_url, "reachable": backend_up},
+                "frontend":           {"url": fe_url,       "reachable": fe_up},
+                "ready_for_training": backend_up,
+            }
+            if not backend_up:
+                # Auto-start and report
+                start_result = _ensure_talishar_running(
+                    talishar_url=talishar_url,
+                    need_fe=False,
+                )
+                status["auto_start_attempted"] = True
+                status["auto_start_result"]     = start_result
+            return json.dumps(status, indent=2)
+
+        if action == "stop":
+            result = _run_ps(_START_TALISHAR_SCRIPT, ["-Down"], timeout=timeout_seconds)
+            return _format_output(result)
+
+        if action == "start":
+            ps_args: list[str] = []
+            if backend_only:
+                ps_args = ["-BackendOnly"]
+            elif fe_only:
+                ps_args = ["-FeOnly"]
+            result = _run_ps(_START_TALISHAR_SCRIPT, ps_args, timeout=timeout_seconds)
+            return _format_output(result)
+
+        return f"ERROR: unknown action {action!r}. Use 'start', 'stop', or 'status'."
+
     _FAB_CUSTOM_TOOLS_REGISTERED = True
-    return 3
+    return 4
 
