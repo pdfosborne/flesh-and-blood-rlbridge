@@ -58,8 +58,8 @@ $DeckbuildEpisodes      = 1000
 $SideboardEpisodes      = 1000
 $PlayEpisodes           = 10000
 $NumEvalGames           = 1000
-$NumSideboardEpisodes   = 1000   # sideboard runs *inside* each deckbuilder eval
-$Iterations             = 3
+$NumSideboardEpisodes   = 1000  # sideboard runs *inside* each deckbuilder eval
+$Iterations             = 20
 # Parallel workers for Phase 3 play training.
 # Leave as $null to let train_full_pipeline.py auto-detect based on whether
 # the C++ engine is available (auto -> half physical cores, capped at 8).
@@ -68,7 +68,7 @@ $PlayWorkers            = $null
 
 # Final evaluation (post-training)
 $FinalEvalEpisodes      = 100  # eval games with best deck + optimal policy
-$FinalEvalMaxSteps      = 100
+$FinalEvalMaxSteps      = 200
 $GifFps                 = 1.0
 
 # ─── Setup ────────────────────────────────────────────────────────────────────
@@ -147,7 +147,25 @@ if (Test-Path $BriarDeckJson)  { $CppBuildArgs["Deck2Json"] = $BriarDeckJson  }
 & "$PSScriptRoot\build_cpp_engine_for_matchup.ps1" @CppBuildArgs
 
 $CppEngineBuildSucceeded = ($LASTEXITCODE -eq 0)
-if ($LASTEXITCODE -ne 0) {
+
+# Discover the actual engine directory — the build script appends a content
+# hash suffix (e.g. aurora_vs_briar-fddc39a5ea94336d) so we cannot hardcode it.
+$CppEngineDir = $null
+if ($CppEngineBuildSucceeded) {
+    $CppEngineDir = Get-ChildItem (Join-Path $PSScriptRoot "results\cpp_engines") -Directory `
+        -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like "aurora_vs_briar-*" -or $_.Name -eq "aurora_vs_briar" } |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 1 -ExpandProperty FullName
+    if (-not $CppEngineDir) {
+        Write-Host "  WARNING: C++ build reported success but engine directory not found." -ForegroundColor DarkYellow
+        $CppEngineBuildSucceeded = $false
+    } else {
+        Write-Host "  Engine directory: $CppEngineDir"
+    }
+}
+
+if (-not $CppEngineBuildSucceeded) {
     Write-Host ""
     Write-Host "  WARNING: C++ engine build failed (exit $LASTEXITCODE)." -ForegroundColor DarkYellow
     Write-Host "  Continuing — training will fall back to HTTP Talishar." -ForegroundColor DarkYellow
@@ -192,6 +210,7 @@ Write-Host ""
     --assets-path         $AssetsPath `
     --out-dir             $OutDir `
     --results-json        $ResultsJson `
+    $(if ($CppEngineBuildSucceeded) { @("--cpp-engine-dir", $CppEngineDir) } else { @() }) `
     $(if ($null -ne $PlayWorkers) { @("--workers", $PlayWorkers) } else { @() }) `
     @StartingDeckArgs
 

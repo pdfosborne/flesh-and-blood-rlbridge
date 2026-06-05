@@ -90,6 +90,8 @@ class Matchup:
     # UUID-based (Phase 3) but the compiled engine was built for the hero IDs.
     cpp_engine_deck1: Optional[str] = None
     cpp_engine_deck2: Optional[str] = None
+    # Explicit engine directory — bypasses key/cache lookup entirely.
+    cpp_engine_dir: Optional[str] = None
 
 
 def make_env(
@@ -148,6 +150,7 @@ def make_env(
         cpp_engine_cache_dir=effective_cache_dir,
         cpp_engine_deck1=matchup.cpp_engine_deck1,
         cpp_engine_deck2=matchup.cpp_engine_deck2,
+        cpp_engine_dir=matchup.cpp_engine_dir,
     )
 
 

@@ -228,6 +228,7 @@ def run_phase1_deckbuilder(
     assets_path: Optional[str],
     base_url: str,
     render: bool,
+    cpp_engine_dir: Optional[str] = None,
     starting_deck: Optional[dict[str, int]] = None,
     play_reward: float = 0.0,
 ) -> None:
@@ -275,23 +276,36 @@ def run_phase1_deckbuilder(
         max_build_steps=max_build_steps,
         starting_deck=starting_deck,
         render_mode="ansi" if render else None,
+        cpp_engine_dir=cpp_engine_dir,
     )
 
     best_reward = float("-inf")
     best_pool: dict[str, int] = {}
 
     for ep in range(1, n_episodes + 1):
+        print(f"  [{agents.player}] Ep {ep:>4}/{n_episodes}")
         result = env.reset()
         ep_reward = 0.0
         done = False
 
+        step_count = 0
         while not done:
+            if step_count % 100 == 0:
+                print(f"  [{agents.player}] Ep {ep:>4}/{n_episodes} - Step {step_count}")
             if agents.deckbuilder is not None and hasattr(agents.deckbuilder, "act"):
                 action = agents.deckbuilder.act(result.observation)
             else:
-                avail = json.loads(result.observation).get("availableActions", [])
-                import random  # noqa: PLC0415
-                action = random.choice(avail) if avail else "finalize"
+                obs_data = json.loads(result.observation)
+                deck_sz  = obs_data.get("deckSize", 0)
+                pool_sz  = obs_data.get("targetPoolSize", 55)
+                avail    = obs_data.get("availableActions", [])
+                if deck_sz < pool_sz:
+                    # Greedily add cards until pool is full — one evaluate per episode
+                    add_acts = [a for a in avail if a.startswith("add:")]
+                    action = add_acts[0] if add_acts else "finalize"
+                else:
+                    # Pool is full — finalize immediately
+                    action = "finalize"
 
             step = env.step(action)
             ep_reward += step.reward
@@ -303,6 +317,7 @@ def run_phase1_deckbuilder(
                     print(r.text)
 
             result.observation = step.observation
+            step_count += 1
 
         pool = env.get_card_pool()
         pool_size = sum(pool.values())
@@ -358,6 +373,7 @@ def run_phase2_sideboard(
     assets_path: Optional[str],
     base_url: str,
     render: bool,
+    cpp_engine_dir: Optional[str] = None,
     play_reward: float = 0.0,
 ) -> None:
     """Train the sideboard agent for each opponent, store best decks on ``agents``.
@@ -406,16 +422,20 @@ def run_phase2_sideboard(
             talishar_assets_path=assets_path,
             max_sideboard_steps=max_sideboard_steps,
             render_mode="ansi" if render else None,
+            cpp_engine_dir=cpp_engine_dir,
         )
         best_reward = float("-inf")
         best_deck: dict[str, int] = {}
 
         for ep in range(1, n_episodes_per_opponent + 1):
+            print(f"  [{agents.player}] Ep {ep:>4}/{n_episodes_per_opponent}")
             result = env.reset()
             ep_reward = 0.0
             done = False
-
+            step_count = 0
             while not done:
+                if step_count % 100 == 0:
+                    print(f"  [{agents.player}] Ep {ep:>4}/{n_episodes_per_opponent} - Step {step_count}")
                 if agents.sideboard is not None and hasattr(agents.sideboard, "act"):
                     action = agents.sideboard.act(result.observation)
                 else:
@@ -442,6 +462,7 @@ def run_phase2_sideboard(
                         print(r.text)
 
                 result.observation = step.observation
+                step_count += 1
 
             deck = env.get_active_deck()
             deck_size = sum(deck.values())
@@ -628,6 +649,7 @@ def run_phase3_play(
     out_dir: Path,
     cache_dir: Optional[Path],
     seed: Optional[int] = None,
+    cpp_engine_dir: Optional[str] = None,
 ) -> tuple[float, float]:
     """Co-evolution play using train_dual_agent_common warmup + episode-cache infrastructure.
 
@@ -720,6 +742,7 @@ def run_phase3_play(
         render_mode=None,
         cpp_engine_deck1=_cpp_deck1,
         cpp_engine_deck2=_cpp_deck2,
+        cpp_engine_dir=cpp_engine_dir,
     )
     try:
         print(f"  Runtime backend (Phase 3): {_runtime_backend_label(probe_env)}")
@@ -737,6 +760,7 @@ def run_phase3_play(
         p2_hero=p2_hero_id.replace("_", "-"),
         cpp_engine_deck1=_cpp_deck1,
         cpp_engine_deck2=_cpp_deck2,
+        cpp_engine_dir=cpp_engine_dir,
     )
 
     cache_root = cache_dir or (out_dir.parent / "agent_cache")
@@ -1106,6 +1130,13 @@ def _render_game_with_talishar_frontend(
         with sync_playwright() as pw:
             browser = pw.chromium.launch(headless=True, args=["--no-sandbox"])
             context = browser.new_context(viewport={"width": 1600, "height": 900})
+
+            # Pre-set cookie consent so the modal never appears
+            context.add_init_script(
+                "localStorage.setItem('cookieConsent', 'declined');"
+                "localStorage.setItem('cookieConsentDate', new Date().toISOString());"
+            )
+
             page = context.new_page()
 
             try:
@@ -1118,11 +1149,17 @@ def _render_game_with_talishar_frontend(
                     browser.close()
                     return frame_paths
 
-                # Open the frontend for player 1's perspective
-                game_url = f"{fe_url.rstrip('/')}/?gameID={game_name}&playerID=1"
+                # The FE router reads 'gameName' (not 'gameID') and 'playerID'.
+                # IndexGuard redirects /?gameName=X&playerID=1 → /game/play?...
+                game_url = f"{fe_url.rstrip('/')}/?gameName={game_name}&playerID=1"
                 print(f"  [{player_label}] Opening FE: {game_url}")
                 try:
                     page.goto(game_url, timeout=15_000, wait_until="networkidle")
+                    # Wait for the game board to mount (not the home page)
+                    page.wait_for_selector(
+                        "#root .game, #root [class*='board'], #root [class*='Board'], #root [class*='play'], #root [class*='Play']",
+                        timeout=10_000,
+                    )
                 except Exception as exc:
                     print(f"  [{player_label}] WARNING: FE page load error ({exc}) — continuing with fallback screenshots")
 
@@ -1639,6 +1676,22 @@ def main() -> None:
         "--p2-starting-deck", default=None,
         help="Same as --p1-starting-deck but for player 2.",
     )
+    parser.add_argument(
+        "--p1-fixed-deck", default=None,
+        help=(
+            "Path to a JSON file (fetch_fabrary_deck.py format) to pin P1 to a "
+            "fixed card pool every iteration.  Phase 1 (deckbuilder) is skipped "
+            "entirely.  Phase 2 (sideboard) is also skipped when the deck already "
+            "meets the minimum play size (e.g. a 40-card Silver Age game deck)."
+        ),
+    )
+    parser.add_argument(
+        "--p2-fixed-deck", default=None,
+        help=(
+            "Same as --p1-fixed-deck but for P2 (dual mode).  Useful for "
+            "evaluating a training P1 agent against a known fixed opponent deck."
+        ),
+    )
 
     # ── misc ──────────────────────────────────────────────────────────────────
     parser.add_argument("--render", action="store_true")
@@ -1650,6 +1703,9 @@ def main() -> None:
     parser.add_argument("--talishar-fe-url",
         default=os.environ.get("TALISHAR_FE_URL", "http://localhost:5173"),
         help="Talishar frontend URL for Playwright render screenshots (default: http://localhost:5173)")
+    parser.add_argument("--cpp-engine-dir",
+        default=None,
+        help="Path to compiled C++ engine directory for fast deckbuild/sideboard eval (no HTTP).")
     parser.add_argument("--assets-path",
         default=os.environ.get("TALISHAR_ASSETS_PATH", ""))
 
@@ -1679,11 +1735,28 @@ def main() -> None:
     # always 1 for HTTP Talishar (server is the bottleneck).
     if args.workers is None:
         import os as _os
+        import glob as _glob
         _cpp_cache = _os.path.join(str(_REPO_ROOT), "results", "cpp_engines")
         _cpp_deck1 = getattr(args, "hero_id", "") or ""
         _cpp_deck2 = getattr(args, "p2_hero_id", "") or _cpp_deck1
         _cpp_key   = f"{_cpp_deck1}_vs_{_cpp_deck2}"
-        _cpp_dir   = _os.path.join(_cpp_cache, _cpp_key)
+
+        # Prefer the explicitly-passed engine dir; fall back to auto-discovery.
+        _explicit = getattr(args, "cpp_engine_dir", None)
+        if _explicit and _os.path.isdir(_explicit):
+            _cpp_dir = _explicit
+        else:
+            # Exact match first, then hashed variant (e.g. aurora_vs_briar-<hash>)
+            _exact = _os.path.join(_cpp_cache, _cpp_key)
+            if _os.path.isdir(_exact):
+                _cpp_dir = _exact
+            else:
+                _candidates = sorted(
+                    _glob.glob(_os.path.join(_cpp_cache, f"{_cpp_key}-*")),
+                    key=_os.path.getmtime, reverse=True,
+                )
+                _cpp_dir = _candidates[0] if _candidates else _exact
+
         _has_cpp   = any(
             _os.path.exists(_os.path.join(_cpp_dir, f))
             for f in _os.listdir(_cpp_dir)
@@ -1791,6 +1864,36 @@ def main() -> None:
         p2.active_decks[args.hero_id] = cold_deck2
         print(f"  [p2] Cold-start deck: {sum(cold_deck2.values())} cards from starting pool")
 
+    # ── fixed decks (skip deckbuilding; also skip sideboard when game-ready) ──
+    # A fixed deck overrides the deckbuilder every iteration.  If it already
+    # meets the minimum play size no sideboard RL is needed — active_decks is
+    # seeded directly from the fixed deck via a greedy cut.
+    _p1_opp_key = args.p2_hero_id if args.opponent_mode == "dual" else args.opponent_hero_id
+    p1_fixed_deck: Optional[dict[str, int]] = _load_starting_deck(
+        getattr(args, "p1_fixed_deck", None)
+    )
+    p2_fixed_deck: Optional[dict[str, int]] = _load_starting_deck(
+        getattr(args, "p2_fixed_deck", None)
+    )
+    if p1_fixed_deck:
+        p1.card_pool = dict(p1_fixed_deck)
+        _p1_fd_sz = sum(p1_fixed_deck.values())
+        if _p1_fd_sz >= _min_size:
+            p1.active_decks[_p1_opp_key] = _greedy_game_deck_cut(p1_fixed_deck, _min_size)
+        print(
+            f"  [p1] Fixed deck: {_p1_fd_sz} cards — Phase 1 skipped every iteration"
+            + (" (Phase 2 also skipped — deck is game-ready)" if _p1_fd_sz >= _min_size else "")
+        )
+    if p2 is not None and p2_fixed_deck:
+        p2.card_pool = dict(p2_fixed_deck)
+        _p2_fd_sz = sum(p2_fixed_deck.values())
+        if _p2_fd_sz >= _min_size:
+            p2.active_decks[args.hero_id] = _greedy_game_deck_cut(p2_fixed_deck, _min_size)
+        print(
+            f"  [p2] Fixed deck: {_p2_fd_sz} cards — Phase 1 skipped every iteration"
+            + (" (Phase 2 also skipped — deck is game-ready)" if _p2_fd_sz >= _min_size else "")
+        )
+
     # ── outer training loop ───────────────────────────────────────────────────
     for iteration in range(1, args.iterations + 1):
         print(f"\n\n{'#'*62}")
@@ -1825,44 +1928,29 @@ def main() -> None:
             out_dir=out_dir,
             cache_dir=Path(args.cache_dir) if args.cache_dir else None,
             seed=args.seed,
+            cpp_engine_dir=args.cpp_engine_dir,
         )
         p1.last_play_win_rate = p1_wr
         if p2 is not None:
             p2.last_play_win_rate = p2_wr
 
         # ── Phase 1: Deckbuilder ───────────────────────────────────────────────
-        # On iteration 1 use the FaBrary warm-start; on later iterations feed
-        # back the best pool from the previous iteration.
-        p1_warm = p1.card_pool if iteration > 1 else p1_starting_deck
-        run_phase1_deckbuilder(
-            p1,
-            hero_id=args.hero_id,
-            hero_class=args.hero_class,
-            equipment_header=args.equipment_header,
-            game_format=args.format,
-            opponent_deck_name=args.opponent_deck,
-            opponent_hero_id=args.opponent_hero_id,
-            n_episodes=args.deckbuild_episodes,
-            max_build_steps=args.max_build_steps,
-            num_eval_games=args.num_eval_games,
-            num_sideboard_episodes=args.num_sideboard_episodes,
-            assets_path=assets_path,
-            base_url=args.talishar_url,
-            render=args.render,
-            starting_deck=p1_warm,
-            play_reward=p1.last_play_win_rate,
-        )
-
-        if args.opponent_mode == "dual" and p2 is not None:
-            p2_warm = p2.card_pool if iteration > 1 else p2_starting_deck
+        if p1_fixed_deck:
+            # Fixed deck supplied — deckbuilding is always skipped for p1.
+            p1.card_pool = dict(p1_fixed_deck)
+            print(f"\n  [p1] Phase 1 skipped — using fixed deck ({sum(p1_fixed_deck.values())} cards)")
+        else:
+            # On iteration 1 use the FaBrary warm-start; on later iterations feed
+            # back the best pool from the previous iteration.
+            p1_warm = p1.card_pool if iteration > 1 else p1_starting_deck
             run_phase1_deckbuilder(
-                p2,
-                hero_id=args.p2_hero_id,
-                hero_class=args.p2_hero_class,
-                equipment_header=args.p2_equipment_header,
+                p1,
+                hero_id=args.hero_id,
+                hero_class=args.hero_class,
+                equipment_header=args.equipment_header,
                 game_format=args.format,
                 opponent_deck_name=args.opponent_deck,
-                opponent_hero_id=args.hero_id,
+                opponent_hero_id=args.opponent_hero_id,
                 n_episodes=args.deckbuild_episodes,
                 max_build_steps=args.max_build_steps,
                 num_eval_games=args.num_eval_games,
@@ -1870,33 +1958,54 @@ def main() -> None:
                 assets_path=assets_path,
                 base_url=args.talishar_url,
                 render=args.render,
-                starting_deck=p2_warm,
-                play_reward=p2.last_play_win_rate,
+                cpp_engine_dir=args.cpp_engine_dir,
+                starting_deck=p1_warm,
+                play_reward=p1.last_play_win_rate,
             )
 
-        # ── Phase 2: Sideboard ────────────────────────────────────────────────
-        run_phase2_sideboard(
-            p1,
-            p1_opponents,
-            hero_id=args.hero_id,
-            equipment_header=args.equipment_header,
-            game_format=args.format,
-            opponent_deck_name=args.opponent_deck,
-            n_episodes_per_opponent=args.sideboard_episodes,
-            max_sideboard_steps=args.max_sideboard_steps,
-            num_eval_games=args.num_eval_games,
-            assets_path=assets_path,
-            base_url=args.talishar_url,
-            render=args.render,
-            play_reward=p1.last_play_win_rate,
-        )
-
         if args.opponent_mode == "dual" and p2 is not None:
+            if p2_fixed_deck:
+                p2.card_pool = dict(p2_fixed_deck)
+                print(f"\n  [p2] Phase 1 skipped — using fixed deck ({sum(p2_fixed_deck.values())} cards)")
+            else:
+                p2_warm = p2.card_pool if iteration > 1 else p2_starting_deck
+                run_phase1_deckbuilder(
+                    p2,
+                    hero_id=args.p2_hero_id,
+                    hero_class=args.p2_hero_class,
+                    equipment_header=args.p2_equipment_header,
+                    game_format=args.format,
+                    opponent_deck_name=args.opponent_deck,
+                    opponent_hero_id=args.hero_id,
+                    n_episodes=args.deckbuild_episodes,
+                    max_build_steps=args.max_build_steps,
+                    num_eval_games=args.num_eval_games,
+                    num_sideboard_episodes=args.num_sideboard_episodes,
+                    assets_path=assets_path,
+                    base_url=args.talishar_url,
+                    render=args.render,
+                    cpp_engine_dir=args.cpp_engine_dir,
+                    starting_deck=p2_warm,
+                    play_reward=p2.last_play_win_rate,
+                )
+
+        # ── Phase 2: Sideboard ────────────────────────────────────────────────
+        if p1_fixed_deck and sum(p1_fixed_deck.values()) >= _min_size:
+            # Fixed deck already meets minimum play size — cut it directly and
+            # skip the sideboard RL phase for p1.
+            _p1_game_deck = _greedy_game_deck_cut(p1_fixed_deck, _min_size)
+            p1.active_decks[_p1_opp_key] = _p1_game_deck
+            print(
+                f"\n  [p1] Phase 2 skipped — fixed deck is game-ready "
+                f"({sum(p1_fixed_deck.values())} ≥ {_min_size}, "
+                f"game deck: {sum(_p1_game_deck.values())} cards)"
+            )
+        else:
             run_phase2_sideboard(
-                p2,
-                p2_opponents,
-                hero_id=args.p2_hero_id,
-                equipment_header=args.p2_equipment_header,
+                p1,
+                p1_opponents,
+                hero_id=args.hero_id,
+                equipment_header=args.equipment_header,
                 game_format=args.format,
                 opponent_deck_name=args.opponent_deck,
                 n_episodes_per_opponent=args.sideboard_episodes,
@@ -1905,8 +2014,36 @@ def main() -> None:
                 assets_path=assets_path,
                 base_url=args.talishar_url,
                 render=args.render,
-                play_reward=p2.last_play_win_rate,
+                cpp_engine_dir=args.cpp_engine_dir,
+                play_reward=p1.last_play_win_rate,
             )
+
+        if args.opponent_mode == "dual" and p2 is not None:
+            if p2_fixed_deck and sum(p2_fixed_deck.values()) >= _min_size:
+                _p2_game_deck = _greedy_game_deck_cut(p2_fixed_deck, _min_size)
+                p2.active_decks[args.hero_id] = _p2_game_deck
+                print(
+                    f"\n  [p2] Phase 2 skipped — fixed deck is game-ready "
+                    f"({sum(p2_fixed_deck.values())} ≥ {_min_size}, "
+                    f"game deck: {sum(_p2_game_deck.values())} cards)"
+                )
+            else:
+                run_phase2_sideboard(
+                    p2,
+                    p2_opponents,
+                    hero_id=args.p2_hero_id,
+                    equipment_header=args.p2_equipment_header,
+                    game_format=args.format,
+                    opponent_deck_name=args.opponent_deck,
+                    n_episodes_per_opponent=args.sideboard_episodes,
+                    max_sideboard_steps=args.max_sideboard_steps,
+                    num_eval_games=args.num_eval_games,
+                    assets_path=assets_path,
+                    base_url=args.talishar_url,
+                    render=args.render,
+                    cpp_engine_dir=args.cpp_engine_dir,
+                    play_reward=p2.last_play_win_rate,
+                )
 
         # ── Save after each iteration ─────────────────────────────────────────
         _save_all_agents(p1, out_dir)

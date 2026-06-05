@@ -245,6 +245,7 @@ class TalisharDeckBuilderEnvironment(rlbridgeEnvironment):
         max_build_steps: int = 200,
         step_penalty: float = 0.005,
         render_mode: Optional[str] = None,
+        cpp_engine_dir: Optional[str] = None,
     ) -> None:
         self._hero_id = hero_id
         self._hero_class = hero_class
@@ -260,6 +261,7 @@ class TalisharDeckBuilderEnvironment(rlbridgeEnvironment):
         self._step_penalty = step_penalty
         self._max_build_steps = max_build_steps
         self._render_mode = render_mode
+        self._cpp_engine_dir: Optional[str] = cpp_engine_dir
 
         # Assets directory: used for reading the hero deck header and writing
         # temporary evaluation deck files.
@@ -570,22 +572,44 @@ class TalisharDeckBuilderEnvironment(rlbridgeEnvironment):
            episodes to find the best game deck selection from the built pool.
            The sideboard agent (``self._sideboard_agent``) is used when available;
            otherwise actions are sampled randomly.
-        2. Play ``num_eval_games`` Talishar games with the best-selected deck and
-           return the win rate.
-
-        This means the deckbuilder reward directly reflects how well the pool
-        performs *after optimal sideboard selection*, not just a greedy cut.
+        2. Play ``num_eval_games`` games with the best-selected deck and return
+           the win rate.  When ``cpp_engine_dir`` is set the C++ engine is used
+           (fast, no HTTP); otherwise Talishar HTTP is used.
 
         Returns the win rate in ``[0.0, 1.0]``.  Returns ``0.5`` (neutral) if
-        ``num_eval_games == 0``, the Talishar server is unreachable, or
-        evaluation otherwise fails.
+        ``num_eval_games == 0``, the server is unreachable, or evaluation fails.
         """
-        # When num_eval_games == 0 the caller (e.g. pipeline iteration 1) has
-        # chosen to skip internal evaluation — play win rate is the real signal.
-        # Return 0.5 so the mapped reward is 0.0 (neutral) for any valid pool.
+        # When num_eval_games == 0 skip internal eval — return neutral.
         if self._num_eval_games == 0:
             return 0.5
 
+        # ── C++ fast-path (no HTTP, no deck file) ──────────────────────────
+        if self._cpp_engine_dir is not None:
+            from .cpp_engine_environment import CppEngineEnvironment  # noqa: PLC0415
+            wins = 0
+            try:
+                for _ in range(self._num_eval_games):
+                    cpp_env = CppEngineEnvironment(
+                        engine_dir=self._cpp_engine_dir, max_turns=200
+                    )
+                    try:
+                        cpp_env.reset()
+                        done = False
+                        final_reward = 0.0
+                        while not done:
+                            sr = cpp_env.step(cpp_env.sample_action())
+                            done = sr.terminated or sr.truncated
+                            if done:
+                                final_reward = sr.reward
+                        if final_reward > 0.0:
+                            wins += 1
+                    finally:
+                        cpp_env.close()
+            except Exception:  # noqa: BLE001
+                return 0.5
+            return wins / self._num_eval_games
+
+        # ── Talishar HTTP path ──────────────────────────────────────────────
         game_deck = self._run_sideboard_phase()
 
         deck_name = f"rl_deck_{uuid.uuid4().hex[:12]}"

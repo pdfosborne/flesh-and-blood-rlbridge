@@ -81,7 +81,7 @@ from .talishar_engine_environment import (
 from .talishar_oracle import TalisharConnectionError
 
 # ---------------------------------------------------------------------------
-# Per-format minimum deck size (mirrored from deckbuilder for convenience)
+# Per-format deck size limits (mirrored from deckbuilder for convenience)
 # ---------------------------------------------------------------------------
 
 _FORMAT_MIN_DECK: dict[str, int] = {
@@ -91,6 +91,67 @@ _FORMAT_MIN_DECK: dict[str, int] = {
     "silver_age": 40,
     "upf": 60,
 }
+
+# Maximum game-deck size (non-token cards only).
+# For Silver Age the game deck is exactly 40 cards (pool=55, sideboard=15).
+# For formats with no stated maximum use the pool_size as the ceiling.
+_FORMAT_MAX_DECK: dict[str, int] = {
+    "blitz": 40,                 # pool == min, no sideboard
+    "classic_constructed": 80,   # pool_size; no formal maximum
+    "living_legend": 80,
+    "silver_age": 40,            # exactly 40 — remaining 15 stay in inventory
+    "upf": 80,
+}
+
+# ---------------------------------------------------------------------------
+# Equipment slot detection from FaB type lines
+# ---------------------------------------------------------------------------
+# FaB type lines encode slot explicitly, e.g.:
+#   "Generic Equipment - Chest"
+#   "Ninja Equipment - Arms"
+#   "Mechanologist Equipment - Evo Head"   (suffix still ends with "Head")
+#   "Lightning Runeblade Weapon - Sword (2H)"
+#   "Ninja Hero - Young"
+#
+# The card DB has two ID formats:
+#   underscore  (e.g. "blade_beckoner_helm") — used in equipment headers,
+#               but type_line is often empty in the DB entry
+#   hyphen      (e.g. "blade-beckoner-helm") — alternate entry that carries
+#               the authoritative type_line
+#
+# Strategy: look up underscore ID first; if type_line is empty, retry with
+# the hyphen form.  Fall back to ID-pattern heuristics only when both miss.
+# ---------------------------------------------------------------------------
+
+# Maps the suffix after " - " in an Equipment type_line to a canonical slot.
+# All Mechanologist variants ("Base Head", "Evo Head" …) end with the same
+# canonical token, so endswith() covers every variant automatically.
+_SLOT_SUFFIX_MAP: tuple[tuple[str, str], ...] = (
+    ("Head",     "head"),
+    ("Chest",    "chest"),
+    ("Arms",     "arms"),
+    ("Legs",     "legs"),
+    ("Off-Hand", "off_hand"),
+    ("Quiver",   "off_hand"),   # Ranger quiver — valid off-hand
+)
+
+# ID-pattern fallbacks used only when the DB has no usable type_line.
+_EQUIP_HEAD_PAT:   frozenset[str] = frozenset(["helm", "hood", "crown", "cap",
+                                                "headband", "goggles", "mask", "hat",
+                                                "visor", "tiara", "circlet"])
+_EQUIP_CHEST_PAT:  frozenset[str] = frozenset(["coat", "robe", "vest", "chestplate",
+                                                "chest", "jacket", "tunic", "cuirass",
+                                                "cloak", "cape", "mantle", "doublet"])
+_EQUIP_ARMS_PAT:   frozenset[str] = frozenset(["gauntlet", "glove", "bracer",
+                                                "vambrace", "bangle", "shuko",
+                                                "sleeve", "handwrap"])
+_EQUIP_LEGS_PAT:   frozenset[str] = frozenset(["boots", "greaves", "pants", "leggings",
+                                                "sabaton", "sabatons", "footwrap",
+                                                "shin", "paws"])
+_EQUIP_WEAPON_PAT: frozenset[str] = frozenset(["kodachi", "dawnblade", "rosetta",
+                                                "galaxia", "pistol", "sword", "axe",
+                                                "staff", "bow", "harpoon", "blade",
+                                                "katana", "scimitar", "bauble"])
 
 _DEFAULT_FORMAT = "silver_age"
 
@@ -196,6 +257,7 @@ class TalisharSideboardEnvironment(rlbridgeEnvironment):
         max_sideboard_steps: int = 100,
         step_penalty: float = 0.002,
         render_mode: Optional[str] = None,
+        cpp_engine_dir: Optional[str] = None,
     ) -> None:
         # Pool (fixed across the episode)
         self._card_pool: dict[str, int] = dict(card_pool)
@@ -207,6 +269,10 @@ class TalisharSideboardEnvironment(rlbridgeEnvironment):
         self._equipment_header = hero_equipment_header
         self._game_format = game_format
         self._min_deck_size: int = _FORMAT_MIN_DECK.get(game_format, 40)
+        # Upper bound: can't exceed pool size; Silver Age = exactly 40.
+        self._max_deck_size: int = _FORMAT_MAX_DECK.get(
+            game_format, self._pool_total
+        )
         self._num_eval_games = num_eval_games
         self._opponent_deck_name = opponent_deck_name
         self._eval_p1_agent = eval_p1_agent
@@ -215,6 +281,7 @@ class TalisharSideboardEnvironment(rlbridgeEnvironment):
         self._step_penalty = step_penalty
         self._max_sideboard_steps = max_sideboard_steps
         self._render_mode = render_mode
+        self._cpp_engine_dir: Optional[str] = cpp_engine_dir
         self._assets_path = self._resolve_assets_path(talishar_assets_path)
 
         # Episode state (set in reset())
@@ -222,6 +289,8 @@ class TalisharSideboardEnvironment(rlbridgeEnvironment):
         self._sideboard: dict[str, int] = {}
         self._step_no: int = 0
         self._done: bool = False
+
+        self._validate_equipment_header()
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
@@ -239,27 +308,169 @@ class TalisharSideboardEnvironment(rlbridgeEnvironment):
             return str(default)
         return "/tmp"  # noqa: S108
 
+    def _is_token_card(self, card_id: str) -> bool:
+        """Return True if *card_id* is a token card that must not count toward deck size.
+
+        Tokens are never legal in a game deck — they are generated during play.
+        We detect them via two paths (either is sufficient):
+
+        1. The ``pool_by_id`` metadata contains ``"token"`` in ``card_types``.
+        2. The card ID follows the conventional ``*_token`` or ``*_token_*`` pattern.
+        """
+        meta = self._pool_by_id.get(card_id, {})
+        if "token" in meta.get("card_types", []):
+            return True
+        return card_id.endswith("_token") or "_token_" in card_id
+
+    def _validate_equipment_header(self) -> None:
+        """Warn if *hero_equipment_header* does not look like a complete loadout.
+
+        A complete FaB loadout requires:
+        * 1 hero / character card
+        * At least 1 weapon (1×2H weapon, or up to 2×1H weapons)
+        * 1 each of: head, chest, arms, legs equipment pieces
+
+        Detection uses the card's ``type_line`` from the card DB (authoritative),
+        e.g. ``"Generic Equipment - Chest"`` or ``"Lightning Runeblade Weapon - Sword (2H)"``.
+        The DB stores two ID formats: underscore (used in equipment headers, but
+        ``type_line`` is often empty) and hyphen (carries the authoritative
+        ``type_line``).  Both are tried before falling back to ID-pattern heuristics.
+
+        Issues a WARNING rather than raising, so it never blocks training.
+        """
+        items = self._equipment_header.split()
+        if not items:
+            print(
+                f"  WARNING [{self._hero_id}] equipment_header is empty — "
+                "hero + full equipment set required"
+            )
+            return
+
+        # Load full card DB (equipment/weapon/hero cards are excluded from pool_by_id)
+        db_path = Path(__file__).parent / "card_db" / "cards.json"
+        full_db: dict[str, dict[str, Any]] = {}
+        try:
+            full_db = {
+                c["id"]: c
+                for c in json.loads(db_path.read_text(encoding="utf-8"))
+                if "id" in c
+            }
+        except Exception:  # noqa: BLE001
+            pass  # validation falls through to ID-pattern heuristics
+
+        def _get_type_line(card_id: str) -> str:
+            """Return type_line, trying underscore ID then hyphenated ID."""
+            tl = full_db.get(card_id, {}).get("type_line", "")
+            if not tl:
+                tl = full_db.get(card_id.replace("_", "-"), {}).get("type_line", "")
+            return tl.strip()
+
+        slots_found: set[str] = set()
+        weapon_hands: list[int] = []  # one entry (1 or 2) per weapon found
+
+        for item in items:
+            cid = item.lower()
+            tl = _get_type_line(cid)
+            tl_lower = tl.lower()
+
+            if tl:
+                # ── Authoritative: parse the type_line from the DB ──────────
+                if "weapon" in tl_lower:
+                    # Weapon - <Type> (1H) / (2H) — token weapons have no hand spec
+                    if "(2h)" in tl_lower:
+                        weapon_hands.append(2)
+                    elif "(1h)" in tl_lower:
+                        weapon_hands.append(1)
+                    # else: token weapon (e.g. "Assassin Token Weapon - Dagger") — skip
+                elif "equipment" in tl_lower:
+                    # Slot lives after " - " in the type_line; all variants
+                    # ("Base Head", "Evo Head", …) end with the canonical name.
+                    suffix = tl.split(" - ")[-1] if " - " in tl else ""
+                    for sfx_key, slot_name in _SLOT_SUFFIX_MAP:
+                        if suffix.endswith(sfx_key):
+                            slots_found.add(slot_name)
+                            break
+                    # else: unrecognised suffix (e.g. bare "Mechanologist Equipment")
+                elif "hero" in tl_lower or "character" in tl_lower:
+                    slots_found.add("hero")
+            else:
+                # ── Fallback: ID-pattern heuristics ────────────────────────
+                if any(p in cid for p in _EQUIP_HEAD_PAT):
+                    slots_found.add("head")
+                elif any(p in cid for p in _EQUIP_CHEST_PAT):
+                    slots_found.add("chest")
+                elif any(p in cid for p in _EQUIP_ARMS_PAT):
+                    slots_found.add("arms")
+                elif any(p in cid for p in _EQUIP_LEGS_PAT):
+                    slots_found.add("legs")
+                elif any(p in cid for p in _EQUIP_WEAPON_PAT):
+                    weapon_hands.append(1)  # assume 1H when type_line unavailable
+                elif self._hero_id and self._hero_id.split("_")[0] in cid:
+                    slots_found.add("hero")
+
+        # ── Report problems ────────────────────────────────────────────────
+        required = {"head", "chest", "arms", "legs"}
+        missing = required - slots_found
+        if missing:
+            print(
+                f"  WARNING [{self._hero_id}] equipment header may be missing "
+                f"slot(s): {', '.join(sorted(missing))}  "
+                f"(header='{self._equipment_header}')"
+            )
+        if not weapon_hands:
+            print(
+                f"  WARNING [{self._hero_id}] equipment header has no weapon  "
+                f"(header='{self._equipment_header}')"
+            )
+        else:
+            n2h = weapon_hands.count(2)
+            n1h = weapon_hands.count(1)
+            if n2h > 1:
+                print(
+                    f"  WARNING [{self._hero_id}] equipment has {n2h} two-handed "
+                    "weapons (max 1)"
+                )
+            elif n2h == 1 and n1h > 0:
+                print(
+                    f"  WARNING [{self._hero_id}] equipment mixes a 2H weapon "
+                    f"with {n1h} 1H weapon(s)"
+                )
+            elif n2h == 0 and n1h > 2:
+                print(
+                    f"  WARNING [{self._hero_id}] equipment has {n1h} one-handed "
+                    "weapons (max 2 for dual-wield)"
+                )
+
     @property
     def _deck_size(self) -> int:
-        return sum(self._deck.values())
+        """Non-token cards currently in the game deck."""
+        return sum(
+            count for cid, count in self._deck.items()
+            if not self._is_token_card(cid)
+        )
 
     @property
     def _sideboard_size(self) -> int:
-        return sum(self._sideboard.values())
+        """Non-token cards currently in the sideboard."""
+        return sum(
+            count for cid, count in self._sideboard.items()
+            if not self._is_token_card(cid)
+        )
 
     @property
     def _is_valid(self) -> bool:
-        return self._deck_size >= self._min_deck_size
+        return self._min_deck_size <= self._deck_size <= self._max_deck_size
 
     def _available_actions(self) -> list[str]:
         actions: list[str] = []
-        # Move from sideboard into deck
-        for card_id, count in self._sideboard.items():
-            if count > 0:
-                actions.append(f"move_to_deck:{card_id}")
-        # Move from deck into sideboard
+        # Move from sideboard into deck — only when below max AND card is not a token
+        if self._deck_size < self._max_deck_size:
+            for card_id, count in self._sideboard.items():
+                if count > 0 and not self._is_token_card(card_id):
+                    actions.append(f"move_to_deck:{card_id}")
+        # Move from deck into sideboard — only non-token cards (tokens can't be in deck)
         for card_id, count in self._deck.items():
-            if count > 0:
+            if count > 0 and not self._is_token_card(card_id):
                 actions.append(f"move_to_sideboard:{card_id}")
         actions.append("finalize")
         return actions
@@ -285,6 +496,7 @@ class TalisharSideboardEnvironment(rlbridgeEnvironment):
             "deckSize": self._deck_size,
             "sideboardSize": self._sideboard_size,
             "minDeckSize": self._min_deck_size,
+            "maxDeckSize": self._max_deck_size,
             "isValid": self._is_valid,
             "stepNo": self._step_no,
             "availableActions": available_actions,
@@ -350,6 +562,7 @@ class TalisharSideboardEnvironment(rlbridgeEnvironment):
                 "format": self._game_format,
                 "pool_total": self._pool_total,
                 "min_deck_size": self._min_deck_size,
+                "max_deck_size": self._max_deck_size,
             },
         )
 
@@ -422,7 +635,7 @@ class TalisharSideboardEnvironment(rlbridgeEnvironment):
         lines = [
             f"=== Sideboard [{self._hero_id} vs {self._opponent_hero_id} / {self._game_format}] ===",
             f"Step {self._step_no} | "
-            f"Deck: {self._deck_size} / {self._min_deck_size}+ required | "
+            f"Deck: {self._deck_size} / {self._min_deck_size}–{self._max_deck_size} required | "
             f"Sideboard: {self._sideboard_size} | "
             f"Valid: {self._is_valid}",
         ]
@@ -461,6 +674,8 @@ class TalisharSideboardEnvironment(rlbridgeEnvironment):
     def _write_deck_file(self, deck_name: str) -> Path:
         card_ids: list[str] = []
         for card_id, count in sorted(self._deck.items()):
+            if self._is_token_card(card_id):
+                continue  # tokens never belong in a Talishar deck file
             card_ids.extend([card_id] * count)
 
         content = f"{self._equipment_header}\n{' '.join(card_ids)}\n"
@@ -474,7 +689,37 @@ class TalisharSideboardEnvironment(rlbridgeEnvironment):
 
         Returns the win rate in ``[0.0, 1.0]``.  Returns ``0.5`` (neutral) on
         connection or evaluation failure.
+
+        When ``cpp_engine_dir`` is set the C++ engine is used (fast, no HTTP);
+        otherwise Talishar HTTP is used.
         """
+        # ── C++ fast-path ──────────────────────────────────────────────────
+        if self._cpp_engine_dir is not None:
+            from .cpp_engine_environment import CppEngineEnvironment  # noqa: PLC0415
+            wins = 0
+            try:
+                for _ in range(self._num_eval_games):
+                    cpp_env = CppEngineEnvironment(
+                        engine_dir=self._cpp_engine_dir, max_turns=200
+                    )
+                    try:
+                        cpp_env.reset()
+                        done = False
+                        final_reward = 0.0
+                        while not done:
+                            sr = cpp_env.step(cpp_env.sample_action())
+                            done = sr.terminated or sr.truncated
+                            if done:
+                                final_reward = sr.reward
+                        if final_reward > 0.0:
+                            wins += 1
+                    finally:
+                        cpp_env.close()
+            except Exception:  # noqa: BLE001
+                return 0.5
+            return wins / self._num_eval_games
+
+        # ── Talishar HTTP path ──────────────────────────────────────────────
         deck_name = f"rl_sb_{uuid.uuid4().hex[:12]}"
         deck_file: Optional[Path] = None
         wins = 0

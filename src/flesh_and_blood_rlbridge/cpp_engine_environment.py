@@ -437,9 +437,29 @@ def get_engine_dir(
     deck2: str,
     cache_dir: str | Path | None = None,
 ) -> Path:
-    """Return the canonical cache directory for a deck matchup."""
+    """Return the canonical cache directory for a deck matchup.
+
+    Prefers an exact ``{deck1}_vs_{deck2}`` directory.  If that directory
+    has no compiled module, falls back to the most-recently-modified
+    hashed variant ``{deck1}_vs_{deck2}-<hash>`` (produced by
+    build_cpp_engine_for_matchup.ps1 when content-hashing is enabled).
+    """
     base = Path(cache_dir) if cache_dir else _DEFAULT_CACHE_DIR
-    return base / _matchup_key(deck1, deck2)
+    key  = _matchup_key(deck1, deck2)
+    exact = base / key
+    if is_cpp_engine_available(exact):
+        return exact
+    # Search for hashed variants: aurora_vs_briar-<16hex>
+    candidates = sorted(
+        base.glob(f"{key}-*"),
+        key=lambda p: p.stat().st_mtime if p.exists() else 0,
+        reverse=True,
+    )
+    for candidate in candidates:
+        if candidate.is_dir() and is_cpp_engine_available(candidate):
+            return candidate
+    # Return exact dir as default even if empty (lets callers report the error)
+    return exact
 
 
 def get_or_none(

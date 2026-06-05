@@ -146,8 +146,6 @@ if ($Deck1 -eq "" -or $Deck2 -eq "") {
     exit 1
 }
 
-$MatchupKey = "${Deck1}_vs_${Deck2}"
-$EngineDir  = Join-Path (Join-Path $RepoRoot $CacheDir) $MatchupKey
 
 # ---------------------------------------------------------------------------
 # Compute a content hash of the deck inputs so we can skip rebuilds when
@@ -167,6 +165,10 @@ function Get-DeckInputHash {
 }
 
 $InputHash     = Get-DeckInputHash -d1 $Deck1 -d2 $Deck2 -j1 $Deck1Json -j2 $Deck2Json
+
+$MatchupKey = "${Deck1}_vs_${Deck2}-${InputHash}"
+$EngineDir  = Join-Path (Join-Path $RepoRoot $CacheDir) $MatchupKey
+
 $HashFile      = Join-Path $EngineDir "engine_input_hash.txt"
 
 # Check whether a cached engine already covers exactly these inputs

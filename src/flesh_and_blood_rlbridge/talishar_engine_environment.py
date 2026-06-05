@@ -191,6 +191,9 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         # compiled engine was built for the original hero/deck IDs.
         cpp_engine_deck1: Optional[str] = None,
         cpp_engine_deck2: Optional[str] = None,
+        # Explicit engine directory — bypasses the key/cache lookup entirely.
+        # Takes priority over cpp_engine_deck1/2 and cpp_engine_cache_dir.
+        cpp_engine_dir: Optional[str] = None,
     ) -> None:
         self._base_url = (
             base_url or os.environ.get("TALISHAR_URL", "http://localhost")
@@ -270,12 +273,29 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             # original hero IDs).
             lookup_deck1 = cpp_engine_deck1 or local_deck_name
             lookup_deck2 = cpp_engine_deck2 or deck2
-            self._cpp_env = _cpp_get_or_none(  # type: ignore[misc]
-                lookup_deck1,
-                lookup_deck2,
-                cache_dir=cpp_engine_cache_dir,
-                max_turns=max_turns,
-            )
+            if cpp_engine_dir is not None:
+                # Explicit dir takes priority — load directly, skip key lookup.
+                from .cpp_engine_environment import (  # noqa: PLC0415
+                    CppEngineEnvironment as _CppEnv,
+                    is_cpp_engine_available as _is_avail,
+                )
+                if _is_avail(cpp_engine_dir):
+                    try:
+                        self._cpp_env = _CppEnv(
+                            engine_dir=cpp_engine_dir,
+                            max_turns=max_turns,
+                            deck1=lookup_deck1,
+                            deck2=lookup_deck2,
+                        )
+                    except Exception:
+                        self._cpp_env = None
+            else:
+                self._cpp_env = _cpp_get_or_none(  # type: ignore[misc]
+                    lookup_deck1,
+                    lookup_deck2,
+                    cache_dir=cpp_engine_cache_dir,
+                    max_turns=max_turns,
+                )
             if self._cpp_env is not None:
                 import warnings
                 warnings.warn(
