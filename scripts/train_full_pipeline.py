@@ -20,23 +20,48 @@ Phase 3 — Play agent
       ``dual``    — a full second pipeline (deckbuilder + sideboard + play)
                     trains in parallel for both players simultaneously
 
-Usage
------
-    # Quickstart: Silver Age, Ira vs preset Dorinthea opponent
-    python scripts/train_full_pipeline.py
+                try:
+                    # Navigate and give the FE time to hydrate and fetch game state
+                    page.goto(game_url, timeout=20_000, wait_until="domcontentloaded")
+                    # Extra delay mirrors _open_playwright_page in the engine so
+                    # the FE can complete client-side routing + API calls.
+                    page.wait_for_timeout(5000)
 
-    # Mirror match (Ira vs copy of own built deck)
-    python scripts/train_full_pipeline.py --opponent-mode mirror
+                    # Try multiple consent button labels in case a different
+                    # widget is used (match common variants).
+                    for lbl in ("Agree", "Accept", "Accept All Cookies", "Accept All", "OK", "Got it"):
+                        try:
+                            btn = page.locator("button", has_text=lbl).first
+                            if btn.is_visible(timeout=500):
+                                btn.click()
+                                page.wait_for_timeout(1500)
+                                break
+                        except Exception:
+                            pass
 
-    # Dual / co-evolution: both players train all three phases simultaneously
-    python scripts/train_full_pipeline.py --opponent-mode dual \\
-        --p2-hero-id dorinthea_ironsong --p2-hero-class Warrior
+                    # Wait for the game board to mount (not the home page)
+                    board_sel = "#root .game, #root [class*='board'], #root [class*='Board'], #root [class*='play'], #root [class*='Play']"
+                    page.wait_for_selector(board_sel, timeout=15_000)
+                    # Wait for at least one IMG inside the board so equipment art
+                    # / card images have started loading. If no <img> appears, the
+                    # selector times out and we fall back to the normal screenshot.
+                    try:
+                        page.wait_for_selector(f"{board_sel} img", timeout=8_000)
+                        # little extra time to let the image render fully
+                        page.wait_for_timeout(400)
+                    except Exception:
+                        pass
+                except Exception as exc:
+                    print(f"  [{player_label}] WARNING: FE page load error ({exc}) — continuing with fallback screenshots")
 
-    # Classic Constructed
-    python scripts/train_full_pipeline.py --format classic_constructed \\
-        --hero-class Ninja --hero-id ira_crimson_haze \\
-        --opponent-mode dual --p2-hero-id dorinthea_ironsong --p2-hero-class Warrior
-
+                # Screenshot after reset (give a moment for images to load)
+                frame_path = render_dir / "frame_0000_reset.png"
+                try:
+                    page.wait_for_timeout(500)
+                    page.screenshot(path=str(frame_path), full_page=False)
+                    frame_paths.append(frame_path)
+                except Exception:
+                    pass
     # Resume from saved agents
     python scripts/train_full_pipeline.py \\
         --p1-deckbuilder results/full_pipeline/p1_deckbuilder.pkl \\
@@ -192,6 +217,8 @@ class PhaseAgents:
     deckbuilder: Optional[Any] = None
     sideboard: Optional[Any] = None
     play: Optional[Any] = None
+    # Equipment header string written into the deck file (e.g. "ira_crimson_haze harmonized_kodachi ...")
+    equipment_header: str = ""
     # Outputs from completed phases
     card_pool: dict[str, int] = field(default_factory=dict)
     pool_by_id: dict[str, Any] = field(default_factory=dict)
@@ -503,6 +530,108 @@ def _write_deck_file(
     deck_name: str,
     assets_path: str,
 ) -> Path:
+    # ── Equipment fallback extraction ─────────────────────────────────────────
+    # When the header only contains a hero ID (no equipment pieces), scan the
+    # deck list for equipment-type cards and promote them to the header line.
+    #
+    # This handles decks fetched via FaBrary's GraphQL endpoint which returns
+    # all registered cards (including equipment) in deckCards with no zone
+    # information, so fetch_fabrary_deck.py ends up storing everything in
+    # `deck` and leaving equipment_header as just the hero ID.
+    #
+    # Heuristic rules (safe because FaB play-cards always carry a colour
+    # suffix: _red / _blue / _yellow / _purple):
+    #   1. Any card with a colour suffix  →  always a play card.
+    #   2. Cards matching equipment slot patterns without a colour suffix
+    #      →  equipment; lifted out of the deck into the header.
+    _EQUIP_SLOT_PATS: dict[str, list[str]] = {
+        "weapon": [
+            # Use specific multi-character fragments only — "blade" alone is too
+            # broad and matches equipment names like "blade_beckoner_gauntlets".
+            "kodachi", "dawnblade", "rosetta", "galaxia", "pistol",
+            "sword", "axe", "staff", "bow", "harpoon",
+            "scimitar", "cracked_bauble", "bauble", "quiver", "death_dealer",
+        ],
+        "head": [
+            "helm", "hood", "crown", "cap", "headband", "goggles",
+            "mask", "hat", "brow", "visor", "tiara", "circlet",
+        ],
+        "chest": [
+            "coat", "robe", "vest", "chestplate", "jacket", "shirt",
+            "tunic", "cuirass", "cloak", "cape", "mantle", "doublet",
+        ],
+        "arms": [
+            "gauntlet", "glove", "bracer", "vambrace", "wrist",
+            "bangle", "shuko", "sleeve", "handwrap", "sedative",
+        ],
+        "legs": [
+            "boots", "greaves", "pants", "leggings", "leg", "sabaton",
+            "footwrap", "shin", "paws",
+        ],
+    }
+    # Known equipment cards whose names give no keyword clue.
+    # Checked before pattern matching so they are never mis-placed in the
+    # play deck (e.g. "garland_of_spring" = Runeblade chest,
+    # "star_fall" = Runeblade sword 1H).
+    _KNOWN_EQUIP: dict[str, str] = {
+        # Runeblade
+        "star_fall":                   "weapon",
+        "nebula_blade":                "weapon",
+        "talishar_the_lost_prince":    "weapon",
+        "aether_ironweave":            "chest",
+        "garland_of_spring":           "chest",
+        "ironhide_plate":              "chest",
+        "spellbound_creepers":         "legs",
+        "aether_crackers":             "arms",
+        "nullrune_gloves":             "arms",
+        # Blade Beckoner equipment — "blade" pattern in weapon list would
+        # match these incorrectly if it were included.
+        "blade_beckoner_gauntlets":    "arms",
+        "blade_beckoner_helm":         "head",
+        "blade_beckoner_boots":        "legs",
+        # Ranger / Riptide
+        "quiver_of_a_thousand_arrows": "weapon",
+        # Generic
+        "nullrune_robe":               "chest",
+        "nullrune_hood":               "head",
+    }
+    _COLOUR_SUFFIXES = ("_red", "_blue", "_yellow", "_purple")
+
+    def _equip_slot(cid: str) -> str:
+        known = _KNOWN_EQUIP.get(cid)
+        if known:
+            return known
+        if cid.endswith(_COLOUR_SUFFIXES):
+            return "deck"
+        for slot, pats in _EQUIP_SLOT_PATS.items():
+            for pat in pats:
+                if pat in cid:
+                    return slot
+        return "deck"
+
+    header_parts = (equipment_header or "").split()
+    if len(header_parts) <= 1:
+        # Only a hero ID (or empty) — extract equipment from the deck
+        hero = header_parts[0] if header_parts else ""
+        slot_cards: dict[str, list[str]] = {s: [] for s in _EQUIP_SLOT_PATS}
+        play_deck: dict[str, int] = {}
+        for card_id, count in deck.items():
+            s = _equip_slot(card_id)
+            if s in slot_cards:
+                slot_cards[s].extend([card_id] * count)
+            else:
+                play_deck[card_id] = count
+        found: list[str] = []
+        for slot in ("weapon", "head", "chest", "arms", "legs"):
+            found.extend(slot_cards[slot])
+        if found:
+            equipment_header = (hero + " " + " ".join(found)).strip()
+            deck = play_deck
+            print(
+                f"  [deck] Extracted {len(found)} equipment card(s) from deck "
+                f"into header: {found}"
+            )
+
     card_ids: list[str] = []
     for card_id, count in sorted(deck.items()):
         card_ids.extend([card_id] * count)
@@ -1088,132 +1217,77 @@ def _render_game_with_talishar_frontend(
     render_dir: Path,
     player_label: str,
 ) -> list[Path]:
-    """Play one game via the HTTP Talishar backend, screenshot the live frontend
-    after every step using Playwright, and return the list of saved PNG paths.
+    """Play one game via the HTTP Talishar backend and screenshot the live
+    Talishar frontend after every step.
 
-    Args:
-        agents:          PhaseAgents for the primary player.
-        opponent_agents: PhaseAgents for the opponent (dual mode only).
-        opponent_mode:   "dual" or "preset".
-        base_url:        Talishar backend URL (e.g. ``http://localhost:8080/game``).
-        fe_url:          Talishar-FE base URL (e.g. ``http://localhost:5173``).
-        game_format:     Format string passed to the environment.
-        deck_name:       Local deck name for the primary player.
-        opp_name:        Deck name for the opponent.
-        max_steps:       Max game steps before truncation.
-        render_dir:      Directory to save per-step PNG frames.
-        player_label:    Short label used in log messages (e.g. ``"p1"``).
+    Uses ``render_mode='rgb_array'`` on the environment so that
+    ``TalisharEngineEnvironment`` manages its own Playwright browser thread —
+    the same approach used (and confirmed working) in
+    ``train_eval_render_pipeline.py``.  On ``reset()`` the engine navigates to
+    the frontend with ``domcontentloaded`` + a 5-second settle wait, then
+    queues a screenshot (with a 1.5 s render delay) on every ``env.render()``
+    call, which gives equipment card art time to load.
 
     Returns:
         List of Paths to the saved PNG files (may be empty on failure).
     """
     _ensure_playwright()
-
-    from playwright.sync_api import sync_playwright  # noqa: PLC0415
-
     render_dir.mkdir(parents=True, exist_ok=True)
     frame_paths: list[Path] = []
 
     try:
-        # ── start a fresh HTTP game so we can get the game_name ──────────────
         env = TalisharEngineEnvironment(
             base_url=base_url,
+            frontend_url=fe_url,           # passed directly to env — no manual browser
             game_format=game_format,
             local_deck_name=deck_name,
             opponent_deck_name=opp_name,
             max_turns=max_steps,
             self_play=True,
-            render_mode=None,
-            use_cpp_engine=False,   # must use HTTP backend so FE can connect
+            render_mode="rgb_array",       # engine owns the Playwright worker
+            use_cpp_engine=False,          # HTTP backend required so FE can connect
         )
+        try:
+            result = env.reset()           # _open_playwright_page() runs here
+            obs = result.observation
 
-        with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=True, args=["--no-sandbox"])
-            context = browser.new_context(viewport={"width": 1600, "height": 900})
+            # Frame 0 — board state after reset (equipment is visible here)
+            frame_path = render_dir / "frame_0000_reset.png"
+            if _save_state_image(env, obs, frame_path):
+                frame_paths.append(frame_path)
+                print(f"  [{player_label}] Frame 0 saved (reset)")
 
-            # Pre-set cookie consent so the modal never appears
-            context.add_init_script(
-                "localStorage.setItem('cookieConsent', 'declined');"
-                "localStorage.setItem('cookieConsentDate', new Date().toISOString());"
-            )
+            done = False
+            step_no = 0
+            while not done and step_no < max_steps:
+                step_no += 1
 
-            page = context.new_page()
+                obs_data = json.loads(obs) if isinstance(obs, str) else (obs or {})
+                acting = obs_data.get("actingPlayerID", 1)
 
-            try:
-                result = env.reset()
-                obs = result.observation
-                game_name = getattr(env, "_game_name", None) or ""
-                if not game_name:
-                    print(f"  [{player_label}] WARNING: could not read game_name from env — skipping FE screenshots")
-                    env.close()
-                    browser.close()
-                    return frame_paths
+                # Route action to the correct agent
+                active_agents = agents
+                if opponent_mode == "dual" and opponent_agents is not None and acting != 1:
+                    active_agents = opponent_agents
 
-                # The FE router reads 'gameName' (not 'gameID') and 'playerID'.
-                # IndexGuard redirects /?gameName=X&playerID=1 → /game/play?...
-                game_url = f"{fe_url.rstrip('/')}/?gameName={game_name}&playerID=1"
-                print(f"  [{player_label}] Opening FE: {game_url}")
-                try:
-                    page.goto(game_url, timeout=15_000, wait_until="networkidle")
-                    # Wait for the game board to mount (not the home page)
-                    page.wait_for_selector(
-                        "#root .game, #root [class*='board'], #root [class*='Board'], #root [class*='play'], #root [class*='Play']",
-                        timeout=10_000,
-                    )
-                except Exception as exc:
-                    print(f"  [{player_label}] WARNING: FE page load error ({exc}) — continuing with fallback screenshots")
+                if active_agents.play is not None and hasattr(active_agents.play, "act_greedy"):
+                    action = active_agents.play.act_greedy(obs)
+                elif active_agents.play is not None and hasattr(active_agents.play, "act"):
+                    action = active_agents.play.act(obs)
+                else:
+                    action = env.sample_action()
 
-                # Screenshot after reset
-                frame_path = render_dir / "frame_0000_reset.png"
-                try:
-                    page.screenshot(path=str(frame_path), full_page=False)
-                    frame_paths.append(frame_path)
-                except Exception:
-                    pass
+                step = env.step(action)
+                obs = step.observation
+                done = bool(step.terminated) or bool(step.truncated)
 
-                done = False
-                step_no = 0
-                while not done and step_no < max_steps:
-                    step_no += 1
+                fname = f"frame_{step_no:04d}_p{acting}.png"
+                fpath = render_dir / fname
+                if _save_state_image(env, obs, fpath):
+                    frame_paths.append(fpath)
 
-                    obs_data = json.loads(obs) if isinstance(obs, str) else (obs or {})
-                    acting = obs_data.get("actingPlayerID", 1)
-
-                    # Route action to the correct agent
-                    active_agents = agents
-                    if opponent_mode == "dual" and opponent_agents is not None and acting != 1:
-                        active_agents = opponent_agents
-
-                    if active_agents.play is not None and hasattr(active_agents.play, "act_greedy"):
-                        action = active_agents.play.act_greedy(obs)
-                    elif active_agents.play is not None and hasattr(active_agents.play, "act"):
-                        action = active_agents.play.act(obs)
-                    else:
-                        action = env.sample_action()
-
-                    step = env.step(action)
-                    obs = step.observation
-                    done = bool(step.terminated) or bool(step.truncated)
-
-                    # Give the frontend a moment to render the new state
-                    try:
-                        page.wait_for_timeout(300)  # 300 ms
-                    except Exception:
-                        pass
-
-                    fname = f"frame_{step_no:04d}_p{acting}.png"
-                    fpath = render_dir / fname
-                    try:
-                        page.screenshot(path=str(fpath), full_page=False)
-                        frame_paths.append(fpath)
-                    except Exception:
-                        pass
-
-            finally:
-                page.close()
-                context.close()
-                browser.close()
-                env.close()
+        finally:
+            env.close()
 
     except Exception as exc:
         print(f"  [{player_label}] Render error: {exc}")
@@ -1295,6 +1369,7 @@ def run_final_evaluation(
     *,
     hero_id: str,
     equipment_header: str,
+    opponent_equipment_header: str = "",
     game_format: str,
     opponent_deck_name: str,
     opponent_hero_id: str,
@@ -1355,11 +1430,16 @@ def run_final_evaluation(
             or opponent_agents.card_pool
         )
         opp_name = f"rl_final_{opponent_agents.player}_{uuid.uuid4().hex[:8]}"
+        # Resolve the opponent equipment header: explicit param > PhaseAgents
+        # field > fall back to P1's header so the deck file is always valid.
+        _opp_equip = (
+            opponent_equipment_header
+            or getattr(opponent_agents, "equipment_header", "")
+            or equipment_header
+        )
         opp_file = _write_deck_file(
             opp_deck,
-            # Use opponent equipment header stored in the first key of active_decks
-            # (we don't store it separately, so we pass the deck name)
-            deck_name,  # placeholder — overridden by opp_name below
+            _opp_equip,
             opp_name,
             assets_path,
         )
@@ -1798,6 +1878,7 @@ def main() -> None:
         deckbuilder=_load_agent(args.p1_deckbuilder),
         sideboard=_load_agent(args.p1_sideboard),
         play=_load_agent(args.p1_play),
+        equipment_header=args.equipment_header,
     )
     p2: Optional[PhaseAgents] = None
     if args.opponent_mode == "dual":
@@ -1806,6 +1887,7 @@ def main() -> None:
             deckbuilder=_load_agent(args.p2_deckbuilder),
             sideboard=_load_agent(args.p2_sideboard),
             play=_load_agent(args.p2_play),
+            equipment_header=args.p2_equipment_header,
         )
 
     # ── warm-start (FaBrary) decks ────────────────────────────────────────────
@@ -2072,6 +2154,7 @@ def main() -> None:
         p2 if args.opponent_mode == "dual" else None,
         hero_id=args.hero_id,
         equipment_header=args.equipment_header,
+        opponent_equipment_header=args.p2_equipment_header,
         game_format=args.format,
         opponent_deck_name=args.opponent_deck,
         opponent_hero_id=args.opponent_hero_id if args.opponent_mode != "dual"
@@ -2094,6 +2177,7 @@ def main() -> None:
             p1,
             hero_id=args.p2_hero_id,
             equipment_header=args.p2_equipment_header,
+            opponent_equipment_header=args.equipment_header,
             game_format=args.format,
             opponent_deck_name=args.opponent_deck,
             opponent_hero_id=args.hero_id,

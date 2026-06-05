@@ -78,58 +78,140 @@ _FABRARY_AWS_BASE = (
 )
 
 # ---------------------------------------------------------------------------
-# Talishar-side card-type heuristics
-# These mirror GeneratedCardType() in Talishar's PHP — character (C),
-# equipment (E, H, CH, A, L), weapon (W, WP).
+# Talishar-side card-type classification
+#
+# Primary path  — _zone_from_card_types():
+#   Uses the `types` and `subtypes` fields that FaBrary's API returns for
+#   each card.  FaB card type lines look like:
+#     "Ranger Equipment - Arms"     → types=["Equipment"], subtypes=["Arms"]
+#     "Ranger Equipment - Quiver"   → types=["Equipment"], subtypes=["Quiver"]
+#     "Warrior Weapon - Sword (2H)" → types=["Weapon"],    subtypes=["Sword","2H"]
+#     "Ranger Weapon - Bow (2H)"    → types=["Weapon"],    subtypes=["Bow","2H"]
+#     "Hero - Young"                → types=["Hero"],      subtypes=["Young"]
+#
+# Fallback path — _guess_slot():
+#   Called only when the API returns no type/subtype data (e.g. the legacy
+#   REST endpoint for some cards).  All FaB play-cards carry a colour suffix
+#   (_red/_blue/_yellow/_purple); anything without one is equipment/hero.
 # ---------------------------------------------------------------------------
 
-# Patterns in the card identifier that strongly signal a specific gear slot.
-_EQUIPMENT_SLOT_PATTERNS: dict[str, list[str]] = {
-    "head":   ["helm", "hood", "crown", "cap", "_head", "headband", "goggles",
-               "mask", "hat", "brow", "visor", "tiara", "circlet"],
-    "chest":  ["coat", "robe", "vest", "chestplate", "chest", "jacket", "shirt",
-               "tunic", "cuirass", "cloak", "cape", "mantle", "doublet"],
-    "arms":   ["gauntlet", "glove", "bracer", "vambrace", "arm", "wrist",
-               "bangle", "shuko", "sleeve", "handwrap"],
-    "legs":   ["boots", "greaves", "pants", "leggings", "leg", "sabaton",
-               "sabatons", "footwrap", "shin", "paws"],
-    "offhand":["buckler", "shield", "offhand", "targe", "protector"],
+# Maps lowercased FaBrary type / subtype tokens to Talishar equipment slots.
+_TYPE_TO_SLOT: dict[str, str] = {
+    # Weapon — 1H and 2H variants both occupy the weapon zone
+    "weapon":    "weapon",
+    "1h":        "weapon",
+    "2h":        "weapon",
+    "(1h)":      "weapon",
+    "(2h)":      "weapon",
+    # Equipment — the subtype string names the exact slot
+    "head":      "head",
+    "chest":     "chest",
+    "arms":      "arms",
+    "legs":      "legs",
+    "off-hand":  "offhand",
+    "offhand":   "offhand",
+    # Quiver occupies the weapon zone (Riptide Specialization rule)
+    "quiver":    "weapon",
+    # Hero / Character cards
+    "hero":      "character",
+    "character": "character",
+    "young":     "character",
+    "adult":     "character",
 }
 
-# Hero (Character) card patterns — identifier contains the hero name directly.
-_HERO_PATTERNS: list[str] = [
-    "aurora", "briar", "ira_crimson", "fai", "dorinthea", "viserai",
-    "lexi", "kano", "rhinar", "chane", "bravo", "katsu",
-    "prism", "azalea", "dash", "boltyn",
-]
 
-# Weapon patterns
-_WEAPON_PATTERNS: list[str] = [
-    "kodachi", "dawnblade", "rosetta", "galaxia", "pistol", "sword",
-    "axe", "staff", "bow", "harpoon", "blade", "katana", "scimitar",
-    "cracked_bauble", "bauble",
-]
+def _zone_from_card_types(types: list[str], subtypes: list[str]) -> str:
+    """Return the Talishar equipment slot from FaBrary card type/subtype strings.
+
+    Examples
+    --------
+    types=["Equipment"], subtypes=["Arms"]      → "arms"
+    types=["Equipment"], subtypes=["Quiver"]    → "weapon"  (weapon zone)
+    types=["Weapon"],    subtypes=["Bow", "2H"] → "weapon"
+    types=["Hero"],      subtypes=["Young"]     → "character"
+
+    Returns "" when the slot cannot be determined; caller falls back to
+    _guess_slot().
+    """
+    for token in [t.lower().strip() for t in (types or [])] + \
+                 [s.lower().strip() for s in (subtypes or [])]:
+        slot = _TYPE_TO_SLOT.get(token)
+        if slot:
+            return slot
+    return ""
 
 
 def _guess_slot(card_id: str) -> str:
-    """Return the gear slot for a card ID or 'deck' if it goes in the main deck."""
+    """Last-resort slot inference from the card identifier string.
+
+    Called only when the API provides no type/subtype information.
+    All FaB play-cards carry a colour suffix (_red, _blue, _yellow, _purple),
+    so any card without one is almost certainly equipment or a hero card.
+    """
     cid = card_id.lower()
 
-    # Character
-    for pat in _HERO_PATTERNS:
-        if pat in cid:
-            return "character"
+    # 1. Exact known-card lookup — covers items whose names give no clue
+    #    (e.g. "garland_of_spring" is a chest piece; "star_fall" is a sword).
+    _KNOWN: dict[str, str] = {
+        # ── Runeblade ────────────────────────────────────────────────────
+        "star_fall":                   "weapon",
+        "nebula_blade":                "weapon",
+        "talishar_the_lost_prince":    "weapon",
+        "aether_ironweave":            "chest",
+        "garland_of_spring":           "chest",
+        "ironhide_plate":              "chest",
+        "spellbound_creepers":         "legs",
+        "aether_crackers":             "arms",
+        "nullrune_gloves":             "arms",
+        # Blade Beckoner items — "blade" as a standalone weapon fragment
+        # would mis-classify these, so they are pinned here.
+        "blade_beckoner_gauntlets":    "arms",
+        "blade_beckoner_helm":         "head",
+        "blade_beckoner_boots":        "legs",
+        # ── Ranger / Riptide ─────────────────────────────────────────────
+        "quiver_of_a_thousand_arrows": "weapon",
+        # ── Generic ──────────────────────────────────────────────────────
+        "nullrune_robe":               "chest",
+        "nullrune_hood":               "head",
+    }
+    slot = _KNOWN.get(cid)
+    if slot:
+        return slot
 
-    # Equipment slots (order matters: check specific before generic)
-    for slot, pats in _EQUIPMENT_SLOT_PATTERNS.items():
-        for pat in pats:
-            if pat in cid:
-                return slot
+    # 2. Play cards always end with a colour suffix — fast-path exit
+    if cid.endswith(("_red", "_blue", "_yellow", "_purple")):
+        return "deck"
 
-    # Weapon
-    for pat in _WEAPON_PATTERNS:
-        if pat in cid:
-            return "weapon"
+    # 3. Known hero identifiers → character slot
+    _HERO_IDS: frozenset[str] = frozenset([
+        "ira", "ira_crimson_haze", "fai", "dorinthea", "dorinthea_ironsong",
+        "briar", "aurora", "aurora_shooting_star", "viserai", "lexi",
+        "kano", "rhinar", "chane", "bravo", "katsu", "prism", "azalea",
+        "dash", "boltyn", "riptide", "dromai", "enigma", "arakni",
+        "blaze", "blaze_firemind", "lyath", "lyath_goldmane",
+    ])
+    if cid in _HERO_IDS or any(cid.startswith(h + "_") for h in _HERO_IDS):
+        return "character"
+
+    # 4. Weapon cards — bows (2H), swords, quivers, etc.
+    _WEAPON_FRAGMENTS = [
+        "kodachi", "dawnblade", "rosetta_thorn", "galaxia", "death_dealer",
+        "driftwood_quiver", "quiver", "pistol", "sword", "harpoon",
+        "cracked_bauble",
+    ]
+    if any(frag in cid for frag in _WEAPON_FRAGMENTS):
+        return "weapon"
+
+    # 5. Equipment — matched by canonical slot keyword in the identifier
+    if any(k in cid for k in ("helm", "hood", "crown", "visor", "circlet", "tiara", "cap_of")):
+        return "head"
+    if any(k in cid for k in ("chestplate", "cuirass", "coat", "robe", "vest", "mantle", "doublet")):
+        return "chest"
+    if any(k in cid for k in ("bracers", "bracer", "gauntlet", "glove", "shuko", "sedative")):
+        return "arms"
+    if any(k in cid for k in ("boots", "greaves", "sabatons", "paws", "shin_guards",
+                               "leggings", "leg", "sabaton", "footwrap")):
+        return "legs"
 
     return "deck"
 
@@ -137,6 +219,7 @@ def _guess_slot(card_id: str) -> str:
 # ---------------------------------------------------------------------------
 # API key resolution
 # ---------------------------------------------------------------------------
+
 
 
 def _read_fabrary_key_from_php(php_path: Path) -> Optional[str]:
@@ -192,6 +275,8 @@ query getDeck($deckId: ID!) {
       cardIdentifier
       quantity
       sideboardQuantity
+      types
+      subtypes
     }
   }
 }
@@ -412,11 +497,23 @@ def _normalise_graphql_deck(gql_deck: dict[str, Any]) -> dict[str, Any]:
     """Convert the AppSync getDeck response to the legacy REST API shape."""
     cards = []
     for dc in gql_deck.get("deckCards") or []:
+        card_types = dc.get("types") or []
+        card_subtypes = dc.get("subtypes") or []
+        # Derive zone from the explicit type/subtype data the API returns.
+        # e.g. types=["Equipment"] subtypes=["Arms"] → "arms"
+        #      types=["Weapon"]    subtypes=["Bow","2H"] → "weapon"
+        # Empty string means no type info available → parse_fabrary_deck will
+        # call _guess_slot() as a fallback.
+        zone = _zone_from_card_types(card_types, card_subtypes)
         cards.append({
             "identifier": dc.get("cardIdentifier", ""),
             "total": dc.get("quantity", 0),
             "sideboardTotal": dc.get("sideboardQuantity", 0),
-            "zone": "deck",  # all deckCards are in the main deck
+            "zone": zone,
+            # Pass through raw type info so parse_fabrary_deck can also use it
+            # directly without re-deriving the slot.
+            "types": card_types,
+            "subtypes": card_subtypes,
         })
     hero_obj = gql_deck.get("hero") or {}
     # 'classes' is a list like ["Runeblade"] on the hero card
@@ -489,8 +586,15 @@ def parse_fabrary_deck(raw: dict[str, Any]) -> dict[str, Any]:
         total: int = int(card.get("total", 0))
         sb_total: int = int(card.get("sideboardTotal", 0))
 
-        # FaBrary may provide a 'zone' field directly
+        # FaBrary may provide a 'zone' field directly (legacy REST endpoint)
         zone: str = (card.get("zone") or "").lower()
+
+        # If no zone, try type/subtype classification (GraphQL endpoint)
+        if not zone:
+            zone = _zone_from_card_types(
+                card.get("types") or [],
+                card.get("subtypes") or [],
+            )
 
         if zone in ("character", "hero"):
             equipment_by_slot["character"].append(card_id)

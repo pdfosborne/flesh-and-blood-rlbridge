@@ -69,11 +69,11 @@ $Format = "silver_age"   # silver_age | classic_constructed | blitz | upf
 # ── Simulation volumes ────────────────────────────────────────────────────────
 # Play episodes train the agents enough to produce a meaningful win rate.
 # Final-eval episodes are used for the reported win %.
-$PlayEpisodes         = 1000    # Phase 3 training games per iteration
-$FinalEvalEpisodes    = 500    # Games for the final win % measurement
+$PlayEpisodes         = 100    # Phase 3 training games per iteration
+$FinalEvalEpisodes    = 10    # Games for the final win % measurement
 $FinalEvalMaxSteps    = 200    # Max turns per evaluation game
 $SideboardEpisodes    = 30     # Sideboard episodes (only used if deck < min size)
-$NumEvalGames         = 5      # Quick eval games inside sideboard finalize
+$NumEvalGames         = 50      # Quick eval games inside sideboard finalize
 $WarmupEpisodes       = 40     # Random warmup before PPO kicks in
 $Iterations           = 1      # Outer iterations (1 = single-pass simulation)
 $PlayWorkers          = $null  # null = auto (C++: half-cores capped at 8)
@@ -340,7 +340,7 @@ $WorkerArgs  = if ($null -ne $PlayWorkers)   { @("--workers", $PlayWorkers) }   
     --iterations                 $Iterations `
     --final-eval-episodes        $FinalEvalEpisodes `
     --final-eval-max-steps       $FinalEvalMaxSteps `
-    --no-render-gif `
+    --gif-fps                    2.0 `
     --talishar-url               $TalisharUrl `
     --assets-path                $AssetsPath `
     --out-dir                    $OutDir `
@@ -393,6 +393,14 @@ if (Test-Path $ResultsJson) {
                 ForEach-Object { "$($_.Name): $($_.Value) cards" }
             Write-Host "    Game deck(s)          : $($deckSizes -join ' | ')"
         }
+        # GIF render path — stored under final_eval.render.gif in results.json
+        $gifPath = $null
+        if ($PlayerData.final_eval -and $PlayerData.final_eval.PSObject.Properties["render"]) {
+            $gifPath = $PlayerData.final_eval.render.gif
+        }
+        if ($gifPath) {
+            Write-Host "    Render GIF            : $gifPath" -ForegroundColor Cyan
+        }
     }
 
     Show-PlayerResult `
@@ -433,4 +441,6 @@ if (Test-Path $ResultsJson) {
 Write-Host ""
 Write-Host "  Full results : $ResultsJson"
 Write-Host "  Output dir   : $OutDir"
+Write-Host "  Render GIFs  : $OutDir\final_eval\p1_optimal_policy.gif"
+Write-Host "               : $OutDir\final_eval\p2_optimal_policy.gif"
 Write-Host ""

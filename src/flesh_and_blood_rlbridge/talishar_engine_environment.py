@@ -1402,7 +1402,10 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         done = threading.Event()
 
         def _shot(page: Any) -> bytes:
-            page.wait_for_timeout(800)
+            # Give the frontend a bit more time to load card/equipment images
+            # after state updates. 800ms was observed to be too short on some
+            # machines / network conditions; increase to 1500ms.
+            page.wait_for_timeout(1500)
             return page.screenshot(full_page=False)
 
         q.put((_shot, done, result_box))
