@@ -258,7 +258,10 @@ _APPSYNC_ENDPOINT = (
 _COGNITO_IDENTITY_POOL_ID = "us-east-2:e50f3ed7-32ed-4b22-a05e-10b3e7e03fe0"
 _AWS_REGION = "us-east-2"
 
-# The getDeck GraphQL query (field set sufficient for rlbridge conversion)
+# The getDeck GraphQL query (field set sufficient for rlbridge conversion).
+# NOTE: FaBrary's AppSync schema does NOT expose 'types' or 'subtypes' on
+# DeckCard, so those fields must not be requested here.  Equipment
+# classification falls back entirely to _guess_slot() / _KNOWN lookup.
 _GET_DECK_QUERY = """
 query getDeck($deckId: ID!) {
   getDeck(deckId: $deckId) {
@@ -275,8 +278,6 @@ query getDeck($deckId: ID!) {
       cardIdentifier
       quantity
       sideboardQuantity
-      types
-      subtypes
     }
   }
 }
@@ -494,26 +495,22 @@ def _fetch_graphql_iam(slug: str) -> dict[str, Any]:
 
 
 def _normalise_graphql_deck(gql_deck: dict[str, Any]) -> dict[str, Any]:
-    """Convert the AppSync getDeck response to the legacy REST API shape."""
+    """Convert the AppSync getDeck response to the legacy REST API shape.
+
+    FaBrary's AppSync schema does not expose card type/subtype on DeckCard,
+    so zone classification is delegated entirely to _guess_slot() via the
+    empty-zone fallback path in parse_fabrary_deck().
+    """
     cards = []
     for dc in gql_deck.get("deckCards") or []:
-        card_types = dc.get("types") or []
-        card_subtypes = dc.get("subtypes") or []
-        # Derive zone from the explicit type/subtype data the API returns.
-        # e.g. types=["Equipment"] subtypes=["Arms"] → "arms"
-        #      types=["Weapon"]    subtypes=["Bow","2H"] → "weapon"
-        # Empty string means no type info available → parse_fabrary_deck will
-        # call _guess_slot() as a fallback.
-        zone = _zone_from_card_types(card_types, card_subtypes)
         cards.append({
             "identifier": dc.get("cardIdentifier", ""),
             "total": dc.get("quantity", 0),
             "sideboardTotal": dc.get("sideboardQuantity", 0),
-            "zone": zone,
-            # Pass through raw type info so parse_fabrary_deck can also use it
-            # directly without re-deriving the slot.
-            "types": card_types,
-            "subtypes": card_subtypes,
+            # Leave zone empty — parse_fabrary_deck will call _guess_slot()
+            # which uses the _KNOWN lookup table + pattern matching to
+            # correctly classify equipment vs play cards.
+            "zone": "",
         })
     hero_obj = gql_deck.get("hero") or {}
     # 'classes' is a list like ["Runeblade"] on the hero card

@@ -83,13 +83,21 @@ from rlbridge.protocol.messages import RenderResult, ResetResult, StepResult, Te
 from .talishar_default_policy import (
     choose_talishar_action_index,
     _get_phase as _dp_get_phase,
+    _apply_block_phase_filter,
     _card_pitch_value,
+    _is_affordable_hand_play,
+    _is_pass_action,
+    _is_revert_action,
     _match_action_card,
+    _strip_revert_actions,
     _to_int as _dp_to_int,
     _CONFIRM_PHASES as _dp_confirm_phases,
     _CHOOSE_HAND_PHASES as _dp_choose_hand_phases,
     _BUTTON_INPUT_PHASES as _dp_button_input_phases,
     _POPUP_PHASES as _dp_popup_phases,
+    _BLOCK_PHASES as _dp_block_phases,
+    _DEFENSE_PHASES as _dp_defense_phases,
+    _REVERT_MODE_CODES as _dp_revert_mode_codes,
 )
 from .talishar_oracle import TalisharConnectionError
 
@@ -174,7 +182,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         game_format: str = "silver_age",
         timeout: float = 15.0,
         request_timeout: float = 30.0,
-    max_turns: int = 100,
+        max_turns: int = 2000,
         render_mode: Optional[str] = None,
         local_deck_name: Optional[str] = "Ira",
         opponent_deck_name: Optional[str] = None,
@@ -194,6 +202,10 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         # Explicit engine directory — bypasses the key/cache lookup entirely.
         # Takes priority over cpp_engine_deck1/2 and cpp_engine_cache_dir.
         cpp_engine_dir: Optional[str] = None,
+        # Print step-by-step progress during reset() — useful for debugging
+        # connection / game-creation hangs.  Off by default to avoid polluting
+        # training output.
+        verbose: bool = False,
     ) -> None:
         self._base_url = (
             base_url or os.environ.get("TALISHAR_URL", "http://localhost")
@@ -224,6 +236,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             or os.environ.get("TALISHAR_RENDER_HEIGHT", _DEFAULT_RENDER_HEIGHT)
         )
         self._opened_frontend_url: Optional[str] = None
+        self._verbose = verbose
 
         # HTTP session with connection pooling and automatic retry on transient
         # server errors.  One persistent TCP connection is reused for all steps
@@ -249,10 +262,19 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         # Cycle-breaker for sample_action: tracks (legal_action_fingerprint, last_idx)
         self._sample_action_last_fp: Optional[str] = None
         self._sample_action_repeat: int = 0
+        # Whether playerDeckCount > 0 has ever been observed this episode.
+        # Guards deck-exhaustion game-over checks so they do NOT fire during the
+        # pre-game equipment-selection phase, when Talishar returns
+        # playerDeckCount=0 / empty playerHand before decks are shuffled.
+        self._deck_nonzero_ever_seen: bool = False
         # Pitch-window "unaffordable card" loop prevention
         self._last_m_label: Optional[str] = None
+        self._last_block_label: Optional[str] = None
         self._unaffordable_labels: set[str] = set()
         self._last_turn_no_for_unaffordable: int = -1
+        # Multi-select popup tracking (mode=16 picks + mode=19 submit payload)
+        self._multi_select_inputs: list[str] = []
+        self._pending_chk_inputs: Optional[list[str]] = None
 
         # Persistent Playwright worker thread for rgb_array rendering
         self._pw_page: Any = None
@@ -464,7 +486,12 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
     def _start_game(self, game_name: str) -> str:
         """Call Start.php to write the initial gamestate file.
 
-        Returns the (possibly updated) auth key.
+        Only P1 needs to call Start.php — it writes the complete gamestate for
+        both players.  Calling it a second time for P2 would truncate and
+        rewrite the file (fopen "w" mode), and any difference in PHP session
+        context for P2 (e.g. $firstPlayer not set) produces a broken gamestate.
+
+        Returns the (possibly updated) P1 auth key.
         """
         resp = self._http_get("/Start.php", {"gameName": game_name, "playerID": "1"})
         # Start.php returns {"success": true, "authKey": "..."}
@@ -518,6 +545,12 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         and the first Python call.
         """
         pid = player_id if player_id is not None else self._acting_player_id
+        chk_payload: list[str] = []
+        if mode == 19:
+            if self._pending_chk_inputs is not None:
+                chk_payload = [str(v) for v in self._pending_chk_inputs if str(v) != ""]
+            else:
+                chk_payload = [str(v) for v in self._multi_select_inputs if str(v) != ""]
         for attempt in range(2):
             params: dict[str, str] = {
                 "gameName": self._game_name or "",
@@ -528,14 +561,27 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             if button_input:
                 params["buttonInput"] = button_input
                 params["cardID"] = button_input  # card-zone modes (27, 3, 5, …) index via $cardID
+            if mode == 19 and chk_payload:
+                params["chkCount"] = str(len(chk_payload))
+                for i, value in enumerate(chk_payload):
+                    params[f"chk{i}"] = value
             resp = self._http_get("/ProcessInput.php", params, allow_empty_body=True)
+            # Log any PHP-level errors returned by ProcessInput so we can
+            # diagnose WriteGamestateCache / SHMOP failures without guessing.
+            if self._verbose and (resp.get("error") or resp.get("errorMessage")):
+                err = resp.get("error") or resp.get("errorMessage")
+                print(f"    [submit P{pid}] ProcessInput.php ERROR: {err!r}", flush=True)
             if resp.get("notYourTurn"):
                 # Server says it's the other player's turn — correct and retry once
                 server_current = int(resp.get("currentPlayer", 3 - pid))
+                if self._verbose:
+                    print(f"    [submit] notYourTurn — switching P{pid}→P{server_current}",
+                          flush=True)
                 pid = server_current
                 self._acting_player_id = pid
                 self._auth_key = self._auth_key_for(pid)
             else:
+                self._pending_chk_inputs = None
                 break
 
     def _apply_last_update(self, state: dict[str, Any]) -> None:
@@ -571,6 +617,80 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             time.sleep(interval)
         return self._fetch_state(player_id=target)
 
+    def _wait_for_any_priority(
+        self,
+        max_polls: int = 60,
+        interval: float = 0.15,
+    ) -> dict[str, Any]:
+        """Self-play step helper: check BOTH players each poll until either has priority.
+
+        This replaces the ``_poll_until_priority`` + ``_sync_acting_player``
+        pair used in the self-play branch of ``step()``.  The original pair
+        had two problems:
+
+        1. ``_poll_until_priority`` targets only the *last-acting* player.
+           In self-play mode the server never auto-passes for the other side,
+           so the just-acted player will not regain priority until the opponent
+           explicitly submits an action.  Polling for one player while the
+           other has priority wastes the full 60-second timeout on every step.
+
+        2. ``_poll_until_priority`` uses incremental ``lastUpdate`` fetches.
+           When no delta exists the response body may omit ``havePriority``
+           entirely, causing the check to return False even when the player
+           genuinely has priority.
+
+        This method uses ``last_update=0`` (full snapshots) and alternates
+        between P1 and P2 on every iteration so it finds the acting player
+        within one round-trip after the server processes the submitted action.
+
+        Timeout: ``max_polls * interval`` seconds (default 9 s) before
+        falling back to ``_sync_acting_player``.
+        """
+        for i in range(max_polls):
+            error_count = 0
+            for pid in (1, 2):
+                state = self._fetch_state(player_id=pid, last_update=0)
+                has_priority = state.get("havePriority", False)
+                is_over = self._is_game_over(state)
+                err_msg = state.get("error", "")
+                # "gamestate too short" is a transient file-write race — keep polling.
+                # Only count it as a hard error when it persists past the first few polls.
+                is_transient_error = (
+                    isinstance(err_msg, str) and "too short" in err_msg
+                    and i < 10
+                )
+                if self._verbose and i == 0:
+                    print(f"    [wait poll {i+1}] P{pid}  havePriority={has_priority}  "
+                          f"phase={self._phase_str(state)!r}  "
+                          f"hp={state.get('playerHealth','?')}/"
+                          f"{state.get('opponentHealth','?')}  "
+                          f"keys={list(state.keys())[:8]}"
+                          + (f"  ERROR: {err_msg!r}" if err_msg else ""),
+                          flush=True)
+                if (has_priority or is_over) and not is_transient_error:
+                    self._acting_player_id = pid
+                    self._auth_key = self._auth_key_for(pid)
+                    self._apply_last_update(state)
+                    return state
+                if err_msg and not is_transient_error:
+                    error_count += 1
+            # If BOTH players returned non-transient error states the game has
+            # crashed — return immediately rather than burning the full timeout.
+            if error_count == 2:
+                if self._verbose:
+                    print("    [wait] both players returned fatal error — "
+                          "ending episode", flush=True)
+                return {"error": "game_crashed"}
+            if self._verbose and i > 0 and i % 5 == 0:
+                print(f"    [wait] poll {i+1}/{max_polls}: no priority yet...",
+                      flush=True)
+            time.sleep(interval)
+        if self._verbose:
+            print(f"    [wait] timed out after {max_polls} polls — falling back to sync",
+                  flush=True)
+        # Fallback — should rarely be reached
+        return self._sync_acting_player()
+
     # ── State helpers ─────────────────────────────────────────────────────────
 
     def _phase_str(self, state: dict[str, Any]) -> str:
@@ -580,28 +700,47 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         return ""
 
     def _is_game_over(self, state: dict[str, Any]) -> bool:
+        # Fatal crash sentinel emitted by _wait_for_any_priority when both
+        # players return persistent PHP errors.  Treat as episode termination
+        # so the caller gets terminated=True and starts a fresh game next reset.
+        if state.get("error") == "game_crashed":
+            return True
         if self._phase_str(state) == "OVER":
             return True
-        player_hp = state.get("playerHealth", -1)
-        opp_hp = state.get("opponentHealth", -1)
-        if isinstance(player_hp, (int, float)) and int(player_hp) <= 0:
+        # Use None as sentinel so that a missing key (empty/pre-game state) does
+        # NOT accidentally trigger game-over.  The original -1 default caused
+        # false positives whenever Talishar returned a state without playerHealth.
+        player_hp = state.get("playerHealth")
+        opp_hp = state.get("opponentHealth")
+        if player_hp is not None and isinstance(player_hp, (int, float)) and int(player_hp) <= 0:
             return True
-        if isinstance(opp_hp, (int, float)) and int(opp_hp) <= 0:
+        if opp_hp is not None and isinstance(opp_hp, (int, float)) and int(opp_hp) <= 0:
             return True
-        # Draw detection: both decks exhausted with neither player at 0 HP.
+        # Track whether the deck has ever been non-zero this episode so that the
+        # deck-exhaustion checks below do NOT fire during the pre-game equipment
+        # phase.  During equipment selection Talishar returns playerDeckCount=0
+        # with an empty hand because the deck hasn't been shuffled yet — those
+        # are NOT end-of-game conditions.
         p_deck = state.get("playerDeckCount")
         o_deck = state.get("opponentDeckCount")
-        if (
-            p_deck is not None and o_deck is not None
-            and int(p_deck) == 0 and int(o_deck) == 0
-        ):
-            return True
-        # Resource exhaustion: acting player has empty deck AND empty hand —
-        # they cannot play another card and will lose to fatigue.  End now.
-        if p_deck is not None and int(p_deck) == 0:
-            hand = state.get("playerHand", [])
-            if isinstance(hand, list) and len(hand) == 0:
+        if p_deck is not None and int(p_deck) > 0:
+            self._deck_nonzero_ever_seen = True
+        if o_deck is not None and int(o_deck) > 0:
+            self._deck_nonzero_ever_seen = True
+        # Draw / exhaustion checks only make sense once decks have been shuffled.
+        if self._deck_nonzero_ever_seen:
+            # Draw detection: both decks exhausted with neither player at 0 HP.
+            if (
+                p_deck is not None and o_deck is not None
+                and int(p_deck) == 0 and int(o_deck) == 0
+            ):
                 return True
+            # Resource exhaustion: acting player has empty deck AND empty hand —
+            # they cannot play another card and will lose to fatigue.  End now.
+            if p_deck is not None and int(p_deck) == 0:
+                hand = state.get("playerHand", [])
+                if isinstance(hand, list) and len(hand) == 0:
+                    return True
         return False
 
     def _is_draw(self, state: dict[str, Any]) -> bool:
@@ -683,6 +822,12 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         * ``label``        — human-readable description
         """
         actions: list[dict[str, Any]] = []
+        phase = _dp_get_phase(state)
+        in_multi_choose = (
+            phase.startswith("multichoose")
+            or phase.startswith("maymultichoose")
+            or phase in {"choosemultizone", "maychoosemultizone"}
+        )
 
         zone_keys: list[tuple[str, str]] = [
             ("playerHand", "hand"),
@@ -765,6 +910,10 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                     if not isinstance(card, dict):
                         continue
                     card_action = card.get("action", 0)
+                    if not card_action and in_multi_choose:
+                        # MULTICHOOSE* popup cards often omit explicit `action`
+                        # but are selectable via mode 16 + actionDataOverride.
+                        card_action = 16
                     if not card_action:
                         continue
                     card_label = card.get("cardNumber") or card.get("label") or f"popup_card_{i}"
@@ -777,6 +926,39 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                             "label": str(card_label),
                         }
                     )
+
+            # Multi-select submit actions are exposed as popup.formOptions
+            # (typically mode=19, caption="Submit").
+            form_options = popup.get("formOptions", {})
+            if isinstance(form_options, dict):
+                form_mode = form_options.get("mode", 0)
+                if form_mode:
+                    form_caption = form_options.get("caption") or "Submit"
+                    actions.append(
+                        {
+                            "action_code": int(form_mode),
+                            "button_input": "",
+                            "card_id": "",
+                            "zone": "popup",
+                            "label": str(form_caption),
+                        }
+                    )
+
+            # MULTICHOOSETEXT options are emitted as checkboxes.
+            for i, option in enumerate(popup.get("multiChooseText", [])):
+                if not isinstance(option, dict):
+                    continue
+                opt_input = option.get("input", option.get("value", i))
+                opt_label = option.get("label") or f"option_{opt_input}"
+                actions.append(
+                    {
+                        "action_code": 16,
+                        "button_input": str(opt_input),
+                        "card_id": "",
+                        "zone": "popup",
+                        "label": str(opt_label),
+                    }
+                )
 
         # Always guarantee at least one pass action in the legal action list.
         # This ensures the policy can always choose to end its priority window
@@ -853,7 +1035,13 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             Fallback: if removing Pass leaves nothing, keep Pass to avoid an
             empty action set.
 
-        **Rule 6 — block-phase Undo Block removal** (phase ``b``):
+        **Rule 6 — block/defense phase pass forcing** (phases ``b``, ``d``):
+            Block steps require an explicit pass (mode=99/101) to confirm.  When
+            no hand cards remain that can actually block (Talishar ``action=0``,
+            unaffordable, or defense below the dedicated-blocker threshold),
+            strip all hand block plays and undo so only pass remains.
+
+        **Rule 7 — block-phase Undo Block removal** (phase ``b``):
             Once no blocking hand cards remain (all have been committed),
             remove Undo Block (10001).  There is nothing useful to undo to,
             so keeping it only allows a "commit all → undo → re-commit" loop.
@@ -863,26 +1051,16 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
 
         # ── Rules 1 & 2: main-phase ───────────────────────────────────────────
         if phase == "m":
-            hand_cards = [c for c in state.get("playerHand", []) if isinstance(c, dict)]
-            total_pitch = sum(_card_pitch_value(c) for c in hand_cards)
             affordable: list[dict[str, Any]] = []
             for action in filtered:
                 code = _dp_to_int(action.get("action_code", 0))
                 # Rule 2: strip Equip (mode=3) — opens unresolvable pitch windows
                 if code == 3:
                     continue
-                # Rule 1: strip unaffordable action-27 hand plays
-                if (
-                    action.get("zone") == "hand"
-                    and code == 27
-                ):
-                    card = _match_action_card(action, state)
-                    cost = _dp_to_int((card or {}).get("cost"), 0)
-                    if cost > 0:
-                        card_pitch = _card_pitch_value(card) if card else 0
-                        available = total_pitch - card_pitch
-                        if cost > available:
-                            continue  # cannot afford — omit from legal set
+                # Rule 1: strip unaffordable action-27 hand plays (card DB lookup
+                # when Talishar omits cost/resource on playerHand entries).
+                if not _is_affordable_hand_play(action, state):
+                    continue
                 affordable.append(action)
             if affordable:
                 filtered = affordable
@@ -899,14 +1077,22 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             if no_pass:
                 filtered = no_pass
 
-            # Rule 4: when hand cards can still be pitched, remove Cancel too —
-            # force agent to pitch rather than immediately aborting.
             pitch_cards = [
                 a for a in filtered
                 if a.get("zone") == "hand"
                 and _dp_to_int(a.get("action_code", 0)) == 27
             ]
-            if pitch_cards:
+            if not pitch_cards:
+                # Empty pitch window — only Cancel can abort the unaffordable play.
+                cancel_only = [
+                    a for a in filtered
+                    if _dp_to_int(a.get("action_code", 0)) == 10000
+                ]
+                if cancel_only:
+                    filtered = cancel_only
+            else:
+                # Rule 4: when hand cards can still be pitched, remove Cancel too —
+                # force agent to pitch rather than immediately aborting.
                 no_cancel = [
                     a for a in filtered
                     if _dp_to_int(a.get("action_code", 0)) != 10000
@@ -929,23 +1115,72 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             if no_pass:
                 filtered = no_pass
 
-        # ── Rule 6: block-phase Undo Block removal ────────────────────────────
-        elif phase == "b":
-            block_hand_cards = [
-                a for a in filtered
-                if a.get("zone") == "hand"
-                and _dp_to_int(a.get("action_code", 0)) == 27
-            ]
-            if not block_hand_cards:
-                # No blockers left → remove Undo Block to prevent undo-loop.
-                no_undo = [
-                    a for a in filtered
-                    if _dp_to_int(a.get("action_code", 0)) != 10001
-                ]
-                if no_undo:
-                    filtered = no_undo
+        # ── Rules 6 & 7: block / defense phases ───────────────────────────────
+        elif phase in _dp_block_phases | _dp_defense_phases:
+            filtered = _apply_block_phase_filter(
+                state,
+                filtered,
+                block_blacklist=frozenset(getattr(self, "_unaffordable_labels", set())),
+            )
 
-        return filtered
+        filtered = _strip_revert_actions(phase, filtered)
+
+        # ── Final: if nothing actionable remains, force pass to end the turn ──
+        actionable = [a for a in filtered if not _is_pass_action(a)]
+        if actionable:
+            return filtered
+
+        pass_actions = [a for a in filtered if _is_pass_action(a)]
+        if pass_actions:
+            return [pass_actions[0]]
+
+        return [
+            {
+                "action_code": 99,
+                "button_input": "",
+                "card_id": "",
+                "zone": "button",
+                "label": "Pass",
+            }
+        ]
+
+    def _first_pass_action(
+        self,
+        legal_actions: list[dict[str, Any]],
+    ) -> tuple[int, str]:
+        for a in legal_actions:
+            if _is_pass_action(a):
+                return int(a.get("action_code", 99)), str(a.get("button_input", ""))
+        if legal_actions:
+            a0 = legal_actions[0]
+            return int(a0.get("action_code", 99)), str(a0.get("button_input", ""))
+        return 99, ""
+
+    def _sanitize_revert_submission(
+        self,
+        mode: int,
+        button_input: str,
+        legal_actions: list[dict[str, Any]],
+        state: dict[str, Any],
+    ) -> tuple[int, str]:
+        """Never submit undo/cancel unless pitch abort is the only valid exit."""
+        if mode not in _dp_revert_mode_codes:
+            return mode, button_input
+
+        phase = _dp_get_phase(state)
+        pitch_abort_only = [
+            a for a in legal_actions
+            if _dp_to_int(a.get("action_code", 0)) == 10000
+        ]
+        if (
+            mode == 10000
+            and phase == "p"
+            and pitch_abort_only
+            and len(legal_actions) == len(pitch_abort_only)
+        ):
+            return mode, button_input
+
+        return self._first_pass_action(legal_actions)
 
     def _legal_actions(self, state: dict[str, Any]) -> list[dict[str, Any]]:
         """Return filtered legal actions for *state* (single call-site helper)."""
@@ -1057,7 +1292,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             f"Deck: {state.get('playerDeckCount', '?')} cards"
         )
 
-        legal_actions = self._extract_legal_actions(state)
+        legal_actions = self._legal_actions(state)
         if legal_actions:
             lines.append("Legal actions:")
             for i, a in enumerate(legal_actions[:12]):
@@ -1079,16 +1314,154 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         """Parse an action value into ``(mode, button_input)``."""
         action_str = str(action).strip().lower()
         if action_str == "pass":
-            return 99, ""
+            return self._coerce_progress_action(99, "", legal_actions)
         try:
             idx = int(action_str)
             if 0 <= idx < len(legal_actions):
                 a = legal_actions[idx]
-                return int(a["action_code"]), str(a.get("button_input", ""))
+                mode = int(a["action_code"])
+                button = str(a.get("button_input", ""))
+                mode, button = self._maybe_prepare_multiselect_submit(
+                    mode,
+                    button,
+                    legal_actions,
+                )
+                return self._coerce_progress_action(mode, button, legal_actions)
         except (ValueError, TypeError):
             pass
-        # Fallback: pass priority
+
+        # Invalid action from agent — choose a progress-making fallback when
+        # possible instead of blindly passing (which can no-op in chooser phases).
+        if legal_actions:
+            fb_mode, fb_btn = self._preferred_progress_action(legal_actions)
+            fb_mode, fb_btn = self._maybe_prepare_multiselect_submit(
+                fb_mode,
+                fb_btn,
+                legal_actions,
+            )
+            return self._coerce_progress_action(fb_mode, fb_btn, legal_actions)
         return 99, ""
+
+    def _is_noop_pass_action(self, action: dict[str, Any]) -> bool:
+        """Return True for pass/no-op actions that often stall chooser phases."""
+        code = _dp_to_int(action.get("action_code", 0))
+        if code != 99:
+            return False
+        btn = str(action.get("button_input", "") or "").strip()
+        if btn:
+            # mode=99 with non-empty button_input can be a real chooser decision.
+            return False
+        label = str(action.get("label", "") or "").strip().lower()
+        return (
+            label == ""
+            or any(tok in label for tok in ("pass", "end turn", "skip", "decline", "no "))
+        )
+
+    def _preferred_progress_action(
+        self,
+        legal_actions: list[dict[str, Any]],
+    ) -> tuple[int, str]:
+        """Pick an action that is most likely to advance game state.
+
+        In mandatory-choice phases, prefer non-no-op options over plain pass.
+        """
+        if not legal_actions:
+            return 99, ""
+
+        phase = _dp_get_phase(self._last_state)
+        mandatory_choice_phase = phase in (
+            _dp_choose_hand_phases | _dp_button_input_phases | _dp_popup_phases
+        )
+
+        if mandatory_choice_phase:
+            # 1) Prefer any non-no-op action first.
+            for a in legal_actions:
+                if not self._is_noop_pass_action(a):
+                    return int(a.get("action_code", 99)), str(a.get("button_input", ""))
+
+            # 2) If all are mode=99, prefer one that carries input over empty-pass.
+            for a in legal_actions:
+                if _dp_to_int(a.get("action_code", 0)) == 99 and str(a.get("button_input", "") or "").strip():
+                    return 99, str(a.get("button_input", ""))
+
+        # Generic fallback: first non-revert legal action.
+        for a in legal_actions:
+            if not _is_revert_action(a):
+                return int(a.get("action_code", 99)), str(a.get("button_input", ""))
+        a0 = legal_actions[0]
+        return int(a0.get("action_code", 99)), str(a0.get("button_input", ""))
+
+    def _maybe_prepare_multiselect_submit(
+        self,
+        mode: int,
+        button_input: str,
+        legal_actions: list[dict[str, Any]],
+    ) -> tuple[int, str]:
+        """Prepare mode-19 submit payloads for MULTICHOOSE* phases.
+
+        Talishar multi-select flows require mode=16 selections plus mode=19 with
+        chkCount/chk{i} payload. We track selected inputs locally and auto-submit
+        when possible to avoid pass/no-op loops.
+        """
+        phase = _dp_get_phase(self._last_state)
+        in_multi_choose = (
+            phase.startswith("multichoose")
+            or phase.startswith("maymultichoose")
+            or phase in {"choosemultizone", "maychoosemultizone"}
+        )
+        if not in_multi_choose:
+            self._pending_chk_inputs = None
+            return mode, button_input
+
+        has_submit = any(_dp_to_int(a.get("action_code", 0)) == 19 for a in legal_actions)
+        btn = str(button_input or "")
+
+        if mode == 16 and btn:
+            if btn in self._multi_select_inputs:
+                self._multi_select_inputs = [x for x in self._multi_select_inputs if x != btn]
+            else:
+                self._multi_select_inputs.append(btn)
+            if has_submit and self._multi_select_inputs:
+                self._pending_chk_inputs = list(self._multi_select_inputs)
+                return 19, ""
+
+        if mode == 19:
+            if not self._multi_select_inputs:
+                for a in legal_actions:
+                    if _dp_to_int(a.get("action_code", 0)) == 16:
+                        seed = str(a.get("button_input", "") or "")
+                        if seed:
+                            self._multi_select_inputs.append(seed)
+                            break
+            self._pending_chk_inputs = list(self._multi_select_inputs)
+
+        return mode, button_input
+
+    def _coerce_progress_action(
+        self,
+        mode: int,
+        button_input: str,
+        legal_actions: list[dict[str, Any]],
+    ) -> tuple[int, str]:
+        """Replace no-op pass with a progress action when alternatives exist."""
+        if not legal_actions:
+            return mode, button_input
+
+        phase = _dp_get_phase(self._last_state)
+        mandatory_choice_phase = phase in (
+            _dp_choose_hand_phases | _dp_button_input_phases | _dp_popup_phases
+        )
+
+        if not mandatory_choice_phase:
+            return mode, button_input
+
+        # If selected action is a plain pass (no input), but another option
+        # exists, force a progress action to avoid endless chooser loops.
+        if mode == 99 and not str(button_input or "").strip():
+            fb_mode, fb_btn = self._preferred_progress_action(legal_actions)
+            return fb_mode, fb_btn
+
+        return mode, button_input
 
     # ── rlbridge interface ────────────────────────────────────────────────────
 
@@ -1112,26 +1485,49 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         self._session.cookies.clear()
         self._last_update = 0
 
+        if self._verbose:
+            print(f"    [talishar reset] POST CreateLocalGame.php  "
+                  f"({self._local_deck_name} vs {self._opponent_deck_name})...",
+                  flush=True)
         self._game_name, self._p1_auth_key, self._p2_auth_key = self._create_game()
+        if self._verbose:
+            print(f"    [talishar reset] game created: {self._game_name}", flush=True)
+
         self._acting_player_id = 1
+        if self._verbose:
+            print(f"    [talishar reset] GET Start.php...", flush=True)
         started_key = self._start_game(self._game_name)
+        if self._verbose:
+            print(f"    [talishar reset] Start.php done", flush=True)
         if started_key:
             self._p1_auth_key = started_key
         self._auth_key = self._p1_auth_key
 
         # Wait for initial state with priority (equipment selection or main phase)
+        if self._verbose:
+            print(f"    [talishar reset] GET GetNextTurn.php (syncing priority)...",
+                  flush=True)
         if self._self_play:
             self._last_state = self._sync_acting_player()
         else:
             self._last_state = self._poll_until_priority()
+        if self._verbose:
+            print(f"    [talishar reset] game ready — "
+                  f"P{self._acting_player_id} has priority  "
+                  f"phase: {self._phase_str(self._last_state)!r}",
+                  flush=True)
         self._player_hp = int(self._last_state.get("playerHealth", 20))
         self._opp_hp = int(self._last_state.get("opponentHealth", 20))
         self._steps = 0
+        self._deck_nonzero_ever_seen = False
         self._sample_action_last_fp = None
         self._sample_action_repeat = 0
         self._last_m_label = None
+        self._last_block_label = None
         self._unaffordable_labels = set()
         self._last_turn_no_for_unaffordable = -1
+        self._multi_select_inputs = []
+        self._pending_chk_inputs = None
         self._reset_repeat_tracking(
             turn_no=int(self._last_state.get("turnNo", 0) or 0),
             acting_player_id=self._acting_player_id,
@@ -1171,8 +1567,30 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
 
         state = self._last_state
         legal_actions = self._legal_actions(state)
+        phase_before = _dp_get_phase(state)
 
         mode, button_input = self._parse_action(action, legal_actions)
+        mode, button_input = self._sanitize_revert_submission(
+            mode,
+            button_input,
+            legal_actions,
+            state,
+        )
+
+        if phase_before in _dp_block_phases and mode == 27:
+            chosen = next(
+                (a for a in legal_actions
+                 if _dp_to_int(a.get("action_code", 0)) == mode
+                 and str(a.get("button_input", "")) == button_input),
+                None,
+            )
+            if chosen is not None and chosen.get("zone") == "hand":
+                self._last_block_label = str(chosen.get("label", "") or "")
+
+        if self._verbose:
+            print(f"    [step {self._steps + 1}] P{self._acting_player_id} "
+                  f"mode={mode} btn={button_input!r}  "
+                  f"→ POST ProcessInput.php...", flush=True)
         try:
             self._submit_action(mode, button_input)
         except RuntimeError as exc:
@@ -1186,11 +1604,22 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             except Exception:
                 pass
 
+        if self._verbose:
+            print(f"    [step {self._steps + 1}] ProcessInput.php done, "
+                  f"waiting for priority...", flush=True)
+        # Brief pause so Talishar has time to finish writing the gamestate file
+        # before we poll GetNextTurn.php.  Without this a race condition causes
+        # "ParseGamestate: gamestate too short" on the very first poll.
+        time.sleep(0.35)
         if self._self_play:
-            new_state = self._poll_until_priority()
-            new_state = self._sync_acting_player()
+            new_state = self._wait_for_any_priority()
         else:
             new_state = self._poll_until_priority()
+        if self._verbose:
+            print(f"    [step {self._steps + 1}] priority → P{self._acting_player_id}  "
+                  f"phase={self._phase_str(new_state)!r}  "
+                  f"hp={new_state.get('playerHealth','?')}/{new_state.get('opponentHealth','?')}  "
+                  f"terminated={self._is_game_over(new_state)}", flush=True)
         new_player_hp = int(new_state.get("playerHealth", self._player_hp))
         new_opp_hp = int(new_state.get("opponentHealth", self._opp_hp))
         self._steps += 1
@@ -1236,6 +1665,22 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         self._player_hp = new_player_hp
         self._opp_hp = new_opp_hp
         self._last_state = new_state
+
+        if phase_before == "p" and mode == 10000:
+            for label in (self._last_block_label, self._last_m_label):
+                if label:
+                    self._unaffordable_labels.add(label)
+            self._last_block_label = None
+            self._last_m_label = None
+
+        new_phase = _dp_get_phase(new_state)
+        if not (
+            new_phase.startswith("multichoose")
+            or new_phase.startswith("maymultichoose")
+            or new_phase in {"choosemultizone", "maychoosemultizone"}
+        ):
+            self._multi_select_inputs = []
+            self._pending_chk_inputs = None
 
         new_legal_actions = self._legal_actions(new_state)
         obs = self._encode_observation(new_state, new_legal_actions)
@@ -1497,8 +1942,10 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             ]
             if not _pitch_cards:
                 # Blacklist the card that triggered this empty pitch window.
-                if self._last_m_label:
-                    self._unaffordable_labels.add(self._last_m_label)
+                _abort_label = self._last_block_label or self._last_m_label
+                if _abort_label:
+                    self._unaffordable_labels.add(_abort_label)
+                    self._last_block_label = None
                     self._last_m_label = None
                 # Return Cancel (10000) to abort the play, else fall back to Pass.
                 for _ci, _ca in enumerate(legal):
@@ -1616,12 +2063,14 @@ def run_talishar_eval_episode(
         "total_reward": total_reward,
         "terminated": terminated,
         "truncated": truncated,
+        "timed_out": truncated and not terminated,
         "final_observation": obs,
         "deck_player_id": deck_player_id,
         "deck_player_won": talishar_deck_player_won(
             obs,
             deck_player_id=deck_player_id,
             terminated=terminated,
+            truncated=truncated,
         ),
     }
 
@@ -1631,8 +2080,25 @@ def talishar_deck_player_won(
     *,
     deck_player_id: int = 1,
     terminated: bool = False,
+    truncated: bool = False,
 ) -> Optional[bool]:
-    """Whether *deck_player_id* won, from a Talishar JSON observation."""
+    """Whether *deck_player_id* won, from a Talishar JSON observation.
+
+    Returns:
+        ``True``  — deck player won (opponent HP ≤ 0)
+        ``False`` — deck player lost (own HP ≤ 0)
+        ``None``  — draw (both decks empty, equal HP) **or** timeout (max
+                    steps hit without a winner — *not* treated as a draw).
+
+    Callers that need to distinguish draw from timeout should check the
+    ``"timed_out"`` key in the episode dict returned by
+    :func:`run_talishar_eval_episode`.
+    """
+    # A timeout is not a decided outcome — return None immediately without
+    # inspecting HP so callers cannot accidentally treat it as a draw.
+    if truncated and not terminated:
+        return None
+
     if isinstance(obs, str):
         try:
             obs = json.loads(obs)
@@ -1653,5 +2119,5 @@ def talishar_deck_player_won(
         if player_hp <= 0 < opp_hp:
             return False
         if player_hp == opp_hp:
-            return None
+            return None   # genuine draw
     return None

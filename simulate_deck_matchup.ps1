@@ -58,10 +58,10 @@ param(
 # =============================================================================
 
 if (-not $Deck1Source) {
-    $Deck1Source = "https://fabrary.net/decks/01KR0XXRF5MESBQWQH7FW5Y8MG"   # Riptide fixed
+    $Deck1Source = "https://fabrary.net/decks/01KTBBVEZE0TPDAZ74Z4D787G4"   # Briar fixed
 }
 if (-not $Deck2Source) {
-    $Deck2Source = "https://fabrary.net/decks/01KTBBVEZE0TPDAZ74Z4D787G4"   # Briar fixed
+    $Deck2Source = "https://fabrary.net/decks/01KR0XXRF5MESBQWQH7FW5Y8MG"   # Riptide fixed
 }
 
 $Format = "silver_age"   # silver_age | classic_constructed | blitz | upf
@@ -69,7 +69,7 @@ $Format = "silver_age"   # silver_age | classic_constructed | blitz | upf
 # ── Simulation volumes ────────────────────────────────────────────────────────
 # Play episodes train the agents enough to produce a meaningful win rate.
 # Final-eval episodes are used for the reported win %.
-$PlayEpisodes         = 100    # Phase 3 training games per iteration
+$PlayEpisodes         = 1000000    # Phase 3 training games per iteration
 $FinalEvalEpisodes    = 10    # Games for the final win % measurement
 $FinalEvalMaxSteps    = 200    # Max turns per evaluation game
 $SideboardEpisodes    = 30     # Sideboard episodes (only used if deck < min size)

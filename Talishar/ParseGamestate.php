@@ -43,12 +43,28 @@ function ParseGamestate()
   global $mainPlayerGamestateStillBuilt, $mpgBuiltFor, $myStateBuiltFor, $playerID;
   global $p1Inventory, $p2Inventory, $p1IsAI, $p2IsAI, $AIHasInfiniteHP, $attackQueue;
 
+  $gamestateFile = "./Games/" . $gameName . "/gamestate.txt";
+
   $mainPlayerGamestateStillBuilt = 0;
   $mpgBuiltFor = -1;
   $myStateBuiltFor = -1;
 
-  $gamestateContent = ReadCache(GamestateID($gameName));
-  $gamestateContent = explode("\r\n", $gamestateContent);
+  $gamestateRaw = ReadCache(GamestateID($gameName));
+  // SHMOP can occasionally be stale/corrupted (e.g. partial write), yielding
+  // very short content like one line.  The on-disk gamestate file is written
+  // first and is the authoritative fallback.
+  $useFileFallback = empty($gamestateRaw);
+  if (!$useFileFallback) {
+    $probeLines = explode("\r\n", $gamestateRaw);
+    if (count($probeLines) < 60) $useFileFallback = true;
+  }
+  if ($useFileFallback && file_exists($gamestateFile)) {
+    $fileRaw = @file_get_contents($gamestateFile);
+    if ($fileRaw !== false && !empty($fileRaw)) {
+      $gamestateRaw = $fileRaw;
+    }
+  }
+  $gamestateContent = explode("\r\n", $gamestateRaw);
   if(count($gamestateContent) < 60) { echo json_encode(["error" => "ParseGamestate: gamestate too short (" . count($gamestateContent) . " lines) for game " . $gameName]); exit; }
 
   $playerHealths = GetStringArray($gamestateContent[0]); // 1

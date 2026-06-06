@@ -700,7 +700,7 @@ class TalisharSideboardEnvironment(rlbridgeEnvironment):
             try:
                 for _ in range(self._num_eval_games):
                     cpp_env = CppEngineEnvironment(
-                        engine_dir=self._cpp_engine_dir, max_turns=200
+                        engine_dir=self._cpp_engine_dir, max_turns=2000
                     )
                     try:
                         cpp_env.reset()
@@ -765,6 +765,9 @@ class TalisharSideboardEnvironment(rlbridgeEnvironment):
                             deck_player_id=1,
                             terminated=bool(
                                 step_result is not None and step_result.terminated
+                            ),
+                            truncated=bool(
+                                step_result is not None and step_result.truncated
                             ),
                         ):
                             wins += 1

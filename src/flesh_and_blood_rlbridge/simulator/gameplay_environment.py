@@ -14,7 +14,7 @@ class FleshAndBloodGameplayEnvironment(FleshAndBloodEnvironment):
         seed: Optional[int] = None,
         agent_hero_id: str = "hero_dorinthea_ironsong",
         opponent_hero_id: str = "hero_rhinar_reckless_rampage",
-        max_turns: int = 60,
+        max_turns: int = 2000,
         deck_size: int = 36,
         agent_deck_style: str = "balanced",
         opponent_deck_style: str = "balanced",

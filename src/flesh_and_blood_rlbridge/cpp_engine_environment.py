@@ -38,13 +38,14 @@ Usage
 
     engine_dir = "results/cpp_engines/Ira_vs_Ira"
     if is_cpp_engine_available(engine_dir):
-        env = CppEngineEnvironment(engine_dir=engine_dir, max_turns=200)
+        env = CppEngineEnvironment(engine_dir=engine_dir, max_turns=2000)
         obs, info = env.reset()
         result = env.step(0)
 
-The observation JSON format is identical to
-:meth:`TalisharEngineEnvironment._encode_observation` so agents trained on
-one environment transfer seamlessly to the other.
+The observation JSON format mirrors
+:meth:`TalisharEngineEnvironment._encode_observation` closely enough that
+agents trained on one environment can be transferred to the other with
+minimal adaptation.
 """
 
 from __future__ import annotations
@@ -58,6 +59,13 @@ from typing import Any, Optional
 
 from rlbridge.environments.base import rlbridgeEnvironment
 from rlbridge.protocol.messages import RenderResult, ResetResult, StepResult, TextSpace
+
+from .talishar_default_policy import (
+    _CARD_RESOURCE_STATS,
+    _CARD_STATS,
+    _MIN_BLOCK_VALUE,
+    _strip_revert_actions,
+)
 
 # Reward constants mirror talishar_engine_environment.py
 _TRUNCATION_PENALTY = 0
@@ -128,8 +136,8 @@ def load_fab_engine(engine_dir: str | Path) -> Any:
 class CppEngineEnvironment(rlbridgeEnvironment):
     """RL environment backed by a compiled C++ FAB game engine.
 
-    Observation / action format is identical to
-    :class:`TalisharEngineEnvironment` so agents are interchangeable.
+    Observation / action format is Talishar-compatible (same top-level
+    contract and legal-action indexing), enabling direct policy transfer.
 
     Parameters
     ----------
@@ -146,7 +154,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         self,
         *,
         engine_dir: str | Path,
-        max_turns: int = 1000,
+        max_turns: int = 2000,
         deck1: str = "",
         deck2: str = "",
     ) -> None:
@@ -181,24 +189,287 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         """Return legal actions from the C++ engine as a list of LegalAction objects."""
         return self._gs.get_legal_actions()
 
+    def _is_pass_like(self, action: Any) -> bool:
+        code = int(getattr(action, "action_code", 0) or 0)
+        if code in (99, 101, 105):
+            return True
+        label = str(getattr(action, "label", "") or "").strip().lower()
+        return any(tok in label for tok in ("pass", "end turn", "no block", "skip"))
+
+    def _card_cost(self, card: Any) -> int:
+        try:
+            cost = int(getattr(card, "cost", 0) or 0)
+        except (TypeError, ValueError):
+            cost = 0
+        if cost > 0:
+            return cost
+        cid = str(getattr(card, "card_id", "") or "").strip()
+        if cid in _CARD_RESOURCE_STATS:
+            return _CARD_RESOURCE_STATS[cid][1]
+        return 0
+
+    def _card_pitch(self, card: Any) -> int:
+        try:
+            pitch = int(getattr(card, "pitch", 0) or 0)
+        except (TypeError, ValueError):
+            pitch = 0
+        if pitch > 0:
+            return pitch
+        cid = str(getattr(card, "card_id", "") or "").strip()
+        if cid in _CARD_RESOURCE_STATS:
+            return _CARD_RESOURCE_STATS[cid][0]
+        return 0
+
+    def _is_affordable_hand_play(self, action: Any, hand_cards: list[Any]) -> bool:
+        """Return True when a hand play action can be paid with other hand cards."""
+        if str(getattr(action, "zone", "") or "").strip().lower() != "hand":
+            return True
+        if int(getattr(action, "action_code", 0) or 0) != 27:
+            return True
+
+        try:
+            idx = int(str(getattr(action, "button_input", "") or ""))
+        except (TypeError, ValueError):
+            return False
+        if idx < 0 or idx >= len(hand_cards):
+            return False
+
+        card = hand_cards[idx]
+        cost = self._card_cost(card)
+        if cost <= 0:
+            return True
+
+        available = 0
+        for j, c in enumerate(hand_cards):
+            if j == idx:
+                continue
+            available += self._card_pitch(c)
+        return cost <= available
+
+    def _card_defense(self, card: Any) -> int:
+        try:
+            defense = int(getattr(card, "defense", 0) or 0)
+        except (TypeError, ValueError):
+            defense = 0
+        if defense > 0:
+            return defense
+        cid = str(getattr(card, "card_id", "") or "").strip()
+        if cid in _CARD_STATS:
+            return _CARD_STATS[cid][1]
+        return 0
+
+    def _is_hand_block_action(self, action: Any) -> bool:
+        return (
+            str(getattr(action, "zone", "") or "").strip().lower() == "hand"
+            and int(getattr(action, "action_code", 0) or 0) == 27
+        )
+
+    def _is_viable_block_play(self, action: Any, hand_cards: list[Any]) -> bool:
+        """Return True when a hand play can be used as a dedicated block."""
+        if not self._is_hand_block_action(action):
+            return True
+
+        try:
+            idx = int(str(getattr(action, "button_input", "") or ""))
+        except (TypeError, ValueError):
+            return False
+        if idx < 0 or idx >= len(hand_cards):
+            return False
+
+        card = hand_cards[idx]
+        if not self._is_affordable_hand_play(action, hand_cards):
+            return False
+        return self._card_defense(card) >= _MIN_BLOCK_VALUE
+
+    def _apply_block_phase_filter(self, legal: list[Any]) -> list[Any]:
+        """During block phase, only offer viable blocks or pass."""
+        pass_actions = [a for a in legal if self._is_pass_like(a)]
+        hand_cards = self._hand_cards()
+        viable_blocks = [
+            a for a in legal
+            if self._is_hand_block_action(a) and self._is_viable_block_play(a, hand_cards)
+        ]
+        if viable_blocks:
+            return viable_blocks + pass_actions
+
+        if pass_actions:
+            return [pass_actions[0]]
+        return [type("_Pass", (), {
+            "action_code": 99,
+            "button_input": "",
+            "card_id": "",
+            "zone": "button",
+            "label": "Pass",
+        })()]
+
+    def _filter_legal_actions(self, legal: list[Any]) -> list[Any]:
+        """Filter legal actions to avoid impossible plays and dead loops.
+
+        If no actionable (non-pass) option remains, force a pass-only set.
+        """
+        hand_cards = self._hand_cards()
+        filtered = [
+            a for a in legal
+            if self._is_affordable_hand_play(a, hand_cards)
+        ]
+
+        phase = self._phase_code()
+        if phase in {"b", "d"}:
+            filtered = self._apply_block_phase_filter(filtered)
+
+        stripped_keys = {
+            (
+                int(d.get("action_code", 0)),
+                str(d.get("button_input", "") or ""),
+                str(d.get("label", "") or ""),
+            )
+            for d in _strip_revert_actions(phase, [
+                {
+                    "action_code": int(getattr(a, "action_code", 0) or 0),
+                    "button_input": str(getattr(a, "button_input", "") or ""),
+                    "label": str(getattr(a, "label", "") or ""),
+                    "zone": str(getattr(a, "zone", "") or ""),
+                }
+                for a in filtered
+            ])
+        }
+        filtered = [
+            a for a in filtered
+            if (
+                int(getattr(a, "action_code", 0) or 0),
+                str(getattr(a, "button_input", "") or ""),
+                str(getattr(a, "label", "") or ""),
+            ) in stripped_keys
+        ]
+
+        actionable = [a for a in filtered if not self._is_pass_like(a)]
+        if actionable:
+            return filtered
+
+        pass_actions = [a for a in filtered if self._is_pass_like(a)]
+        if pass_actions:
+            return [pass_actions[0]]
+
+        # Final fallback: synthetic pass action so the turn can progress.
+        return [type("_Pass", (), {
+            "action_code": 99,
+            "button_input": "",
+            "card_id": "",
+            "zone": "button",
+            "label": "Pass",
+        })()]
+
+    def _phase_code(self) -> str:
+        """Return a Talishar-like phase token from the C++ engine phase value."""
+        phase = getattr(self._gs, "phase", None)
+        phase_value: Optional[int]
+        if phase is None:
+            phase_value = None
+        else:
+            try:
+                phase_value = int(phase)
+            except (TypeError, ValueError):
+                phase_value = None
+
+        # Matches the generated C++ enum order in scripts/generate_cpp_engine.py
+        # START=0, MAIN=1, PITCH=2, ATTACK=3, BLOCK=4, DAMAGE=5, END=6, OVER=7
+        mapping = {
+            0: "startturn",
+            1: "m",
+            2: "p",
+            3: "a",
+            4: "d",
+            5: "damage",
+            6: "endphase",
+            7: "OVER",
+        }
+        return mapping.get(phase_value, "m")
+
+    def _acting_idx(self) -> int:
+        return 0 if self._acting_player == 1 else 1
+
+    def _hand_cards(self) -> list[Any]:
+        attr = "p1_hand" if self._acting_idx() == 0 else "p2_hand"
+        cards = getattr(self._gs, attr, None)
+        return list(cards) if isinstance(cards, list) else []
+
+    def _pitch_count(self) -> int:
+        attr = "p1_pitch_size" if self._acting_idx() == 0 else "p2_pitch_size"
+        try:
+            return int(getattr(self._gs, attr, 0) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _encode_player_hand(self, legal: list[Any]) -> list[dict[str, Any]]:
+        """Return Talishar-compatible playerHand entries for all hand cards."""
+        cards = self._hand_cards()
+        if not cards:
+            # Back-compat fallback for older compiled modules lacking hand bindings.
+            return [
+                {
+                    "cardID": str(getattr(a, "card_id", "") or ""),
+                    "action": int(getattr(a, "action_code", 0) or 0),
+                    "actionDataOverride": str(getattr(a, "button_input", "") or ""),
+                    "label": str(getattr(a, "label", "") or ""),
+                }
+                for a in legal
+                if str(getattr(a, "zone", "")).strip().lower() == "hand"
+            ]
+
+        hand_legal: dict[str, Any] = {}
+        for a in legal:
+            zone = str(getattr(a, "zone", "") or "").strip().lower()
+            if zone == "hand" and int(getattr(a, "action_code", 0) or 0) == 27:
+                hand_legal[str(getattr(a, "button_input", "") or "")] = a
+
+        out: list[dict[str, Any]] = []
+        for i, c in enumerate(cards):
+            key = str(i)
+            a = hand_legal.get(key)
+            card_id = str(getattr(c, "card_id", "") or "")
+            fallback_label = str(getattr(c, "name", "") or card_id)
+            if a is not None:
+                out.append(
+                    {
+                        "cardID": card_id,
+                        "action": 27,
+                        "actionDataOverride": key,
+                        "label": str(getattr(a, "label", "") or fallback_label),
+                    }
+                )
+            else:
+                out.append(
+                    {
+                        "cardID": card_id,
+                        "action": 0,
+                        "actionDataOverride": "",
+                        "label": fallback_label,
+                    }
+                )
+        return out
+
     def _encode_observation(self, legal: list[Any]) -> str:
         """Encode the current C++ game state as a JSON string.
 
         Format mirrors :meth:`TalisharEngineEnvironment._encode_observation`
-        so agents trained on Talishar transfer directly.
+        (same keys and legal action indexing).
         """
         gs = self._gs
+        legal = self._filter_legal_actions(legal)
+        player_hand = self._encode_player_hand(legal)
+        acting_idx = self._acting_idx()
+        player_hand_size = len(player_hand) if player_hand else (
+            gs.p1_hand_size if acting_idx == 0 else gs.p2_hand_size
+        )
         obs: dict[str, Any] = {
             "actingPlayerID": self._acting_player,
             "selfPlay": True,
             "playerHealth": gs.p1_health if self._acting_player == 1 else gs.p2_health,
             "opponentHealth": gs.p2_health if self._acting_player == 1 else gs.p1_health,
             "turnNo": gs.turn_no,
-            "turnPhase": "m",           # simplified — full phase tracking is TODO
-            "havePriority": True,
-            "playerHandSize": (
-                gs.p1_hand_size if self._acting_player == 1 else gs.p2_hand_size
-            ),
+            "turnPhase": self._phase_code(),
+            "havePriority": not self._is_game_over(),
+            "playerHandSize": player_hand_size,
             "opponentHandSize": (
                 gs.p2_hand_size if self._acting_player == 1 else gs.p1_hand_size
             ),
@@ -208,8 +479,8 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             "opponentDeckCount": (
                 gs.p2_deck_size if self._acting_player == 1 else gs.p1_deck_size
             ),
-            "playerPitchCount": 0,
-            "playerHand": [],           # hand detail not yet exposed by bindings
+            "playerPitchCount": self._pitch_count(),
+            "playerHand": player_hand,
             "legalActions": [
                 {"index": i, "label": a.label, "zone": a.zone}
                 for i, a in enumerate(legal)
@@ -303,7 +574,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         self._last_action_key = None
         self._last_turn_no = 0
 
-        legal = self._legal_actions()
+        legal = self._filter_legal_actions(self._legal_actions())
         obs = self._encode_observation(legal)
         return ResetResult(
             observation=obs,
@@ -330,13 +601,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
     def step(self, action: Any) -> StepResult:
         assert self._gs is not None, "call reset() first"
 
-        legal = self._legal_actions()
-        if not legal:
-            # No legal actions — pass and end
-            legal = [type("_Pass", (), {
-                "action_code": 99, "button_input": "", "card_id": "",
-                "zone": "button", "label": "Pass"
-            })()]
+        legal = self._filter_legal_actions(self._legal_actions())
 
         idx, chosen = self._parse_action(action, legal)
 
@@ -356,7 +621,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         repeat_pen = self._repeat_penalty(chosen.action_code, chosen.button_input)
         reward = self._compute_reward(prev_p1, prev_p2, terminated, truncated, repeat_pen)
 
-        new_legal = self._legal_actions()
+        new_legal = self._filter_legal_actions(self._legal_actions())
         obs = self._encode_observation(new_legal)
 
         return StepResult(
@@ -389,7 +654,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
     def sample_action(self) -> str:
         """Return a random legal action index as a string."""
         import random
-        legal = self._legal_actions()
+        legal = self._filter_legal_actions(self._legal_actions())
         if not legal:
             return "0"
         return str(random.randrange(len(legal)))
@@ -405,7 +670,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             f"P1 hand: {gs.p1_hand_size}  deck: {gs.p1_deck_size}",
             f"P2 hand: {gs.p2_hand_size}  deck: {gs.p2_deck_size}",
         ]
-        legal = self._legal_actions()
+        legal = self._filter_legal_actions(self._legal_actions())
         if legal:
             lines.append("Legal actions:")
             for i, a in enumerate(legal[:10]):
@@ -466,7 +731,7 @@ def get_or_none(
     deck1: str,
     deck2: str,
     cache_dir: str | Path | None = None,
-    max_turns: int = 1000,
+    max_turns: int = 2000,
 ) -> Optional["CppEngineEnvironment"]:
     """Return a :class:`CppEngineEnvironment` if one is compiled for this matchup.
 

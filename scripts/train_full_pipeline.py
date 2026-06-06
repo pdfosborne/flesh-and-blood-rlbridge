@@ -1293,6 +1293,20 @@ def _save_play_checkpoint_package(
     return checkpoint_dir
 
 
+def _ensure_hero_in_header(equipment_header: str, hero_id: str) -> str:
+    """Guarantee ``hero_id`` is the first token of ``equipment_header``.
+
+    Talishar's deck file parser requires the hero card ID as the very first
+    token on line 1.  When it is absent the hero portrait is never loaded.
+    ``hero_id`` uses underscores; convert dashes just in case.
+    """
+    hero = hero_id.replace("-", "_").strip()
+    header = (equipment_header or "").strip()
+    if hero and not header.startswith(hero):
+        header = (hero + " " + header).strip()
+    return header
+
+
 def _save_phase3_play_checkpoints(
     *,
     out_dir: Path,
@@ -1311,6 +1325,11 @@ def _save_phase3_play_checkpoints(
     p2_equipment_header: str,
     p1_opponent_deck_name: str,
 ) -> None:
+    # Always store the hero ID as the first token so eval scripts can
+    # reconstruct a valid deck file without needing external hero metadata.
+    _p1_header = _ensure_hero_in_header(p1_equipment_header, matchup.p1_hero)
+    _p2_header = _ensure_hero_in_header(p2_equipment_header, matchup.p2_hero)
+
     p1_ckpt = _save_play_checkpoint_package(
         agent=p1_agent,
         out_dir=out_dir,
@@ -1321,7 +1340,7 @@ def _save_phase3_play_checkpoints(
         total_target_episodes=total_target_episodes,
         reward_history=p1_rewards,
         deck_cards=p1_deck_cards,
-        equipment_header=p1_equipment_header,
+        equipment_header=_p1_header,
         opponent_mode=opponent_mode,
         opponent_deck_name=p1_opponent_deck_name,
     )
@@ -1338,7 +1357,7 @@ def _save_phase3_play_checkpoints(
         total_target_episodes=total_target_episodes,
         reward_history=p2_rewards,
         deck_cards=p2_deck_cards or {},
-        equipment_header=p2_equipment_header,
+        equipment_header=_p2_header,
         opponent_mode=opponent_mode,
         opponent_deck_name=(matchup.p1_deck if opponent_mode == "dual" else p1_opponent_deck_name),
     )

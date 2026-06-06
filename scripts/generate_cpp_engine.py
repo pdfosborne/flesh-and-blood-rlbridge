@@ -13,7 +13,7 @@ Steps performed:
        register_cards.cpp             — wires stubs into GameState::register_all_cards()
        bindings.cpp                   — pybind11 Python bindings
        CMakeLists.txt                 — CMake build config
-       fab_engine_environment.py      — drop-in Python env (no HTTP required)
+    build.sh / build.ps1          — convenience build helpers
        card_manifest.json             — discovered metadata for reference
 
 Build the output with:
@@ -709,6 +709,17 @@ namespace py = pybind11;
 PYBIND11_MODULE(fab_engine, m) {{
     m.doc() = "FAB engine — {deck1} vs {deck2}";
 
+    py::class_<Card>(m, "Card")
+        .def_readonly("card_id", &Card::card_id)
+        .def_readonly("name", &Card::name)
+        .def_readonly("cost", &Card::cost)
+        .def_readonly("pitch", &Card::pitch)
+        .def_readonly("power", &Card::power)
+        .def_readonly("defense", &Card::defense)
+        .def_readonly("card_type", &Card::card_type)
+        .def_readonly("zone", &Card::zone)
+        .def_readonly("action_code", &Card::action_code);
+
     py::class_<LegalAction>(m, "LegalAction")
         .def_readonly("action_code",  &LegalAction::action_code)
         .def_readonly("button_input", &LegalAction::button_input)
@@ -750,10 +761,18 @@ PYBIND11_MODULE(fab_engine, m) {{
             [](const GameState& g) {{ return (int)g.players[0].hand.size(); }})
         .def_property_readonly("p2_hand_size",
             [](const GameState& g) {{ return (int)g.players[1].hand.size(); }})
+        .def_property_readonly("p1_hand",
+            [](const GameState& g) {{ return g.players[0].hand; }})
+        .def_property_readonly("p2_hand",
+            [](const GameState& g) {{ return g.players[1].hand; }})
         .def_property_readonly("p1_deck_size",
             [](const GameState& g) {{ return (int)g.players[0].deck.size(); }})
         .def_property_readonly("p2_deck_size",
             [](const GameState& g) {{ return (int)g.players[1].deck.size(); }})
+        .def_property_readonly("p1_pitch_size",
+            [](const GameState& g) {{ return (int)g.players[0].pitch_zone.size(); }})
+        .def_property_readonly("p2_pitch_size",
+            [](const GameState& g) {{ return (int)g.players[1].pitch_zone.size(); }})
         .def_property_readonly("consecutive_passes",
             [](const GameState& g) {{ return g.consecutive_passes; }})
         .def_readwrite("max_consecutive_passes", &GameState::max_consecutive_passes);

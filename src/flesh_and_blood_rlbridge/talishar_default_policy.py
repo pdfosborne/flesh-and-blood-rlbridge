@@ -31,6 +31,8 @@ _YES_LABELS = ("yes", "confirm", "continue", "ok", "accept", "done")
 # Mode codes treated as pass/skip.  10000 (Cancel) and 10001 (Undo Block)
 # deliberately excluded — they undo committed plays and cause loops.
 _PASS_MODE_CODES: frozenset[int] = frozenset({99, 101, 105})
+# Talishar maps both "Cancel" (pitch) and general undo to 10000; 10001 is Undo Block.
+_REVERT_MODE_CODES: frozenset[int] = frozenset({10000, 10001})
 
 # Talishar phase code buckets (normalised to lowercase).
 # ── CanPassPhase=1 (mode=99 advances the game) ───────────────────────────────
@@ -58,6 +60,8 @@ _POPUP_PHASES:   frozenset[str] = frozenset({"choosemultizone"})  # mandatory po
 # CHOOSEHAND: hand cards exposed as action=16 zone=hand (not in popup)
 _CHOOSE_HAND_PHASES: frozenset[str] = frozenset({
     "choosehand", "choosehandcancel",
+    # Mandatory multi-card hand selection windows (mode=99 is a no-op here)
+    "multichoosehand", "multichoosetext",
 })
 # BUTTONINPUT: popup buttons with action=17; must press one (or 105)
 _BUTTON_INPUT_PHASES: frozenset[str] = frozenset({
@@ -103,7 +107,23 @@ def _load_card_stats() -> dict[str, tuple[int, int]]:
     return stats
 
 
+def _load_card_resource_stats() -> dict[str, tuple[int, int]]:
+    """Load (pitch, cost) keyed by Talishar card-ID slug from cards.json."""
+    db_path = Path(__file__).parent / "card_db" / "cards.json"
+    try:
+        records = json.loads(db_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    stats: dict[str, tuple[int, int]] = {}
+    for rec in records:
+        cid = rec.get("id", "")
+        if "_" in cid:
+            stats[cid] = (int(rec.get("pitch") or 0), int(rec.get("cost") or 0))
+    return stats
+
+
 _CARD_STATS: dict[str, tuple[int, int]] = _load_card_stats()
+_CARD_RESOURCE_STATS: dict[str, tuple[int, int]] = _load_card_resource_stats()
 
 
 def _to_int(value: Any, default: int = 0) -> int:
@@ -123,6 +143,47 @@ def _is_pass_action(action: dict[str, Any]) -> bool:
         return True
     label = _normalize(action.get("label", ""))
     return any(tok in label for tok in ("pass", "end turn", "no block", "skip"))
+
+
+def _is_revert_action(action: dict[str, Any]) -> bool:
+    """Return True for Cancel / Undo actions that revert committed game state."""
+    code = _to_int(action.get("action_code", 0))
+    if code in _REVERT_MODE_CODES:
+        return True
+    label = _normalize(action.get("label", ""))
+    return "undo" in label or label == "cancel"
+
+
+def _pitch_hand_actions(filtered: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        a for a in filtered
+        if a.get("zone") == "hand"
+        and _to_int(a.get("action_code", 0)) == 27
+    ]
+
+
+def _strip_revert_actions(
+    phase: str,
+    filtered: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Remove state-revert actions except pitch-window abort when nothing can pitch."""
+    allow_cancel_abort = (
+        phase == "p"
+        and not _pitch_hand_actions(filtered)
+    )
+    kept: list[dict[str, Any]] = []
+    for action in filtered:
+        code = _to_int(action.get("action_code", 0))
+        if code == 10001:
+            continue
+        if code == 10000:
+            if allow_cancel_abort:
+                kept.append(action)
+            continue
+        if _is_revert_action(action):
+            continue
+        kept.append(action)
+    return kept
 
 
 def _get_phase(state: dict[str, Any]) -> str:
@@ -213,11 +274,49 @@ def _best_index(indices: list[int], scores: dict[int, tuple[float, ...]]) -> int
     return max(indices, key=lambda i: scores[i])
 
 
-def _card_pitch_value(card: Optional[dict[str, Any]]) -> int:
+def _card_id_from(
+    card: Optional[dict[str, Any]],
+    action: Optional[dict[str, Any]] = None,
+) -> str:
+    if isinstance(card, dict):
+        for key in ("cardNumber", "cardID", "card_id"):
+            cid = str(card.get(key, "")).strip()
+            if cid and cid.lower() not in {"cardback", "card_back"}:
+                return cid
+    if isinstance(action, dict):
+        cid = str(action.get("card_id", "")).strip()
+        if cid:
+            return cid
+    return ""
+
+
+def _card_cost(
+    card: Optional[dict[str, Any]],
+    action: Optional[dict[str, Any]] = None,
+) -> int:
+    """Return the resource cost to play a card.
+
+    Talishar hand JSON often omits ``cost``; fall back to the local card DB.
+    """
+    if isinstance(card, dict):
+        for key in ("cost", "resourceCost"):
+            val = card.get(key)
+            if val is not None:
+                return _to_int(val, 0)
+    cid = _card_id_from(card, action)
+    if cid in _CARD_RESOURCE_STATS:
+        return _CARD_RESOURCE_STATS[cid][1]
+    return 0
+
+
+def _card_pitch_value(
+    card: Optional[dict[str, Any]],
+    action: Optional[dict[str, Any]] = None,
+) -> int:
     """Return the pitch/resource value of a card (blue=3, yellow=2, red=1, unknown=0).
 
     Talishar exposes this as ``card["resource"]`` (the number of resources generated
-    when the card is pitched).  Falls back to ``card["pitch"]`` for compatibility.
+    when the card is pitched).  Falls back to ``card["pitch"]`` and the card DB.
     """
     if not isinstance(card, dict):
         return 0
@@ -225,7 +324,108 @@ def _card_pitch_value(card: Optional[dict[str, Any]]) -> int:
         val = card.get(key)
         if val is not None:
             return _to_int(val, 0)
+    cid = _card_id_from(card, action)
+    if cid in _CARD_RESOURCE_STATS:
+        return _CARD_RESOURCE_STATS[cid][0]
     return 0
+
+
+def _card_defense(
+    card: Optional[dict[str, Any]],
+    action: Optional[dict[str, Any]] = None,
+) -> int:
+    """Return block/defense value, preferring live Talishar state over the card DB."""
+    if isinstance(card, dict):
+        for key in ("defense", "block", "blockValue"):
+            val = card.get(key)
+            if val is not None:
+                return _to_int(val, 0)
+    cid = _card_id_from(card, action)
+    if cid in _CARD_STATS:
+        return _CARD_STATS[cid][1]
+    return 0
+
+
+def _is_affordable_hand_play(
+    action: dict[str, Any],
+    state: dict[str, Any],
+) -> bool:
+    """Return True when a hand play can be paid with other hand cards."""
+    zone = _normalize(action.get("zone", ""))
+    code = _to_int(action.get("action_code", 0))
+    if zone != "hand" or code != 27:
+        return True
+
+    card = _match_action_card(action, state)
+    cost = _card_cost(card, action)
+    if cost <= 0:
+        return True
+
+    hand_cards = [c for c in state.get("playerHand", []) if isinstance(c, dict)]
+    total_pitch = sum(_card_pitch_value(c) for c in hand_cards)
+    card_pitch = _card_pitch_value(card, action)
+    available = total_pitch - card_pitch
+    return cost <= available
+
+
+def _is_hand_block_action(action: dict[str, Any]) -> bool:
+    return (
+        _to_int(action.get("action_code", 0)) == 27
+        and _normalize(action.get("zone", "")) == "hand"
+    )
+
+
+def _is_viable_block_action(
+    action: dict[str, Any],
+    state: dict[str, Any],
+) -> bool:
+    """Return True when a hand card can legally contribute to a block."""
+    if not _is_hand_block_action(action):
+        return True
+
+    card = _match_action_card(action, state)
+    if isinstance(card, dict) and _to_int(card.get("action", 0), 0) == 0:
+        return False
+    if not _is_affordable_hand_play(action, state):
+        return False
+    return _card_defense(card, action) >= _MIN_BLOCK_VALUE
+
+
+def _apply_block_phase_filter(
+    state: dict[str, Any],
+    filtered: list[dict[str, Any]],
+    *,
+    block_blacklist: frozenset[str] = frozenset(),
+) -> list[dict[str, Any]]:
+    """During block/defense phases, only offer viable blocks or pass."""
+    pass_actions = [a for a in filtered if _is_pass_action(a)]
+    auxiliary = [
+        a for a in filtered
+        if not _is_pass_action(a)
+        and not _is_hand_block_action(a)
+        and not _is_revert_action(a)
+        and _to_int(a.get("action_code", 0)) != 3
+    ]
+    viable_blocks = [
+        a for a in filtered
+        if _is_hand_block_action(a)
+        and _is_viable_block_action(a, state)
+        and str(a.get("label", "") or "") not in block_blacklist
+    ]
+    if viable_blocks:
+        return viable_blocks + pass_actions + auxiliary
+
+    if pass_actions:
+        return [pass_actions[0]]
+    return [
+        {
+            "action_code": 99,
+            "button_input": "",
+            "card_id": "",
+            "zone": "button",
+            "label": "Pass",
+        }
+    ]
 
 
 def choose_talishar_action_index(

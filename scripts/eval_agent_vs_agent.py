@@ -105,6 +105,7 @@ def run_episode(
             obs,
             deck_player_id=1,
             terminated=bool(step_result and step_result.terminated),
+            truncated=bool(step_result and step_result.truncated),
         ),
     }
 
