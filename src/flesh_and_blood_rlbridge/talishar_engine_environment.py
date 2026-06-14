@@ -80,6 +80,7 @@ from urllib3.util.retry import Retry
 from rlbridge.environments.base import rlbridgeEnvironment
 from rlbridge.protocol.messages import RenderResult, ResetResult, StepResult, TextSpace
 
+from .combat_log_tracker import CombatTurnTracker, extract_talishar_chat_log_lines
 from .talishar_default_policy import (
     choose_talishar_action_index,
     _get_phase as _dp_get_phase,
@@ -171,6 +172,9 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
     render_width, render_height:
         Playwright viewport size for ``rgb_array`` screenshots (default 1920×1080).
         Override via ``TALISHAR_RENDER_WIDTH`` / ``TALISHAR_RENDER_HEIGHT``.
+    enable_combat_tracker:
+        When ``True`` (default), capture per-step combat traces and board-state
+        action statistics for debugging and parity checks.
     """
 
     def __init__(
@@ -206,6 +210,8 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         # connection / game-creation hangs.  Off by default to avoid polluting
         # training output.
         verbose: bool = False,
+        # Record per-step combat/turn traces and board-state action stats.
+        enable_combat_tracker: bool = True,
     ) -> None:
         self._base_url = (
             base_url or os.environ.get("TALISHAR_URL", "http://localhost")
@@ -237,6 +243,11 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         )
         self._opened_frontend_url: Optional[str] = None
         self._verbose = verbose
+        self._enable_combat_tracker = bool(enable_combat_tracker)
+        self._combat_tracker = CombatTurnTracker(
+            engine_name="talishar_http",
+            enabled=self._enable_combat_tracker,
+        )
 
         # HTTP session with connection pooling and automatic retry on transient
         # server errors.  One persistent TCP connection is reused for all steps
@@ -308,6 +319,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                             max_turns=max_turns,
                             deck1=lookup_deck1,
                             deck2=lookup_deck2,
+                            enable_combat_tracker=self._enable_combat_tracker,
                         )
                     except Exception:
                         self._cpp_env = None
@@ -317,6 +329,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                     lookup_deck2,
                     cache_dir=cpp_engine_cache_dir,
                     max_turns=max_turns,
+                    enable_combat_tracker=self._enable_combat_tracker,
                 )
             if self._cpp_env is not None:
                 import warnings
@@ -334,6 +347,125 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
     def _using_cpp(self) -> bool:
         """True when all environment calls are delegated to the C++ engine."""
         return self._cpp_env is not None
+
+    def _tracker_state_snapshot(
+        self,
+        state: dict[str, Any],
+        legal_actions: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        player_hand = state.get("playerHand", [])
+        opp_hand = state.get("opponentHand", [])
+        return {
+            "acting_player_id": int(self._acting_player_id),
+            "turn_no": int(state.get("turnNo", 0) or 0),
+            "phase": self._phase_str(state),
+            "player_health": int(state.get("playerHealth", 0) or 0),
+            "opponent_health": int(state.get("opponentHealth", 0) or 0),
+            "player_hand_size": len(player_hand) if isinstance(player_hand, list) else 0,
+            "opponent_hand_size": len(opp_hand) if isinstance(opp_hand, list) else 0,
+            "player_deck_count": int(state.get("playerDeckCount", 0) or 0),
+            "opponent_deck_count": int(state.get("opponentDeckCount", 0) or 0),
+            "player_pitch_count": int(state.get("playerPitchCount", 0) or 0),
+            "legal_count": len(legal_actions),
+        }
+
+    def _tracker_action_dict(self, action: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "action_code": int(_dp_to_int(action.get("action_code", 0))),
+            "button_input": str(action.get("button_input", "") or ""),
+            "card_id": str(action.get("card_id", "") or ""),
+            "zone": str(action.get("zone", "") or ""),
+            "label": str(action.get("label", "") or ""),
+        }
+
+    def _tracker_action_for_submission(
+        self,
+        legal_actions: list[dict[str, Any]],
+        mode: int,
+        button_input: str,
+    ) -> dict[str, Any]:
+        target_mode = int(mode)
+        target_button = str(button_input or "")
+        for action in legal_actions:
+            if (
+                int(_dp_to_int(action.get("action_code", 0))) == target_mode
+                and str(action.get("button_input", "") or "") == target_button
+            ):
+                return self._tracker_action_dict(action)
+        for action in legal_actions:
+            if int(_dp_to_int(action.get("action_code", 0))) == target_mode:
+                return self._tracker_action_dict(action)
+        return {
+            "action_code": target_mode,
+            "button_input": target_button,
+            "card_id": "",
+            "zone": "button",
+            "label": f"mode={target_mode}",
+        }
+
+    def _tracker_stub(self, latest_event: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+        if self._using_cpp:
+            try:
+                snap = self._cpp_env.get_combat_tracker_snapshot(  # type: ignore[union-attr]
+                    top_k=5,
+                    tail_events=0,
+                    tail_log_lines=25,
+                )
+                return {
+                    "enabled": bool(snap.get("enabled", True)),
+                    "engine": snap.get("engine", "cpp"),
+                    "steps_recorded": int(snap.get("steps_recorded", 0) or 0),
+                    "trace_digest": str(snap.get("trace_digest", "") or ""),
+                }
+            except Exception:
+                return {"enabled": False}
+
+        if not self._enable_combat_tracker:
+            return {"enabled": False}
+
+        snap = self._combat_tracker.snapshot(top_k=5, tail_events=0, tail_log_lines=25)
+        out: dict[str, Any] = {
+            "enabled": True,
+            "engine": str(snap.get("engine", "talishar_http")),
+            "steps_recorded": int(snap.get("steps_recorded", 0) or 0),
+            "trace_digest": str(snap.get("trace_digest", "") or ""),
+        }
+        if latest_event is not None:
+            out["latest_event"] = latest_event
+        return out
+
+    def get_combat_tracker_snapshot(
+        self,
+        *,
+        top_k: int = 10,
+        tail_events: int = 20,
+        tail_log_lines: int = 40,
+    ) -> dict[str, Any]:
+        """Return a detailed snapshot of tracked combat/turn statistics."""
+        if self._using_cpp:
+            return self._cpp_env.get_combat_tracker_snapshot(  # type: ignore[union-attr]
+                top_k=top_k,
+                tail_events=tail_events,
+                tail_log_lines=tail_log_lines,
+            )
+        return self._combat_tracker.snapshot(
+            top_k=top_k,
+            tail_events=tail_events,
+            tail_log_lines=tail_log_lines,
+        )
+
+    def get_combat_trace(self) -> list[dict[str, Any]]:
+        """Return the full per-step trace captured by the combat tracker."""
+        if self._using_cpp:
+            return self._cpp_env.get_combat_trace()  # type: ignore[union-attr]
+        return self._combat_tracker.trace()
+
+    def clear_combat_tracker(self) -> None:
+        """Clear all currently tracked combat/turn events and counters."""
+        if self._using_cpp:
+            self._cpp_env.clear_combat_tracker()  # type: ignore[union-attr]
+            return
+        self._combat_tracker.clear()
 
     # ── HTTP helpers ──────────────────────────────────────────────────────────
 
@@ -1542,6 +1674,20 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         legal_actions = self._legal_actions(self._last_state)
         obs = self._encode_observation(self._last_state, legal_actions)
 
+        if self._enable_combat_tracker:
+            self._combat_tracker.reset(
+                initial_snapshot=self._tracker_state_snapshot(self._last_state, legal_actions),
+                initial_legal_actions=[self._tracker_action_dict(a) for a in legal_actions],
+                combat_log_lines=extract_talishar_chat_log_lines(self._last_state.get("chatLog", "")),
+                metadata={
+                    "engine": "talishar_http",
+                    "game_name": self._game_name,
+                    "self_play": self._self_play,
+                },
+            )
+        else:
+            self._combat_tracker.clear()
+
         return ResetResult(
             observation=obs,
             info={
@@ -1551,6 +1697,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                 "opponent_hp": self._opp_hp,
                 "acting_player_id": self._acting_player_id,
                 "self_play": self._self_play,
+                "combat_tracker": self._tracker_stub(),
             },
         )
 
@@ -1568,6 +1715,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         state = self._last_state
         legal_actions = self._legal_actions(state)
         phase_before = _dp_get_phase(state)
+        before_snapshot = self._tracker_state_snapshot(state, legal_actions)
 
         mode, button_input = self._parse_action(action, legal_actions)
         mode, button_input = self._sanitize_revert_submission(
@@ -1575,6 +1723,11 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             button_input,
             legal_actions,
             state,
+        )
+        tracker_action = self._tracker_action_for_submission(
+            legal_actions,
+            mode,
+            button_input,
         )
 
         if phase_before in _dp_block_phases and mode == 27:
@@ -1685,6 +1838,20 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         new_legal_actions = self._legal_actions(new_state)
         obs = self._encode_observation(new_state, new_legal_actions)
 
+        tracker_event: Optional[dict[str, Any]] = None
+        if self._enable_combat_tracker:
+            tracker_event = self._combat_tracker.record_step(
+                before_snapshot=before_snapshot,
+                after_snapshot=self._tracker_state_snapshot(new_state, new_legal_actions),
+                action=tracker_action,
+                legal_before=[self._tracker_action_dict(a) for a in legal_actions],
+                legal_after=[self._tracker_action_dict(a) for a in new_legal_actions],
+                reward=float(reward),
+                terminated=terminated,
+                truncated=truncated,
+                combat_log_lines=extract_talishar_chat_log_lines(new_state.get("chatLog", "")),
+            )
+
         return StepResult(
             observation=obs,
             reward=reward,
@@ -1699,6 +1866,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                 "self_play": self._self_play,
                 "repeat_streak": self._repeat_streak,
                 "repeat_penalty": repeat_penalty,
+                "combat_tracker": self._tracker_stub(tracker_event),
             },
         )
 
@@ -1814,6 +1982,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         if self._using_cpp:
             self._cpp_env.close()  # type: ignore[union-attr]
             self._cpp_env = None
+            self._combat_tracker.clear()
             return
         self._close_playwright_page()
         try:
@@ -1828,6 +1997,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         self._last_state = {}
         self._initialized = False
         self._opened_frontend_url = None
+        self._combat_tracker.clear()
 
     @property
     def observation_space(self) -> TextSpace:

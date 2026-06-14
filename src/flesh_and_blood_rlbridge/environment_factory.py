@@ -190,6 +190,7 @@ class TalisharEngineFactory(rlbridgeEnvironmentFactory):
             render_height=kwargs.get("render_height"),
             use_cpp_engine=bool(kwargs.get("use_cpp_engine", True)),
             cpp_engine_cache_dir=kwargs.get("cpp_engine_cache_dir"),
+            enable_combat_tracker=bool(kwargs.get("enable_combat_tracker", True)),
         )
 
 

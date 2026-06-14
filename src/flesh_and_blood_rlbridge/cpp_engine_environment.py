@@ -60,6 +60,7 @@ from typing import Any, Optional
 from rlbridge.environments.base import rlbridgeEnvironment
 from rlbridge.protocol.messages import RenderResult, ResetResult, StepResult, TextSpace
 
+from .combat_log_tracker import CombatTurnTracker
 from .talishar_default_policy import (
     _CARD_RESOURCE_STATS,
     _CARD_STATS,
@@ -148,6 +149,9 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         Maximum steps before episode truncation.
     deck1, deck2:
         Deck names recorded in info dicts (cosmetic only).
+    enable_combat_tracker:
+        When ``True`` (default), capture per-step combat traces and board-state
+        action statistics for parity checks against Talishar HTTP outcomes.
     """
 
     def __init__(
@@ -157,11 +161,18 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         max_turns: int = 2000,
         deck1: str = "",
         deck2: str = "",
+        enable_combat_tracker: bool = True,
     ) -> None:
         self._engine_dir = Path(engine_dir).resolve()
         self._max_turns = max_turns
         self._deck1 = deck1
         self._deck2 = deck2
+        self._enable_combat_tracker = bool(enable_combat_tracker)
+        self._combat_tracker = CombatTurnTracker(
+            engine_name="cpp",
+            enabled=self._enable_combat_tracker,
+        )
+        self._synthetic_combat_log: list[str] = []
 
         # Load the compiled module once at construction time
         self._fab = load_fab_engine(self._engine_dir)
@@ -558,6 +569,112 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             reward = dmg_dealt * 0.01 - dmg_taken * 0.01 + _STEP_PENALTY
         return reward + repeat_penalty
 
+    def _action_to_dict(self, action: Any) -> dict[str, Any]:
+        return {
+            "action_code": int(getattr(action, "action_code", 0) or 0),
+            "button_input": str(getattr(action, "button_input", "") or ""),
+            "card_id": str(getattr(action, "card_id", "") or ""),
+            "zone": str(getattr(action, "zone", "") or ""),
+            "label": str(getattr(action, "label", "") or ""),
+        }
+
+    def _legal_to_dicts(self, legal: list[Any]) -> list[dict[str, Any]]:
+        return [self._action_to_dict(a) for a in legal]
+
+    def _tracker_state_snapshot(self, legal: list[Any]) -> dict[str, Any]:
+        gs = self._gs
+        acting = int(self._acting_player)
+        return {
+            "acting_player_id": acting,
+            "turn_no": int(getattr(gs, "turn_no", 0) or 0),
+            "phase": self._phase_code(),
+            "player_health": int(gs.p1_health if acting == 1 else gs.p2_health),
+            "opponent_health": int(gs.p2_health if acting == 1 else gs.p1_health),
+            "player_hand_size": int(gs.p1_hand_size if acting == 1 else gs.p2_hand_size),
+            "opponent_hand_size": int(gs.p2_hand_size if acting == 1 else gs.p1_hand_size),
+            "player_deck_count": int(gs.p1_deck_size if acting == 1 else gs.p2_deck_size),
+            "opponent_deck_count": int(gs.p2_deck_size if acting == 1 else gs.p1_deck_size),
+            "player_pitch_count": int(self._pitch_count()),
+            "legal_count": len(legal),
+        }
+
+    def _append_synthetic_log(
+        self,
+        before: dict[str, Any],
+        action: dict[str, Any],
+        after: dict[str, Any],
+        prev_p1: int,
+        prev_p2: int,
+        terminated: bool,
+        truncated: bool,
+    ) -> None:
+        action_label = str(action.get("label", "") or "").strip()
+        if not action_label:
+            action_label = f"mode={int(action.get('action_code', 0))}"
+        zone = str(action.get("zone", "") or "")
+        self._synthetic_combat_log.append(
+            f"P{before.get('acting_player_id', 1)} {action_label} ({zone})"
+        )
+
+        p1_now = int(self._gs.p1_health)
+        p2_now = int(self._gs.p2_health)
+        if prev_p1 != p1_now or prev_p2 != p2_now:
+            self._synthetic_combat_log.append(
+                f"HP P1 {prev_p1}->{p1_now} | P2 {prev_p2}->{p2_now}"
+            )
+
+        if str(before.get("phase", "")) != str(after.get("phase", "")):
+            self._synthetic_combat_log.append(
+                f"Phase {before.get('phase', '')} -> {after.get('phase', '')}"
+            )
+
+        if terminated:
+            winner = int(getattr(self._gs, "winner", -1))
+            winner_label = "draw" if winner < 0 else f"P{winner + 1}"
+            self._synthetic_combat_log.append(f"Game over winner={winner_label}")
+        elif truncated:
+            self._synthetic_combat_log.append("Episode truncated")
+
+        if len(self._synthetic_combat_log) > 4000:
+            self._synthetic_combat_log = self._synthetic_combat_log[-4000:]
+
+    def _tracker_stub(self, latest_event: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+        if not self._enable_combat_tracker:
+            return {"enabled": False}
+        snap = self._combat_tracker.snapshot(top_k=5, tail_events=0, tail_log_lines=25)
+        out: dict[str, Any] = {
+            "enabled": True,
+            "engine": str(snap.get("engine", "cpp")),
+            "steps_recorded": int(snap.get("steps_recorded", 0) or 0),
+            "trace_digest": str(snap.get("trace_digest", "") or ""),
+        }
+        if latest_event is not None:
+            out["latest_event"] = latest_event
+        return out
+
+    def get_combat_tracker_snapshot(
+        self,
+        *,
+        top_k: int = 10,
+        tail_events: int = 20,
+        tail_log_lines: int = 40,
+    ) -> dict[str, Any]:
+        """Return a detailed snapshot of tracked combat/turn statistics."""
+        return self._combat_tracker.snapshot(
+            top_k=top_k,
+            tail_events=tail_events,
+            tail_log_lines=tail_log_lines,
+        )
+
+    def get_combat_trace(self) -> list[dict[str, Any]]:
+        """Return the full per-step trace captured by the combat tracker."""
+        return self._combat_tracker.trace()
+
+    def clear_combat_tracker(self) -> None:
+        """Clear all currently tracked combat/turn events and counters."""
+        self._combat_tracker.clear()
+        self._synthetic_combat_log = []
+
     # ── rlbridge interface ────────────────────────────────────────────────────
 
     def reset(
@@ -576,6 +693,26 @@ class CppEngineEnvironment(rlbridgeEnvironment):
 
         legal = self._filter_legal_actions(self._legal_actions())
         obs = self._encode_observation(legal)
+
+        if self._enable_combat_tracker:
+            self._synthetic_combat_log = [
+                f"matchup {self._deck1 or 'P1'} vs {self._deck2 or 'P2'}"
+            ]
+            self._combat_tracker.reset(
+                initial_snapshot=self._tracker_state_snapshot(legal),
+                initial_legal_actions=self._legal_to_dicts(legal),
+                combat_log_lines=self._synthetic_combat_log,
+                metadata={
+                    "engine": "cpp",
+                    "engine_dir": str(self._engine_dir),
+                    "deck1": self._deck1,
+                    "deck2": self._deck2,
+                },
+            )
+        else:
+            self._combat_tracker.clear()
+            self._synthetic_combat_log = []
+
         return ResetResult(
             observation=obs,
             info={
@@ -595,6 +732,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
                 "opponent_hp": self._p2_hp,
                 "acting_player_id": self._acting_player,
                 "self_play": True,
+                "combat_tracker": self._tracker_stub(),
             },
         )
 
@@ -602,8 +740,11 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         assert self._gs is not None, "call reset() first"
 
         legal = self._filter_legal_actions(self._legal_actions())
+        before_snapshot = self._tracker_state_snapshot(legal)
+        legal_before = self._legal_to_dicts(legal)
 
         idx, chosen = self._parse_action(action, legal)
+        chosen_dict = self._action_to_dict(chosen)
 
         prev_p1 = self._gs.p1_health
         prev_p2 = self._gs.p2_health
@@ -623,6 +764,30 @@ class CppEngineEnvironment(rlbridgeEnvironment):
 
         new_legal = self._filter_legal_actions(self._legal_actions())
         obs = self._encode_observation(new_legal)
+        after_snapshot = self._tracker_state_snapshot(new_legal)
+
+        tracker_event: Optional[dict[str, Any]] = None
+        if self._enable_combat_tracker:
+            self._append_synthetic_log(
+                before_snapshot,
+                chosen_dict,
+                after_snapshot,
+                prev_p1,
+                prev_p2,
+                terminated,
+                truncated,
+            )
+            tracker_event = self._combat_tracker.record_step(
+                before_snapshot=before_snapshot,
+                after_snapshot=after_snapshot,
+                action=chosen_dict,
+                legal_before=legal_before,
+                legal_after=self._legal_to_dicts(new_legal),
+                reward=float(reward),
+                terminated=terminated,
+                truncated=truncated,
+                combat_log_lines=self._synthetic_combat_log,
+            )
 
         return StepResult(
             observation=obs,
@@ -648,6 +813,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
                 "self_play": True,
                 "repeat_streak": self._repeat_streak,
                 "repeat_penalty": repeat_pen,
+                "combat_tracker": self._tracker_stub(tracker_event),
             },
         )
 
@@ -687,6 +853,8 @@ class CppEngineEnvironment(rlbridgeEnvironment):
 
     def close(self) -> None:
         self._gs = None
+        self._combat_tracker.clear()
+        self._synthetic_combat_log = []
 
 
 # ── Cache management ──────────────────────────────────────────────────────────
@@ -732,6 +900,7 @@ def get_or_none(
     deck2: str,
     cache_dir: str | Path | None = None,
     max_turns: int = 2000,
+    enable_combat_tracker: bool = True,
 ) -> Optional["CppEngineEnvironment"]:
     """Return a :class:`CppEngineEnvironment` if one is compiled for this matchup.
 
@@ -747,6 +916,7 @@ def get_or_none(
             max_turns=max_turns,
             deck1=deck1,
             deck2=deck2,
+            enable_combat_tracker=enable_combat_tracker,
         )
     except Exception:
         return None
