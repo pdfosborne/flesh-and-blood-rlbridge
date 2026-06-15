@@ -5,14 +5,15 @@ from typing import Any, Optional
 from rlbridge.environments.base import rlbridgeEnvironment, rlbridgeEnvironmentFactory
 from rlbridge.protocol.messages import EnvironmentInfo, SuggestedHyperparameters
 
-from .simulator.deck_builder_environment import FleshAndBloodDeckBuilderEnvironment
 from .simulator.gameplay_environment import FleshAndBloodGameplayEnvironment
 from .talishar_deckbuilder_environment import TalisharDeckBuilderEnvironment
-from .talishar_sideboard_environment import TalisharSideboardEnvironment
 from .talishar_engine_environment import (
-    TalisharEngineEnvironment,
     _DEFAULT_DECK_LINK as _TALISHAR_DEFAULT_DECK,
 )
+from .talishar_engine_environment import (
+    TalisharEngineEnvironment,
+)
+from .talishar_sideboard_environment import TalisharSideboardEnvironment
 
 
 class FleshAndBloodFactory(rlbridgeEnvironmentFactory):
@@ -22,7 +23,7 @@ class FleshAndBloodFactory(rlbridgeEnvironmentFactory):
         *,
         agent_hero_id: str = "hero_dorinthea_ironsong",
         opponent_hero_id: str = "hero_rhinar_reckless_rampage",
-    max_turns: int = 2000,
+        max_turns: int = 2000,
         deck_size: int = 36,
         format: str = "classic_constructed",
         two_phase_deckbuild: bool = False,
@@ -120,7 +121,7 @@ class TalisharEngineFactory(rlbridgeEnvironmentFactory):
         *,
         deck_link: str = _TALISHAR_DEFAULT_DECK,
         game_format: str = "silver_age",
-    max_turns: int = 2000,
+        max_turns: int = 2000,
         self_play: bool = True,
     ) -> None:
         self._env_id = env_id
@@ -267,12 +268,8 @@ class TalisharDeckBuilderFactory(rlbridgeEnvironmentFactory):
             hero_class=str(kwargs.get("hero_class", self._hero_class)),
             game_format=str(kwargs.get("game_format", self._game_format)),
             num_eval_games=int(kwargs.get("num_eval_games", self._num_eval_games)),
-            opponent_deck_name=str(
-                kwargs.get("opponent_deck_name", self._opponent_deck_name)
-            ),
-            opponent_hero_id=str(
-                kwargs.get("opponent_hero_id", self._opponent_hero_id)
-            ),
+            opponent_deck_name=str(kwargs.get("opponent_deck_name", self._opponent_deck_name)),
+            opponent_hero_id=str(kwargs.get("opponent_hero_id", self._opponent_hero_id)),
             num_sideboard_episodes=int(
                 kwargs.get("num_sideboard_episodes", self._num_sideboard_episodes)
             ),
@@ -388,17 +385,13 @@ class TalisharSideboardFactory(rlbridgeEnvironmentFactory):
         return TalisharSideboardEnvironment(
             card_pool=card_pool,
             pool_by_id=pool_by_id,
-            opponent_hero_id=str(
-                kwargs.get("opponent_hero_id", self._opponent_hero_id)
-            ),
+            opponent_hero_id=str(kwargs.get("opponent_hero_id", self._opponent_hero_id)),
             hero_id=str(kwargs.get("hero_id", self._hero_id)),
             game_format=str(kwargs.get("game_format", self._game_format)),
             num_eval_games=int(kwargs.get("num_eval_games", self._num_eval_games)),
             base_url=kwargs.get("base_url"),
             talishar_assets_path=kwargs.get("talishar_assets_path"),
-            max_sideboard_steps=int(
-                kwargs.get("max_sideboard_steps", self._max_sideboard_steps)
-            ),
+            max_sideboard_steps=int(kwargs.get("max_sideboard_steps", self._max_sideboard_steps)),
             render_mode=render_mode,
         )
 

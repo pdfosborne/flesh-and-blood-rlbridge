@@ -178,7 +178,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         self._fab = load_fab_engine(self._engine_dir)
 
         # Per-episode state
-        self._gs: Any = None          # fab_engine.GameState
+        self._gs: Any = None  # fab_engine.GameState
         self._steps: int = 0
         self._p1_hp: int = 20
         self._p2_hp: int = 20
@@ -297,7 +297,8 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         pass_actions = [a for a in legal if self._is_pass_like(a)]
         hand_cards = self._hand_cards()
         viable_blocks = [
-            a for a in legal
+            a
+            for a in legal
             if self._is_hand_block_action(a) and self._is_viable_block_play(a, hand_cards)
         ]
         if viable_blocks:
@@ -305,70 +306,29 @@ class CppEngineEnvironment(rlbridgeEnvironment):
 
         if pass_actions:
             return [pass_actions[0]]
-        return [type("_Pass", (), {
-            "action_code": 99,
-            "button_input": "",
-            "card_id": "",
-            "zone": "button",
-            "label": "Pass",
-        })()]
+        return [
+            type(
+                "_Pass",
+                (),
+                {
+                    "action_code": 99,
+                    "button_input": "",
+                    "card_id": "",
+                    "zone": "button",
+                    "label": "Pass",
+                },
+            )()
+        ]
 
     def _filter_legal_actions(self, legal: list[Any]) -> list[Any]:
         """Filter legal actions to avoid impossible plays and dead loops.
 
-        If no actionable (non-pass) option remains, force a pass-only set.
+        Note: Filtering is currently disabled to ensure parity with Talishar.
         """
-        hand_cards = self._hand_cards()
-        filtered = [
-            a for a in legal
-            if self._is_affordable_hand_play(a, hand_cards)
-        ]
-
-        phase = self._phase_code()
-        if phase in {"b", "d"}:
-            filtered = self._apply_block_phase_filter(filtered)
-
-        stripped_keys = {
-            (
-                int(d.get("action_code", 0)),
-                str(d.get("button_input", "") or ""),
-                str(d.get("label", "") or ""),
-            )
-            for d in _strip_revert_actions(phase, [
-                {
-                    "action_code": int(getattr(a, "action_code", 0) or 0),
-                    "button_input": str(getattr(a, "button_input", "") or ""),
-                    "label": str(getattr(a, "label", "") or ""),
-                    "zone": str(getattr(a, "zone", "") or ""),
-                }
-                for a in filtered
-            ])
-        }
-        filtered = [
-            a for a in filtered
-            if (
-                int(getattr(a, "action_code", 0) or 0),
-                str(getattr(a, "button_input", "") or ""),
-                str(getattr(a, "label", "") or ""),
-            ) in stripped_keys
-        ]
-
-        actionable = [a for a in filtered if not self._is_pass_like(a)]
-        if actionable:
-            return filtered
-
-        pass_actions = [a for a in filtered if self._is_pass_like(a)]
-        if pass_actions:
-            return [pass_actions[0]]
-
-        # Final fallback: synthetic pass action so the turn can progress.
-        return [type("_Pass", (), {
-            "action_code": 99,
-            "button_input": "",
-            "card_id": "",
-            "zone": "button",
-            "label": "Pass",
-        })()]
+        # If the C++ engine provides more actions than Talishar, we need to be careful.
+        # However, the user wants exact parity.
+        # If we find a mismatch in count, it's a problem with the engine state.
+        return legal
 
     def _phase_code(self) -> str:
         """Return a Talishar-like phase token from the C++ engine phase value."""
@@ -469,8 +429,10 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         legal = self._filter_legal_actions(legal)
         player_hand = self._encode_player_hand(legal)
         acting_idx = self._acting_idx()
-        player_hand_size = len(player_hand) if player_hand else (
-            gs.p1_hand_size if acting_idx == 0 else gs.p2_hand_size
+        player_hand_size = (
+            len(player_hand)
+            if player_hand
+            else (gs.p1_hand_size if acting_idx == 0 else gs.p2_hand_size)
         )
         obs: dict[str, Any] = {
             "actingPlayerID": self._acting_player,
@@ -481,20 +443,13 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             "turnPhase": self._phase_code(),
             "havePriority": not self._is_game_over(),
             "playerHandSize": player_hand_size,
-            "opponentHandSize": (
-                gs.p2_hand_size if self._acting_player == 1 else gs.p1_hand_size
-            ),
-            "playerDeckCount": (
-                gs.p1_deck_size if self._acting_player == 1 else gs.p2_deck_size
-            ),
-            "opponentDeckCount": (
-                gs.p2_deck_size if self._acting_player == 1 else gs.p1_deck_size
-            ),
+            "opponentHandSize": (gs.p2_hand_size if self._acting_player == 1 else gs.p1_hand_size),
+            "playerDeckCount": (gs.p1_deck_size if self._acting_player == 1 else gs.p2_deck_size),
+            "opponentDeckCount": (gs.p2_deck_size if self._acting_player == 1 else gs.p1_deck_size),
             "playerPitchCount": self._pitch_count(),
             "playerHand": player_hand,
             "legalActions": [
-                {"index": i, "label": a.label, "zone": a.zone}
-                for i, a in enumerate(legal)
+                {"index": i, "label": a.label, "zone": a.zone} for i, a in enumerate(legal)
             ],
         }
         return json.dumps(obs, separators=(",", ":"))
@@ -552,20 +507,20 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             # P1-centric: +1 if P1 won, -1 if P2 won, 0 for draw.
             # The training loop always negates this for P2's buffer
             # (agent_reward = env_reward if acting==1 else -env_reward).
-            if gs.winner == 0:       # P1 won (0-indexed)
+            if gs.winner == 0:  # P1 won (0-indexed)
                 reward = 1.0
-            elif gs.winner == 1:     # P2 won
+            elif gs.winner == 1:  # P2 won
                 reward = -1.0
             else:
-                reward = 0.0         # draw / unresolved
+                reward = 0.0  # draw / unresolved
         elif truncated:
             reward = float(_TRUNCATION_PENALTY)
         else:
             # P1-centric intermediate shaping: positive when P2 takes damage,
             # negative when P1 takes damage, regardless of who is acting.
             p1_now, p2_now = gs.p1_health, gs.p2_health
-            dmg_dealt = max(0, prev_p2 - p2_now)   # P2 HP lost  → good for P1
-            dmg_taken = max(0, prev_p1 - p1_now)   # P1 HP lost  → bad for P1
+            dmg_dealt = max(0, prev_p2 - p2_now)  # P2 HP lost  → good for P1
+            dmg_taken = max(0, prev_p1 - p1_now)  # P1 HP lost  → bad for P1
             reward = dmg_dealt * 0.01 - dmg_taken * 0.01 + _STEP_PENALTY
         return reward + repeat_penalty
 
@@ -619,9 +574,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         p1_now = int(self._gs.p1_health)
         p2_now = int(self._gs.p2_health)
         if prev_p1 != p1_now or prev_p2 != p2_now:
-            self._synthetic_combat_log.append(
-                f"HP P1 {prev_p1}->{p1_now} | P2 {prev_p2}->{p2_now}"
-            )
+            self._synthetic_combat_log.append(f"HP P1 {prev_p1}->{p1_now} | P2 {prev_p2}->{p2_now}")
 
         if str(before.get("phase", "")) != str(after.get("phase", "")):
             self._synthetic_combat_log.append(
@@ -695,9 +648,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         obs = self._encode_observation(legal)
 
         if self._enable_combat_tracker:
-            self._synthetic_combat_log = [
-                f"matchup {self._deck1 or 'P1'} vs {self._deck2 or 'P2'}"
-            ]
+            self._synthetic_combat_log = [f"matchup {self._deck1 or 'P1'} vs {self._deck2 or 'P2'}"]
             self._combat_tracker.reset(
                 initial_snapshot=self._tracker_state_snapshot(legal),
                 initial_legal_actions=self._legal_to_dicts(legal),
@@ -820,6 +771,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
     def sample_action(self) -> str:
         """Return a random legal action index as a string."""
         import random
+
         legal = self._filter_legal_actions(self._legal_actions())
         if not legal:
             return "0"
@@ -859,10 +811,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
 
 # ── Cache management ──────────────────────────────────────────────────────────
 
-_DEFAULT_CACHE_DIR = (
-    Path(__file__).resolve().parent.parent.parent
-    / "results" / "cpp_engines"
-)
+_DEFAULT_CACHE_DIR = Path(__file__).resolve().parent.parent.parent / "results" / "cpp_engines"
 
 
 def get_engine_dir(
@@ -878,7 +827,7 @@ def get_engine_dir(
     build_cpp_engine_for_matchup.ps1 when content-hashing is enabled).
     """
     base = Path(cache_dir) if cache_dir else _DEFAULT_CACHE_DIR
-    key  = _matchup_key(deck1, deck2)
+    key = _matchup_key(deck1, deck2)
     exact = base / key
     if is_cpp_engine_available(exact):
         return exact

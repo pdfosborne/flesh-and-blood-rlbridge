@@ -184,11 +184,11 @@ def resolve_deck_from_json(talishar_src: Path, deck_json_path: str) -> set[str]:
 
 
 def resolve_deck_counts_from_json(talishar_src: Path, deck_json_path: str) -> dict[str, int]:
-    """Parse a FaBrary/FABdb deck JSON and return {card_id: count}.
+    """Parse a FaBrary/FABdb deck JSON and return {Talishar card-name ID: count}.
 
     The JSON format stores card names (e.g. ``"arcanic_crackle_red": 2``) in
-    ``deck`` and ``sideboard`` dicts.  Names are resolved to card IDs via the
-    Talishar ``GeneratedCardDictionaries.php`` lookup.
+    ``deck`` and ``sideboard`` dicts.  These names are the IDs exposed by
+    Talishar observations, so keep them as the generated engine's runtime IDs.
     """
     try:
         with open(deck_json_path, encoding="utf-8") as f:
@@ -197,14 +197,7 @@ def resolve_deck_counts_from_json(talishar_src: Path, deck_json_path: str) -> di
         print(f"  WARNING: could not read deck JSON {deck_json_path}: {exc}")
         return {}
 
-    name_to_id = _build_name_to_id(talishar_src)
-    if not name_to_id:
-        print("  WARNING: GeneratedCardDictionaries.php not found — "
-              "cannot resolve deck JSON card names to IDs")
-        return {}
-
     counts: dict[str, int] = {}
-    missing: list[str] = []
     for zone in ("deck", "sideboard"):
         zone_data = data.get(zone, {})
         if isinstance(zone_data, dict):
@@ -214,15 +207,10 @@ def resolve_deck_counts_from_json(talishar_src: Path, deck_json_path: str) -> di
         else:
             continue
         for name, cnt in items:
-            cid = name_to_id.get(name)
-            if cid:
-                counts[cid] = counts.get(cid, 0) + int(cnt)
-            else:
-                missing.append(name)
+            card_name = str(name or "").strip()
+            if card_name:
+                counts[card_name] = counts.get(card_name, 0) + int(cnt)
 
-    if missing:
-        print(f"  WARNING: {len(missing)} card name(s) from deck JSON not found in "
-              f"dictionary: {missing[:5]}{'...' if len(missing) > 5 else ''}")
     print(f"  Resolved {len(counts)} card ID(s) ({sum(counts.values())} total) "
           f"from deck JSON: {deck_json_path}")
     return counts
@@ -283,30 +271,30 @@ def _build_generated_stats(talishar_src: Path) -> dict[str, dict[str, int]]:
     }
 
 
-def resolve_deck_from_assets(talishar_src: Path, deck_name: str) -> set[str]:
-    """Read Talishar/Assets/<deck_name>.txt and return the set of card IDs.
+def resolve_deck_counts_from_assets(talishar_src: Path, deck_name: str) -> dict[str, int]:
+    """Read Talishar/Assets/<deck_name>.txt and return {Talishar card-name ID: count}.
 
     Falls back gracefully if the file or dictionary is missing.
     """
     asset_file = talishar_src / "Assets" / f"{deck_name}.txt"
     if not asset_file.exists():
-        return set()
-    names = asset_file.read_text(encoding="utf-8", errors="replace").split()
-    name_to_id = _build_name_to_id(talishar_src)
-    if not name_to_id:
-        return set()
-    ids: set[str] = set()
-    missing: list[str] = []
+        return {}
+    lines = asset_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    # Talishar local deck files use the first non-empty line for hero/equipment.
+    # Those cards are not part of playerDeckCount / opening hand parity.
+    deck_lines = [line for line in lines if line.strip()][1:]
+    names = "\n".join(deck_lines).split()
+    counts: dict[str, int] = {}
     for name in names:
-        cid = name_to_id.get(name)
-        if cid:
-            ids.add(cid)
-        else:
-            missing.append(name)
-    if missing:
-        print(f"  WARNING: {len(missing)} card name(s) not found in dictionary: "
-              f"{missing[:5]}{'…' if len(missing) > 5 else ''}")
-    return ids
+        card_name = str(name or "").strip()
+        if card_name:
+            counts[card_name] = counts.get(card_name, 0) + 1
+    return counts
+
+
+def resolve_deck_from_assets(talishar_src: Path, deck_name: str) -> set[str]:
+    """Read Talishar/Assets/<deck_name>.txt and return the set of card IDs."""
+    return set(resolve_deck_counts_from_assets(talishar_src, deck_name).keys())
 
 
 # ── PHP source mining ──────────────────────────────────────────────────────────
@@ -367,7 +355,7 @@ def scan_php_sources(
     gen_stats = _build_generated_stats(talishar_src)
     stats_applied = 0
     for cid, meta in metas.items():
-        card_name = id_to_name.get(cid, "")
+        card_name = id_to_name.get(cid, cid)
         if card_name and card_name in gen_stats:
             s = gen_stats[card_name]
             meta.name = meta.name or card_name
@@ -877,10 +865,12 @@ def generate(
     p1_counts: dict[str, int] | None = None,
     p2_counts: dict[str, int] | None = None,
 ) -> None:
-    # Default: 2 copies of each unique card if counts not provided
-    if p1_counts is None:
+    # Default: 2 copies of each unique card if counts not provided.
+    # Empty dicts are treated as missing because callers initialise counts
+    # before trying live discovery / asset resolution.
+    if not p1_counts:
         p1_counts = {cid: 2 for cid in p1_ids}
-    if p2_counts is None:
+    if not p2_counts:
         p2_counts = {cid: 2 for cid in p2_ids}
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1131,8 +1121,21 @@ def main() -> None:
               f"(total {len(p2_ids)}, {sum(p2_counts.values())} cards)")
 
     # Step 2: PHP scan
-    all_ids = p1_ids | p2_ids
     if talishar_src.exists():
+        p1_asset_counts = resolve_deck_counts_from_assets(talishar_src, args.deck1)
+        p2_asset_counts = resolve_deck_counts_from_assets(talishar_src, args.deck2)
+        if p1_asset_counts:
+            p1_ids |= set(p1_asset_counts.keys())
+            p1_counts.update(p1_asset_counts)
+            print(f"  Resolved {len(p1_asset_counts)} card ID(s) for {args.deck1} from Assets txt "
+                  f"({sum(p1_asset_counts.values())} cards)")
+        if p2_asset_counts:
+            p2_ids |= set(p2_asset_counts.keys())
+            p2_counts.update(p2_asset_counts)
+            print(f"  Resolved {len(p2_asset_counts)} card ID(s) for {args.deck2} from Assets txt "
+                  f"({sum(p2_asset_counts.values())} cards)")
+
+        all_ids = p1_ids | p2_ids
         print("\nStep 2: Scanning PHP source…")
         if not all_ids:
             print("  No asset deck files found — scanning all PHP card definitions…")
@@ -1146,6 +1149,7 @@ def main() -> None:
             print(f"  Found {len(all_ids)} total card IDs in PHP source")
         metas = scan_php_sources(talishar_src, all_ids)
     else:
+        all_ids = p1_ids | p2_ids
         print(f"\nStep 2: WARNING — Talishar source not found at {talishar_src}")
         print("  Generating stub-only output (no PHP logic to extract)")
         metas = {cid: CardMeta(card_id=cid) for cid in all_ids}
