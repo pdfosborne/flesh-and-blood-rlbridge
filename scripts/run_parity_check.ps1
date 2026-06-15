@@ -51,6 +51,11 @@
 .PARAMETER CppEngineDeck2
     Override deck 2 name used only for C++ engine cache lookup.
 
+.PARAMETER ContinueAfterFailure
+    Keep running requested episodes after the first discrepancy. By default the
+    checker stops at the first mismatch because actions are no longer comparable
+    after observations diverge.
+
 .EXAMPLE
     # Full episode parity check for Ira vs Briar
     .\run_parity_check.ps1 -Deck1Source "Ira" -Deck2Source "Briar" -Format silver_age -Episodes 10
@@ -80,7 +85,8 @@ param(
     [string]$CppEngineDir = "",
     [string]$CppEngineCacheDir = "",
     [string]$CppEngineDeck1 = "",
-    [string]$CppEngineDeck2 = ""
+    [string]$CppEngineDeck2 = "",
+    [switch]$ContinueAfterFailure
 )
 
 # =============================================================================
@@ -116,6 +122,9 @@ if ($CppEngineDir) {
 }
 if ($CppEngineCacheDir) {
     Write-Host "  C++ Cache: $CppEngineCacheDir"
+}
+if ($ContinueAfterFailure) {
+    Write-Host "  Continue : after first failure"
 }
 Write-Host "================================================================"
 Write-Host ""
@@ -168,6 +177,9 @@ if ($CppEngineDeck1) {
 }
 if ($CppEngineDeck2) {
     $ArgsList += "--cpp-engine-deck2", "`"$CppEngineDeck2`""
+}
+if ($ContinueAfterFailure) {
+    $ArgsList += "--continue-after-failure"
 }
 
 Write-Host "  Command:"

@@ -411,6 +411,43 @@ def _compare_reset(reset_tal: Any, reset_cpp: Any, report: ParityReport, episode
     return True
 
 
+def _card_ids_from_state_hand(state: dict[str, Any]) -> list[str]:
+    hand = state.get("playerHand", [])
+    if not isinstance(hand, list):
+        return []
+    card_ids: list[str] = []
+    for card in hand:
+        if isinstance(card, dict):
+            card_id = card.get("cardID") or card.get("cardId") or card.get("card_id")
+            if card_id:
+                card_ids.append(str(card_id))
+    return card_ids
+
+
+def _opening_hands_from_talishar(env_tal: Any, reset_tal: Any) -> dict[int, list[str]]:
+    opening_hands: dict[int, list[str]] = {}
+    reset_obs, _ = _parse_observation("Talishar", getattr(reset_tal, "observation", None))
+    acting_player_id = 1
+    if isinstance(reset_obs, dict):
+        acting_player_id = _safe_int(reset_obs.get("actingPlayerID", 1)) or 1
+        opening_hands[acting_player_id] = _card_ids_from_state_hand(reset_obs)
+
+    fetch_state = getattr(env_tal, "_fetch_state", None)
+    if callable(fetch_state):
+        for player_id in (1, 2):
+            if player_id in opening_hands:
+                continue
+            try:
+                state = fetch_state(player_id=player_id, last_update=0)
+            except Exception:
+                continue
+            opening_hands[player_id] = _card_ids_from_state_hand(state)
+    last_state = getattr(env_tal, "_last_state", None)
+    if 1 not in opening_hands and isinstance(last_state, dict):
+        opening_hands[1] = _card_ids_from_state_hand(last_state)
+    return opening_hands
+
+
 def _compare_step(
     step_tal: Any,
     step_cpp: Any,
@@ -535,7 +572,9 @@ def run_parity_episode(
     report.episodes_run += 1
     try:
         reset_tal = env_tal.reset()
-        reset_cpp = env_cpp.reset()
+        reset_cpp = env_cpp.reset(
+            options={"opening_hands": _opening_hands_from_talishar(env_tal, reset_tal)}
+        )
     except Exception as exc:
         report.episodes_failed += 1
         return _record_discrepancy(
@@ -804,6 +843,15 @@ def main() -> None:
     parser.add_argument("--cpp-engine-deck1", default=None)
     parser.add_argument("--cpp-engine-deck2", default=None)
     parser.add_argument("--out-dir", default="results/parity_checks")
+    parser.add_argument(
+        "--continue-after-failure",
+        action="store_true",
+        help=(
+            "Continue running additional episodes after the first discrepancy. "
+            "By default the checker stops at the first mismatch because later "
+            "actions are no longer comparable once observations diverge."
+        ),
+    )
     args = parser.parse_args()
 
     matchup_label = f"{_safe_label(args.deck1)}_vs_{_safe_label(args.deck2)}"
@@ -850,7 +898,7 @@ def main() -> None:
     max_steps, stress = _steps_for_mode(args, env_tal, env_cpp)
     try:
         for episode in range(1, args.episodes + 1):
-            run_parity_episode(
+            episode_ok = run_parity_episode(
                 env_tal,
                 env_cpp,
                 report,
@@ -858,6 +906,12 @@ def main() -> None:
                 max_steps=max_steps,
                 stress=stress,
             )
+            if not episode_ok and not args.continue_after_failure:
+                print(
+                    "[WARN] Stopping after first discrepancy. "
+                    "Use --continue-after-failure to collect repeated failures."
+                )
+                break
     except KeyboardInterrupt:
         print("[WARN] Interrupted by user; writing partial report")
     finally:

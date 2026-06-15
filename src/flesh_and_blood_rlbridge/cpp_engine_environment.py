@@ -1,9 +1,9 @@
-"""C++ FAB engine environment.
+﻿"""C++ FAB engine environment.
 
 Drop-in replacement for :class:`TalisharEngineEnvironment` that loads a
 pre-generated, compiled pybind11 ``fab_engine`` module for a specific
-deck matchup.  No HTTP calls, no Docker — each step is a direct C++ function
-call (~100× faster than the HTTP-backed environment).
+deck matchup.  No HTTP calls, no Docker â€” each step is a direct C++ function
+call (~100Ã— faster than the HTTP-backed environment).
 
 Prerequisites
 -------------
@@ -187,7 +187,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         self._last_action_key: Optional[tuple[int, str]] = None
         self._last_turn_no: int = 0
 
-    # ── helpers ───────────────────────────────────────────────────────────────
+    # â”€â”€ helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     def _new_gamestate(self) -> Any:
         gs = self._fab.GameState()
@@ -340,13 +340,23 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             try:
                 phase_value = int(phase)
             except (TypeError, ValueError):
-                phase_value = None
+                phase_name = str(phase).split(".")[-1].upper()
+                phase_value = {
+                    "START": 0,
+                    "MAIN": 1,
+                    "PITCH": 2,
+                    "ATTACK": 3,
+                    "BLOCK": 4,
+                    "DAMAGE": 5,
+                    "END": 6,
+                    "OVER": 7,
+                }.get(phase_name)
 
         # Matches the generated C++ enum order in scripts/generate_cpp_engine.py
         # START=0, MAIN=1, PITCH=2, ATTACK=3, BLOCK=4, DAMAGE=5, END=6, OVER=7
         mapping = {
             0: "startturn",
-            1: "m",
+            1: "M",
             2: "p",
             3: "a",
             4: "d",
@@ -354,7 +364,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             6: "endphase",
             7: "OVER",
         }
-        return mapping.get(phase_value, "m")
+        return mapping.get(phase_value, "M")
 
     def _acting_idx(self) -> int:
         return 0 if self._acting_player == 1 else 1
@@ -519,8 +529,8 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             # P1-centric intermediate shaping: positive when P2 takes damage,
             # negative when P1 takes damage, regardless of who is acting.
             p1_now, p2_now = gs.p1_health, gs.p2_health
-            dmg_dealt = max(0, prev_p2 - p2_now)  # P2 HP lost  → good for P1
-            dmg_taken = max(0, prev_p1 - p1_now)  # P1 HP lost  → bad for P1
+            dmg_dealt = max(0, prev_p2 - p2_now)  # P2 HP lost  â†’ good for P1
+            dmg_taken = max(0, prev_p1 - p1_now)  # P1 HP lost  â†’ bad for P1
             reward = dmg_dealt * 0.01 - dmg_taken * 0.01 + _STEP_PENALTY
         return reward + repeat_penalty
 
@@ -628,7 +638,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         self._combat_tracker.clear()
         self._synthetic_combat_log = []
 
-    # ── rlbridge interface ────────────────────────────────────────────────────
+    # â”€â”€ rlbridge interface â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     def reset(
         self,
@@ -639,7 +649,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         self._steps = 0
         self._p1_hp = self._gs.p1_health
         self._p2_hp = self._gs.p2_health
-        self._acting_player = self._gs.priority + 1  # convert 0-indexed → 1-indexed
+        self._acting_player = self._gs.priority + 1  # convert 0-indexed â†’ 1-indexed
         self._repeat_streak = 0
         self._last_action_key = None
         self._last_turn_no = 0
@@ -809,7 +819,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         self._synthetic_combat_log = []
 
 
-# ── Cache management ──────────────────────────────────────────────────────────
+# â”€â”€ Cache management â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 _DEFAULT_CACHE_DIR = Path(__file__).resolve().parent.parent.parent / "results" / "cpp_engines"
 
@@ -869,3 +879,5 @@ def get_or_none(
         )
     except Exception:
         return None
+
+

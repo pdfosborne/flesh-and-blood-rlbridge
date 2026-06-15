@@ -100,7 +100,7 @@ def test_cpp_observation_contract_matches_talishar_field_shapes() -> None:
     assert set(obs.keys()) == expected_keys
 
     assert obs["actingPlayerID"] == 1
-    assert obs["turnPhase"] == "m"
+    assert obs["turnPhase"] == "M"
     assert obs["havePriority"] is True
     assert obs["playerPitchCount"] == 1
     assert obs["playerHandSize"] == 2

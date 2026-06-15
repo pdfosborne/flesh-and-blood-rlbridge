@@ -68,6 +68,13 @@ class CardMeta:
     php_snippet: str = ""             # extracted PHP logic block
 
 
+@dataclass
+class DeckAssetInfo:
+    hero_id: str = ""
+    equipment_ids: list[str] = field(default_factory=list)
+    deck_counts: dict[str, int] = field(default_factory=dict)
+
+
 # ── Talishar API helpers ───────────────────────────────────────────────────────
 
 def _post(session: requests.Session, base: str, path: str, payload: dict) -> dict:
@@ -271,25 +278,55 @@ def _build_generated_stats(talishar_src: Path) -> dict[str, dict[str, int]]:
     }
 
 
+def _build_character_stats(talishar_src: Path) -> tuple[dict[str, int], dict[str, int]]:
+    """Build Talishar character health/intellect maps from generated dictionaries."""
+    dict_file = talishar_src / "GeneratedCode" / "GeneratedCardDictionaries.php"
+    if not dict_file.exists():
+        return {}, {}
+    text = dict_file.read_text(encoding="utf-8", errors="replace")
+    health = _parse_generated_stat_block(text, "GeneratedCharacterHealth")
+    intellect = _parse_generated_stat_block(text, "GeneratedCharacterIntellect")
+    return health, intellect
+
+
+def _hero_health(hero_id: str, health_by_id: dict[str, int]) -> int:
+    return health_by_id.get(hero_id, 20)
+
+
+def _hero_intellect(hero_id: str, intellect_by_id: dict[str, int]) -> int:
+    return intellect_by_id.get(hero_id, 4)
+
+
+def resolve_deck_asset_info(talishar_src: Path, deck_name: str) -> DeckAssetInfo:
+    """Read Talishar/Assets/<deck_name>.txt preserving hero/equipment setup."""
+    asset_file = talishar_src / "Assets" / f"{deck_name}.txt"
+    if not asset_file.exists():
+        return DeckAssetInfo()
+    lines = [
+        line.strip()
+        for line in asset_file.read_text(encoding="utf-8", errors="replace").splitlines()
+        if line.strip()
+    ]
+    setup_cards = lines[0].split() if lines else []
+    deck_cards = "\n".join(lines[1:]).split()
+    counts: dict[str, int] = {}
+    for name in deck_cards:
+        card_name = str(name or "").strip()
+        if card_name:
+            counts[card_name] = counts.get(card_name, 0) + 1
+    return DeckAssetInfo(
+        hero_id=setup_cards[0] if setup_cards else "",
+        equipment_ids=setup_cards[1:],
+        deck_counts=counts,
+    )
+
+
 def resolve_deck_counts_from_assets(talishar_src: Path, deck_name: str) -> dict[str, int]:
     """Read Talishar/Assets/<deck_name>.txt and return {Talishar card-name ID: count}.
 
     Falls back gracefully if the file or dictionary is missing.
     """
-    asset_file = talishar_src / "Assets" / f"{deck_name}.txt"
-    if not asset_file.exists():
-        return {}
-    lines = asset_file.read_text(encoding="utf-8", errors="replace").splitlines()
-    # Talishar local deck files use the first non-empty line for hero/equipment.
-    # Those cards are not part of playerDeckCount / opening hand parity.
-    deck_lines = [line for line in lines if line.strip()][1:]
-    names = "\n".join(deck_lines).split()
-    counts: dict[str, int] = {}
-    for name in names:
-        card_name = str(name or "").strip()
-        if card_name:
-            counts[card_name] = counts.get(card_name, 0) + 1
-    return counts
+    return resolve_deck_asset_info(talishar_src, deck_name).deck_counts
 
 
 def resolve_deck_from_assets(talishar_src: Path, deck_name: str) -> set[str]:
@@ -432,6 +469,7 @@ struct Card {{
 
 struct PlayerState {{
     int health    = 20;
+    int intellect = 4;
     int resources = 0;
     std::vector<Card> hand;
     std::vector<Card> deck;
@@ -481,6 +519,7 @@ struct GameState {{
     void apply_action(const LegalAction& action);
     void register_all_cards();
     void init_standard_decks();   // deal opening hands from pre-built deck lists
+    void sync_opening_hand(int player_idx, const std::vector<std::string>& card_ids);
 
 private:
     void _advance_phase();
@@ -570,6 +609,34 @@ void GameState::_draw_cards(int player_idx, int n) {{
             p.deck.pop_back();
         }}
     }}
+}}
+
+void GameState::sync_opening_hand(int player_idx, const std::vector<std::string>& card_ids) {{
+    if (player_idx < 0 || player_idx >= 2) {{
+        throw std::runtime_error("player_idx must be 0 or 1");
+    }}
+
+    auto& p = players[player_idx];
+    std::vector<Card> available;
+    available.reserve(p.hand.size() + p.deck.size());
+    available.insert(available.end(), p.hand.begin(), p.hand.end());
+    available.insert(available.end(), p.deck.begin(), p.deck.end());
+
+    std::vector<Card> synced_hand;
+    synced_hand.reserve(card_ids.size());
+    for (const auto& card_id : card_ids) {{
+        auto it = std::find_if(available.begin(), available.end(), [&](const Card& c) {{
+            return c.card_id == card_id;
+        }});
+        if (it == available.end()) {{
+            throw std::runtime_error("Cannot sync opening hand; card not found: " + card_id);
+        }}
+        synced_hand.push_back(*it);
+        available.erase(it);
+    }}
+
+    p.hand = synced_hand;
+    p.deck = available;
 }}
 
 void GameState::_advance_phase() {{
@@ -662,13 +729,43 @@ static void _push_card(std::vector<Card>& v, const Card& c, int n) {{
 }}
 
 void GameState::init_standard_decks() {{
+    phase = TurnPhase::MAIN;
+    turn_no = 0;
+    priority = 0;
+    game_over = false;
+    winner = -1;
+    consecutive_passes = 0;
+
+    players[0].health = {p1_health};
+    players[0].intellect = {p1_intellect};
+    players[0].resources = 0;
+    players[0].hero_card_id = "{p1_hero}";
     players[0].deck.clear();
     players[0].hand.clear();
+    players[0].discard.clear();
+    players[0].equipment.clear();
+    players[0].arsenal.clear();
+    players[0].pitch_zone.clear();
+
+    players[1].health = {p2_health};
+    players[1].intellect = {p2_intellect};
+    players[1].resources = 0;
+    players[1].hero_card_id = "{p2_hero}";
     players[1].deck.clear();
     players[1].hand.clear();
+    players[1].discard.clear();
+    players[1].equipment.clear();
+    players[1].arsenal.clear();
+    players[1].pitch_zone.clear();
+
+    // ── P1 setup ({deck1}) ───────────────────────────────────────────────
+{p1_setup}
 
     // ── P1 deck ({deck1}) ────────────────────────────────────────────────
 {p1_cards}
+
+    // ── P2 setup ({deck2}) ───────────────────────────────────────────────
+{p2_setup}
 
     // ── P2 deck ({deck2}) ────────────────────────────────────────────────
 {p2_cards}
@@ -679,9 +776,9 @@ void GameState::init_standard_decks() {{
     std::shuffle(players[0].deck.begin(), players[0].deck.end(), rng0);
     std::shuffle(players[1].deck.begin(), players[1].deck.end(), rng1);
 
-    // Deal starting hands (4 cards each)
-    _draw_cards(0, 4);
-    _draw_cards(1, 4);
+    // Deal starting hands from Talishar character intellect.
+    _draw_cards(0, players[0].intellect);
+    _draw_cards(1, players[1].intellect);
 }}
 """
 
@@ -731,6 +828,7 @@ PYBIND11_MODULE(fab_engine, m) {{
         .def(py::init<>())
         .def("register_all_cards", &GameState::register_all_cards)
         .def("init_standard_decks", &GameState::init_standard_decks)
+        .def("sync_opening_hand", &GameState::sync_opening_hand)
         .def("get_legal_actions",  &GameState::get_legal_actions)
         .def("apply_action",       &GameState::apply_action)
         .def_property_readonly("game_over",
@@ -864,6 +962,10 @@ def generate(
     p2_ids: set[str],
     p1_counts: dict[str, int] | None = None,
     p2_counts: dict[str, int] | None = None,
+    p1_asset_info: DeckAssetInfo | None = None,
+    p2_asset_info: DeckAssetInfo | None = None,
+    character_health: dict[str, int] | None = None,
+    character_intellect: dict[str, int] | None = None,
 ) -> None:
     # Default: 2 copies of each unique card if counts not provided.
     # Empty dicts are treated as missing because callers initialise counts
@@ -872,6 +974,10 @@ def generate(
         p1_counts = {cid: 2 for cid in p1_ids}
     if not p2_counts:
         p2_counts = {cid: 2 for cid in p2_ids}
+    p1_asset_info = p1_asset_info or DeckAssetInfo(deck_counts=p1_counts)
+    p2_asset_info = p2_asset_info or DeckAssetInfo(deck_counts=p2_counts)
+    character_health = character_health or {}
+    character_intellect = character_intellect or {}
 
     out_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -917,15 +1023,29 @@ def generate(
     )
 
     # init_decks.cpp — hard-codes the two deck lists and deals opening hands
-    def _card_init_line(cid: str, count: int, player_vec: str) -> str:
+    def _card_init_line(
+        cid: str,
+        count: int,
+        player_vec: str,
+        *,
+        zone: str = "deck",
+        action_code: int = 27,
+    ) -> str:
         m = metas.get(cid, CardMeta(card_id=cid))
         safe_name = (m.name or cid).replace('"', '\\"')
         safe_type = (m.card_type or "unknown").replace('"', '\\"')
+        safe_zone = zone.replace('"', '\\"')
         return (
             f'    _push_card({player_vec}, '
             f'Card{{"{cid}", "{safe_name}", {m.cost}, {m.pitch}, {m.power}, '
-            f'{m.defense}, "{safe_type}", "deck", 27}}, {count});'
+            f'{m.defense}, "{safe_type}", "{safe_zone}", {action_code}}}, {count});'
         )
+
+    def _setup_init_lines(info: DeckAssetInfo, player_vec: str) -> str:
+        lines = []
+        for cid in info.equipment_ids:
+            lines.append(_card_init_line(cid, 1, player_vec, zone="equipment", action_code=0))
+        return "\n".join(lines)
 
     p1_lines = "\n".join(
         _card_init_line(cid, cnt, "players[0].deck")
@@ -937,9 +1057,19 @@ def generate(
         for cid, cnt in sorted(p2_counts.items())
         if cid in metas
     )
+    p1_setup_lines = _setup_init_lines(p1_asset_info, "players[0].equipment")
+    p2_setup_lines = _setup_init_lines(p2_asset_info, "players[1].equipment")
     (out_dir / "init_decks.cpp").write_text(
         _INIT_DECKS_CPP.format(
             deck1=deck1, deck2=deck2,
+            p1_hero=p1_asset_info.hero_id.replace('"', '\\"'),
+            p2_hero=p2_asset_info.hero_id.replace('"', '\\"'),
+            p1_health=_hero_health(p1_asset_info.hero_id, character_health),
+            p2_health=_hero_health(p2_asset_info.hero_id, character_health),
+            p1_intellect=_hero_intellect(p1_asset_info.hero_id, character_intellect),
+            p2_intellect=_hero_intellect(p2_asset_info.hero_id, character_intellect),
+            p1_setup=p1_setup_lines or "    // (no setup cards)",
+            p2_setup=p2_setup_lines or "    // (no setup cards)",
             p1_cards=p1_lines or "    // (no cards)",
             p2_cards=p2_lines or "    // (no cards)",
         ),
@@ -963,6 +1093,12 @@ def generate(
         "deck1": deck1,
         "deck2": deck2,
         "generated": ts,
+            "p1_hero": p1_asset_info.hero_id,
+            "p2_hero": p2_asset_info.hero_id,
+            "p1_health": _hero_health(p1_asset_info.hero_id, character_health),
+            "p2_health": _hero_health(p2_asset_info.hero_id, character_health),
+            "p1_intellect": _hero_intellect(p1_asset_info.hero_id, character_intellect),
+            "p2_intellect": _hero_intellect(p2_asset_info.hero_id, character_intellect),
         "p1_cards": sorted(p1_ids),
         "p2_cards": sorted(p2_ids),
         "cards": {
@@ -1022,6 +1158,14 @@ def generate(
         flag = "Y" if m.php_snippet else "N"
         print(f"   [{flag}]  {cid:10s}  {(m.name or '?'):30s}  "
               f"cost={m.cost} pitch={m.pitch} power={m.power}")
+    print(
+        f"\n   Reset metadata: P1 {p1_asset_info.hero_id or '?'} "
+        f"hp={_hero_health(p1_asset_info.hero_id, character_health)} "
+        f"int={_hero_intellect(p1_asset_info.hero_id, character_intellect)}; "
+        f"P2 {p2_asset_info.hero_id or '?'} "
+        f"hp={_hero_health(p2_asset_info.hero_id, character_health)} "
+        f"int={_hero_intellect(p2_asset_info.hero_id, character_intellect)}"
+    )
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
@@ -1083,6 +1227,8 @@ def main() -> None:
     p2_ids: set[str] = set()
     p1_counts: dict[str, int] = {}
     p2_counts: dict[str, int] = {}
+    p1_asset_info = DeckAssetInfo()
+    p2_asset_info = DeckAssetInfo()
 
     if not args.no_server:
         print("Step 1: Discovering cards via live Talishar game...")
@@ -1095,14 +1241,20 @@ def main() -> None:
         print("Step 1: Skipped (--no-server)")
         # Try to resolve deck card IDs from Talishar/Assets/<deck>.txt files
         if talishar_src.exists():
-            p1_asset = resolve_deck_from_assets(talishar_src, args.deck1)
-            p2_asset = resolve_deck_from_assets(talishar_src, args.deck2)
-            if p1_asset:
-                p1_ids = p1_asset
-                print(f"  Resolved {len(p1_ids)} card ID(s) for {args.deck1} from Assets txt")
-            if p2_asset:
-                p2_ids = p2_asset
-                print(f"  Resolved {len(p2_ids)} card ID(s) for {args.deck2} from Assets txt")
+            p1_asset_info = resolve_deck_asset_info(talishar_src, args.deck1)
+            p2_asset_info = resolve_deck_asset_info(talishar_src, args.deck2)
+            if p1_asset_info.deck_counts:
+                p1_counts.update(p1_asset_info.deck_counts)
+                p1_ids |= set(p1_asset_info.deck_counts) | set(p1_asset_info.equipment_ids)
+                if p1_asset_info.hero_id:
+                    p1_ids.add(p1_asset_info.hero_id)
+                print(f"  Resolved {len(p1_asset_info.deck_counts)} card ID(s) for {args.deck1} from Assets txt")
+            if p2_asset_info.deck_counts:
+                p2_counts.update(p2_asset_info.deck_counts)
+                p2_ids |= set(p2_asset_info.deck_counts) | set(p2_asset_info.equipment_ids)
+                if p2_asset_info.hero_id:
+                    p2_ids.add(p2_asset_info.hero_id)
+                print(f"  Resolved {len(p2_asset_info.deck_counts)} card ID(s) for {args.deck2} from Assets txt")
 
     # Supplement with FaBrary deck JSON files (deck + sideboard card pools)
     if args.deck1_json:
@@ -1122,18 +1274,22 @@ def main() -> None:
 
     # Step 2: PHP scan
     if talishar_src.exists():
-        p1_asset_counts = resolve_deck_counts_from_assets(talishar_src, args.deck1)
-        p2_asset_counts = resolve_deck_counts_from_assets(talishar_src, args.deck2)
-        if p1_asset_counts:
-            p1_ids |= set(p1_asset_counts.keys())
-            p1_counts.update(p1_asset_counts)
-            print(f"  Resolved {len(p1_asset_counts)} card ID(s) for {args.deck1} from Assets txt "
-                  f"({sum(p1_asset_counts.values())} cards)")
-        if p2_asset_counts:
-            p2_ids |= set(p2_asset_counts.keys())
-            p2_counts.update(p2_asset_counts)
-            print(f"  Resolved {len(p2_asset_counts)} card ID(s) for {args.deck2} from Assets txt "
-                  f"({sum(p2_asset_counts.values())} cards)")
+        p1_asset_info = resolve_deck_asset_info(talishar_src, args.deck1)
+        p2_asset_info = resolve_deck_asset_info(talishar_src, args.deck2)
+        if p1_asset_info.deck_counts:
+            p1_ids |= set(p1_asset_info.deck_counts.keys()) | set(p1_asset_info.equipment_ids)
+            if p1_asset_info.hero_id:
+                p1_ids.add(p1_asset_info.hero_id)
+            p1_counts.update(p1_asset_info.deck_counts)
+            print(f"  Resolved {len(p1_asset_info.deck_counts)} card ID(s) for {args.deck1} from Assets txt "
+                  f"({sum(p1_asset_info.deck_counts.values())} cards)")
+        if p2_asset_info.deck_counts:
+            p2_ids |= set(p2_asset_info.deck_counts.keys()) | set(p2_asset_info.equipment_ids)
+            if p2_asset_info.hero_id:
+                p2_ids.add(p2_asset_info.hero_id)
+            p2_counts.update(p2_asset_info.deck_counts)
+            print(f"  Resolved {len(p2_asset_info.deck_counts)} card ID(s) for {args.deck2} from Assets txt "
+                  f"({sum(p2_asset_info.deck_counts.values())} cards)")
 
         all_ids = p1_ids | p2_ids
         print("\nStep 2: Scanning PHP source…")
@@ -1160,7 +1316,21 @@ def main() -> None:
 
     # Step 3: generate
     print(f"\nStep 3: Generating C++ for {len(metas)} cards…")
-    generate(out_dir, args.deck1, args.deck2, metas, p1_ids, p2_ids, p1_counts, p2_counts)
+    character_health, character_intellect = _build_character_stats(talishar_src)
+    generate(
+        out_dir,
+        args.deck1,
+        args.deck2,
+        metas,
+        p1_ids,
+        p2_ids,
+        p1_counts,
+        p2_counts,
+        p1_asset_info,
+        p2_asset_info,
+        character_health,
+        character_intellect,
+    )
 
 
 if __name__ == "__main__":
