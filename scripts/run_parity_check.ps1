@@ -51,10 +51,14 @@
 .PARAMETER CppEngineDeck2
     Override deck 2 name used only for C++ engine cache lookup.
 
+.PARAMETER StopAfterFailure
+    Stop at the first discrepancy instead of recording it and continuing.
+    By default the checker keeps running through all requested episodes and
+    steps to collect as many findings as possible.
+
 .PARAMETER ContinueAfterFailure
-    Keep running requested episodes after the first discrepancy. By default the
-    checker stops at the first mismatch because actions are no longer comparable
-    after observations diverge.
+    Deprecated alias for the previous default behavior. Has no effect because
+    continuing after failures is now the default.
 
 .EXAMPLE
     # Full episode parity check for Ira vs Briar
@@ -86,6 +90,7 @@ param(
     [string]$CppEngineCacheDir = "",
     [string]$CppEngineDeck1 = "",
     [string]$CppEngineDeck2 = "",
+    [switch]$StopAfterFailure,
     [switch]$ContinueAfterFailure
 )
 
@@ -94,7 +99,7 @@ param(
 # =============================================================================
 
 if (-not $TalisharUrl) {
-    $TalisharUrl = if ($env:TALISHAR_URL) { $env:TALISHAR_URL } else { "http://localhost" }
+    $TalisharUrl = if ($env:TALISHAR_URL) { $env:TALISHAR_URL } else { "http://localhost:8080/game" }
 }
 
 # Script is already in scripts/, so PSScriptRoot is the scripts directory
@@ -123,8 +128,8 @@ if ($CppEngineDir) {
 if ($CppEngineCacheDir) {
     Write-Host "  C++ Cache: $CppEngineCacheDir"
 }
-if ($ContinueAfterFailure) {
-    Write-Host "  Continue : after first failure"
+if ($StopAfterFailure) {
+    Write-Host "  Stop     : after first discrepancy"
 }
 Write-Host "================================================================"
 Write-Host ""
@@ -178,8 +183,8 @@ if ($CppEngineDeck1) {
 if ($CppEngineDeck2) {
     $ArgsList += "--cpp-engine-deck2", "`"$CppEngineDeck2`""
 }
-if ($ContinueAfterFailure) {
-    $ArgsList += "--continue-after-failure"
+if ($StopAfterFailure) {
+    $ArgsList += "--stop-after-failure"
 }
 
 Write-Host "  Command:"

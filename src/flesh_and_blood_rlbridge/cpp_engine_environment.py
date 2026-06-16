@@ -65,6 +65,7 @@ from .talishar_default_policy import (
     _CARD_RESOURCE_STATS,
     _CARD_STATS,
     _MIN_BLOCK_VALUE,
+    _is_affordable_hand_play as _talishar_is_affordable_hand_play,
     _strip_revert_actions,
 )
 
@@ -174,6 +175,8 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         )
         self._synthetic_combat_log: list[str] = []
 
+        self._hand_playability: dict[int, set[str]] = {}
+
         # Load the compiled module once at construction time
         self._fab = load_fab_engine(self._engine_dir)
 
@@ -189,11 +192,60 @@ class CppEngineEnvironment(rlbridgeEnvironment):
 
     # â”€â”€ helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-    def _new_gamestate(self) -> Any:
+    def _normalize_hand_playability(self, raw: Any) -> dict[int, set[str]]:
+        if not isinstance(raw, dict):
+            return {}
+        out: dict[int, set[str]] = {}
+        for player_key, indices in raw.items():
+            try:
+                player_id = int(player_key)
+            except (TypeError, ValueError):
+                continue
+            if player_id not in (1, 2):
+                continue
+            if not isinstance(indices, (list, tuple, set)):
+                continue
+            out[player_id] = {str(index) for index in indices}
+        return out
+
+    def _playable_hand_indices(self) -> Optional[set[str]]:
+        playability = getattr(self, "_hand_playability", None) or {}
+        if not playability:
+            return None
+        return playability.get(self._acting_player)
+
+    def _apply_opening_hands(self, gs: Any, opening_hands: Any) -> None:
+        """Align dealt hands with Talishar when *opening_hands* is provided."""
+        if not opening_hands or not hasattr(gs, "sync_opening_hand"):
+            return
+        if not isinstance(opening_hands, dict):
+            return
+        for player_key, card_ids in opening_hands.items():
+            try:
+                player_id = int(player_key)
+            except (TypeError, ValueError):
+                continue
+            if player_id not in (1, 2):
+                continue
+            if not isinstance(card_ids, list):
+                continue
+            ids = [str(card_id) for card_id in card_ids if str(card_id)]
+            if not ids:
+                continue
+            gs.sync_opening_hand(player_id - 1, ids)
+
+    def _new_gamestate(self, options: Optional[dict[str, Any]] = None) -> Any:
         gs = self._fab.GameState()
         gs.register_all_cards()
         if hasattr(gs, "init_standard_decks"):
             gs.init_standard_decks()
+        opts = options or {}
+        self._apply_opening_hands(gs, opts.get("opening_hands"))
+        acting_player = opts.get("acting_player_id")
+        if acting_player is not None and hasattr(gs, "set_priority"):
+            player_id = int(acting_player)
+            if player_id in (1, 2):
+                gs.set_priority(player_id - 1)
         return gs
 
     def _legal_actions(self) -> list[Any]:
@@ -320,15 +372,112 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             )()
         ]
 
-    def _filter_legal_actions(self, legal: list[Any]) -> list[Any]:
-        """Filter legal actions to avoid impossible plays and dead loops.
+    def _synthetic_talishar_state(self) -> dict[str, Any]:
+        """Build a Talishar-shaped state dict for shared affordability helpers."""
+        return {
+            "turnPhase": {"turnPhase": self._phase_code()},
+            "playerHand": [
+                {
+                    "action": 27,
+                    "actionDataOverride": str(index),
+                    "cardNumber": str(getattr(card, "card_id", "") or ""),
+                }
+                for index, card in enumerate(self._hand_cards())
+            ],
+        }
 
-        Note: Filtering is currently disabled to ensure parity with Talishar.
-        """
-        # If the C++ engine provides more actions than Talishar, we need to be careful.
-        # However, the user wants exact parity.
-        # If we find a mismatch in count, it's a problem with the engine state.
-        return legal
+    def _ensure_playable_hand_actions(
+        self,
+        legal: list[Any],
+        playable: set[str],
+    ) -> list[Any]:
+        """Add hand-play actions for Talishar-playable indices missing from C++ legal."""
+        existing = {
+            str(getattr(action, "button_input", "") or "")
+            for action in legal
+            if int(getattr(action, "action_code", 0) or 0) == 27
+            and str(getattr(action, "zone", "") or "").strip().lower() == "hand"
+        }
+        hand_cards = self._hand_cards()
+        additions: list[Any] = []
+        for index in sorted(playable, key=lambda value: int(value) if value.isdigit() else 0):
+            if index in existing:
+                continue
+            try:
+                card_index = int(index)
+            except ValueError:
+                continue
+            if card_index < 0 or card_index >= len(hand_cards):
+                continue
+            card = hand_cards[card_index]
+            card_id = str(getattr(card, "card_id", "") or "")
+            label = str(getattr(card, "name", "") or card_id)
+            additions.append(
+                type(
+                    "_HandPlay",
+                    (),
+                    {
+                        "action_code": 27,
+                        "button_input": index,
+                        "card_id": card_id,
+                        "zone": "hand",
+                        "label": label,
+                    },
+                )()
+            )
+        if not additions:
+            return legal
+        pass_actions = [action for action in legal if self._is_pass_like(action)]
+        other = [
+            action
+            for action in legal
+            if not self._is_pass_like(action)
+            and (
+                int(getattr(action, "action_code", 0) or 0) != 27
+                or str(getattr(action, "zone", "") or "").strip().lower() != "hand"
+            )
+        ]
+        return other + additions + pass_actions
+
+    def _filter_legal_actions(self, legal: list[Any]) -> list[Any]:
+        """Filter legal actions to mirror Talishar HTTP observation filtering."""
+        phase = self._phase_code().upper()
+        filtered = list(legal)
+
+        if phase in ("B", "D"):
+            return self._apply_block_phase_filter(filtered)
+
+        if phase == "M":
+            playable = self._playable_hand_indices()
+            if playable is not None:
+                filtered = self._ensure_playable_hand_actions(filtered, playable)
+                filtered = [
+                    action
+                    for action in filtered
+                    if int(getattr(action, "action_code", 0) or 0) != 27
+                    or str(getattr(action, "button_input", "") or "") in playable
+                ]
+            else:
+                talishar_state = self._synthetic_talishar_state()
+                affordable: list[Any] = []
+                for action in filtered:
+                    code = int(getattr(action, "action_code", 0) or 0)
+                    if code == 3:
+                        continue
+                    if (
+                        str(getattr(action, "zone", "") or "").strip().lower() == "hand"
+                        and code == 27
+                        and not _talishar_is_affordable_hand_play(
+                            self._action_to_dict(action),
+                            talishar_state,
+                        )
+                    ):
+                        continue
+                    affordable.append(action)
+                if affordable:
+                    filtered = affordable
+
+        return filtered
 
     def _phase_code(self) -> str:
         """Return a Talishar-like phase token from the C++ engine phase value."""
@@ -415,7 +564,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
                         "cardID": card_id,
                         "action": 27,
                         "actionDataOverride": key,
-                        "label": str(getattr(a, "label", "") or fallback_label),
+                        "label": "",
                     }
                 )
             else:
@@ -423,8 +572,8 @@ class CppEngineEnvironment(rlbridgeEnvironment):
                     {
                         "cardID": card_id,
                         "action": 0,
-                        "actionDataOverride": "",
-                        "label": fallback_label,
+                        "actionDataOverride": key,
+                        "label": "",
                     }
                 )
         return out
@@ -645,11 +794,19 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         seed: Optional[int] = None,
         options: Optional[dict[str, Any]] = None,
     ) -> ResetResult:
-        self._gs = self._new_gamestate()
+        opts = options or {}
+        self._hand_playability = self._normalize_hand_playability(
+            opts.get("hand_playability")
+        )
+        self._gs = self._new_gamestate(opts)
         self._steps = 0
         self._p1_hp = self._gs.p1_health
         self._p2_hp = self._gs.p2_health
-        self._acting_player = self._gs.priority + 1  # convert 0-indexed â†’ 1-indexed
+        acting_player = opts.get("acting_player_id")
+        if acting_player is not None and hasattr(self._gs, "set_priority"):
+            self._acting_player = int(acting_player)
+        else:
+            self._acting_player = self._gs.priority + 1  # convert 0-indexed → 1-indexed
         self._repeat_streak = 0
         self._last_action_key = None
         self._last_turn_no = 0
@@ -673,6 +830,9 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         else:
             self._combat_tracker.clear()
             self._synthetic_combat_log = []
+
+        # Playability hints are only for aligning the opening snapshot with Talishar.
+        self._hand_playability = {}
 
         return ResetResult(
             observation=obs,

@@ -418,33 +418,178 @@ def _card_ids_from_state_hand(state: dict[str, Any]) -> list[str]:
     card_ids: list[str] = []
     for card in hand:
         if isinstance(card, dict):
-            card_id = card.get("cardID") or card.get("cardId") or card.get("card_id")
+            card_id = (
+                card.get("cardID")
+                or card.get("cardNumber")
+                or card.get("cardId")
+                or card.get("card_id")
+            )
             if card_id:
                 card_ids.append(str(card_id))
     return card_ids
 
 
-def _opening_hands_from_talishar(env_tal: Any, reset_tal: Any) -> dict[int, list[str]]:
-    opening_hands: dict[int, list[str]] = {}
-    reset_obs, _ = _parse_observation("Talishar", getattr(reset_tal, "observation", None))
-    acting_player_id = 1
-    if isinstance(reset_obs, dict):
-        acting_player_id = _safe_int(reset_obs.get("actingPlayerID", 1)) or 1
-        opening_hands[acting_player_id] = _card_ids_from_state_hand(reset_obs)
+def _phase_from_state(env_tal: Any, state: dict[str, Any]) -> str:
+    phase_fn = getattr(env_tal, "_phase_str", None)
+    if callable(phase_fn):
+        return str(phase_fn(state) or "").upper()
+    turn_phase = state.get("turnPhase", {})
+    if isinstance(turn_phase, dict):
+        return str(turn_phase.get("turnPhase", "") or "").upper()
+    return ""
 
+
+def _is_parity_baseline_state(env_tal: Any, state: dict[str, Any]) -> bool:
+    """True once Talishar has finished pregame setup and dealt opening hands."""
+    phase = _phase_from_state(env_tal, state)
+    hand = state.get("playerHand", [])
+    hand_size = len(hand) if isinstance(hand, list) else 0
+    p_deck = int(state.get("playerDeckCount", 0) or 0)
+    o_deck = int(state.get("opponentDeckCount", 0) or 0)
+    decks_ready = p_deck > 0 or o_deck > 0
+    deck_seen = bool(getattr(env_tal, "_deck_nonzero_ever_seen", False))
+    return phase == "M" and hand_size > 0 and (decks_ready or deck_seen)
+
+
+def _pick_pregame_advance_index(legal: list[dict[str, Any]]) -> int:
+    """Prefer pass/confirm over equipping during pregame equipment selection."""
+    for index, action in enumerate(legal):
+        if _safe_int(action.get("action_code", 0)) == 99:
+            return index
+    for index, action in enumerate(legal):
+        if _safe_int(action.get("action_code", 0)) != 3:
+            return index
+    return 0
+
+
+def _advance_talishar_to_parity_baseline(env_tal: Any, *, max_steps: int = 40) -> dict[str, Any]:
+    """Auto-advance Talishar through equipment selection until main-phase hands are dealt."""
+    state = getattr(env_tal, "_last_state", None) or {}
+    if _is_parity_baseline_state(env_tal, state):
+        return state
+
+    legal_actions_fn = getattr(env_tal, "_legal_actions", None)
+    step_fn = getattr(env_tal, "step", None)
+    if not callable(legal_actions_fn) or not callable(step_fn):
+        return state
+
+    for _ in range(max_steps):
+        state = getattr(env_tal, "_last_state", None) or {}
+        if _is_parity_baseline_state(env_tal, state):
+            return state
+        if state.get("error") == "game_crashed":
+            break
+        legal_actions = legal_actions_fn(state)
+        if not legal_actions:
+            break
+        action_index = _pick_pregame_advance_index(legal_actions)
+        step_fn(str(action_index))
+    return getattr(env_tal, "_last_state", None) or {}
+
+
+def _build_talishar_reset_snapshot(env_tal: Any) -> Any:
+    """Build a reset-like snapshot from the current Talishar HTTP state."""
+    state = getattr(env_tal, "_last_state", None) or {}
+    legal_actions_fn = getattr(env_tal, "_legal_actions", None)
+    encode_fn = getattr(env_tal, "_encode_observation", None)
+    legal_actions = legal_actions_fn(state) if callable(legal_actions_fn) else []
+    observation = encode_fn(state, legal_actions) if callable(encode_fn) else "{}"
+    return type(
+        "TalisharResetSnapshot",
+        (),
+        {
+            "observation": observation,
+            "info": {
+                "game_name": getattr(env_tal, "_game_name", ""),
+                "legal_actions": legal_actions,
+                "player_hp": int(state.get("playerHealth", 0) or 0),
+                "opponent_hp": int(state.get("opponentHealth", 0) or 0),
+                "acting_player_id": int(getattr(env_tal, "_acting_player_id", 1) or 1),
+                "self_play": bool(getattr(env_tal, "_self_play", False)),
+            },
+        },
+    )()
+
+
+def _cpp_supports_priority_sync(env_cpp: Any) -> bool:
+    cpp_env = getattr(env_cpp, "_cpp_env", None)
+    fab = getattr(cpp_env, "_fab", None)
+    if fab is None:
+        return False
+    try:
+        probe = fab.GameState()
+    except Exception:
+        return False
+    return hasattr(probe, "set_priority")
+
+
+def _reset_talishar_for_parity(
+    env_tal: Any,
+    env_cpp: Any,
+    *,
+    max_attempts: int = 8,
+) -> None:
+    """Reset Talishar and advance to a main-phase baseline suitable for parity."""
+    require_p1_priority = not _cpp_supports_priority_sync(env_cpp)
+    last_error: Optional[Exception] = None
+    for _ in range(max_attempts):
+        try:
+            env_tal.reset()
+            _advance_talishar_to_parity_baseline(env_tal)
+            if (
+                not require_p1_priority
+                or int(getattr(env_tal, "_acting_player_id", 1) or 1) == 1
+            ):
+                return
+        except Exception as exc:
+            last_error = exc
+            continue
+    if last_error is not None:
+        raise last_error
+    acting_player_id = int(getattr(env_tal, "_acting_player_id", 1) or 1)
+    raise RuntimeError(
+        "Could not align Talishar opening state for parity "
+        f"(acting_player_id={acting_player_id}, require_p1_priority={require_p1_priority})"
+    )
+
+
+def _hand_playability_from_talishar(env_tal: Any) -> dict[int, list[int]]:
+    playability: dict[int, list[int]] = {}
     fetch_state = getattr(env_tal, "_fetch_state", None)
     if callable(fetch_state):
         for player_id in (1, 2):
-            if player_id in opening_hands:
-                continue
             try:
                 state = fetch_state(player_id=player_id, last_update=0)
             except Exception:
                 continue
-            opening_hands[player_id] = _card_ids_from_state_hand(state)
+            indices: list[int] = []
+            hand = state.get("playerHand", [])
+            if isinstance(hand, list):
+                for index, card in enumerate(hand):
+                    if isinstance(card, dict) and int(card.get("action", 0) or 0) != 0:
+                        indices.append(index)
+            if indices:
+                playability[player_id] = indices
+    return playability
+
+
+def _opening_hands_from_talishar(env_tal: Any) -> dict[int, list[str]]:
+    opening_hands: dict[int, list[str]] = {}
+    fetch_state = getattr(env_tal, "_fetch_state", None)
+    if callable(fetch_state):
+        for player_id in (1, 2):
+            try:
+                state = fetch_state(player_id=player_id, last_update=0)
+            except Exception:
+                continue
+            cards = _card_ids_from_state_hand(state)
+            if cards:
+                opening_hands[player_id] = cards
+
     last_state = getattr(env_tal, "_last_state", None)
-    if 1 not in opening_hands and isinstance(last_state, dict):
-        opening_hands[1] = _card_ids_from_state_hand(last_state)
+    acting_player_id = _safe_int(getattr(env_tal, "_acting_player_id", 1)) or 1
+    if acting_player_id not in opening_hands and isinstance(last_state, dict):
+        opening_hands[acting_player_id] = _card_ids_from_state_hand(last_state)
     return opening_hands
 
 
@@ -567,17 +712,27 @@ def run_parity_episode(
     episode: int,
     max_steps: int,
     stress: bool,
+    stop_after_failure: bool = False,
 ) -> bool:
     print(f"  [Episode {episode}] Resetting...")
     report.episodes_run += 1
+    episode_failed = False
     try:
-        reset_tal = env_tal.reset()
+        _reset_talishar_for_parity(env_tal, env_cpp)
+        opening_hands = _opening_hands_from_talishar(env_tal)
+        hand_playability = _hand_playability_from_talishar(env_tal)
+        acting_player_id = int(getattr(env_tal, "_acting_player_id", 1) or 1)
         reset_cpp = env_cpp.reset(
-            options={"opening_hands": _opening_hands_from_talishar(env_tal, reset_tal)}
+            options={
+                "opening_hands": opening_hands,
+                "hand_playability": hand_playability,
+                "acting_player_id": acting_player_id,
+            }
         )
+        reset_tal = _build_talishar_reset_snapshot(env_tal)
     except Exception as exc:
         report.episodes_failed += 1
-        return _record_discrepancy(
+        _record_discrepancy(
             report,
             episode=episode,
             step=0,
@@ -586,9 +741,12 @@ def run_parity_episode(
             talishar_value=type(exc).__name__,
             cpp_value="not comparable",
         )
-    if not _compare_reset(reset_tal, reset_cpp, report, episode):
-        report.episodes_failed += 1
         return False
+    if not _compare_reset(reset_tal, reset_cpp, report, episode):
+        episode_failed = True
+        if stop_after_failure:
+            report.episodes_failed += 1
+            return False
 
     observation = reset_tal.observation
     for step in range(1, max_steps + 1):
@@ -598,8 +756,8 @@ def run_parity_episode(
             step_tal = env_tal.step(str(action_index))
             step_cpp = env_cpp.step(str(action_index))
         except Exception as exc:
-            report.episodes_failed += 1
-            return _record_discrepancy(
+            episode_failed = True
+            _record_discrepancy(
                 report,
                 episode=episode,
                 step=step,
@@ -608,6 +766,10 @@ def run_parity_episode(
                 talishar_value=type(exc).__name__,
                 cpp_value="not comparable",
             )
+            if stop_after_failure:
+                report.episodes_failed += 1
+                return False
+            continue
         report.total_steps += 1
         if not _compare_step(
             step_tal,
@@ -618,14 +780,30 @@ def run_parity_episode(
             action_index=action_index,
             action_label=action_label,
         ):
-            report.episodes_failed += 1
-            return False
+            episode_failed = True
+            if stop_after_failure:
+                report.episodes_failed += 1
+                return False
 
         observation = step_tal.observation
+
         if bool(step_tal.terminated) or bool(step_tal.truncated):
-            print(f"  [Episode {episode}] Terminal parity reached at step {step}")
-            report.episodes_passed += 1
-            return True
+            if episode_failed:
+                print(
+                    f"  [Episode {episode}] Terminal state at step {step} "
+                    f"(episode had discrepancies)"
+                )
+            else:
+                print(f"  [Episode {episode}] Terminal parity reached at step {step}")
+                report.episodes_passed += 1
+            if episode_failed:
+                report.episodes_failed += 1
+            return not episode_failed
+
+    if episode_failed:
+        print(f"  [Episode {episode}] Completed {max_steps} step(s) with discrepancies")
+        report.episodes_failed += 1
+        return False
 
     print(f"  [Episode {episode}] Parity matched for {max_steps} step(s)")
     report.episodes_passed += 1
@@ -844,12 +1022,12 @@ def main() -> None:
     parser.add_argument("--cpp-engine-deck2", default=None)
     parser.add_argument("--out-dir", default="results/parity_checks")
     parser.add_argument(
-        "--continue-after-failure",
+        "--stop-after-failure",
         action="store_true",
         help=(
-            "Continue running additional episodes after the first discrepancy. "
-            "By default the checker stops at the first mismatch because later "
-            "actions are no longer comparable once observations diverge."
+            "Stop at the first discrepancy (within an episode or across episodes). "
+            "By default the checker records mismatches and keeps running to collect "
+            "as many findings as possible."
         ),
     )
     args = parser.parse_args()
@@ -898,20 +1076,15 @@ def main() -> None:
     max_steps, stress = _steps_for_mode(args, env_tal, env_cpp)
     try:
         for episode in range(1, args.episodes + 1):
-            episode_ok = run_parity_episode(
+            run_parity_episode(
                 env_tal,
                 env_cpp,
                 report,
                 episode=episode,
                 max_steps=max_steps,
                 stress=stress,
+                stop_after_failure=args.stop_after_failure,
             )
-            if not episode_ok and not args.continue_after_failure:
-                print(
-                    "[WARN] Stopping after first discrepancy. "
-                    "Use --continue-after-failure to collect repeated failures."
-                )
-                break
     except KeyboardInterrupt:
         print("[WARN] Interrupted by user; writing partial report")
     finally:

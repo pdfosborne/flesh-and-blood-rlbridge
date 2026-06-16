@@ -520,6 +520,7 @@ struct GameState {{
     void register_all_cards();
     void init_standard_decks();   // deal opening hands from pre-built deck lists
     void sync_opening_hand(int player_idx, const std::vector<std::string>& card_ids);
+    void set_priority(int player_idx);
 
 private:
     void _advance_phase();
@@ -637,6 +638,13 @@ void GameState::sync_opening_hand(int player_idx, const std::vector<std::string>
 
     p.hand = synced_hand;
     p.deck = available;
+}}
+
+void GameState::set_priority(int player_idx) {{
+    if (player_idx < 0 || player_idx >= 2) {{
+        throw std::runtime_error("player_idx must be 0 or 1");
+    }}
+    priority = player_idx;
 }}
 
 void GameState::_advance_phase() {{
@@ -829,6 +837,7 @@ PYBIND11_MODULE(fab_engine, m) {{
         .def("register_all_cards", &GameState::register_all_cards)
         .def("init_standard_decks", &GameState::init_standard_decks)
         .def("sync_opening_hand", &GameState::sync_opening_hand)
+        .def("set_priority", &GameState::set_priority)
         .def("get_legal_actions",  &GameState::get_legal_actions)
         .def("apply_action",       &GameState::apply_action)
         .def_property_readonly("game_over",

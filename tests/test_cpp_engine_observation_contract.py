@@ -112,13 +112,13 @@ def test_cpp_observation_contract_matches_talishar_field_shapes() -> None:
             "cardID": "WTR001",
             "action": 27,
             "actionDataOverride": "0",
-            "label": "Blue Attack",
+            "label": "",
         },
         {
             "cardID": "WTR002",
             "action": 0,
-            "actionDataOverride": "",
-            "label": "Too Expensive",
+            "actionDataOverride": "1",
+            "label": "",
         }
     ]
 
