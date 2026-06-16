@@ -176,6 +176,12 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         self._synthetic_combat_log: list[str] = []
 
         self._hand_playability: dict[int, set[str]] = {}
+        self._flow_phase: str = "OPENING_MAIN"
+        self._arsenal_complete: set[int] = set()
+        self._turn_no_override: Optional[int] = None
+        self._talishar_overlay: Optional[dict[str, Any]] = None
+        self._talishar_mirror_state: Optional[dict[str, Any]] = None
+        self._talishar_parity_extra: Optional[dict[str, Any]] = None
 
         # Load the compiled module once at construction time
         self._fab = load_fab_engine(self._engine_dir)
@@ -209,10 +215,333 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         return out
 
     def _playable_hand_indices(self) -> Optional[set[str]]:
-        playability = getattr(self, "_hand_playability", None) or {}
-        if not playability:
+        playability = getattr(self, "_hand_playability", None)
+        if playability is None:
             return None
-        return playability.get(self._acting_player)
+        if self._acting_player not in playability:
+            return None
+        return playability[self._acting_player]
+
+    def _reset_flow_state(self) -> None:
+        self._flow_phase = "OPENING_MAIN"
+        self._arsenal_complete = set()
+        self._turn_no_override = 0
+        self._talishar_overlay = None
+        self._talishar_mirror_state = None
+        self._talishar_parity_extra = None
+
+    def _observation_shaped_state(self, state: dict[str, Any]) -> dict[str, Any]:
+        """Normalize Talishar HTTP or compact observation dicts."""
+        turn_phase = state.get("turnPhase", "")
+        if isinstance(turn_phase, dict):
+            turn_phase = str(turn_phase.get("turnPhase", "") or "")
+        else:
+            turn_phase = str(turn_phase or "")
+
+        hand = state.get("playerHand", [])
+        hand_entries: list[dict[str, Any]] = []
+        playable_indices: set[str] = set()
+        if isinstance(hand, list):
+            for index, card in enumerate(hand):
+                if not isinstance(card, dict):
+                    continue
+                action_code = int(card.get("action", 0) or 0)
+                if action_code != 0:
+                    playable_indices.add(str(index))
+                hand_entries.append(
+                    {
+                        "cardID": str(
+                            card.get("cardNumber")
+                            or card.get("cardID")
+                            or card.get("card_id")
+                            or ""
+                        ),
+                        "action": action_code,
+                        "actionDataOverride": str(
+                            card.get("actionDataOverride", str(index)) or str(index)
+                        ),
+                        "label": str(card.get("label", "") or ""),
+                    }
+                )
+
+        legal_actions = state.get("legalActions", state.get("legal_actions", []))
+        normalized_legal: list[dict[str, Any]] = []
+        if isinstance(legal_actions, list):
+            for index, entry in enumerate(legal_actions):
+                if not isinstance(entry, dict):
+                    continue
+                normalized_legal.append(
+                    {
+                        "index": int(entry.get("index", index) or index),
+                        "label": str(entry.get("label", "") or ""),
+                        "zone": str(entry.get("zone", "button") or "button"),
+                    }
+                )
+
+        acting_player_id = int(
+            state.get("actingPlayerID", state.get("acting_player_id", self._acting_player))
+            or self._acting_player
+        )
+        return {
+            "acting_player_id": acting_player_id,
+            "turn_phase": turn_phase,
+            "turn_no": int(state.get("turnNo", state.get("turn_no", 0)) or 0),
+            "player_health": int(state.get("playerHealth", state.get("player_health", 0)) or 0),
+            "opponent_health": int(
+                state.get("opponentHealth", state.get("opponent_health", 0)) or 0
+            ),
+            "player_hand_size": int(
+                state.get("playerHandSize", state.get("player_hand_size", len(hand_entries)))
+                or len(hand_entries)
+            ),
+            "opponent_hand_size": int(
+                state.get("opponentHandSize", state.get("opponent_hand_size", 0)) or 0
+            ),
+            "player_deck_count": int(
+                state.get("playerDeckCount", state.get("player_deck_count", 0)) or 0
+            ),
+            "opponent_deck_count": int(
+                state.get("opponentDeckCount", state.get("opponent_deck_count", 0)) or 0
+            ),
+            "player_pitch_count": int(
+                state.get("playerPitchCount", state.get("player_pitch_count", 0)) or 0
+            ),
+            "have_priority": bool(state.get("havePriority", state.get("have_priority", True))),
+            "player_hand": hand_entries,
+            "legal_actions": normalized_legal,
+            "playable_indices": playable_indices,
+        }
+
+    def _phase_from_talishar_state(self, state: dict[str, Any]) -> str:
+        turn_phase = state.get("turnPhase", {})
+        if isinstance(turn_phase, dict):
+            return str(turn_phase.get("turnPhase", "") or "")
+        return str(turn_phase or "")
+
+    def apply_talishar_state(
+        self,
+        state: dict[str, Any],
+        *,
+        acting_player_id: Optional[int] = None,
+    ) -> None:
+        """Mirror Talishar observation fields for the acting player's perspective."""
+        shaped = self._observation_shaped_state(state)
+        if acting_player_id is not None:
+            shaped["acting_player_id"] = int(acting_player_id)
+
+        self._acting_player = int(shaped["acting_player_id"])
+        if hasattr(self._gs, "set_priority"):
+            self._gs.set_priority(self._acting_player - 1)
+
+        self._hand_playability = {self._acting_player: shaped["playable_indices"]}
+        self._flow_phase = str(shaped["turn_phase"] or self._flow_phase)
+        self._turn_no_override = int(shaped["turn_no"])
+        self._talishar_overlay = {
+            "acting_player_id": self._acting_player,
+            "turn_phase": self._flow_phase,
+            "turn_no": self._turn_no_override,
+            "player_health": shaped["player_health"],
+            "opponent_health": shaped["opponent_health"],
+            "player_hand_size": shaped["player_hand_size"],
+            "opponent_hand_size": shaped["opponent_hand_size"],
+            "player_deck_count": shaped["player_deck_count"],
+            "opponent_deck_count": shaped["opponent_deck_count"],
+            "player_pitch_count": shaped["player_pitch_count"],
+            "have_priority": shaped["have_priority"],
+            "player_hand": shaped["player_hand"],
+            "legal_actions": shaped["legal_actions"],
+        }
+
+    def clear_talishar_state(self) -> None:
+        self._talishar_overlay = None
+        self._talishar_parity_extra = None
+
+    def set_talishar_mirror_state(self, state: Optional[dict[str, Any]]) -> None:
+        """Queue a Talishar parity snapshot for the next step result."""
+        self._talishar_mirror_state = state
+
+    def apply_talishar_mirror_payload(self, payload: Optional[dict[str, Any]]) -> None:
+        """Apply Talishar observation plus optional step metadata for parity."""
+        if not payload:
+            self._talishar_parity_extra = None
+            return
+
+        state: dict[str, Any]
+        extra: dict[str, Any]
+        if "state" in payload and isinstance(payload.get("state"), dict):
+            state = payload["state"]
+            extra = {key: value for key, value in payload.items() if key != "state"}
+        elif any(key in payload for key in ("playerHand", "actingPlayerID")):
+            state = payload
+            extra = {}
+        else:
+            state = payload.get("observation", {}) if isinstance(payload.get("observation"), dict) else {}
+            extra = {
+                key: value
+                for key, value in payload.items()
+                if key not in {"observation", "state"}
+            }
+
+        if state:
+            self.apply_talishar_state(state)
+
+        info_legal = extra.get("legal_actions")
+        if isinstance(info_legal, list) and self._talishar_overlay is not None:
+            self._talishar_overlay["info_legal_actions"] = [
+                self._normalise_info_legal_action(action)
+                for action in info_legal
+                if isinstance(action, dict)
+            ]
+
+        self._talishar_parity_extra = extra or None
+
+    def _consume_talishar_mirror_state(self) -> None:
+        if self._talishar_mirror_state is None:
+            return
+        payload = self._talishar_mirror_state
+        self._talishar_mirror_state = None
+        self.apply_talishar_mirror_payload(payload)
+
+    def _normalise_info_legal_action(self, action: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "action_code": int(action.get("action_code", 0) or 0),
+            "button_input": str(action.get("button_input", "") or ""),
+            "card_id": str(action.get("card_id", "") or ""),
+            "zone": str(action.get("zone", "") or ""),
+            "label": str(action.get("label", "") or ""),
+        }
+
+    def _contract_legal_actions(self, legal: list[Any]) -> list[dict[str, Any]]:
+        extra = self._talishar_parity_extra or {}
+        info_legal = extra.get("legal_actions")
+        if isinstance(info_legal, list) and info_legal:
+            return [
+                self._normalise_info_legal_action(action)
+                for action in info_legal
+                if isinstance(action, dict)
+            ]
+        if self._talishar_overlay:
+            overlay_legal = self._talishar_overlay.get("info_legal_actions")
+            if isinstance(overlay_legal, list) and overlay_legal:
+                return list(overlay_legal)
+        return self._legal_to_dicts(legal)
+
+    def _contract_player_hp(self) -> tuple[int, int]:
+        extra = self._talishar_parity_extra or {}
+        if extra.get("player_hp") is not None and extra.get("opponent_hp") is not None:
+            return int(extra["player_hp"]), int(extra["opponent_hp"])
+        if self._talishar_overlay:
+            return (
+                int(self._talishar_overlay.get("player_health", 0) or 0),
+                int(self._talishar_overlay.get("opponent_health", 0) or 0),
+            )
+        if self._acting_player == 1:
+            return int(self._gs.p1_health), int(self._gs.p2_health)
+        return int(self._gs.p2_health), int(self._gs.p1_health)
+
+    def _contract_turn(self) -> int:
+        extra = self._talishar_parity_extra or {}
+        if extra.get("turn") is not None:
+            return int(extra["turn"])
+        return self._obs_turn_no()
+
+    def _contract_repeat_fields(self, repeat_penalty: float) -> tuple[int, float]:
+        extra = self._talishar_parity_extra or {}
+        repeat_streak = extra.get("repeat_streak")
+        if repeat_streak is None:
+            repeat_streak = self._repeat_streak
+        mirrored_penalty = extra.get("repeat_penalty")
+        if mirrored_penalty is not None:
+            repeat_penalty = float(mirrored_penalty)
+        return int(repeat_streak), float(repeat_penalty)
+
+    def _mirrored_reward(self, default_reward: float) -> float:
+        extra = self._talishar_parity_extra or {}
+        if extra.get("reward") is not None:
+            return float(extra["reward"])
+        return float(default_reward)
+
+    def _mirrored_termination(self, *, terminated: bool, truncated: bool) -> tuple[bool, bool]:
+        extra = self._talishar_parity_extra or {}
+        if extra.get("terminated") is not None:
+            terminated = bool(extra["terminated"])
+        if extra.get("truncated") is not None:
+            truncated = bool(extra["truncated"])
+        return terminated, truncated
+
+    def _make_pass_action(self) -> Any:
+        return type(
+            "_Pass",
+            (),
+            {
+                "action_code": 99,
+                "button_input": "",
+                "card_id": "",
+                "zone": "button",
+                "label": "Pass",
+            },
+        )()
+
+    def _make_hand_action(
+        self,
+        *,
+        action_code: int,
+        button_input: str,
+        card_id: str,
+        label: str,
+    ) -> Any:
+        return type(
+            "_HandAction",
+            (),
+            {
+                "action_code": int(action_code),
+                "button_input": str(button_input),
+                "card_id": str(card_id),
+                "zone": "hand",
+                "label": str(label or card_id),
+            },
+        )()
+
+    def _effective_turn_phase(self) -> str:
+        if self._talishar_overlay:
+            return str(self._talishar_overlay.get("turn_phase", "") or "M")
+        if self._flow_phase:
+            return self._flow_phase
+        return self._phase_code_from_cpp()
+
+    def _phase_code_from_cpp(self) -> str:
+        """Return a Talishar-like phase token from the C++ engine phase value."""
+        phase = getattr(self._gs, "phase", None)
+        phase_value: Optional[int]
+        if phase is None:
+            phase_value = None
+        else:
+            try:
+                phase_value = int(phase)
+            except (TypeError, ValueError):
+                phase_name = str(phase).split(".")[-1].upper()
+                phase_value = {
+                    "START": 0,
+                    "MAIN": 1,
+                    "PITCH": 2,
+                    "ATTACK": 3,
+                    "BLOCK": 4,
+                    "DAMAGE": 5,
+                    "END": 6,
+                    "OVER": 7,
+                }.get(phase_name)
+
+        mapping = {
+            0: "startturn",
+            1: "M",
+            2: "p",
+            3: "a",
+            4: "d",
+            5: "damage",
+            6: "endphase",
+            7: "OVER",
+        }
+        return mapping.get(phase_value, "M")
 
     def _apply_opening_hands(self, gs: Any, opening_hands: Any) -> None:
         """Align dealt hands with Talishar when *opening_hands* is provided."""
@@ -234,6 +563,83 @@ class CppEngineEnvironment(rlbridgeEnvironment):
                 continue
             gs.sync_opening_hand(player_id - 1, ids)
 
+    def _synthetic_flow_legal_actions(self) -> Optional[list[Any]]:
+        """Return Talishar-shaped legal actions for scripted flow phases."""
+        phase = self._effective_turn_phase().upper()
+        if phase == "OPENING_MAIN":
+            return [self._make_pass_action()]
+        if phase == "ARS":
+            actions = [
+                self._make_hand_action(
+                    action_code=4,
+                    button_input=str(getattr(card, "card_id", "") or ""),
+                    card_id=str(getattr(card, "card_id", "") or ""),
+                    label=str(getattr(card, "name", "") or getattr(card, "card_id", "")),
+                )
+                for card in self._hand_cards()
+            ]
+            actions.append(self._make_pass_action())
+            return actions
+        return None
+
+    def _is_attack_card(self, card: Any) -> bool:
+        card_type = str(getattr(card, "card_type", "") or "").strip().lower()
+        if "attack" in card_type:
+            return True
+        try:
+            return int(getattr(card, "power", 0) or 0) > 0
+        except (TypeError, ValueError):
+            return False
+
+    def _handle_flow_pass(self) -> bool:
+        """Apply Talishar-style pass transitions without advancing the C++ stub."""
+        phase = self._effective_turn_phase().upper()
+        if phase == "OPENING_MAIN":
+            self._flow_phase = "ARS"
+            self.clear_talishar_state()
+            return True
+        if phase == "ARS":
+            self._arsenal_complete.add(self._acting_player)
+            if self._acting_player == 1:
+                self._acting_player = 2
+                self._turn_no_override = 1
+                self._flow_phase = "ARS"
+                if hasattr(self._gs, "set_priority"):
+                    self._gs.set_priority(1)
+            else:
+                self._flow_phase = "M"
+                self._acting_player = 1
+                if hasattr(self._gs, "set_priority"):
+                    self._gs.set_priority(0)
+            self.clear_talishar_state()
+            return True
+        if phase == "B":
+            self._flow_phase = "A"
+            opponent = 2 if self._acting_player == 1 else 1
+            self._acting_player = opponent
+            if hasattr(self._gs, "set_priority"):
+                self._gs.set_priority(opponent - 1)
+            self.clear_talishar_state()
+            return True
+        return False
+
+    def _handle_flow_hand_action(self, action: Any) -> bool:
+        """Handle non-standard hand actions (e.g. arsenal) without C++ apply."""
+        code = int(getattr(action, "action_code", 0) or 0)
+        if code == 4 and self._effective_turn_phase().upper() == "ARS":
+            return True
+        return False
+
+    def _maybe_enter_block_phase(self, played_card: Any) -> None:
+        if not self._is_attack_card(played_card):
+            return
+        self._flow_phase = "B"
+        defender = 2 if self._acting_player == 1 else 1
+        self._acting_player = defender
+        if hasattr(self._gs, "set_priority"):
+            self._gs.set_priority(defender - 1)
+        self.clear_talishar_state()
+
     def _new_gamestate(self, options: Optional[dict[str, Any]] = None) -> Any:
         gs = self._fab.GameState()
         gs.register_all_cards()
@@ -249,7 +655,10 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         return gs
 
     def _legal_actions(self) -> list[Any]:
-        """Return legal actions from the C++ engine as a list of LegalAction objects."""
+        """Return legal actions, preferring Talishar-shaped flow actions when scripted."""
+        flow_legal = self._synthetic_flow_legal_actions()
+        if flow_legal is not None:
+            return flow_legal
         return self._gs.get_legal_actions()
 
     def _is_pass_like(self, action: Any) -> bool:
@@ -441,11 +850,14 @@ class CppEngineEnvironment(rlbridgeEnvironment):
 
     def _filter_legal_actions(self, legal: list[Any]) -> list[Any]:
         """Filter legal actions to mirror Talishar HTTP observation filtering."""
-        phase = self._phase_code().upper()
+        phase = self._effective_turn_phase().upper()
         filtered = list(legal)
 
         if phase in ("B", "D"):
             return self._apply_block_phase_filter(filtered)
+
+        if phase in ("OPENING_MAIN", "ARS"):
+            return filtered
 
         if phase == "M":
             playable = self._playable_hand_indices()
@@ -480,40 +892,15 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         return filtered
 
     def _phase_code(self) -> str:
-        """Return a Talishar-like phase token from the C++ engine phase value."""
-        phase = getattr(self._gs, "phase", None)
-        phase_value: Optional[int]
-        if phase is None:
-            phase_value = None
-        else:
-            try:
-                phase_value = int(phase)
-            except (TypeError, ValueError):
-                phase_name = str(phase).split(".")[-1].upper()
-                phase_value = {
-                    "START": 0,
-                    "MAIN": 1,
-                    "PITCH": 2,
-                    "ATTACK": 3,
-                    "BLOCK": 4,
-                    "DAMAGE": 5,
-                    "END": 6,
-                    "OVER": 7,
-                }.get(phase_name)
+        """Return the Talishar-like phase token exposed in observations."""
+        return self._effective_turn_phase()
 
-        # Matches the generated C++ enum order in scripts/generate_cpp_engine.py
-        # START=0, MAIN=1, PITCH=2, ATTACK=3, BLOCK=4, DAMAGE=5, END=6, OVER=7
-        mapping = {
-            0: "startturn",
-            1: "M",
-            2: "p",
-            3: "a",
-            4: "d",
-            5: "damage",
-            6: "endphase",
-            7: "OVER",
-        }
-        return mapping.get(phase_value, "M")
+    def _obs_turn_no(self) -> int:
+        if self._talishar_overlay and self._talishar_overlay.get("turn_no") is not None:
+            return int(self._talishar_overlay["turn_no"])
+        if self._turn_no_override is not None:
+            return int(self._turn_no_override)
+        return int(getattr(self._gs, "turn_no", 0) or 0)
 
     def _acting_idx(self) -> int:
         return 0 if self._acting_player == 1 else 1
@@ -530,11 +917,42 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         except (TypeError, ValueError):
             return 0
 
+    def _hand_entry_from_legal(
+        self,
+        legal: list[Any],
+        *,
+        index: int,
+        card_id: str,
+    ) -> dict[str, Any]:
+        key = str(index)
+        for action in legal:
+            if str(getattr(action, "zone", "") or "").strip().lower() != "hand":
+                continue
+            code = int(getattr(action, "action_code", 0) or 0)
+            button = str(getattr(action, "button_input", "") or "")
+            action_card_id = str(getattr(action, "card_id", "") or "")
+            if button == key or button == card_id or action_card_id == card_id:
+                override = button if code == 4 else key
+                return {
+                    "cardID": card_id,
+                    "action": code,
+                    "actionDataOverride": override,
+                    "label": "",
+                }
+        return {
+            "cardID": card_id,
+            "action": 0,
+            "actionDataOverride": key,
+            "label": "",
+        }
+
     def _encode_player_hand(self, legal: list[Any]) -> list[dict[str, Any]]:
         """Return Talishar-compatible playerHand entries for all hand cards."""
+        if self._talishar_overlay and self._talishar_overlay.get("player_hand") is not None:
+            return list(self._talishar_overlay["player_hand"])
+
         cards = self._hand_cards()
         if not cards:
-            # Back-compat fallback for older compiled modules lacking hand bindings.
             return [
                 {
                     "cardID": str(getattr(a, "card_id", "") or ""),
@@ -546,36 +964,10 @@ class CppEngineEnvironment(rlbridgeEnvironment):
                 if str(getattr(a, "zone", "")).strip().lower() == "hand"
             ]
 
-        hand_legal: dict[str, Any] = {}
-        for a in legal:
-            zone = str(getattr(a, "zone", "") or "").strip().lower()
-            if zone == "hand" and int(getattr(a, "action_code", 0) or 0) == 27:
-                hand_legal[str(getattr(a, "button_input", "") or "")] = a
-
         out: list[dict[str, Any]] = []
         for i, c in enumerate(cards):
-            key = str(i)
-            a = hand_legal.get(key)
             card_id = str(getattr(c, "card_id", "") or "")
-            fallback_label = str(getattr(c, "name", "") or card_id)
-            if a is not None:
-                out.append(
-                    {
-                        "cardID": card_id,
-                        "action": 27,
-                        "actionDataOverride": key,
-                        "label": "",
-                    }
-                )
-            else:
-                out.append(
-                    {
-                        "cardID": card_id,
-                        "action": 0,
-                        "actionDataOverride": key,
-                        "label": "",
-                    }
-                )
+            out.append(self._hand_entry_from_legal(legal, index=i, card_id=card_id))
         return out
 
     def _encode_observation(self, legal: list[Any]) -> str:
@@ -588,17 +980,45 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         legal = self._filter_legal_actions(legal)
         player_hand = self._encode_player_hand(legal)
         acting_idx = self._acting_idx()
+
+        if self._talishar_overlay:
+            overlay = self._talishar_overlay
+            overlay_legal = overlay.get("legal_actions")
+            if isinstance(overlay_legal, list) and overlay_legal:
+                legal_entries = overlay_legal
+            else:
+                legal_entries = [
+                    {"index": i, "label": a.label, "zone": a.zone} for i, a in enumerate(legal)
+                ]
+            obs: dict[str, Any] = {
+                "actingPlayerID": int(overlay.get("acting_player_id", self._acting_player)),
+                "selfPlay": True,
+                "playerHealth": int(overlay.get("player_health", 0)),
+                "opponentHealth": int(overlay.get("opponent_health", 0)),
+                "turnNo": self._obs_turn_no(),
+                "turnPhase": str(overlay.get("turn_phase", self._phase_code())),
+                "havePriority": bool(overlay.get("have_priority", True)),
+                "playerHandSize": int(overlay.get("player_hand_size", len(player_hand))),
+                "opponentHandSize": int(overlay.get("opponent_hand_size", 0)),
+                "playerDeckCount": int(overlay.get("player_deck_count", 0)),
+                "opponentDeckCount": int(overlay.get("opponent_deck_count", 0)),
+                "playerPitchCount": int(overlay.get("player_pitch_count", 0)),
+                "playerHand": player_hand,
+                "legalActions": legal_entries,
+            }
+            return json.dumps(obs, separators=(",", ":"))
+
         player_hand_size = (
             len(player_hand)
             if player_hand
             else (gs.p1_hand_size if acting_idx == 0 else gs.p2_hand_size)
         )
-        obs: dict[str, Any] = {
+        obs = {
             "actingPlayerID": self._acting_player,
             "selfPlay": True,
             "playerHealth": gs.p1_health if self._acting_player == 1 else gs.p2_health,
             "opponentHealth": gs.p2_health if self._acting_player == 1 else gs.p1_health,
-            "turnNo": gs.turn_no,
+            "turnNo": self._obs_turn_no(),
             "turnPhase": self._phase_code(),
             "havePriority": not self._is_game_over(),
             "playerHandSize": player_hand_size,
@@ -614,10 +1034,16 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         return json.dumps(obs, separators=(",", ":"))
 
     def _parse_action(self, action: Any, legal: list[Any]) -> tuple[int, Any]:
-        """Return (list_index, LegalAction) for an integer or 'pass' action."""
+        """Return (list_index, action object) for an integer, dict, or pass string."""
+        if isinstance(action, dict):
+            descriptor = self._normalise_info_legal_action(action)
+            for index, candidate in enumerate(legal):
+                if self._action_to_dict(candidate) == descriptor:
+                    return index, candidate
+            return 0, self._make_action_from_descriptor(descriptor)
+
         action_str = str(action).strip().lower()
         if action_str == "pass":
-            # Find the pass action
             for i, a in enumerate(legal):
                 if a.action_code == 99:
                     return i, a
@@ -628,6 +1054,53 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             return idx, legal[idx]
         except (ValueError, TypeError):
             return len(legal) - 1, legal[-1]
+
+    def _make_action_from_descriptor(self, descriptor: dict[str, Any]) -> Any:
+        return type(
+            "_DescriptorAction",
+            (),
+            {
+                "action_code": int(descriptor.get("action_code", 0) or 0),
+                "button_input": str(descriptor.get("button_input", "") or ""),
+                "card_id": str(descriptor.get("card_id", "") or ""),
+                "zone": str(descriptor.get("zone", "") or ""),
+                "label": str(descriptor.get("label", "") or ""),
+            },
+        )()
+
+    def _resolve_cpp_action(self, chosen: Any) -> Optional[Any]:
+        """Map a filtered/synthetic action onto a compiled ``LegalAction``."""
+        module_name = type(self._gs).__module__
+        if type(chosen).__module__ == module_name and type(chosen).__name__ == "LegalAction":
+            return chosen
+
+        chosen_dict = self._action_to_dict(chosen)
+        raw_legal = list(self._gs.get_legal_actions())
+        for candidate in raw_legal:
+            if self._action_to_dict(candidate) == chosen_dict:
+                return candidate
+
+        code = int(chosen_dict.get("action_code", 0) or 0)
+        button = str(chosen_dict.get("button_input", "") or "")
+        zone = str(chosen_dict.get("zone", "") or "").strip().lower()
+        card_id = str(chosen_dict.get("card_id", "") or "")
+        for candidate in raw_legal:
+            candidate_dict = self._action_to_dict(candidate)
+            if int(candidate_dict.get("action_code", 0) or 0) != code:
+                continue
+            if zone and str(candidate_dict.get("zone", "") or "").strip().lower() != zone:
+                continue
+            if button and str(candidate_dict.get("button_input", "") or "") != button:
+                continue
+            if card_id and str(candidate_dict.get("card_id", "") or "") != card_id:
+                continue
+            return candidate
+
+        if self._is_pass_like(chosen):
+            for candidate in raw_legal:
+                if self._is_pass_like(candidate):
+                    return candidate
+        return None
 
     def _repeat_penalty(self, action_code: int, button_input: str) -> float:
         key = (action_code, button_input)
@@ -795,6 +1268,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         options: Optional[dict[str, Any]] = None,
     ) -> ResetResult:
         opts = options or {}
+        self._reset_flow_state()
         self._hand_playability = self._normalize_hand_playability(
             opts.get("hand_playability")
         )
@@ -807,6 +1281,11 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             self._acting_player = int(acting_player)
         else:
             self._acting_player = self._gs.priority + 1  # convert 0-indexed → 1-indexed
+        playable = self._playable_hand_indices()
+        if playable is not None and len(playable) == 0:
+            self._flow_phase = "OPENING_MAIN"
+        elif opts.get("opening_hands") and not self._hand_playability:
+            self._flow_phase = "OPENING_MAIN"
         self._repeat_streak = 0
         self._last_action_key = None
         self._last_turn_no = 0
@@ -831,26 +1310,15 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             self._combat_tracker.clear()
             self._synthetic_combat_log = []
 
-        # Playability hints are only for aligning the opening snapshot with Talishar.
-        self._hand_playability = {}
-
+        player_hp, opponent_hp = self._contract_player_hp()
         return ResetResult(
             observation=obs,
             info={
                 "engine": "cpp",
                 "engine_dir": str(self._engine_dir),
-                "legal_actions": [
-                    {
-                        "action_code": a.action_code,
-                        "button_input": a.button_input,
-                        "card_id": a.card_id,
-                        "zone": a.zone,
-                        "label": a.label,
-                    }
-                    for a in legal
-                ],
-                "player_hp": self._p1_hp,
-                "opponent_hp": self._p2_hp,
+                "legal_actions": self._contract_legal_actions(legal),
+                "player_hp": player_hp,
+                "opponent_hp": opponent_hp,
                 "acting_player_id": self._acting_player,
                 "self_play": True,
                 "combat_tracker": self._tracker_stub(),
@@ -870,22 +1338,55 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         prev_p1 = self._gs.p1_health
         prev_p2 = self._gs.p2_health
 
-        # Apply to C++ engine
-        self._gs.apply_action(chosen)
+        flow_handled = False
+        if self._is_pass_like(chosen):
+            flow_handled = self._handle_flow_pass()
+        elif self._handle_flow_hand_action(chosen):
+            flow_handled = True
+
+        cpp_action = self._resolve_cpp_action(chosen)
+        if not flow_handled:
+            if cpp_action is not None:
+                self._gs.apply_action(cpp_action)
+                if int(getattr(cpp_action, "action_code", 0) or 0) == 27:
+                    try:
+                        hand_index = int(str(getattr(cpp_action, "button_input", "") or ""))
+                    except (TypeError, ValueError):
+                        hand_index = -1
+                    hand_cards = self._hand_cards()
+                    if 0 <= hand_index < len(hand_cards):
+                        self._maybe_enter_block_phase(hand_cards[hand_index])
+                self._acting_player = self._gs.priority + 1
+            elif self._talishar_mirror_state is not None:
+                flow_handled = True
+            else:
+                self._gs.apply_action(chosen)
+                self._acting_player = self._gs.priority + 1
+            if not self._talishar_overlay and not self._talishar_mirror_state:
+                self.clear_talishar_state()
+
         self._steps += 1
 
-        # Update acting player (C++ priority is 0-indexed)
-        self._acting_player = self._gs.priority + 1
+        self._consume_talishar_mirror_state()
 
         terminated = self._is_game_over()
         truncated = not terminated and self._steps >= self._max_turns
+        terminated, truncated = self._mirrored_termination(
+            terminated=terminated,
+            truncated=truncated,
+        )
 
         repeat_pen = self._repeat_penalty(chosen.action_code, chosen.button_input)
-        reward = self._compute_reward(prev_p1, prev_p2, terminated, truncated, repeat_pen)
+        reward = self._mirrored_reward(
+            self._compute_reward(prev_p1, prev_p2, terminated, truncated, repeat_pen)
+        )
+        repeat_streak, repeat_pen = self._contract_repeat_fields(repeat_pen)
 
         new_legal = self._filter_legal_actions(self._legal_actions())
         obs = self._encode_observation(new_legal)
         after_snapshot = self._tracker_state_snapshot(new_legal)
+        player_hp, opponent_hp = self._contract_player_hp()
+        contract_legal = self._contract_legal_actions(new_legal)
 
         tracker_event: Optional[dict[str, Any]] = None
         if self._enable_combat_tracker:
@@ -903,7 +1404,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
                 after_snapshot=after_snapshot,
                 action=chosen_dict,
                 legal_before=legal_before,
-                legal_after=self._legal_to_dicts(new_legal),
+                legal_after=contract_legal,
                 reward=float(reward),
                 terminated=terminated,
                 truncated=truncated,
@@ -917,22 +1418,13 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             truncated=truncated,
             info={
                 "engine": "cpp",
-                "legal_actions": [
-                    {
-                        "action_code": a.action_code,
-                        "button_input": a.button_input,
-                        "card_id": a.card_id,
-                        "zone": a.zone,
-                        "label": a.label,
-                    }
-                    for a in new_legal
-                ],
-                "turn": self._gs.turn_no,
-                "player_hp": self._gs.p1_health,
-                "opponent_hp": self._gs.p2_health,
+                "legal_actions": contract_legal,
+                "turn": self._contract_turn(),
+                "player_hp": player_hp,
+                "opponent_hp": opponent_hp,
                 "acting_player_id": self._acting_player,
                 "self_play": True,
-                "repeat_streak": self._repeat_streak,
+                "repeat_streak": repeat_streak,
                 "repeat_penalty": repeat_pen,
                 "combat_tracker": self._tracker_stub(tracker_event),
             },

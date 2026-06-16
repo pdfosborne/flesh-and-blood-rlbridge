@@ -56,6 +56,10 @@ def _build_env_for_encode(phase: int = 1) -> CppEngineEnvironment:
     env = object.__new__(CppEngineEnvironment)
     env._gs = _FakeGS(phase=phase)
     env._acting_player = 1
+    env._talishar_overlay = None
+    env._flow_phase = ""
+    env._hand_playability = {}
+    env._turn_no_override = None
     return env
 
 

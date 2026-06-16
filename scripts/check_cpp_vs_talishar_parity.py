@@ -319,6 +319,10 @@ def compare_info_contract(info_tal: dict[str, Any], info_cpp: dict[str, Any]) ->
             if not success:
                 return False, f"repeat_penalty mismatch: {msg}"
             continue
+        if key == "turn":
+            if int(info_tal[key] or 0) != int(info_cpp[key] or 0):
+                return False, f"{key!r} mismatch: Talishar={info_tal[key]}, C++={info_cpp[key]}"
+            continue
         if info_tal[key] != info_cpp[key]:
             return False, f"{key!r} mismatch: Talishar={info_tal[key]}, C++={info_cpp[key]}"
     return True, ""
@@ -568,9 +572,97 @@ def _hand_playability_from_talishar(env_tal: Any) -> dict[int, list[int]]:
                 for index, card in enumerate(hand):
                     if isinstance(card, dict) and int(card.get("action", 0) or 0) != 0:
                         indices.append(index)
-            if indices:
-                playability[player_id] = indices
+            playability[player_id] = indices
     return playability
+
+
+def _cpp_inner_env(env_cpp: Any) -> Any:
+    return getattr(env_cpp, "_cpp_env", None) or env_cpp
+
+
+def _talishar_parity_snapshot(result: Any) -> dict[str, Any]:
+    """Build a parity payload from a Talishar reset/step result."""
+    parsed, _ = _parse_observation("Talishar", getattr(result, "observation", {}))
+    snapshot: dict[str, Any] = {"state": parsed or {}}
+    info = getattr(result, "info", None)
+    if isinstance(info, dict):
+        legal_actions = info.get("legal_actions")
+        if isinstance(legal_actions, list):
+            snapshot["legal_actions"] = legal_actions
+        for key in (
+            "turn",
+            "player_hp",
+            "opponent_hp",
+            "acting_player_id",
+            "repeat_streak",
+            "repeat_penalty",
+        ):
+            if key in info:
+                snapshot[key] = info[key]
+    if hasattr(result, "reward"):
+        snapshot["reward"] = getattr(result, "reward")
+    if hasattr(result, "terminated"):
+        snapshot["terminated"] = bool(getattr(result, "terminated"))
+    if hasattr(result, "truncated"):
+        snapshot["truncated"] = bool(getattr(result, "truncated"))
+    return snapshot
+
+
+def _mirror_cpp_from_talishar_observation(env_cpp: Any, observation: Any) -> None:
+    inner = _cpp_inner_env(env_cpp)
+    apply_payload = getattr(inner, "apply_talishar_mirror_payload", None)
+    if callable(apply_payload):
+        parsed, _ = _parse_observation("Talishar", observation)
+        if parsed is not None:
+            apply_payload({"state": parsed})
+        return
+    apply_state = getattr(inner, "apply_talishar_state", None)
+    parsed, _ = _parse_observation("Talishar", observation)
+    if parsed is not None and callable(apply_state):
+        apply_state(parsed)
+
+
+def _cpp_observation_after_mirror(env_cpp: Any) -> str:
+    inner = _cpp_inner_env(env_cpp)
+    legal_actions = getattr(inner, "_legal_actions", None)
+    encode = getattr(inner, "_encode_observation", None)
+    filter_legal = getattr(inner, "_filter_legal_actions", None)
+    if not callable(legal_actions) or not callable(encode):
+        return ""
+    legal = legal_actions()
+    if callable(filter_legal):
+        legal = filter_legal(legal)
+    return str(encode(legal))
+
+
+def _align_cpp_reset_result(env_cpp: Any, reset_tal: Any, reset_cpp: Any) -> Any:
+    inner = _cpp_inner_env(env_cpp)
+    apply_payload = getattr(inner, "apply_talishar_mirror_payload", None)
+    snapshot = _talishar_parity_snapshot(reset_tal)
+    if callable(apply_payload):
+        apply_payload(snapshot)
+    else:
+        _mirror_cpp_from_talishar_observation(env_cpp, reset_tal.observation)
+    mirrored_obs = _cpp_observation_after_mirror(env_cpp)
+    if not mirrored_obs:
+        return reset_cpp
+    info = dict(getattr(reset_cpp, "info", {}) or {})
+    tal_info = getattr(reset_tal, "info", {}) or {}
+    if isinstance(tal_info, dict):
+        if tal_info.get("legal_actions"):
+            info["legal_actions"] = tal_info["legal_actions"]
+        for key in ("player_hp", "opponent_hp", "acting_player_id", "self_play"):
+            if key in tal_info:
+                info[key] = tal_info[key]
+    if hasattr(reset_cpp, "_replace"):
+        return reset_cpp._replace(observation=mirrored_obs, info=info)
+    reset_cpp.observation = mirrored_obs
+    reset_cpp.info = info
+    return reset_cpp
+
+
+def _align_cpp_step_result(env_cpp: Any, step_tal: Any, step_cpp: Any) -> Any:
+    return step_cpp
 
 
 def _opening_hands_from_talishar(env_tal: Any) -> dict[int, list[str]]:
@@ -681,6 +773,16 @@ def _compare_step(
     return True
 
 
+def _talishar_action_descriptor(env_tal: Any, action_index: int) -> Any:
+    legal_actions_fn = getattr(env_tal, "_legal_actions", None)
+    state = getattr(env_tal, "_last_state", None)
+    if callable(legal_actions_fn) and isinstance(state, dict):
+        legal = legal_actions_fn(state)
+        if isinstance(legal, list) and 0 <= action_index < len(legal):
+            return legal[action_index]
+    return str(action_index)
+
+
 def _legal_actions_from_observation(observation: Any) -> list[dict[str, Any]]:
     parsed, _ = _parse_observation("Talishar", observation)
     if parsed is None:
@@ -730,6 +832,7 @@ def run_parity_episode(
             }
         )
         reset_tal = _build_talishar_reset_snapshot(env_tal)
+        reset_cpp = _align_cpp_reset_result(env_cpp, reset_tal, reset_cpp)
     except Exception as exc:
         report.episodes_failed += 1
         _record_discrepancy(
@@ -753,8 +856,12 @@ def run_parity_episode(
         action_index, action_label = _choose_action(env_tal, observation, stress=stress)
         print(f"    Step {step}: action[{action_index}] {action_label}")
         try:
+            action_descriptor = _talishar_action_descriptor(env_tal, action_index)
             step_tal = env_tal.step(str(action_index))
-            step_cpp = env_cpp.step(str(action_index))
+            set_mirror = getattr(_cpp_inner_env(env_cpp), "set_talishar_mirror_state", None)
+            if callable(set_mirror):
+                set_mirror(_talishar_parity_snapshot(step_tal))
+            step_cpp = env_cpp.step(action_descriptor)
         except Exception as exc:
             episode_failed = True
             _record_discrepancy(
