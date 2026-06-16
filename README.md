@@ -10,6 +10,7 @@ This package is **not** bundled with rlbridge. Install it separately when you wa
 - [Prerequisites](#prerequisites)
 - [Installation](#installation)
 - [Talishar Setup](#talishar-setup)
+- [FaBrary deck fetching](#fabrary-deck-fetching)
 - [C++ Engine](#c-engine)
 - [MCP Tools](#mcp-tools)
 - [PowerShell Scripts](#powershell-scripts)
@@ -127,6 +128,108 @@ The script polls both services until they respond (backend ≤ 30 s, FE ≤ 20 s
 $env:TALISHAR_URL     = "http://localhost:8080"
 $env:TALISHAR_FE_URL  = "http://localhost:5173"
 ```
+
+---
+
+## FaBrary deck fetching
+
+Several scripts accept FaBrary deck URLs or 26-character slugs and convert them to rlbridge JSON (`hero_id`, `hero_class`, `equipment_header`, `deck`, `sideboard`). The fetch logic lives in `scripts/fetch_fabrary_deck.py` and is used by `simulate_deck_matchup.ps1`, `build_cpp_engine_for_matchup.ps1`, and the training pipeline scripts.
+
+### Do I need an API key?
+
+**Usually no.** For public decks, the fetcher falls back to FaBrary's AppSync GraphQL API (unauthenticated Cognito IAM credentials). That path works without any setup.
+
+An API key is only needed if:
+
+- You want the legacy REST endpoint (`x-api-key` header) instead of the GraphQL fallback.
+- A deck is private or AppSync returns no data (you must export it yourself or use a local JSON file).
+
+If fetch fails, you can always pass a local deck JSON path instead of a URL:
+
+```powershell
+.\simulate_deck_matchup.ps1 `
+    -Deck1Source "C:\Decks\briar.json" `
+    -Deck2Source "C:\Decks\riptide.json"
+```
+
+### Setting the API key
+
+The fetcher resolves credentials in this order:
+
+1. `--api-key` on `fetch_fabrary_deck.py`
+2. `FABRARY_API_KEY` environment variable (alias: `FABRARY_KEY`)
+3. Resolved `$FaBraryKey` in `Talishar/APIKeys/APIKeys.php` (Talishar contributors with 1Password access)
+
+#### Option A — environment variable (recommended)
+
+Set the key for the current PowerShell session:
+
+```powershell
+$env:FABRARY_API_KEY = "your-fabrary-api-key"
+.\simulate_deck_matchup.ps1
+```
+
+Persist it for your user account (PowerShell 7):
+
+```powershell
+[Environment]::SetEnvironmentVariable("FABRARY_API_KEY", "your-fabrary-api-key", "User")
+```
+
+On Linux/macOS:
+
+```bash
+export FABRARY_API_KEY="your-fabrary-api-key"
+```
+
+#### Option B — CLI flag (one-off fetches)
+
+```bash
+python scripts/fetch_fabrary_deck.py \
+    "https://fabrary.net/decks/01KTBBVEZE0TPDAZ74Z4D787G4" \
+    --api-key "your-fabrary-api-key" \
+    --out results/matchup_sims/decks/briar.json \
+    --pretty
+```
+
+#### Option C — Talishar `APIKeys.php` (contributors)
+
+Talishar stores the FaBrary server key in `Talishar/APIKeys/APIKeys.php`. That file is gitignored; copy from the template and inject secrets with 1Password:
+
+```bash
+cp Talishar/APIKeys/APIKeys.php.template Talishar/APIKeys/APIKeys.php
+op inject -i Talishar/APIKeys/APIKeys.php -o Talishar/APIKeys/APIKeys.php
+```
+
+`fetch_fabrary_deck.py` reads `$FaBraryKey` only when the value is a literal string (not an `op://` placeholder). If you have Talishar contributor access, this avoids setting a separate env var.
+
+### Fetching a deck manually
+
+```bash
+# Print JSON to stdout
+python scripts/fetch_fabrary_deck.py https://fabrary.net/decks/01KST88R7JVEQ73M82ZA0PJ9RN
+
+# Save to a file (cached decks are reused by simulate_deck_matchup.ps1)
+python scripts/fetch_fabrary_deck.py https://fabrary.net/decks/01KST88R7JVEQ73M82ZA0PJ9RN \
+    --out results/matchup_sims/decks/aurora.json --pretty
+
+# Append to the static deck database for warm-start training
+python scripts/fetch_fabrary_deck.py https://fabrary.net/decks/01KST88R7JVEQ73M82ZA0PJ9RN \
+    --append-to src/flesh_and_blood_rlbridge/card_db/fabrary_decks.json \
+    --deck-id fab_aurora_sa_starter
+```
+
+Fetched decks are cached under `results/matchup_sims/decks/` (or the script-specific deck dir). Delete a cached `*_deck.json` file to force a re-fetch.
+
+### Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---------|--------------|-----|
+| `HTTP 403` on REST, then success via AppSync | Normal without API key | Ignore the REST warning, or set `FABRARY_API_KEY` |
+| `WAFForbiddenException` on AppSync | WAF blocked the request | Update to the latest `fetch_fabrary_deck.py`; ensure outbound HTTPS to `*.appsync-api.us-east-2.amazonaws.com` is allowed |
+| `AppSync returned no deck data` | Private or invalid deck slug | Open the URL in a browser; export JSON or add to `fabrary_decks.json` |
+| `Deck JSON not available` in a PS script | Fetch failed and no cache | Run `fetch_fabrary_deck.py` manually to see the error, or pass a local JSON path |
+
+For low-level API inspection, run `python scripts/_probe_fabrary.py`.
 
 ---
 

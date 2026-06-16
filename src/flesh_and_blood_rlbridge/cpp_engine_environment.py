@@ -225,7 +225,8 @@ class CppEngineEnvironment(rlbridgeEnvironment):
     def _reset_flow_state(self) -> None:
         self._flow_phase = "OPENING_MAIN"
         self._arsenal_complete = set()
-        self._turn_no_override = 0
+        # None => report C++ turn_no; only set during scripted opening for parity.
+        self._turn_no_override = None
         self._talishar_overlay = None
         self._talishar_mirror_state = None
         self._talishar_parity_extra = None
@@ -591,6 +592,22 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         except (TypeError, ValueError):
             return False
 
+    def _advance_ars_phase(self) -> None:
+        """Complete the current player's arsenal step and advance opening flow."""
+        self._arsenal_complete.add(self._acting_player)
+        if self._acting_player == 1:
+            self._acting_player = 2
+            self._turn_no_override = 1
+            self._flow_phase = "ARS"
+            if hasattr(self._gs, "set_priority"):
+                self._gs.set_priority(1)
+        else:
+            self._flow_phase = "M"
+            self._acting_player = 1
+            self._turn_no_override = None
+            if hasattr(self._gs, "set_priority"):
+                self._gs.set_priority(0)
+
     def _handle_flow_pass(self) -> bool:
         """Apply Talishar-style pass transitions without advancing the C++ stub."""
         phase = self._effective_turn_phase().upper()
@@ -599,18 +616,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             self.clear_talishar_state()
             return True
         if phase == "ARS":
-            self._arsenal_complete.add(self._acting_player)
-            if self._acting_player == 1:
-                self._acting_player = 2
-                self._turn_no_override = 1
-                self._flow_phase = "ARS"
-                if hasattr(self._gs, "set_priority"):
-                    self._gs.set_priority(1)
-            else:
-                self._flow_phase = "M"
-                self._acting_player = 1
-                if hasattr(self._gs, "set_priority"):
-                    self._gs.set_priority(0)
+            self._advance_ars_phase()
             self.clear_talishar_state()
             return True
         if phase == "B":
@@ -627,6 +633,10 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         """Handle non-standard hand actions (e.g. arsenal) without C++ apply."""
         code = int(getattr(action, "action_code", 0) or 0)
         if code == 4 and self._effective_turn_phase().upper() == "ARS":
+            # Arsenal completes the step like pass; previously this was a no-op
+            # and trapped episodes when policies picked action index 0.
+            self._advance_ars_phase()
+            self.clear_talishar_state()
             return True
         return False
 
@@ -1487,6 +1497,10 @@ def get_engine_dir(
     has no compiled module, falls back to the most-recently-modified
     hashed variant ``{deck1}_vs_{deck2}-<hash>`` (produced by
     build_cpp_engine_for_matchup.ps1 when content-hashing is enabled).
+
+    When the lookup key differs only by case from a cached directory
+    (e.g. ``briar_vs_riptide`` vs ``Briar_vs_Riptide-<hash>``), the
+    newest matching directory is returned.
     """
     base = Path(cache_dir) if cache_dir else _DEFAULT_CACHE_DIR
     key = _matchup_key(deck1, deck2)
@@ -1502,6 +1516,25 @@ def get_engine_dir(
     for candidate in candidates:
         if candidate.is_dir() and is_cpp_engine_available(candidate):
             return candidate
+    # Case-insensitive fallback (hero IDs are often lowercase; build scripts
+    # title-case deck names when naming engine directories).
+    key_lower = key.lower()
+    if base.is_dir():
+        ci_candidates = sorted(
+            (
+                p for p in base.iterdir()
+                if p.is_dir()
+                and (
+                    p.name.lower() == key_lower
+                    or p.name.lower().startswith(f"{key_lower}-")
+                )
+            ),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        for candidate in ci_candidates:
+            if is_cpp_engine_available(candidate):
+                return candidate
     # Return exact dir as default even if empty (lets callers report the error)
     return exact
 

@@ -3,7 +3,7 @@
 $ResultsDir = if ($env:RESULTS_DIR) {
     $env:RESULTS_DIR
 } else {
-    Join-Path $PSScriptRoot "results/matchup_sims/riptide_vs_briar"
+    Join-Path $PSScriptRoot "results/matchup_sims/briar_vs_riptide"
 }
 
 $AssetsPath = if ($env:TALISHAR_ASSETS_PATH) {
@@ -33,6 +33,28 @@ if ($ForwardArgs -contains "-?" -or $ForwardArgs -contains "/?") {
     $ForwardArgs = @("--help")
 }
 
+# Auto-discover compiled C++ engine for this matchup (e.g. Briar_vs_Riptide-<hash>).
+$ParityCppArgs = @()
+if ($env:CPP_ENGINE_DIR) {
+    $ParityCppArgs = @("--parity-cpp-engine-dir", $env:CPP_ENGINE_DIR)
+} else {
+    $CacheRoot = Join-Path $PSScriptRoot "results\cpp_engines"
+    $DirName   = Split-Path $ResultsDir -Leaf
+    if ($DirName -match '^(.+)_vs_(.+)$') {
+        $d1 = (Get-Culture).TextInfo.ToTitleCase($Matches[1].ToLower())
+        $d2 = (Get-Culture).TextInfo.ToTitleCase($Matches[2].ToLower())
+        $Label = "${d1}_vs_${d2}"
+        $CppEngineDir = Get-ChildItem $CacheRoot -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -like "${Label}-*" -or $_.Name -eq $Label } |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1 -ExpandProperty FullName
+        if ($CppEngineDir) {
+            Write-Host "  Parity C++ engine: $CppEngineDir"
+            $ParityCppArgs = @("--parity-cpp-engine-dir", $CppEngineDir)
+        }
+    }
+}
+
 & $Python $ScriptPath `
     --results-dir  $ResultsDir `
     --assets-path  $AssetsPath `
@@ -48,6 +70,7 @@ if ($ForwardArgs -contains "-?" -or $ForwardArgs -contains "/?") {
     --watch `
     --poll-seconds $PollSeconds `
     --gif-fps      $GifFps `
+    @ParityCppArgs `
     @ForwardArgs
 
 exit $LASTEXITCODE

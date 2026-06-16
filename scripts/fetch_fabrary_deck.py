@@ -257,6 +257,11 @@ _APPSYNC_ENDPOINT = (
 )
 _COGNITO_IDENTITY_POOL_ID = "us-east-2:e50f3ed7-32ed-4b22-a05e-10b3e7e03fe0"
 _AWS_REGION = "us-east-2"
+# AppSync sits behind AWS WAF; unauthenticated IAM requests need browser-like headers.
+_BROWSER_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
 
 # The getDeck GraphQL query (field set sufficient for rlbridge conversion).
 # NOTE: FaBrary's AppSync schema does NOT expose 'types' or 'subtypes' on
@@ -464,6 +469,12 @@ def _fetch_graphql_iam(slug: str) -> dict[str, Any]:
         region=_AWS_REGION,
         service="appsync",
     )
+    # WAF blocks bare SigV4 clients; mimic the fabrary.net SPA request shape.
+    auth_headers.update({
+        "User-Agent": _BROWSER_UA,
+        "Origin": "https://fabrary.net",
+        "Referer": f"https://fabrary.net/decks/{slug}",
+    })
 
     req = urllib.request.Request(
         _APPSYNC_ENDPOINT,

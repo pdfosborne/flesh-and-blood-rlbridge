@@ -38,6 +38,9 @@ from check_cpp_vs_talishar_parity import run_parity_check  # noqa: E402
 from train_full_pipeline import (  # noqa: E402
     _ensure_playwright,
     _frames_to_gif,
+    _infer_render_outcome,
+    _prepare_render_dir,
+    _save_end_state_frame,
     _save_state_image,
     _write_deck_file,
 )
@@ -246,7 +249,7 @@ def _run_render_episode(
     ``"win"``, ``"loss"``, ``"draw"``, or ``"timeout"``.
     """
     _ensure_playwright()
-    render_dir.mkdir(parents=True, exist_ok=True)
+    _prepare_render_dir(render_dir)
     frame_paths: list[Path] = []
     outcome = "timeout"
 
@@ -295,18 +298,12 @@ def _run_render_episode(
                 if _save_state_image(env, obs, fpath):
                     frame_paths.append(fpath)
 
-        if terminated:
-            obs_data = json.loads(obs) if isinstance(obs, str) else (obs or {})
-            p1_hp = float(obs_data.get("playerHealth", 0) or 0)
-            p2_hp = float(obs_data.get("opponentHealth", 0) or 0)
-            if p1_hp > p2_hp:
-                outcome = "win"
-            elif p2_hp > p1_hp:
-                outcome = "loss"
-            else:
-                outcome = "draw"
-        else:
-            outcome = "timeout"
+        outcome = _infer_render_outcome(
+            obs, terminated=terminated, truncated=truncated,
+        )
+        end_path = render_dir / f"frame_{step_no + 1:04d}_end_{outcome}.png"
+        if _save_end_state_frame(env, obs, end_path, outcome=outcome, steps=step_no):
+            frame_paths.append(end_path)
 
     except Exception as exc:
         print(f"  [{player_label}] Render error: {exc}")
@@ -358,12 +355,37 @@ def _append_to_history(summary: dict[str, Any], history_path: Path) -> list[dict
     return history
 
 
-def _update_winrate_chart(
+def _cumulative_win_rates(
     history: list[dict[str, Any]],
+) -> tuple[list[float], list[float]]:
+    """Return cumulative win % (all episodes, excl. timeouts) per checkpoint."""
+    y_all: list[float] = []
+    y_dec: list[float] = []
+    cum_wins = 0
+    cum_episodes = 0
+    cum_timeouts = 0
+    for entry in history:
+        cum_wins += int(entry.get("wins", 0) or 0)
+        cum_episodes += int(entry.get("eval_episodes", 0) or 0)
+        cum_timeouts += int(entry.get("timeouts", 0) or 0)
+        y_all.append(100.0 * cum_wins / max(1, cum_episodes))
+        decided = max(1, cum_episodes - cum_timeouts)
+        y_dec.append(100.0 * cum_wins / decided)
+    return y_all, y_dec
+
+
+def _plot_winrate_chart(
+    *,
+    x: list[int],
+    y_all: list[float],
+    y_dec: list[float],
     chart_path: Path,
-    matchup: str = "",
+    matchup: str,
+    title_suffix: str,
+    all_label: str,
+    dec_label: str,
 ) -> bool:
-    """Regenerate the win-rate line chart from history. Returns True on success."""
+    """Render a win-rate line chart. Returns True on success."""
     try:
         import matplotlib  # noqa: PLC0415
         matplotlib.use("Agg")
@@ -371,39 +393,88 @@ def _update_winrate_chart(
     except ImportError:
         return False
 
-    if not history:
+    if not x:
         return False
 
-    x = [int(h.get("episodes_completed", 0)) for h in history]
-    y_all = [float(h.get("win_rate", 0.0)) * 100 for h in history]
-    y_dec = [float(h.get("win_rate_decided", 0.0)) * 100 for h in history]
-
     fig, ax = plt.subplots(figsize=(10, 5))
-    ax.plot(x, y_all, marker="o", linewidth=2, label="Win % (all episodes)")
-    ax.plot(x, y_dec, marker="s", linewidth=2, linestyle="--", label="Win % (excl. timeouts)")
+    ax.plot(x, y_all, marker="o", linewidth=2, label=all_label)
+    ax.plot(x, y_dec, marker="s", linewidth=2, linestyle="--", label=dec_label)
     ax.axhline(50, color="gray", linewidth=0.8, linestyle=":", alpha=0.7)
 
     ax.set_xlabel("Training episodes completed")
     y_axis_title = matchup.split(" vs ")[0] + " Win %"
     ax.set_ylabel(y_axis_title)
     ax.set_ylim(0, 100)
-    title = f"Win Rate Tracker"
+    title = "Win Rate Tracker"
     if matchup:
         title += f"  ·  {matchup}"
-    #title += f"  ·  {len(history)} checkpoint(s)"
+    if title_suffix:
+        title += f"  ·  {title_suffix}"
     ax.set_title(title)
     ax.legend(loc="upper left")
     ax.grid(True, alpha=0.3)
 
-    # Annotate each data point with its win %.
     for xi, yi in zip(x, y_all):
-        ax.annotate(f"{yi:.1f}%", (xi, yi), textcoords="offset points",
-                    xytext=(0, 8), ha="center", fontsize=8)
+        ax.annotate(
+            f"{yi:.1f}%",
+            (xi, yi),
+            textcoords="offset points",
+            xytext=(0, 8),
+            ha="center",
+            fontsize=8,
+        )
 
     fig.tight_layout()
     fig.savefig(str(chart_path), dpi=120)
     plt.close(fig)
     return True
+
+
+def _update_winrate_chart(
+    history: list[dict[str, Any]],
+    chart_path: Path,
+    matchup: str = "",
+) -> bool:
+    """Regenerate the per-checkpoint win-rate line chart from history."""
+    if not history:
+        return False
+
+    x = [int(h.get("episodes_completed", 0)) for h in history]
+    y_all = [float(h.get("win_rate", 0.0)) * 100 for h in history]
+    y_dec = [float(h.get("win_rate_decided", 0.0)) * 100 for h in history]
+    return _plot_winrate_chart(
+        x=x,
+        y_all=y_all,
+        y_dec=y_dec,
+        chart_path=chart_path,
+        matchup=matchup,
+        title_suffix="per checkpoint",
+        all_label="Win % (all episodes)",
+        dec_label="Win % (excl. timeouts)",
+    )
+
+
+def _update_cumulative_winrate_chart(
+    history: list[dict[str, Any]],
+    chart_path: Path,
+    matchup: str = "",
+) -> bool:
+    """Regenerate cumulative win-rate chart across all eval episodes so far."""
+    if not history:
+        return False
+
+    x = [int(h.get("episodes_completed", 0)) for h in history]
+    y_all, y_dec = _cumulative_win_rates(history)
+    return _plot_winrate_chart(
+        x=x,
+        y_all=y_all,
+        y_dec=y_dec,
+        chart_path=chart_path,
+        matchup=matchup,
+        title_suffix="cumulative",
+        all_label="Cumulative win % (all episodes)",
+        dec_label="Cumulative win % (excl. timeouts)",
+    )
 
 
 def _resolve_p2_preset_deck_name(
@@ -447,6 +518,28 @@ def _exact_metadata_deck_name(bundle: CheckpointBundle, key: str) -> str:
     return str(bundle.metadata.get(key, "") or "").strip()
 
 
+def _hero_to_engine_deck_name(hero_id: str) -> str:
+    """Title-case hero token for C++ engine cache lookup.
+
+    Matches ``simulate_deck_matchup.ps1`` / ``build_cpp_engine_for_matchup.ps1``,
+    which build engines under names like ``Briar_vs_Riptide-<hash>``.
+    """
+    token = hero_id.replace("-", "_").split("_")[0].strip()
+    if not token:
+        return ""
+    return token[:1].upper() + token[1:].lower()
+
+
+def _resolve_cpp_engine_lookup_names(p1_bundle: CheckpointBundle) -> tuple[str, str]:
+    """Return deck keys for ``get_engine_dir`` (hero/asset IDs, not UUID deck files)."""
+    meta = p1_bundle.metadata
+    raw1 = str(meta.get("cpp_engine_deck1", "") or p1_bundle.p1_hero or "").strip()
+    raw2 = str(meta.get("cpp_engine_deck2", "") or p1_bundle.p2_hero or "").strip()
+    deck1 = _hero_to_engine_deck_name(raw1) if raw1 else ""
+    deck2 = _hero_to_engine_deck_name(raw2) if raw2 else ""
+    return deck1, deck2
+
+
 def _resolve_parity_deck_names(
     p1_bundle: CheckpointBundle,
     p2_bundle: Optional[CheckpointBundle],
@@ -488,18 +581,22 @@ def _run_checkpoint_parity_check(
             "reason": deck_error,
         }
 
-    lookup_deck1 = deck1
-    lookup_deck2 = deck2
-    engine_dir = get_engine_dir(
-        lookup_deck1,
-        lookup_deck2,
-        cpp_engine_cache_dir,
-    )
+    lookup_deck1, lookup_deck2 = _resolve_cpp_engine_lookup_names(p1_bundle)
+    if cpp_engine_dir:
+        engine_dir = Path(cpp_engine_dir)
+    elif lookup_deck1 and lookup_deck2:
+        engine_dir = get_engine_dir(
+            lookup_deck1,
+            lookup_deck2,
+            cpp_engine_cache_dir,
+        )
+    else:
+        engine_dir = get_engine_dir(deck1, deck2, cpp_engine_cache_dir)
 
     if not is_cpp_engine_available(engine_dir):
         message = (
-            f"No compiled C++ engine for {deck1} vs {deck2} "
-            f"(expected under {engine_dir})"
+            f"No compiled C++ engine for {lookup_deck1 or deck1} vs "
+            f"{lookup_deck2 or deck2} (expected under {engine_dir})"
         )
         print(f"  [parity] Skipped — {message}", flush=True)
         return {

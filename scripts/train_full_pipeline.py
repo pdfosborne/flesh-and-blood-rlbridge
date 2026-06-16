@@ -1278,6 +1278,9 @@ def _save_play_checkpoint_package(
         "p2_deck": matchup.p2_deck,
         "p1_hero": matchup.p1_hero,
         "p2_hero": matchup.p2_hero,
+        "cpp_engine_deck1": matchup.cpp_engine_deck1,
+        "cpp_engine_deck2": matchup.cpp_engine_deck2,
+        "cpp_engine_dir": matchup.cpp_engine_dir,
         "avg_reward": avg_reward,
         "opponent_mode": opponent_mode,
         "opponent_deck_name": opponent_deck_name,
@@ -1389,6 +1392,15 @@ def _ensure_playwright() -> None:
         subprocess.check_call([sys.executable, "-m", "playwright", "install", "chromium"])
 
 
+def _prepare_render_dir(render_dir: Path) -> None:
+    """Delete stale frames from a prior rollout before writing new ones."""
+    import shutil  # noqa: PLC0415
+
+    if render_dir.exists():
+        shutil.rmtree(render_dir)
+    render_dir.mkdir(parents=True, exist_ok=True)
+
+
 def _render_game_with_talishar_frontend(
     *,
     agents: Any,
@@ -1402,7 +1414,7 @@ def _render_game_with_talishar_frontend(
     max_steps: int,
     render_dir: Path,
     player_label: str,
-) -> list[Path]:
+) -> tuple[list[Path], str]:
     """Play one game via the HTTP Talishar backend and screenshot the live
     Talishar frontend after every step.
 
@@ -1415,11 +1427,14 @@ def _render_game_with_talishar_frontend(
     call, which gives equipment card art time to load.
 
     Returns:
-        List of Paths to the saved PNG files (may be empty on failure).
+        ``(frame_paths, outcome)`` where *outcome* is ``win`` / ``loss`` /
+        ``draw`` / ``timeout`` from P1's perspective.  *frame_paths* includes a
+        final annotated end-state frame when capture succeeds.
     """
     _ensure_playwright()
-    render_dir.mkdir(parents=True, exist_ok=True)
+    _prepare_render_dir(render_dir)
     frame_paths: list[Path] = []
+    outcome = "timeout"
 
     try:
         env = TalisharEngineEnvironment(
@@ -1445,6 +1460,8 @@ def _render_game_with_talishar_frontend(
 
             done = False
             step_no = 0
+            terminated = False
+            truncated = False
             while not done and step_no < max_steps:
                 step_no += 1
 
@@ -1465,12 +1482,22 @@ def _render_game_with_talishar_frontend(
 
                 step = env.step(action)
                 obs = step.observation
-                done = bool(step.terminated) or bool(step.truncated)
+                terminated = bool(step.terminated)
+                truncated = bool(step.truncated)
+                done = terminated or truncated
 
                 fname = f"frame_{step_no:04d}_p{acting}.png"
                 fpath = render_dir / fname
                 if _save_state_image(env, obs, fpath):
                     frame_paths.append(fpath)
+
+            outcome = _infer_render_outcome(
+                obs, terminated=terminated, truncated=truncated,
+            )
+            end_path = render_dir / f"frame_{step_no + 1:04d}_end_{outcome}.png"
+            if _save_end_state_frame(env, obs, end_path, outcome=outcome, steps=step_no):
+                frame_paths.append(end_path)
+                print(f"  [{player_label}] End frame saved ({outcome})")
 
         finally:
             env.close()
@@ -1478,8 +1505,8 @@ def _render_game_with_talishar_frontend(
     except Exception as exc:
         print(f"  [{player_label}] Render error: {exc}")
 
-    print(f"  [{player_label}] Saved {len(frame_paths)} frames → {render_dir}")
-    return frame_paths
+    print(f"  [{player_label}] Saved {len(frame_paths)} frames → {render_dir}  ({outcome})")
+    return frame_paths, outcome
 
 
 def _frames_to_gif(frame_paths: list[Path], gif_path: Path, fps: float = 3.0) -> None:
@@ -1499,6 +1526,11 @@ def _frames_to_gif(frame_paths: list[Path], gif_path: Path, fps: float = 3.0) ->
     if not frames:
         return
     duration_ms = max(1, int(1000.0 / fps))
+    # Pause longer on the final end-state frame so the outcome banner is readable.
+    end_hold_ms = max(duration_ms * 3, 2000)
+    durations = [duration_ms] * len(frames)
+    if len(durations) > 1:
+        durations[-1] = end_hold_ms
     gif_path.parent.mkdir(parents=True, exist_ok=True)
     frames[0].save(
         gif_path,
@@ -1506,9 +1538,102 @@ def _frames_to_gif(frame_paths: list[Path], gif_path: Path, fps: float = 3.0) ->
         save_all=True,
         append_images=frames[1:],
         loop=0,
-        duration=duration_ms,
+        duration=durations,
     )
     print(f"  GIF saved ({len(frames)} frames, {fps} fps) → {gif_path}")
+
+
+def _infer_render_outcome(
+    obs: Any,
+    *,
+    terminated: bool,
+    truncated: bool,
+) -> str:
+    """Classify a rendered rollout as win/loss/draw/timeout from P1's perspective."""
+    if terminated:
+        obs_data = json.loads(obs) if isinstance(obs, str) else (obs or {})
+        p1_hp = float(obs_data.get("playerHealth", 0) or 0)
+        p2_hp = float(obs_data.get("opponentHealth", 0) or 0)
+        if p1_hp > p2_hp:
+            return "win"
+        if p2_hp > p1_hp:
+            return "loss"
+        return "draw"
+    if truncated:
+        return "timeout"
+    return "timeout"
+
+
+def _save_end_state_frame(
+    env: Any,
+    obs: Any,
+    out_path: Path,
+    *,
+    outcome: str,
+    steps: int = 0,
+) -> bool:
+    """Save a final board screenshot with a game-end outcome banner."""
+    import base64  # noqa: PLC0415
+    import io  # noqa: PLC0415
+
+    try:
+        from PIL import Image, ImageDraw, ImageFont  # noqa: PLC0415
+    except ImportError:
+        return _save_state_image(env, obs, out_path)
+
+    img = None
+    try:
+        rr = env.render()
+        b64 = getattr(rr, "data", None)
+        if b64:
+            img = Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGB")
+    except Exception:
+        pass
+
+    if img is None:
+        tmp = out_path.with_suffix(".tmp.png")
+        if not _save_state_image(env, obs, tmp):
+            return False
+        try:
+            img = Image.open(tmp).convert("RGB")
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    obs_data = json.loads(obs) if isinstance(obs, str) else (obs or {})
+    p1_hp = obs_data.get("playerHealth", "?")
+    p2_hp = obs_data.get("opponentHealth", "?")
+
+    labels: dict[str, tuple[str, tuple[int, int, int]]] = {
+        "win": ("WIN", (34, 197, 94)),
+        "loss": ("LOSS", (239, 68, 68)),
+        "draw": ("DRAW", (250, 204, 21)),
+        "timeout": ("TIMEOUT", (249, 115, 22)),
+        "stall_timeout": ("STALL TIMEOUT", (249, 115, 22)),
+    }
+    label, color = labels.get(outcome, (outcome.upper().replace("_", " "), (200, 200, 200)))
+
+    draw = ImageDraw.Draw(img)
+    width, height = img.size
+    banner_h = max(72, height // 8)
+    draw.rectangle([(0, height - banner_h), (width, height)], fill=(16, 16, 16))
+    try:
+        title_font = ImageFont.truetype("arial.ttf", max(28, banner_h // 3))
+        sub_font = ImageFont.truetype("arial.ttf", max(16, banner_h // 5))
+    except Exception:
+        title_font = ImageFont.load_default()
+        sub_font = title_font
+
+    draw.text((24, height - banner_h + 10), label, fill=color, font=title_font)
+    draw.text(
+        (24, height - banner_h + 44),
+        f"P1 {p1_hp} HP  |  P2 {p2_hp} HP  |  {steps} steps",
+        fill=(220, 220, 220),
+        font=sub_font,
+    )
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    img.save(out_path)
+    return True
 
 
 def _save_state_image(env: Any, obs: Any, out_path: Path) -> bool:
@@ -1709,7 +1834,7 @@ def run_final_evaluation(
     gif_path = out_dir / f"{player}_optimal_policy.gif"
 
     print(f"\n  [{player}] Rendering optimal-policy rollout via Talishar FE → {render_dir}")
-    frame_paths = _render_game_with_talishar_frontend(
+    frame_paths, render_outcome = _render_game_with_talishar_frontend(
         agents=agents,
         opponent_agents=opponent_agents,
         opponent_mode=opponent_mode,
@@ -1722,8 +1847,7 @@ def run_final_evaluation(
         render_dir=render_dir,
         player_label=player,
     )
-    render_steps = len(frame_paths)
-    render_terminated = render_steps > 0
+    render_steps = max(0, len(frame_paths) - 1)
 
     if render_gif and frame_paths:
         _frames_to_gif(frame_paths, gif_path, fps=gif_fps)
@@ -1748,8 +1872,9 @@ def run_final_evaluation(
             "frames_dir": str(render_dir),
             "frames_saved": len(frame_paths),
             "steps": render_steps,
-            "terminated": render_terminated,
-            "truncated": False,
+            "outcome": render_outcome,
+            "terminated": render_outcome in ("win", "loss", "draw"),
+            "truncated": render_outcome == "timeout",
             "gif": str(gif_path) if (render_gif and frame_paths) else None,
         },
     }
