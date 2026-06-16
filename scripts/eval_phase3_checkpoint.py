@@ -29,7 +29,12 @@ for path in (SRC_DIR, RL_SRC, Path(__file__).resolve().parent):
         sys.path.insert(0, path_str)
 
 from flesh_and_blood_rlbridge import TalisharEngineEnvironment  # noqa: E402
+from flesh_and_blood_rlbridge.cpp_engine_environment import (  # noqa: E402
+    get_engine_dir,
+    is_cpp_engine_available,
+)
 from rlbridge.rl_agents.ppo import PPOAgent  # noqa: E402
+from check_cpp_vs_talishar_parity import run_parity_check  # noqa: E402
 from train_full_pipeline import (  # noqa: E402
     _ensure_playwright,
     _frames_to_gif,
@@ -438,6 +443,128 @@ def _resolve_p2_preset_deck_name(
     return "Ira"
 
 
+def _exact_metadata_deck_name(bundle: CheckpointBundle, key: str) -> str:
+    return str(bundle.metadata.get(key, "") or "").strip()
+
+
+def _resolve_parity_deck_names(
+    p1_bundle: CheckpointBundle,
+    p2_bundle: Optional[CheckpointBundle],
+) -> tuple[Optional[str], Optional[str], str]:
+    """Return exact Talishar asset deck names for parity, or an error message."""
+    del p2_bundle  # parity deck names come from checkpoint metadata only
+
+    deck1 = _exact_metadata_deck_name(p1_bundle, "p1_deck")
+    deck2 = _exact_metadata_deck_name(p1_bundle, "p2_deck")
+
+    missing: list[str] = []
+    if not deck1:
+        missing.append("p1_deck")
+    if not deck2:
+        missing.append("p2_deck")
+    if missing:
+        return None, None, f"Checkpoint missing exact deck name(s): {', '.join(missing)}"
+    return deck1, deck2, ""
+
+
+def _run_checkpoint_parity_check(
+    *,
+    p1_bundle: CheckpointBundle,
+    p2_bundle: Optional[CheckpointBundle],
+    base_url: str,
+    eval_dir: Path,
+    cpp_engine_dir: Optional[str] = None,
+    cpp_engine_cache_dir: Optional[str] = None,
+) -> dict[str, Any]:
+    """Run one full-episode parity check for the checkpoint matchup."""
+    deck1, deck2, deck_error = _resolve_parity_deck_names(p1_bundle, p2_bundle)
+    parity_dir = eval_dir / "parity_check"
+    if deck_error or not deck1 or not deck2:
+        print(f"  [parity] Skipped — {deck_error}", flush=True)
+        return {
+            "status": "missing_deck",
+            "deck1": deck1,
+            "deck2": deck2,
+            "reason": deck_error,
+        }
+
+    lookup_deck1 = deck1
+    lookup_deck2 = deck2
+    engine_dir = get_engine_dir(
+        lookup_deck1,
+        lookup_deck2,
+        cpp_engine_cache_dir,
+    )
+
+    if not is_cpp_engine_available(engine_dir):
+        message = (
+            f"No compiled C++ engine for {deck1} vs {deck2} "
+            f"(expected under {engine_dir})"
+        )
+        print(f"  [parity] Skipped — {message}", flush=True)
+        return {
+            "status": "skipped",
+            "deck1": deck1,
+            "deck2": deck2,
+            "engine_dir": str(engine_dir),
+            "reason": message,
+        }
+
+    print(
+        f"  [parity] Running 1 full-episode check: {deck1} vs {deck2}",
+        flush=True,
+    )
+    report, exit_code = run_parity_check(
+        deck1=deck1,
+        deck2=deck2,
+        game_format=p1_bundle.game_format,
+        episodes=1,
+        mode="full-episode",
+        talishar_url=base_url,
+        cpp_engine_cache_dir=cpp_engine_cache_dir,
+        cpp_engine_dir=cpp_engine_dir,
+        cpp_engine_deck1=lookup_deck1,
+        cpp_engine_deck2=lookup_deck2,
+        out_dir=parity_dir,
+        write_reports=True,
+        verbose=False,
+    )
+
+    first_failure = ""
+    if report.discrepancies:
+        first_failure = str(report.discrepancies[0].get("description", "") or "")
+
+    status = "passed" if exit_code == 0 else ("setup_failed" if exit_code == 2 else "discrepancy")
+    result = {
+        "status": status,
+        "exit_code": exit_code,
+        "deck1": deck1,
+        "deck2": deck2,
+        "engine_dir": str(engine_dir),
+        "episodes_run": report.episodes_run,
+        "episodes_passed": report.episodes_passed,
+        "episodes_failed": report.episodes_failed,
+        "total_steps": report.total_steps,
+        "discrepancies_found": report.discrepancies_found,
+        "first_failure": first_failure,
+        "report_dir": str(parity_dir),
+        "summary_path": str(parity_dir / "parity_summary.txt"),
+    }
+
+    if exit_code == 0:
+        print(
+            f"  [parity] Passed ({report.total_steps} steps compared)",
+            flush=True,
+        )
+    else:
+        print(
+            f"  [parity] {status} — {report.discrepancies_found} discrepancies"
+            + (f": {first_failure}" if first_failure else ""),
+            flush=True,
+        )
+    return result
+
+
 def _prefer_non_pass_action(obs_data: dict[str, Any], fallback_action: Any) -> Any:
     """Choose a non-pass legal action index when available.
 
@@ -670,6 +797,9 @@ def _evaluate_checkpoint(
     stall_min_attack_hand: int,
     parallel_workers: int,
     verbose: bool = False,
+    run_parity: bool = True,
+    cpp_engine_dir: Optional[str] = None,
+    cpp_engine_cache_dir: Optional[str] = None,
 ) -> dict[str, Any]:
     print(f"\n{'='*72}")
     print(f"  Evaluating checkpoint  : {p1_bundle.checkpoint_dir.name}")
@@ -768,6 +898,17 @@ def _evaluate_checkpoint(
             "  Start the server first:  ./start_talishar.ps1\n"
             "  Or set TALISHAR_URL / --talishar-url to the correct address."
         ) from _conn_exc
+
+    parity_result: Optional[dict[str, Any]] = None
+    if run_parity:
+        parity_result = _run_checkpoint_parity_check(
+            p1_bundle=p1_bundle,
+            p2_bundle=p2_bundle,
+            base_url=base_url,
+            eval_dir=eval_dir,
+            cpp_engine_dir=cpp_engine_dir,
+            cpp_engine_cache_dir=cpp_engine_cache_dir,
+        )
 
     workers = max(1, min(int(parallel_workers), episodes))
     print(
@@ -907,6 +1048,7 @@ def _evaluate_checkpoint(
             "outcome": render_outcome,
             "max_steps": render_max_steps if render_gif else None,
         },
+        "parity": parity_result,
     }
     summary_path = eval_dir / "latest_eval.json"
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
@@ -993,6 +1135,21 @@ def main() -> None:
     )
     parser.add_argument("--verbose", action="store_true",
                         help="Enable verbose Talishar environment debug logs.")
+    parser.add_argument(
+        "--skip-parity",
+        action="store_true",
+        help="Skip the single-episode C++ vs Talishar parity check.",
+    )
+    parser.add_argument(
+        "--parity-cpp-engine-dir",
+        default=None,
+        help="Explicit compiled C++ engine directory for the checkpoint parity check.",
+    )
+    parser.add_argument(
+        "--parity-cpp-engine-cache-dir",
+        default=None,
+        help="C++ engine cache directory for the checkpoint parity check.",
+    )
     parser.add_argument("--talishar-url", default=os.environ.get("TALISHAR_URL", "http://localhost:8080/game"))
     parser.add_argument("--talishar-fe-url", default=os.environ.get("TALISHAR_FE_URL", "http://localhost:5173"))
     parser.add_argument("--assets-path", default=os.environ.get("TALISHAR_ASSETS_PATH", ""))
@@ -1019,6 +1176,7 @@ def main() -> None:
     print(f"  Render GIF    : {'yes' if not args.no_render_gif else 'no'}")
     if not args.no_render_gif:
         print(f"  Render steps  : {args.render_max_steps}")
+    print(f"  Parity check  : {'no' if args.skip_parity else '1 full episode'}")
     print(
         "  Stall guard   : "
         f"{args.stall_no_damage_turns} no-dmg turns, "
@@ -1058,6 +1216,9 @@ def main() -> None:
                 stall_min_attack_hand=args.stall_min_attack_hand,
                 parallel_workers=args.parallel_workers,
                 verbose=args.verbose,
+                run_parity=not args.skip_parity,
+                cpp_engine_dir=args.parity_cpp_engine_dir,
+                cpp_engine_cache_dir=args.parity_cpp_engine_cache_dir,
             )
             last_seen = p1_bundle.checkpoint_dir
         else:

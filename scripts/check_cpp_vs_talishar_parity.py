@@ -1033,27 +1033,45 @@ pre {{ background: #f6f8fa; padding: 12px; overflow: auto; font-size: 12px; }}
 </html>"""
 
 
-def _steps_for_mode(args: argparse.Namespace, env_tal: Any, env_cpp: Any) -> tuple[int, bool]:
-    if args.mode == "single-step":
+def _steps_for_parity_mode(
+    mode: str,
+    *,
+    steps_per_episode: Optional[int],
+    max_turns: int,
+    env_tal: Any,
+    env_cpp: Any,
+) -> tuple[int, bool]:
+    if mode == "single-step":
         return 1, False
-    if args.mode == "multi-step":
-        return args.steps_per_episode or 50, False
-    if args.mode == "stress-test":
-        return args.steps_per_episode or 500, True
-    max_turns = max(
-        int(getattr(env_tal, "_max_turns", 2000) or 2000),
-        int(getattr(env_cpp, "_max_turns", 2000) or 2000),
+    if mode == "multi-step":
+        return steps_per_episode or 50, False
+    if mode == "stress-test":
+        return steps_per_episode or 500, True
+    resolved_max_turns = max(
+        int(getattr(env_tal, "_max_turns", max_turns) or max_turns),
+        int(getattr(env_cpp, "_max_turns", max_turns) or max_turns),
     )
-    return args.steps_per_episode or max_turns, False
+    return steps_per_episode or resolved_max_turns, False
 
 
-def _create_envs(args: argparse.Namespace) -> tuple[TalisharEngineEnvironment, TalisharEngineEnvironment]:
+def _create_parity_envs(
+    *,
+    deck1: str,
+    deck2: str,
+    game_format: str,
+    max_turns: int,
+    talishar_url: str,
+    cpp_engine_cache_dir: Optional[str] = None,
+    cpp_engine_dir: Optional[str] = None,
+    cpp_engine_deck1: Optional[str] = None,
+    cpp_engine_deck2: Optional[str] = None,
+) -> tuple[TalisharEngineEnvironment, TalisharEngineEnvironment]:
     common = {
-        "base_url": args.talishar_url,
-        "local_deck_name": args.deck1,
-        "opponent_deck_name": args.deck2,
-        "game_format": args.format,
-        "max_turns": args.max_turns,
+        "base_url": talishar_url,
+        "local_deck_name": deck1,
+        "opponent_deck_name": deck2,
+        "game_format": game_format,
+        "max_turns": max_turns,
         "self_play": True,
         "enable_combat_tracker": True,
     }
@@ -1061,19 +1079,19 @@ def _create_envs(args: argparse.Namespace) -> tuple[TalisharEngineEnvironment, T
     env_cpp = TalisharEngineEnvironment(
         **common,
         use_cpp_engine=True,
-        cpp_engine_cache_dir=args.cpp_engine_cache_dir,
-        cpp_engine_deck1=args.cpp_engine_deck1,
-        cpp_engine_deck2=args.cpp_engine_deck2,
-        cpp_engine_dir=args.cpp_engine_dir,
+        cpp_engine_cache_dir=cpp_engine_cache_dir,
+        cpp_engine_deck1=cpp_engine_deck1,
+        cpp_engine_deck2=cpp_engine_deck2,
+        cpp_engine_dir=cpp_engine_dir,
     )
 
     if getattr(env_tal, "_using_cpp", False):
         raise RuntimeError("Talishar HTTP comparison environment unexpectedly enabled C++")
     if not getattr(env_cpp, "_using_cpp", False):
-        lookup_deck1 = args.cpp_engine_deck1 or args.deck1
-        lookup_deck2 = args.cpp_engine_deck2 or args.deck2
-        expected_dir = args.cpp_engine_dir or str(
-            get_engine_dir(lookup_deck1, lookup_deck2, args.cpp_engine_cache_dir)
+        lookup_deck1 = cpp_engine_deck1 or deck1
+        lookup_deck2 = cpp_engine_deck2 or deck2
+        expected_dir = cpp_engine_dir or str(
+            get_engine_dir(lookup_deck1, lookup_deck2, cpp_engine_cache_dir)
         )
         raise RuntimeError(
             "C++ comparison environment did not load a compiled engine. Build the matchup first "
@@ -1081,6 +1099,149 @@ def _create_envs(args: argparse.Namespace) -> tuple[TalisharEngineEnvironment, T
             f"Expected engine directory: {expected_dir}"
         )
     return env_tal, env_cpp
+
+
+def run_parity_check(
+    *,
+    deck1: str,
+    deck2: str,
+    game_format: str = "silver_age",
+    episodes: int = 1,
+    mode: str = "full-episode",
+    steps_per_episode: Optional[int] = None,
+    max_turns: int = 2000,
+    talishar_url: str = "http://localhost:8080/game",
+    cpp_engine_cache_dir: Optional[str] = None,
+    cpp_engine_dir: Optional[str] = None,
+    cpp_engine_deck1: Optional[str] = None,
+    cpp_engine_deck2: Optional[str] = None,
+    out_dir: Optional[Path | str] = None,
+    stop_after_failure: bool = False,
+    write_reports: bool = True,
+    verbose: bool = True,
+) -> tuple[ParityReport, int]:
+    """Run a parity check programmatically.
+
+    Returns ``(report, exit_code)`` where exit code matches the CLI script:
+    0 = passed, 1 = discrepancies, 2 = setup failure.
+    """
+    matchup_label = f"{_safe_label(deck1)}_vs_{_safe_label(deck2)}"
+    resolved_out_dir = Path(out_dir) if out_dir is not None else Path("results/parity_checks") / matchup_label
+    resolved_out_dir.mkdir(parents=True, exist_ok=True)
+
+    report = ParityReport(
+        matchup=f"{deck1} vs {deck2}",
+        format=game_format,
+        mode=mode,
+        episodes_requested=episodes,
+    )
+
+    if verbose:
+        print("=" * 60)
+        print("CPP ENGINE vs TALISHAR HTTP PARITY CHECK")
+        print("=" * 60)
+        print(f"Matchup: {deck1} vs {deck2}")
+        print(f"Format: {game_format}")
+        print(f"Mode: {mode}")
+        print(f"Episodes: {episodes}")
+        print(f"Talishar URL: {talishar_url}")
+        print(f"Output Dir: {resolved_out_dir}")
+        print("=" * 60)
+        print()
+
+    try:
+        env_tal, env_cpp = _create_parity_envs(
+            deck1=deck1,
+            deck2=deck2,
+            game_format=game_format,
+            max_turns=max_turns,
+            talishar_url=talishar_url,
+            cpp_engine_cache_dir=cpp_engine_cache_dir,
+            cpp_engine_dir=cpp_engine_dir,
+            cpp_engine_deck1=cpp_engine_deck1,
+            cpp_engine_deck2=cpp_engine_deck2,
+        )
+        if verbose:
+            print("[OK] Talishar HTTP environment created")
+            print("[OK] C++ engine environment created")
+    except Exception as exc:
+        if verbose:
+            print(f"[ERROR] Failed to create parity environments: {exc}")
+        _record_discrepancy(
+            report,
+            episode=0,
+            step=0,
+            category="setup",
+            description=f"failed to create parity environments: {exc}",
+            talishar_value="HTTP environment must use use_cpp_engine=False",
+            cpp_value=str(exc),
+        )
+        if write_reports:
+            _write_reports(report, resolved_out_dir)
+        return report, 2
+
+    max_steps, stress = _steps_for_parity_mode(
+        mode,
+        steps_per_episode=steps_per_episode,
+        max_turns=max_turns,
+        env_tal=env_tal,
+        env_cpp=env_cpp,
+    )
+    try:
+        for episode in range(1, episodes + 1):
+            run_parity_episode(
+                env_tal,
+                env_cpp,
+                report,
+                episode=episode,
+                max_steps=max_steps,
+                stress=stress,
+                stop_after_failure=stop_after_failure,
+            )
+    except KeyboardInterrupt:
+        if verbose:
+            print("[WARN] Interrupted by user; writing partial report")
+    finally:
+        env_tal.close()
+        env_cpp.close()
+
+    if write_reports:
+        _write_reports(report, resolved_out_dir)
+
+    if report.discrepancies_found == 0 and report.episodes_failed == 0:
+        if verbose:
+            print("\nPARITY CHECK PASSED - ALL TESTS SUCCESSFUL")
+        return report, 0
+
+    if verbose:
+        print(f"\nPARITY CHECK COMPLETED WITH {report.discrepancies_found} DISCREPANCIES")
+    if report.setup_failures > 0 and report.total_steps == 0:
+        return report, 2
+    return report, 1
+
+
+def _steps_for_mode(args: argparse.Namespace, env_tal: Any, env_cpp: Any) -> tuple[int, bool]:
+    return _steps_for_parity_mode(
+        args.mode,
+        steps_per_episode=args.steps_per_episode,
+        max_turns=args.max_turns,
+        env_tal=env_tal,
+        env_cpp=env_cpp,
+    )
+
+
+def _create_envs(args: argparse.Namespace) -> tuple[TalisharEngineEnvironment, TalisharEngineEnvironment]:
+    return _create_parity_envs(
+        deck1=args.deck1,
+        deck2=args.deck2,
+        game_format=args.format,
+        max_turns=args.max_turns,
+        talishar_url=args.talishar_url,
+        cpp_engine_cache_dir=args.cpp_engine_cache_dir,
+        cpp_engine_dir=args.cpp_engine_dir,
+        cpp_engine_deck1=args.cpp_engine_deck1,
+        cpp_engine_deck2=args.cpp_engine_deck2,
+    )
 
 
 def _write_reports(report: ParityReport, out_dir: Path) -> None:
@@ -1141,73 +1302,26 @@ def main() -> None:
 
     matchup_label = f"{_safe_label(args.deck1)}_vs_{_safe_label(args.deck2)}"
     out_dir = Path(args.out_dir) / matchup_label
-    out_dir.mkdir(parents=True, exist_ok=True)
 
-    print("=" * 60)
-    print("CPP ENGINE vs TALISHAR HTTP PARITY CHECK")
-    print("=" * 60)
-    print(f"Matchup: {args.deck1} vs {args.deck2}")
-    print(f"Format: {args.format}")
-    print(f"Mode: {args.mode}")
-    print(f"Episodes: {args.episodes}")
-    print(f"Talishar URL: {args.talishar_url}")
-    print(f"Output Dir: {out_dir}")
-    print("=" * 60)
-    print()
-
-    report = ParityReport(
-        matchup=f"{args.deck1} vs {args.deck2}",
-        format=args.format,
+    report, exit_code = run_parity_check(
+        deck1=args.deck1,
+        deck2=args.deck2,
+        game_format=args.format,
+        episodes=args.episodes,
         mode=args.mode,
-        episodes_requested=args.episodes,
+        steps_per_episode=args.steps_per_episode,
+        max_turns=args.max_turns,
+        talishar_url=args.talishar_url,
+        cpp_engine_cache_dir=args.cpp_engine_cache_dir,
+        cpp_engine_dir=args.cpp_engine_dir,
+        cpp_engine_deck1=args.cpp_engine_deck1,
+        cpp_engine_deck2=args.cpp_engine_deck2,
+        out_dir=out_dir,
+        stop_after_failure=args.stop_after_failure,
+        write_reports=True,
+        verbose=True,
     )
-
-    try:
-        env_tal, env_cpp = _create_envs(args)
-        print("[OK] Talishar HTTP environment created")
-        print("[OK] C++ engine environment created")
-    except Exception as exc:
-        print(f"[ERROR] Failed to create parity environments: {exc}")
-        _record_discrepancy(
-            report,
-            episode=0,
-            step=0,
-            category="setup",
-            description=f"failed to create parity environments: {exc}",
-            talishar_value="HTTP environment must use use_cpp_engine=False",
-            cpp_value=str(exc),
-        )
-        _write_reports(report, out_dir)
-        sys.exit(2)
-
-    max_steps, stress = _steps_for_mode(args, env_tal, env_cpp)
-    try:
-        for episode in range(1, args.episodes + 1):
-            run_parity_episode(
-                env_tal,
-                env_cpp,
-                report,
-                episode=episode,
-                max_steps=max_steps,
-                stress=stress,
-                stop_after_failure=args.stop_after_failure,
-            )
-    except KeyboardInterrupt:
-        print("[WARN] Interrupted by user; writing partial report")
-    finally:
-        env_tal.close()
-        env_cpp.close()
-
-    _write_reports(report, out_dir)
-
-    if report.discrepancies_found == 0 and report.episodes_failed == 0:
-        print("\nPARITY CHECK PASSED - ALL TESTS SUCCESSFUL")
-        sys.exit(0)
-
-    print(f"\nPARITY CHECK COMPLETED WITH {report.discrepancies_found} DISCREPANCIES")
-    if report.setup_failures > 0 and report.total_steps == 0:
-        sys.exit(2)
-    sys.exit(1)
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":
