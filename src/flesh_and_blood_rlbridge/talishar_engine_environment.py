@@ -81,16 +81,15 @@ from rlbridge.environments.base import rlbridgeEnvironment
 from rlbridge.protocol.messages import RenderResult, ResetResult, StepResult, TextSpace
 
 from .combat_log_tracker import CombatTurnTracker, extract_talishar_chat_log_lines
+from .legal_action_filter import filter_legal_actions
 from .talishar_default_policy import (
     choose_talishar_action_index,
+    RepeatActionTracker,
     _get_phase as _dp_get_phase,
-    _apply_block_phase_filter,
     _card_pitch_value,
-    _is_affordable_hand_play,
     _is_pass_action,
     _is_revert_action,
     _match_action_card,
-    _strip_revert_actions,
     _to_int as _dp_to_int,
     _CONFIRM_PHASES as _dp_confirm_phases,
     _CHOOSE_HAND_PHASES as _dp_choose_hand_phases,
@@ -124,10 +123,8 @@ except Exception:  # pragma: no cover
 _DEFAULT_DECK_LINK = "https://fabrary.net/decks/01GJG7Z4WGWSZ95FY74KX4M557"
 _DEFAULT_RENDER_WIDTH = 1920
 _DEFAULT_RENDER_HEIGHT = 1080
-_TRUNCATION_PENALTY = 0
-_REPEAT_ACTION_THRESHOLD = 3
-_REPEAT_ACTION_PENALTY = -0.1
-_STEP_PENALTY = -0.005  # small per-step penalty to encourage faster game completion
+_TRUNCATION_PENALTY = -0.1  # negative reward for hitting max_turns without a winner
+_STEP_PENALTY = -0.001  # small per-step penalty to encourage faster game completion
 
 
 def _normalize_game_format(fmt: str) -> str:
@@ -266,10 +263,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         self._player_hp: int = 20
         self._opp_hp: int = 20
         self._initialized: bool = False
-        self._repeat_turn_no: int = 0
-        self._repeat_acting_player: int = 0
-        self._last_action_key: Optional[tuple[int, str]] = None
-        self._repeat_streak: int = 0
+        self._repeat_tracker = RepeatActionTracker()
         # Cycle-breaker for sample_action: tracks (legal_action_fingerprint, last_idx)
         self._sample_action_last_fp: Optional[str] = None
         self._sample_action_repeat: int = 0
@@ -910,10 +904,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         return opp_hp <= 0 and player_hp > 0
 
     def _reset_repeat_tracking(self, *, turn_no: int, acting_player_id: int) -> None:
-        self._repeat_turn_no = turn_no
-        self._repeat_acting_player = acting_player_id
-        self._last_action_key = None
-        self._repeat_streak = 0
+        self._repeat_tracker.reset(turn_no=turn_no, acting_player_id=acting_player_id)
 
     def _repeat_action_penalty(
         self,
@@ -922,25 +913,12 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         turn_no: int,
         acting_player_id: int,
     ) -> float:
-        """Penalize submitting the same action repeatedly within one turn."""
-        turn_changed = turn_no != self._repeat_turn_no
-        player_changed = acting_player_id != self._repeat_acting_player
-        if turn_changed or player_changed:
-            self._repeat_turn_no = turn_no
-            self._repeat_acting_player = acting_player_id
-            self._last_action_key = action_key
-            self._repeat_streak = 1
-            return 0.0
-
-        if action_key == self._last_action_key:
-            self._repeat_streak += 1
-        else:
-            self._last_action_key = action_key
-            self._repeat_streak = 1
-
-        if self._repeat_streak >= _REPEAT_ACTION_THRESHOLD:
-            return _REPEAT_ACTION_PENALTY
-        return 0.0
+        """Penalize exact repeats and play-undo oscillation within one turn."""
+        return self._repeat_tracker.update(
+            action_key,
+            turn_no=turn_no,
+            acting_player_id=acting_player_id,
+        )
 
     def _extract_legal_actions(self, state: dict[str, Any]) -> list[dict[str, Any]]:
         """Extract all legal actions from the current game state.
@@ -1124,157 +1102,12 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         state: dict[str, Any],
         legal_actions: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        """Remove actions that cause the agent to loop or get stuck.
-
-        Each rule falls back to the original filtered list if it would
-        otherwise produce an empty set.
-
-        **Rule 1 — main-phase affordability** (phase ``m``):
-            Strip action-27 hand-card plays whose resource cost exceeds the
-            total pitch value of all *other* hand cards.  Unaffordable cards
-            always open an empty pitch window → Cancel → same main phase →
-            infinite loop.
-
-        **Rule 2 — main-phase equip removal** (phase ``m``):
-            Remove mode-3 (Equip) actions entirely.  Equipping opens a pitch
-            window that may be empty (0-cost equipment has no pitch window
-            exit except Cancel), causing: equip → P phase → Pass no-op or
-            Cancel → equip again → infinite loop.  The default policy
-            explicitly skips mode=3 for this reason (see Pitfall 2 in the
-            interaction guide).
-
-        **Rule 3 — pitch-phase Pass removal** (phase ``p``):
-            Remove Pass (mode=99) from pitch-phase choices.  Phase P is
-            CanPassPhase=0 *until* the played card's cost has been met, so
-            mode=99 is a **silent server no-op** when resources are
-            insufficient — the server returns the same state and the agent
-            loops forever.  The correct choices are: pitch a hand card
-            (mode=27) or Cancel (mode=10000) to abort the unaffordable play.
-            Pass is only meaningful once the server auto-advances out of P
-            (which it does automatically once cost is satisfied), so it is
-            never needed here.
-
-        **Rule 4 — pitch-phase Cancel removal** (phase ``p``):
-            When hand cards are still available to pitch, also remove Cancel
-            (10000).  This forces the agent to pitch at least one card rather
-            than instantly aborting an affordable play.
-
-        **Rule 5 — mandatory-choice phase Pass removal**
-            (phases: ``choosehand``, ``choosehandcancel``, ``choosemultizone``,
-            ``buttoninput``, ``buttoninputnopass``):
-            These are all CanPassPhase=0 phases — mode=99 is a silent no-op.
-            Remove Pass so the agent is forced to make the required pick.
-            Fallback: if removing Pass leaves nothing, keep Pass to avoid an
-            empty action set.
-
-        **Rule 6 — block/defense phase pass forcing** (phases ``b``, ``d``):
-            Block steps require an explicit pass (mode=99/101) to confirm.  When
-            no hand cards remain that can actually block (Talishar ``action=0``,
-            unaffordable, or defense below the dedicated-blocker threshold),
-            strip all hand block plays and undo so only pass remains.
-
-        **Rule 7 — block-phase Undo Block removal** (phase ``b``):
-            Once no blocking hand cards remain (all have been committed),
-            remove Undo Block (10001).  There is nothing useful to undo to,
-            so keeping it only allows a "commit all → undo → re-commit" loop.
-        """
-        phase = _dp_get_phase(state)
-        filtered = list(legal_actions)
-
-        # ── Rules 1 & 2: main-phase ───────────────────────────────────────────
-        if phase == "m":
-            affordable: list[dict[str, Any]] = []
-            for action in filtered:
-                code = _dp_to_int(action.get("action_code", 0))
-                # Rule 2: strip Equip (mode=3) — opens unresolvable pitch windows
-                if code == 3:
-                    continue
-                # Rule 1: strip unaffordable action-27 hand plays (card DB lookup
-                # when Talishar omits cost/resource on playerHand entries).
-                if not _is_affordable_hand_play(action, state):
-                    continue
-                affordable.append(action)
-            if affordable:
-                filtered = affordable
-
-        # ── Rules 3 & 4: pitch-phase ──────────────────────────────────────────
-        elif phase == "p":
-            # Rule 3: always remove Pass (99) — it is a silent no-op in P phase
-            # until cost is met; the server auto-advances once cost is satisfied
-            # so Pass is never needed as an explicit choice here.
-            no_pass = [
-                a for a in filtered
-                if _dp_to_int(a.get("action_code", 0)) != 99
-            ]
-            if no_pass:
-                filtered = no_pass
-
-            pitch_cards = [
-                a for a in filtered
-                if a.get("zone") == "hand"
-                and _dp_to_int(a.get("action_code", 0)) == 27
-            ]
-            if not pitch_cards:
-                # Empty pitch window — only Cancel can abort the unaffordable play.
-                cancel_only = [
-                    a for a in filtered
-                    if _dp_to_int(a.get("action_code", 0)) == 10000
-                ]
-                if cancel_only:
-                    filtered = cancel_only
-            else:
-                # Rule 4: when hand cards can still be pitched, remove Cancel too —
-                # force agent to pitch rather than immediately aborting.
-                no_cancel = [
-                    a for a in filtered
-                    if _dp_to_int(a.get("action_code", 0)) != 10000
-                ]
-                if no_cancel:
-                    filtered = no_cancel
-
-        # ── Rule 5: mandatory-choice phases (CanPassPhase=0) ─────────────────
-        elif phase in (
-            _dp_choose_hand_phases
-            | _dp_button_input_phases
-            | _dp_popup_phases
-        ):
-            # mode=99 is a silent no-op here — remove it so the agent is
-            # forced to make the required pick.
-            no_pass = [
-                a for a in filtered
-                if _dp_to_int(a.get("action_code", 0)) != 99
-            ]
-            if no_pass:
-                filtered = no_pass
-
-        # ── Rules 6 & 7: block / defense phases ───────────────────────────────
-        elif phase in _dp_block_phases | _dp_defense_phases:
-            filtered = _apply_block_phase_filter(
-                state,
-                filtered,
-                block_blacklist=frozenset(getattr(self, "_unaffordable_labels", set())),
-            )
-
-        filtered = _strip_revert_actions(phase, filtered)
-
-        # ── Final: if nothing actionable remains, force pass to end the turn ──
-        actionable = [a for a in filtered if not _is_pass_action(a)]
-        if actionable:
-            return filtered
-
-        pass_actions = [a for a in filtered if _is_pass_action(a)]
-        if pass_actions:
-            return [pass_actions[0]]
-
-        return [
-            {
-                "action_code": 99,
-                "button_input": "",
-                "card_id": "",
-                "zone": "button",
-                "label": "Pass",
-            }
-        ]
+        """Delegate to :func:`legal_action_filter.filter_legal_actions`."""
+        return filter_legal_actions(
+            state,
+            legal_actions,
+            block_blacklist=frozenset(getattr(self, "_unaffordable_labels", set())),
+        )
 
     def _first_pass_action(
         self,
@@ -1864,7 +1697,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                 "opponent_hp": new_opp_hp,
                 "acting_player_id": self._acting_player_id,
                 "self_play": self._self_play,
-                "repeat_streak": self._repeat_streak,
+                "repeat_streak": self._repeat_tracker.repeat_streak,
                 "repeat_penalty": repeat_penalty,
                 "combat_tracker": self._tracker_stub(tracker_event),
             },

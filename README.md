@@ -133,7 +133,7 @@ $env:TALISHAR_FE_URL  = "http://localhost:5173"
 
 ## FaBrary deck fetching
 
-Several scripts accept FaBrary deck URLs or 26-character slugs and convert them to rlbridge JSON (`hero_id`, `hero_class`, `equipment_header`, `deck`, `sideboard`). The fetch logic lives in `scripts/fetch_fabrary_deck.py` and is used by `simulate_deck_matchup.ps1`, `build_cpp_engine_for_matchup.ps1`, and the training pipeline scripts.
+Several scripts accept FaBrary deck URLs or 26-character slugs and convert them to rlbridge JSON (`hero_id`, `hero_class`, `equipment_header`, `deck`, `sideboard`). The fetch logic lives in `scripts/deck/fetch_fabrary_deck.py` and is used by `runscripts/simulate_deck_matchup.py`, `scripts/cpp/build_cpp_engine_for_matchup.py`, and the training pipeline scripts.
 
 ### Do I need an API key?
 
@@ -147,9 +147,9 @@ An API key is only needed if:
 If fetch fails, you can always pass a local deck JSON path instead of a URL:
 
 ```powershell
-.\simulate_deck_matchup.ps1 `
-    -Deck1Source "C:\Decks\briar.json" `
-    -Deck2Source "C:\Decks\riptide.json"
+python runscripts/simulate_deck_matchup.py `
+    "C:\Decks\briar.json" `
+    "C:\Decks\riptide.json"
 ```
 
 ### Setting the API key
@@ -184,7 +184,7 @@ export FABRARY_API_KEY="your-fabrary-api-key"
 #### Option B — CLI flag (one-off fetches)
 
 ```bash
-python scripts/fetch_fabrary_deck.py \
+python scripts/deck/fetch_fabrary_deck.py \
     "https://fabrary.net/decks/01KTBBVEZE0TPDAZ74Z4D787G4" \
     --api-key "your-fabrary-api-key" \
     --out results/matchup_sims/decks/briar.json \
@@ -206,14 +206,14 @@ op inject -i Talishar/APIKeys/APIKeys.php -o Talishar/APIKeys/APIKeys.php
 
 ```bash
 # Print JSON to stdout
-python scripts/fetch_fabrary_deck.py https://fabrary.net/decks/01KST88R7JVEQ73M82ZA0PJ9RN
+python scripts/deck/fetch_fabrary_deck.py https://fabrary.net/decks/01KST88R7JVEQ73M82ZA0PJ9RN
 
 # Save to a file (cached decks are reused by simulate_deck_matchup.ps1)
-python scripts/fetch_fabrary_deck.py https://fabrary.net/decks/01KST88R7JVEQ73M82ZA0PJ9RN \
+python scripts/deck/fetch_fabrary_deck.py https://fabrary.net/decks/01KST88R7JVEQ73M82ZA0PJ9RN \
     --out results/matchup_sims/decks/aurora.json --pretty
 
 # Append to the static deck database for warm-start training
-python scripts/fetch_fabrary_deck.py https://fabrary.net/decks/01KST88R7JVEQ73M82ZA0PJ9RN \
+python scripts/deck/fetch_fabrary_deck.py https://fabrary.net/decks/01KST88R7JVEQ73M82ZA0PJ9RN \
     --append-to src/flesh_and_blood_rlbridge/card_db/fabrary_decks.json \
     --deck-id fab_aurora_sa_starter
 ```
@@ -229,7 +229,7 @@ Fetched decks are cached under `results/matchup_sims/decks/` (or the script-spec
 | `AppSync returned no deck data` | Private or invalid deck slug | Open the URL in a browser; export JSON or add to `fabrary_decks.json` |
 | `Deck JSON not available` in a PS script | Fetch failed and no cache | Run `fetch_fabrary_deck.py` manually to see the error, or pass a local JSON path |
 
-For low-level API inspection, run `python scripts/_probe_fabrary.py`.
+For low-level API inspection, inspect `scripts/deck/fetch_fabrary_deck.py` or run it with `--help`.
 
 ---
 
@@ -237,7 +237,7 @@ For low-level API inspection, run `python scripts/_probe_fabrary.py`.
 
 ### What it does
 
-`scripts/generate_cpp_engine.py` scans ≈50 Talishar PHP source files and auto-generates a self-contained C++ game engine:
+`scripts/cpp/generate_cpp_engine.py` scans ≈50 Talishar PHP source files and auto-generates a self-contained C++ game engine:
 
 | Generated file | Contents |
 |----------------|----------|
@@ -260,11 +260,11 @@ The compiled output is a Python extension module (`fab_engine.cp312-win_amd64.py
 ### Building
 
 ```powershell
-# Build engine for a hero matchup (names, slugs, or FaBrary URLs accepted)
-.\build_cpp_engine_for_matchup.ps1 -Deck1 aurora -Deck2 briar
+# Build engine for a hero matchup
+python scripts/cpp/build_cpp_engine_for_matchup.py --deck1 aurora --deck2 briar
 
-# With FaBrary deck URLs
-.\build_cpp_engine_for_matchup.ps1 -Deck1 "https://fabrary.net/decks/..." -Deck2 briar
+# With optional FaBrary deck JSON files for full card-pool coverage
+python scripts/cpp/build_cpp_engine_for_matchup.py --deck1 aurora --deck2 briar --deck1-json path/to/deck.json
 ```
 
 Pipeline scripts (`train_full_pipeline.py`, `simulate_deck_matchup.ps1`) **auto-discover** the hashed engine directory — no manual path configuration is needed after building.
@@ -341,54 +341,60 @@ Full co-training pipeline where **both players** simultaneously build decks, sid
 | Script | Purpose |
 |--------|---------|
 | `start_talishar.ps1` | Start/stop the Talishar Docker backend and Vite FE. Flags: `-BackendOnly`, `-FeOnly`, `-Down`. Polls both services for readiness. |
-| `build_cpp_engine_for_matchup.ps1` | Generate C++ source from Talishar PHP and CMake-build the pybind11 engine for a matchup. Output lands in `results/cpp_engines/{matchup}-{hash}/`. |
-| `simulate_deck_matchup.ps1` | Fetch two decks (FaBrary or local JSON), sideboard each to format rules, build the C++ engine, run simulated games, and print win percentages. |
-| `run_aurora_vs_briar_fixed_opponent.ps1` | Train an Aurora deck through all three phases (deckbuild → sideboard → play) against a fixed Briar opponent. |
-| `run_sage_aurora_vs_briar_deckbuild.ps1` | Full dual co-training pipeline for Aurora vs Briar: both players deckbuild, sideboard, and train simultaneously. |
-| `run_sage_briar_vs_dorinthea_play.ps1` | Play-phase-only training for Briar vs Dorinthea (skips deckbuild and sideboard). |
+| `scripts/cpp/build_cpp_engine_for_matchup.py` | Generate C++ source from Talishar PHP and CMake-build the pybind11 engine for a matchup. Output lands in `results/cpp_engines/{matchup}-{hash}/`. |
+| `runscripts/simulate_deck_matchup.py` | Fetch two decks (FaBrary or local JSON), sideboard each to format rules, build the C++ engine, run simulated games, and print win percentages. |
+| `runscripts/aurora_vs_briar_fixed_opponent.py` | Train an Aurora deck through all three phases (deckbuild → sideboard → play) against a fixed Briar opponent. |
+| `runscripts/sage_aurora_vs_briar_deckbuild.py` | Full dual co-training pipeline for Aurora vs Briar: both players deckbuild, sideboard, and train simultaneously. |
+| `runscripts/sage_briar_vs_dorinthea_play.py` | Play-phase-only training for Briar vs Dorinthea (skips deckbuild and sideboard). |
 
 ---
 
 ## Python Scripts
 
-All utility scripts live in `scripts/`.
+Utility scripts live under `scripts/` in four categories. See `scripts/README.md`
+for layout. High-level orchestration lives in `runscripts/` at the repo root.
 
-### Training pipelines
+### `scripts/training/`
 
 | Script | Purpose |
 |--------|---------|
-| `train_full_pipeline.py` | Three-phase pipeline: deckbuild → sideboard → play. Supports `preset`, `mirror`, and `dual` modes. Accepts `--p1-fixed-deck`, `--p2-fixed-deck`, `--cpp-engine-dir`. Main entry-point for PS scripts. |
-| `train_three_phase_pipeline.py` | Earlier three-phase pipeline (superseded by `train_full_pipeline.py`). |
+| `train_full_pipeline.py` | Three-phase pipeline: deckbuild → sideboard → play. Supports `preset`, `mirror`, and `dual` modes. Main entry-point for runscripts. |
 | `train_eval_render_pipeline.py` | Train → evaluate → render the optimal-policy rollout as images/GIF. |
 | `train_sage_precons.py` | Dual-agent PPO training across all 45 SAGE precon cross-matchups (C(10,2)). |
 | `train_silver_age_decks.py` | Dual-agent PPO for Silver Age FaBrary deck cross-matchups. |
 | `train_classic_constructed_decks.py` | Dual-agent PPO for Classic Constructed FaBrary deck cross-matchups. |
-| `train_dual_agent_common.py` | Shared PPO training loop, `Matchup` dataclass, and `make_env()` factory used by all pipeline scripts. |
+| `train_dual_agent_common.py` | Shared PPO training loop, `Matchup` dataclass, and `make_env()` factory. |
+| `agent_cache.py` | Four-tier PPO agent cache for warm-starting training. |
+| `episode_cache.py` | Persistent episode replay buffer keyed by matchup. |
 
-### Evaluation & diagnostics
-
-| Script | Purpose |
-|--------|---------|
-| `eval_agent_vs_agent.py` | Evaluate two saved PPO agents head-to-head across N games; returns win rates and confidence intervals. |
-| `check_oracle.py` | Run games and validate combat resolutions against the rules oracle to catch engine regressions. |
-| `test_talishar_env.py` | Environment smoke test — plays one full episode with random actions against the live server and prints a summary. |
-| `_debug_game_flow.py` | Internal game-flow debugger; prints step-by-step state transitions. |
-
-### Deck & data utilities
+### `scripts/eval/`
 
 | Script | Purpose |
 |--------|---------|
-| `fetch_fabrary_deck.py` | Fetch a deck from the FaBrary API by URL or slug. Saves JSON with `hero_id`, `hero_class`, `equipment_header`, `deck`, and `sideboard` fields. |
-| `generate_cpp_engine.py` | Scan Talishar PHP source and emit C++ + pybind11 engine sources ready for CMake. |
-| `cli_talishar.py` | Interactive human-vs-CombatDummy CLI. Optionally load a trained agent checkpoint to watch it play. |
-| `_probe_fabrary.py` | FaBrary API probe / diagnostics — inspect raw API responses. |
+| `eval_phase3_checkpoint.py` | Live dashboard for phase-3 checkpoint evaluation and GIF render. |
+| `eval_agent_vs_agent.py` | Evaluate two saved PPO agents head-to-head across N games. |
 
-### Cache helpers
+### `scripts/cpp/`
 
 | Script | Purpose |
 |--------|---------|
-| `agent_cache.py` | Four-tier PPO agent cache (deck×deck → deck×hero → hero×hero → hero). Warm-starts training from the best available prior run. |
-| `episode_cache.py` | Persistent episode replay buffer keyed by matchup. Stores complete episodes to skip the default-policy warmup phase on re-runs. |
+| `build_cpp_engine_for_matchup.py` | Generate and CMake-build the pybind11 engine for a matchup. |
+| `generate_cpp_engine.py` | Scan Talishar PHP source and emit C++ engine sources. |
+| `check_cpp_vs_talishar_parity.py` | Core C++ vs HTTP Talishar parity checker library. |
+| `run_parity_check.py` | CLI wrapper for single-matchup parity checks. |
+| `run_random_parity_sweep.py` | Randomized parity sweeps across Talishar deck assets. |
+
+### `scripts/deck/`
+
+| Script | Purpose |
+|--------|---------|
+| `fetch_fabrary_deck.py` | Fetch a deck from the FaBrary API by URL or slug. |
+
+### Tests
+
+| Script | Purpose |
+|--------|---------|
+| `tests/test_talishar_env_smoke.py` | Manual smoke test against a live Talishar server (random actions). |
 
 ---
 

@@ -59,6 +59,14 @@ include = ["src/", "README.md", "pyproject.toml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = [
+    "scripts",
+    "scripts/training",
+    "scripts/eval",
+    "scripts/cpp",
+    "scripts/deck",
+    "src",
+]
 
 [tool.ruff]
 target-version = "py310"

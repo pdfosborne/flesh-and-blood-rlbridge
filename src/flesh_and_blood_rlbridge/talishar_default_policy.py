@@ -154,6 +154,71 @@ def _is_revert_action(action: dict[str, Any]) -> bool:
     return "undo" in label or label == "cancel"
 
 
+_REPEAT_ACTION_THRESHOLD = 3
+_REPEAT_ACTION_PENALTY = -0.1
+
+
+class RepeatActionTracker:
+    """Track repeated and oscillating action patterns within a turn.
+
+    Penalises both exact repeats (A, A, A, …) and pairwise loops such as
+    play-undo cycles (A, B, A, B, …) where *B* is commonly Cancel/Undo.
+    """
+
+    def __init__(self) -> None:
+        self.turn_no: int = -1
+        self.acting_player: int = -1
+        self.last_action_key: Optional[tuple[int, str]] = None
+        self.prev_action_key: Optional[tuple[int, str]] = None
+        self.repeat_streak: int = 0
+
+    def reset(self, *, turn_no: int, acting_player_id: int) -> None:
+        self.turn_no = turn_no
+        self.acting_player = acting_player_id
+        self.last_action_key = None
+        self.prev_action_key = None
+        self.repeat_streak = 0
+
+    def update(
+        self,
+        action_key: tuple[int, str],
+        *,
+        turn_no: int,
+        acting_player_id: int,
+        threshold: int = _REPEAT_ACTION_THRESHOLD,
+        penalty: float = _REPEAT_ACTION_PENALTY,
+    ) -> float:
+        """Record *action_key* and return any repeat penalty for this step."""
+        turn_changed = turn_no != self.turn_no
+        player_changed = acting_player_id != self.acting_player
+        if turn_changed or player_changed:
+            self.turn_no = turn_no
+            self.acting_player = acting_player_id
+            self.prev_action_key = None
+            self.last_action_key = action_key
+            self.repeat_streak = 1
+            return 0.0
+
+        if action_key == self.last_action_key:
+            self.repeat_streak += 1
+        elif (
+            self.prev_action_key is not None
+            and action_key == self.prev_action_key
+            and self.last_action_key != action_key
+        ):
+            # Play-undo and other A-B-A-B oscillation loops.
+            self.repeat_streak += 1
+        else:
+            self.repeat_streak = 1
+
+        self.prev_action_key = self.last_action_key
+        self.last_action_key = action_key
+
+        if self.repeat_streak >= threshold:
+            return penalty
+        return 0.0
+
+
 def _pitch_hand_actions(filtered: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
         a for a in filtered

@@ -9,7 +9,7 @@ Prerequisites
 -------------
 1. Generate the C++ source for a matchup::
 
-       python scripts/generate_cpp_engine.py \\
+       python scripts/cpp/generate_cpp_engine.py \\
            --talishar-src Talishar \\
            --deck1 Ira --deck2 Ira \\
            --out results/cpp_engines/Ira_vs_Ira
@@ -61,19 +61,14 @@ from rlbridge.environments.base import rlbridgeEnvironment
 from rlbridge.protocol.messages import RenderResult, ResetResult, StepResult, TextSpace
 
 from .combat_log_tracker import CombatTurnTracker
+from .legal_action_filter import align_filtered_actions, filter_legal_actions
 from .talishar_default_policy import (
-    _CARD_RESOURCE_STATS,
-    _CARD_STATS,
-    _MIN_BLOCK_VALUE,
-    _is_affordable_hand_play as _talishar_is_affordable_hand_play,
-    _strip_revert_actions,
+    RepeatActionTracker,
 )
 
 # Reward constants mirror talishar_engine_environment.py
-_TRUNCATION_PENALTY = 0
-_REPEAT_ACTION_THRESHOLD = 3
-_REPEAT_ACTION_PENALTY = -0.1
-_STEP_PENALTY = -0.005
+_TRUNCATION_PENALTY = -0.1
+_STEP_PENALTY = -0.001
 
 
 def _matchup_key(deck1: str, deck2: str) -> str:
@@ -192,11 +187,8 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         self._p1_hp: int = 20
         self._p2_hp: int = 20
         self._acting_player: int = 1  # 1-indexed to match Talishar convention
-        self._repeat_streak: int = 0
-        self._last_action_key: Optional[tuple[int, str]] = None
-        self._last_turn_no: int = 0
+        self._repeat_tracker = RepeatActionTracker()
 
-    # â”€â”€ helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     def _normalize_hand_playability(self, raw: Any) -> dict[int, set[str]]:
         if not isinstance(raw, dict):
@@ -450,7 +442,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         extra = self._talishar_parity_extra or {}
         repeat_streak = extra.get("repeat_streak")
         if repeat_streak is None:
-            repeat_streak = self._repeat_streak
+            repeat_streak = self._repeat_tracker.repeat_streak
         mirrored_penalty = extra.get("repeat_penalty")
         if mirrored_penalty is not None:
             repeat_penalty = float(mirrored_penalty)
@@ -678,131 +670,37 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         label = str(getattr(action, "label", "") or "").strip().lower()
         return any(tok in label for tok in ("pass", "end turn", "no block", "skip"))
 
-    def _card_cost(self, card: Any) -> int:
-        try:
-            cost = int(getattr(card, "cost", 0) or 0)
-        except (TypeError, ValueError):
-            cost = 0
-        if cost > 0:
-            return cost
-        cid = str(getattr(card, "card_id", "") or "").strip()
-        if cid in _CARD_RESOURCE_STATS:
-            return _CARD_RESOURCE_STATS[cid][1]
-        return 0
-
-    def _card_pitch(self, card: Any) -> int:
-        try:
-            pitch = int(getattr(card, "pitch", 0) or 0)
-        except (TypeError, ValueError):
-            pitch = 0
-        if pitch > 0:
-            return pitch
-        cid = str(getattr(card, "card_id", "") or "").strip()
-        if cid in _CARD_RESOURCE_STATS:
-            return _CARD_RESOURCE_STATS[cid][0]
-        return 0
-
-    def _is_affordable_hand_play(self, action: Any, hand_cards: list[Any]) -> bool:
-        """Return True when a hand play action can be paid with other hand cards."""
-        if str(getattr(action, "zone", "") or "").strip().lower() != "hand":
-            return True
-        if int(getattr(action, "action_code", 0) or 0) != 27:
-            return True
-
-        try:
-            idx = int(str(getattr(action, "button_input", "") or ""))
-        except (TypeError, ValueError):
-            return False
-        if idx < 0 or idx >= len(hand_cards):
-            return False
-
-        card = hand_cards[idx]
-        cost = self._card_cost(card)
-        if cost <= 0:
-            return True
-
-        available = 0
-        for j, c in enumerate(hand_cards):
-            if j == idx:
-                continue
-            available += self._card_pitch(c)
-        return cost <= available
-
-    def _card_defense(self, card: Any) -> int:
-        try:
-            defense = int(getattr(card, "defense", 0) or 0)
-        except (TypeError, ValueError):
-            defense = 0
-        if defense > 0:
-            return defense
-        cid = str(getattr(card, "card_id", "") or "").strip()
-        if cid in _CARD_STATS:
-            return _CARD_STATS[cid][1]
-        return 0
-
-    def _is_hand_block_action(self, action: Any) -> bool:
-        return (
-            str(getattr(action, "zone", "") or "").strip().lower() == "hand"
-            and int(getattr(action, "action_code", 0) or 0) == 27
-        )
-
-    def _is_viable_block_play(self, action: Any, hand_cards: list[Any]) -> bool:
-        """Return True when a hand play can be used as a dedicated block."""
-        if not self._is_hand_block_action(action):
-            return True
-
-        try:
-            idx = int(str(getattr(action, "button_input", "") or ""))
-        except (TypeError, ValueError):
-            return False
-        if idx < 0 or idx >= len(hand_cards):
-            return False
-
-        card = hand_cards[idx]
-        if not self._is_affordable_hand_play(action, hand_cards):
-            return False
-        return self._card_defense(card) >= _MIN_BLOCK_VALUE
-
-    def _apply_block_phase_filter(self, legal: list[Any]) -> list[Any]:
-        """During block phase, only offer viable blocks or pass."""
-        pass_actions = [a for a in legal if self._is_pass_like(a)]
-        hand_cards = self._hand_cards()
-        viable_blocks = [
-            a
-            for a in legal
-            if self._is_hand_block_action(a) and self._is_viable_block_play(a, hand_cards)
-        ]
-        if viable_blocks:
-            return viable_blocks + pass_actions
-
-        if pass_actions:
-            return [pass_actions[0]]
-        return [
-            type(
-                "_Pass",
-                (),
-                {
-                    "action_code": 99,
-                    "button_input": "",
-                    "card_id": "",
-                    "zone": "button",
-                    "label": "Pass",
-                },
-            )()
-        ]
-
     def _synthetic_talishar_state(self) -> dict[str, Any]:
         """Build a Talishar-shaped state dict for shared affordability helpers."""
+        hand_entries: list[dict[str, Any]] = []
+        for index, card in enumerate(self._hand_cards()):
+            entry: dict[str, Any] = {
+                "action": 27,
+                "actionDataOverride": str(index),
+                "cardNumber": str(getattr(card, "card_id", "") or ""),
+            }
+            for field, attr in (
+                ("defense", "defense"),
+                ("cost", "cost"),
+                ("resource", "cost"),
+                ("pitch", "pitch"),
+            ):
+                value = getattr(card, attr, None)
+                if value is None:
+                    continue
+                try:
+                    if int(value) == 0:
+                        continue
+                except (TypeError, ValueError):
+                    pass
+                entry[field] = value
+            label = str(getattr(card, "name", "") or "").strip()
+            if label:
+                entry["label"] = label
+            hand_entries.append(entry)
         return {
             "turnPhase": {"turnPhase": self._phase_code()},
-            "playerHand": [
-                {
-                    "action": 27,
-                    "actionDataOverride": str(index),
-                    "cardNumber": str(getattr(card, "card_id", "") or ""),
-                }
-                for index, card in enumerate(self._hand_cards())
-            ],
+            "playerHand": hand_entries,
         }
 
     def _ensure_playable_hand_actions(
@@ -859,47 +757,29 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         return other + additions + pass_actions
 
     def _filter_legal_actions(self, legal: list[Any]) -> list[Any]:
-        """Filter legal actions to mirror Talishar HTTP observation filtering."""
+        """Filter legal actions using the shared Talishar/C++ filter."""
         phase = self._effective_turn_phase().upper()
-        filtered = list(legal)
-
-        if phase in ("B", "D"):
-            return self._apply_block_phase_filter(filtered)
-
         if phase in ("OPENING_MAIN", "ARS"):
-            return filtered
+            return legal
 
+        working = list(legal)
         if phase == "M":
             playable = self._playable_hand_indices()
             if playable is not None:
-                filtered = self._ensure_playable_hand_actions(filtered, playable)
-                filtered = [
+                working = self._ensure_playable_hand_actions(working, playable)
+                working = [
                     action
-                    for action in filtered
+                    for action in working
                     if int(getattr(action, "action_code", 0) or 0) != 27
                     or str(getattr(action, "button_input", "") or "") in playable
                 ]
-            else:
-                talishar_state = self._synthetic_talishar_state()
-                affordable: list[Any] = []
-                for action in filtered:
-                    code = int(getattr(action, "action_code", 0) or 0)
-                    if code == 3:
-                        continue
-                    if (
-                        str(getattr(action, "zone", "") or "").strip().lower() == "hand"
-                        and code == 27
-                        and not _talishar_is_affordable_hand_play(
-                            self._action_to_dict(action),
-                            talishar_state,
-                        )
-                    ):
-                        continue
-                    affordable.append(action)
-                if affordable:
-                    filtered = affordable
 
-        return filtered
+        state = self._synthetic_talishar_state()
+        filtered_dicts = filter_legal_actions(
+            state,
+            [self._action_to_dict(action) for action in working],
+        )
+        return align_filtered_actions(working, filtered_dicts, to_descriptor=self._action_to_dict)
 
     def _phase_code(self) -> str:
         """Return the Talishar-like phase token exposed in observations."""
@@ -1113,25 +993,11 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         return None
 
     def _repeat_penalty(self, action_code: int, button_input: str) -> float:
-        key = (action_code, button_input)
-        turn = self._gs.turn_no
-        player = self._gs.priority
-
-        if turn != self._last_turn_no or player != (self._acting_player - 1):
-            self._last_turn_no = turn
-            self._last_action_key = key
-            self._repeat_streak = 1
-            return 0.0
-
-        if key == self._last_action_key:
-            self._repeat_streak += 1
-        else:
-            self._last_action_key = key
-            self._repeat_streak = 1
-
-        if self._repeat_streak >= _REPEAT_ACTION_THRESHOLD:
-            return _REPEAT_ACTION_PENALTY
-        return 0.0
+        return self._repeat_tracker.update(
+            (action_code, button_input),
+            turn_no=int(getattr(self._gs, "turn_no", 0) or 0),
+            acting_player_id=int(self._acting_player),
+        )
 
     def _is_game_over(self) -> bool:
         return self._gs.game_over or self._gs.p1_health <= 0 or self._gs.p2_health <= 0
@@ -1296,9 +1162,10 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             self._flow_phase = "OPENING_MAIN"
         elif opts.get("opening_hands") and not self._hand_playability:
             self._flow_phase = "OPENING_MAIN"
-        self._repeat_streak = 0
-        self._last_action_key = None
-        self._last_turn_no = 0
+        self._repeat_tracker.reset(
+            turn_no=int(getattr(self._gs, "turn_no", 0) or 0),
+            acting_player_id=int(self._acting_player),
+        )
 
         legal = self._filter_legal_actions(self._legal_actions())
         obs = self._encode_observation(legal)
@@ -1496,7 +1363,7 @@ def get_engine_dir(
     Prefers an exact ``{deck1}_vs_{deck2}`` directory.  If that directory
     has no compiled module, falls back to the most-recently-modified
     hashed variant ``{deck1}_vs_{deck2}-<hash>`` (produced by
-    build_cpp_engine_for_matchup.ps1 when content-hashing is enabled).
+    scripts/cpp/build_cpp_engine_for_matchup.py when content-hashing is enabled).
 
     When the lookup key differs only by case from a cached directory
     (e.g. ``briar_vs_riptide`` vs ``Briar_vs_Riptide-<hash>``), the

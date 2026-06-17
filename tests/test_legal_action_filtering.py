@@ -5,6 +5,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from flesh_and_blood_rlbridge.cpp_engine_environment import CppEngineEnvironment
+from flesh_and_blood_rlbridge.legal_action_filter import filter_legal_actions
 from flesh_and_blood_rlbridge.talishar_default_policy import (
     _apply_block_phase_filter,
     _card_cost,
@@ -52,10 +53,12 @@ def _build_talishar_env() -> TalisharEngineEnvironment:
     return object.__new__(TalisharEngineEnvironment)
 
 
-def _build_cpp_env(hand: list[_FakeCard]) -> CppEngineEnvironment:
+def _build_cpp_env(hand: list[_FakeCard], *, phase: int = 1) -> CppEngineEnvironment:
     env = object.__new__(CppEngineEnvironment)
-    env._gs = type("_GS", (), {"p1_hand": hand, "p2_hand": []})()
+    env._gs = type("_GS", (), {"p1_hand": hand, "p2_hand": [], "phase": phase})()
     env._acting_player = 1
+    env._talishar_overlay = None
+    env._flow_phase = ""
     return env
 
 
@@ -153,7 +156,6 @@ def test_talishar_keeps_affordable_play_when_other_cards_can_pitch() -> None:
 
 
 def test_talishar_empty_pitch_window_offers_cancel_only() -> None:
-    env = _build_talishar_env()
     state = {"turnPhase": {"turnPhase": "P"}, "playerHand": []}
     legal = [
         {
@@ -170,10 +172,35 @@ def test_talishar_empty_pitch_window_offers_cancel_only() -> None:
         },
     ]
 
-    filtered = env._filter_legal_actions(state, legal)
+    filtered = filter_legal_actions(state, legal)
 
     assert len(filtered) == 1
     assert filtered[0]["action_code"] == 10000
+
+
+def test_cpp_empty_pitch_window_offers_cancel_only() -> None:
+    env = _build_cpp_env([], phase=2)
+    legal = [
+        _FakeAction(
+            action_code=10000,
+            button_input="",
+            card_id="",
+            zone="button",
+            label="Cancel",
+        ),
+        _FakeAction(
+            action_code=99,
+            button_input="",
+            card_id="",
+            zone="button",
+            label="Pass",
+        ),
+    ]
+
+    filtered = env._filter_legal_actions(legal)
+
+    assert len(filtered) == 1
+    assert filtered[0].action_code == 10000
 
 
 def test_is_affordable_hand_play_helper() -> None:
@@ -246,6 +273,9 @@ def test_cpp_observation_excludes_unaffordable_hand_play() -> None:
         },
     )()
     env._acting_player = 1
+    env._talishar_overlay = None
+    env._flow_phase = ""
+    env._turn_no_override = None
     legal = [
         _FakeAction(
             action_code=27,
@@ -392,6 +422,9 @@ def test_cpp_block_phase_pass_only_for_attack_cards() -> None:
         },
     )()
     env._acting_player = 1
+    env._talishar_overlay = None
+    env._flow_phase = ""
+    env._turn_no_override = None
     legal = [
         _FakeAction(
             action_code=27,
@@ -488,3 +521,86 @@ def test_talishar_block_phase_strips_undo_even_with_viable_blockers() -> None:
     assert 10001 not in codes
     assert 27 in codes
     assert 99 in codes
+
+
+def _bloodrot_yesno_legal() -> list[dict]:
+    return [
+        {
+            "action_code": 20,
+            "button_input": "YES",
+            "card_id": "",
+            "zone": "popup",
+            "label": "Yes",
+        },
+        {
+            "action_code": 20,
+            "button_input": "NO",
+            "card_id": "",
+            "zone": "popup",
+            "label": "No",
+        },
+    ]
+
+
+def test_yesno_strips_yes_when_hand_pitch_cannot_pay_bloodrot() -> None:
+    state = {
+        "turnPhase": {"turnPhase": "YESNO"},
+        "playerPitchCount": 0,
+        "playerHand": [
+            {
+                "cardNumber": "nimblism_red",
+                "action": 27,
+                "actionDataOverride": "0",
+                "resource": 1,
+            }
+        ],
+        "playerPrompt": {
+            "helpText": "Choose if you want to pay 3 to avoid taking 2 damage",
+        },
+        "playerInputPopUp": {
+            "active": True,
+            "popup": {
+                "title": "Choose if you want to pay 3 to avoid taking 2 damage",
+            },
+        },
+    }
+    filtered = filter_legal_actions(state, _bloodrot_yesno_legal())
+
+    assert len(filtered) == 1
+    assert filtered[0]["button_input"] == "NO"
+
+
+def test_yesno_keeps_yes_when_hand_pitch_can_pay_bloodrot() -> None:
+    state = {
+        "turnPhase": {"turnPhase": "YESNO"},
+        "playerPitchCount": 0,
+        "playerHand": [
+            {
+                "cardNumber": "evergreen_blue",
+                "action": 27,
+                "actionDataOverride": "0",
+            }
+        ],
+        "playerPrompt": {
+            "helpText": "Choose if you want to pay 3 to avoid taking 2 damage",
+        },
+    }
+    filtered = filter_legal_actions(state, _bloodrot_yesno_legal())
+    buttons = {action["button_input"] for action in filtered}
+
+    assert buttons == {"YES", "NO"}
+
+
+def test_yesno_strips_yes_when_only_pool_resources_are_insufficient() -> None:
+    state = {
+        "turnPhase": {"turnPhase": "YESNO"},
+        "playerPitchCount": 2,
+        "playerHand": [],
+        "playerPrompt": {
+            "helpText": "Choose if you want to pay 3 to avoid taking 2 damage",
+        },
+    }
+    filtered = filter_legal_actions(state, _bloodrot_yesno_legal())
+
+    assert len(filtered) == 1
+    assert filtered[0]["button_input"] == "NO"
