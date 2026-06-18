@@ -54,14 +54,18 @@ import importlib.util
 import json
 import os
 import sys
+import sysconfig
 from pathlib import Path
 from typing import Any, Optional
+
+import numpy as np
 
 from rlbridge.environments.base import rlbridgeEnvironment
 from rlbridge.protocol.messages import RenderResult, ResetResult, StepResult, TextSpace
 
 from .combat_log_tracker import CombatTurnTracker
 from .legal_action_filter import align_filtered_actions, filter_legal_actions
+from .obs_encoding import observation_fingerprint
 from .talishar_default_policy import (
     RepeatActionTracker,
 )
@@ -76,22 +80,80 @@ def _matchup_key(deck1: str, deck2: str) -> str:
     return f"{deck1}_vs_{deck2}"
 
 
+def python_extension_suffix() -> str:
+    """Return the active interpreter's extension suffix (e.g. ``.cp312-win_amd64.pyd``)."""
+    return str(sysconfig.get_config_var("EXT_SUFFIX") or (".pyd" if os.name == "nt" else ".so"))
+
+
+def expected_fab_engine_module_name() -> str:
+    """Filename of ``fab_engine`` built for the current Python interpreter."""
+    return f"fab_engine{python_extension_suffix()}"
+
+
+def _module_matches_current_python(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    expected = expected_fab_engine_module_name()
+    if path.name == expected:
+        return True
+    # Legacy builds without an ABI tag (fab_engine.pyd) — accept only if import works.
+    if path.name in {"fab_engine.pyd", "fab_engine.so"}:
+        return True
+    return False
+
+
+def _iter_engine_module_candidates(engine_dir: Path) -> list[Path]:
+    """Return compiled-module candidates, newest compatible build first."""
+    patterns = (
+        expected_fab_engine_module_name(),
+        "fab_engine*.pyd",
+        "fab_engine*.so",
+        "fab_engine.pyd",
+        "fab_engine.so",
+    )
+    seen: set[Path] = set()
+    candidates: list[Path] = []
+
+    def add(path: Path) -> None:
+        resolved = path.resolve()
+        if resolved in seen or not path.is_file():
+            return
+        seen.add(resolved)
+        candidates.append(path)
+
+    for pattern in patterns:
+        for path in engine_dir.glob(pattern):
+            add(path)
+    build_dir = engine_dir / "build"
+    if build_dir.is_dir():
+        for pattern in patterns[1:]:
+            for path in build_dir.rglob(pattern):
+                add(path)
+
+    def sort_key(path: Path) -> tuple[int, float]:
+        compatible = int(_module_matches_current_python(path))
+        return (compatible, path.stat().st_mtime)
+
+    candidates.sort(key=sort_key, reverse=True)
+    return candidates
+
+
 def _find_engine_module(engine_dir: str | Path) -> Optional[Path]:
-    """Return the path to a compiled fab_engine module in *engine_dir*, or None."""
+    """Return a compiled ``fab_engine`` module for the active Python, if any."""
     ed = Path(engine_dir)
-    for pattern in ("fab_engine*.pyd", "fab_engine*.so", "fab_engine.pyd", "fab_engine.so"):
-        for p in ed.glob(pattern):
-            return p
-    # Also check inside a build sub-directory
-    for pattern in ("fab_engine*.pyd", "fab_engine*.so"):
-        for p in (ed / "build").rglob(pattern):
-            return p
+    for path in _iter_engine_module_candidates(ed):
+        if _module_matches_current_python(path):
+            return path
     return None
 
 
 def is_cpp_engine_available(engine_dir: str | Path) -> bool:
-    """Return True if a compiled fab_engine module exists in *engine_dir*."""
-    return _find_engine_module(engine_dir) is not None
+    """Return True if ``fab_engine`` can be imported for the active Python."""
+    try:
+        load_fab_engine(engine_dir)
+        return True
+    except ImportError:
+        return False
 
 
 def load_fab_engine(engine_dir: str | Path) -> Any:
@@ -108,13 +170,40 @@ def load_fab_engine(engine_dir: str | Path) -> Any:
     ed = Path(engine_dir).resolve()
     mod_path = _find_engine_module(ed)
     if mod_path is None:
+        expected = expected_fab_engine_module_name()
+        stale = [
+            p.name
+            for p in _iter_engine_module_candidates(ed)
+            if p.name != expected
+        ]
+        stale_hint = ""
+        if stale:
+            stale_hint = (
+                f"\nFound module(s) for a different Python ABI: {', '.join(sorted(set(stale)))}"
+                f"\nRebuild for Python {sys.version_info.major}.{sys.version_info.minor}:"
+                f"\n  cd {ed}"
+                f"\n  cmake -B build . && cmake --build build --config Release"
+            )
         raise ImportError(
-            f"No compiled fab_engine module found in {ed}.\n"
-            "Build it first:\n"
-            f"  cd {ed}\n"
-            "  pip install pybind11\n"
-            "  cmake -B build . && cmake --build build --config Release"
+            f"No compiled fab_engine module for the active interpreter ({expected}) in {ed}."
+            f"{stale_hint}"
         )
+
+    if os.name == "nt":
+        for dll_dir in (
+            mod_path.parent,
+            ed,
+            ed / "build" / "Release",
+            ed / "build" / "fab_engine.dir" / "Release",
+            Path(sys.executable).resolve().parent,
+            Path(sys.executable).resolve().parent / "DLLs",
+            Path(sys.executable).resolve().parent / "Library" / "bin",
+        ):
+            if dll_dir.is_dir():
+                try:
+                    os.add_dll_directory(str(dll_dir))
+                except (AttributeError, OSError):
+                    pass
 
     # Inject the parent directory into sys.path so the normal import works
     mod_dir = str(mod_path.parent)
@@ -157,7 +246,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         max_turns: int = 2000,
         deck1: str = "",
         deck2: str = "",
-        enable_combat_tracker: bool = True,
+        enable_combat_tracker: bool = False,
     ) -> None:
         self._engine_dir = Path(engine_dir).resolve()
         self._max_turns = max_turns
@@ -188,6 +277,12 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         self._p2_hp: int = 20
         self._acting_player: int = 1  # 1-indexed to match Talishar convention
         self._repeat_tracker = RepeatActionTracker()
+        self._last_observation_vec: Optional[np.ndarray] = None
+
+    def _obs_vec_for_json(self, obs_json: str) -> np.ndarray:
+        vec = observation_fingerprint(obs_json)
+        self._last_observation_vec = vec
+        return vec
 
 
     def _normalize_hand_playability(self, raw: Any) -> dict[int, set[str]]:
@@ -860,26 +955,79 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             out.append(self._hand_entry_from_legal(legal, index=i, card_id=card_id))
         return out
 
+    def _apply_pass_action(self, chosen: Any) -> None:
+        """Apply a pass-like action to the game state."""
+        flow_handled = self._handle_flow_pass() if self._is_pass_like(chosen) else False
+        if flow_handled:
+            return
+        cpp_action = self._resolve_cpp_action(chosen)
+        if cpp_action is not None:
+            self._gs.apply_action(cpp_action)
+            self._acting_player = self._gs.priority + 1
+        else:
+            self._gs.apply_action(chosen)
+            self._acting_player = self._gs.priority + 1
+
+    def _auto_advance_pass_only(
+        self,
+        *,
+        max_iters: int = 64,
+    ) -> tuple[float, bool, bool]:
+        """Auto-apply pass while only pass actions remain (skips agent decision steps)."""
+        extra_reward = 0.0
+        for _ in range(max_iters):
+            if self._is_game_over():
+                return extra_reward, True, False
+            if self._steps >= self._max_turns:
+                return extra_reward, False, True
+
+            legal = self._filter_legal_actions(self._legal_actions())
+            if not legal or not all(self._is_pass_like(action) for action in legal):
+                break
+
+            chosen = legal[0]
+            prev_p1 = self._gs.p1_health
+            prev_p2 = self._gs.p2_health
+            self._apply_pass_action(chosen)
+            self._steps += 1
+            repeat_pen = self._repeat_penalty(
+                int(getattr(chosen, "action_code", 0) or 0),
+                str(getattr(chosen, "button_input", "") or ""),
+            )
+            terminated = self._is_game_over()
+            truncated = not terminated and self._steps >= self._max_turns
+            extra_reward += self._mirrored_reward(
+                self._compute_reward(prev_p1, prev_p2, terminated, truncated, repeat_pen)
+            )
+            if terminated:
+                return extra_reward, True, False
+            if truncated:
+                return extra_reward, False, True
+        return extra_reward, False, False
+
+    def _legal_action_entries(self, legal: list[Any]) -> list[dict[str, Any]]:
+        """Build Talishar-shaped legalActions list (index-aligned)."""
+        return [
+            {"index": i, "label": a.label, "zone": a.zone}
+            for i, a in enumerate(legal)
+        ]
+
     def _encode_observation(self, legal: list[Any]) -> str:
         """Encode the current C++ game state as a JSON string.
 
-        Format mirrors :meth:`TalisharEngineEnvironment._encode_observation`
-        (same keys and legal action indexing).
+        *legal* must already be filtered (see :meth:`_filter_legal_actions`).
+        Format mirrors :meth:`TalisharEngineEnvironment._encode_observation`.
         """
         gs = self._gs
-        legal = self._filter_legal_actions(legal)
         player_hand = self._encode_player_hand(legal)
         acting_idx = self._acting_idx()
+        legal_entries = self._legal_action_entries(legal)
 
         if self._talishar_overlay:
             overlay = self._talishar_overlay
             overlay_legal = overlay.get("legal_actions")
             if isinstance(overlay_legal, list) and overlay_legal:
                 legal_entries = overlay_legal
-            else:
-                legal_entries = [
-                    {"index": i, "label": a.label, "zone": a.zone} for i, a in enumerate(legal)
-                ]
             obs: dict[str, Any] = {
                 "actingPlayerID": int(overlay.get("acting_player_id", self._acting_player)),
                 "selfPlay": True,
@@ -896,7 +1044,9 @@ class CppEngineEnvironment(rlbridgeEnvironment):
                 "playerHand": player_hand,
                 "legalActions": legal_entries,
             }
-            return json.dumps(obs, separators=(",", ":"))
+            obs_json = json.dumps(obs, separators=(",", ":"))
+            self._obs_vec_for_json(obs_json)
+            return obs_json
 
         player_hand_size = (
             len(player_hand)
@@ -917,11 +1067,11 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             "opponentDeckCount": (gs.p2_deck_size if self._acting_player == 1 else gs.p1_deck_size),
             "playerPitchCount": self._pitch_count(),
             "playerHand": player_hand,
-            "legalActions": [
-                {"index": i, "label": a.label, "zone": a.zone} for i, a in enumerate(legal)
-            ],
+            "legalActions": legal_entries,
         }
-        return json.dumps(obs, separators=(",", ":"))
+        obs_json = json.dumps(obs, separators=(",", ":"))
+        self._obs_vec_for_json(obs_json)
+        return obs_json
 
     def _parse_action(self, action: Any, legal: list[Any]) -> tuple[int, Any]:
         """Return (list_index, action object) for an integer, dict, or pass string."""
@@ -1188,26 +1338,31 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             self._synthetic_combat_log = []
 
         player_hp, opponent_hp = self._contract_player_hp()
+        info: dict[str, Any] = {
+            "engine": "cpp",
+            "engine_dir": str(self._engine_dir),
+            "legal_actions": self._contract_legal_actions(legal),
+            "player_hp": player_hp,
+            "opponent_hp": opponent_hp,
+            "acting_player_id": self._acting_player,
+            "self_play": True,
+            "combat_tracker": self._tracker_stub(),
+        }
+        if self._last_observation_vec is not None:
+            info["observation_vec"] = self._last_observation_vec
         return ResetResult(
             observation=obs,
-            info={
-                "engine": "cpp",
-                "engine_dir": str(self._engine_dir),
-                "legal_actions": self._contract_legal_actions(legal),
-                "player_hp": player_hp,
-                "opponent_hp": opponent_hp,
-                "acting_player_id": self._acting_player,
-                "self_play": True,
-                "combat_tracker": self._tracker_stub(),
-            },
+            info=info,
         )
 
     def step(self, action: Any) -> StepResult:
         assert self._gs is not None, "call reset() first"
 
         legal = self._filter_legal_actions(self._legal_actions())
-        before_snapshot = self._tracker_state_snapshot(legal)
-        legal_before = self._legal_to_dicts(legal)
+        before_snapshot = (
+            self._tracker_state_snapshot(legal) if self._enable_combat_tracker else None
+        )
+        legal_before = self._legal_to_dicts(legal) if self._enable_combat_tracker else []
 
         idx, chosen = self._parse_action(action, legal)
         chosen_dict = self._action_to_dict(chosen)
@@ -1259,14 +1414,24 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         )
         repeat_streak, repeat_pen = self._contract_repeat_fields(repeat_pen)
 
+        auto_reward, auto_term, auto_trunc = self._auto_advance_pass_only()
+        reward += auto_reward
+        if auto_term:
+            terminated = True
+            truncated = False
+        elif auto_trunc:
+            truncated = True
+
         new_legal = self._filter_legal_actions(self._legal_actions())
         obs = self._encode_observation(new_legal)
-        after_snapshot = self._tracker_state_snapshot(new_legal)
+        after_snapshot = (
+            self._tracker_state_snapshot(new_legal) if self._enable_combat_tracker else None
+        )
         player_hp, opponent_hp = self._contract_player_hp()
         contract_legal = self._contract_legal_actions(new_legal)
 
         tracker_event: Optional[dict[str, Any]] = None
-        if self._enable_combat_tracker:
+        if self._enable_combat_tracker and before_snapshot is not None and after_snapshot is not None:
             self._append_synthetic_log(
                 before_snapshot,
                 chosen_dict,
@@ -1288,23 +1453,27 @@ class CppEngineEnvironment(rlbridgeEnvironment):
                 combat_log_lines=self._synthetic_combat_log,
             )
 
+        step_info: dict[str, Any] = {
+            "engine": "cpp",
+            "legal_actions": contract_legal,
+            "turn": self._contract_turn(),
+            "player_hp": player_hp,
+            "opponent_hp": opponent_hp,
+            "acting_player_id": self._acting_player,
+            "self_play": True,
+            "repeat_streak": repeat_streak,
+            "repeat_penalty": repeat_pen,
+            "combat_tracker": self._tracker_stub(tracker_event),
+        }
+        if self._last_observation_vec is not None:
+            step_info["observation_vec"] = self._last_observation_vec
+
         return StepResult(
             observation=obs,
             reward=reward,
             terminated=terminated,
             truncated=truncated,
-            info={
-                "engine": "cpp",
-                "legal_actions": contract_legal,
-                "turn": self._contract_turn(),
-                "player_hp": player_hp,
-                "opponent_hp": opponent_hp,
-                "acting_player_id": self._acting_player,
-                "self_play": True,
-                "repeat_streak": repeat_streak,
-                "repeat_penalty": repeat_pen,
-                "combat_tracker": self._tracker_stub(tracker_event),
-            },
+            info=step_info,
         )
 
     def sample_action(self) -> str:
@@ -1411,7 +1580,7 @@ def get_or_none(
     deck2: str,
     cache_dir: str | Path | None = None,
     max_turns: int = 2000,
-    enable_combat_tracker: bool = True,
+    enable_combat_tracker: bool = False,
 ) -> Optional["CppEngineEnvironment"]:
     """Return a :class:`CppEngineEnvironment` if one is compiled for this matchup.
 

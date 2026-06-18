@@ -21,8 +21,13 @@ import sys
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
+_SRC = _REPO_ROOT / "src"
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
+from flesh_and_blood_rlbridge.cpp_engine_environment import is_cpp_engine_available
 
 from runscripts._common import (
     MIN_DECK_SIZES,
@@ -32,7 +37,7 @@ from runscripts._common import (
     build_cpp_engine_for_matchup,
     describe_deck_size,
     fetch_fabrary_deck,
-    find_cpp_engine_dir,
+    find_cpp_engine_dir_for_decks,
     optional_cpp_engine_arg,
     optional_train_workers_arg,
     print_banner,
@@ -49,7 +54,7 @@ from runscripts._common import (
 DEFAULT_DECK1_SOURCE = "https://fabrary.net/decks/01KTBBVEZE0TPDAZ74Z4D787G4"
 DEFAULT_DECK2_SOURCE = "https://fabrary.net/decks/01KR0XXRF5MESBQWQH7FW5Y8MG"
 DEFAULT_FORMAT = "silver_age"
-
+MAX_PLAY_STEPS = 500
 PLAY_EPISODES = 1_000_000
 FINAL_EVAL_EPISODES = 100
 FINAL_EVAL_MAX_STEPS = 500
@@ -153,9 +158,34 @@ def main(argv: list[str] | None = None) -> int:
     )
     cpp_engine_dir = None
     if build_rc == 0:
-        cpp_engine_dir = find_cpp_engine_dir(matchup_label)
+        cpp_engine_dir = find_cpp_engine_dir_for_decks(
+            build_deck1,
+            build_deck2,
+            deck1_json=deck1_info.local_path,
+            deck2_json=deck2_info.local_path,
+        )
         if cpp_engine_dir is None:
             print("  WARNING: C++ build reported success but engine directory not found.")
+        elif not is_cpp_engine_available(cpp_engine_dir):
+            print(
+                f"  WARNING: C++ engine at {cpp_engine_dir} is not importable — "
+                "forcing rebuild for the active Python."
+            )
+            rebuild_rc = build_cpp_engine_for_matchup(
+                deck1=build_deck1,
+                deck2=build_deck2,
+                talishar_url_value=talishar_url_value,
+                deck1_json=deck1_info.local_path,
+                deck2_json=deck2_info.local_path,
+                no_server=True,
+            )
+            if rebuild_rc == 0:
+                cpp_engine_dir = find_cpp_engine_dir_for_decks(
+                    build_deck1,
+                    build_deck2,
+                    deck1_json=deck1_info.local_path,
+                    deck2_json=deck2_info.local_path,
+                )
         else:
             print(f"  Engine directory: {cpp_engine_dir}")
             print("  C++ engine ready.")
@@ -195,6 +225,8 @@ def main(argv: list[str] | None = None) -> int:
         str(SIDEBOARD_EPISODES),
         "--play-episodes",
         str(PLAY_EPISODES),
+        "--max-play-steps",
+        str(MAX_PLAY_STEPS),
         "--num-eval-games",
         str(NUM_EVAL_GAMES),
         "--warmup-episodes",

@@ -102,6 +102,10 @@ from flesh_and_blood_rlbridge import (  # noqa: E402
     TalisharSideboardEnvironment,
     TalisharEngineEnvironment,
 )
+from flesh_and_blood_rlbridge.opponent_deck import (  # noqa: E402
+    normalize_talishar_asset_name,
+    resolve_opponent_deck_name,
+)
 
 try:
     from train_dual_agent_common import (  # noqa: E402
@@ -877,6 +881,22 @@ def run_phase3_play(
     )
     try:
         print(f"  Runtime backend (Phase 3): {_runtime_backend_label(probe_env)}")
+        use_cpp_backend = bool(getattr(probe_env, "_using_cpp", False))
+        if cpp_engine_dir and not use_cpp_backend:
+            raise RuntimeError(
+                f"C++ engine required (--cpp-engine-dir={cpp_engine_dir}) but "
+                f"failed to load for Python {sys.version_info.major}.{sys.version_info.minor}. "
+                "Rebuild with:\n"
+                f"  python scripts/cpp/build_cpp_engine_for_matchup.py "
+                f"--deck1 {_cpp_deck1} --deck2 {_cpp_deck2} "
+                f"--deck1-json <p1.json> --deck2-json <p2.json> --no-server"
+            )
+        if not use_cpp_backend and n_workers > 1:
+            print(
+                f"  WARNING: HTTP Talishar cannot run {n_workers} parallel game sessions — "
+                "capping workers to 1."
+            )
+            n_workers = 1
     finally:
         probe_env.close()
 
@@ -1447,6 +1467,7 @@ def _render_game_with_talishar_frontend(
             self_play=True,
             render_mode="rgb_array",       # engine owns the Playwright worker
             use_cpp_engine=False,          # HTTP backend required so FE can connect
+            enable_combat_tracker=True,
         )
         try:
             result = env.reset()           # _open_playwright_page() runs here
@@ -1755,7 +1776,7 @@ def run_final_evaluation(
             assets_path,
         )
     else:
-        opp_name = opponent_deck_name
+        opp_name = normalize_talishar_asset_name(opponent_deck_name, assets_path)
         opp_file = None
 
     # ── evaluation games ──────────────────────────────────────────────────────
@@ -1775,6 +1796,7 @@ def run_final_evaluation(
                 max_turns=max_steps,
                 self_play=True,
                 render_mode=None,
+                enable_combat_tracker=True,
             )
             try:
                 if not backend_printed:
@@ -2150,14 +2172,23 @@ def main() -> None:
                 )
                 _cpp_dir = _candidates[0] if _candidates else _exact
 
-        _has_cpp   = any(
-            _os.path.exists(_os.path.join(_cpp_dir, f))
-            for f in _os.listdir(_cpp_dir)
-            if f.startswith("fab_engine") and f.endswith((".pyd", ".so"))
-        ) if _os.path.isdir(_cpp_dir) else False
+        _has_cpp = False
+        if _os.path.isdir(_cpp_dir):
+            try:
+                if str(_REPO_ROOT / "src") not in sys.path:
+                    sys.path.insert(0, str(_REPO_ROOT / "src"))
+                from flesh_and_blood_rlbridge.cpp_engine_environment import (  # noqa: PLC0415
+                    is_cpp_engine_available,
+                    load_fab_engine,
+                )
+                if is_cpp_engine_available(_cpp_dir):
+                    load_fab_engine(_cpp_dir)
+                    _has_cpp = True
+            except Exception:
+                _has_cpp = False
         if _has_cpp:
-            _cpu_count = max(1, (_os.cpu_count() or 4) // 2)
-            args.workers = min(_cpu_count, 8)
+            _cpu_count = max(1, _os.cpu_count() or 4)
+            args.workers = min(_cpu_count, 16)
             print(f"  [auto] C++ engine detected -> {args.workers} parallel workers "
                   f"(set --workers to override)")
         else:
@@ -2175,7 +2206,7 @@ def main() -> None:
     print(f"  [device] PPO gradient updates: {_gpu_label}")
     print(f"  [workers] Parallel game sessions: {args.workers}")
 
-    min_warmup = max(1, math.ceil(args.play_episodes / 5))
+    min_warmup = max(1, math.ceil(args.play_episodes / 10))
     warmup_eps = min(max(args.warmup_episodes, min_warmup), args.play_episodes)
 
     out_dir = Path(args.out_dir)
@@ -2183,6 +2214,13 @@ def main() -> None:
     assets_path = args.assets_path or str(
         _REPO_ROOT / "Talishar" / "Assets"
     )
+    args.opponent_deck = normalize_talishar_asset_name(args.opponent_deck, assets_path)
+    if args.opponent_mode == "mirror":
+        args.opponent_hero_id = args.hero_id
+    elif not args.opponent_hero_id:
+        args.opponent_hero_id = (
+            args.p2_hero_id if args.opponent_mode == "dual" else _DEFAULT_OPPONENT_HERO
+        )
     results_json = Path(args.results_json) if args.results_json else out_dir / "results.json"
 
     # ── build agent containers ────────────────────────────────────────────────
@@ -2331,6 +2369,36 @@ def main() -> None:
             p2.last_play_win_rate = p2_wr
 
         # ── Phase 1: Deckbuilder ───────────────────────────────────────────────
+        p1_eval_opponent_hero = (
+            args.p2_hero_id if args.opponent_mode == "dual" else args.opponent_hero_id
+        )
+
+        def _p1_opponent_deck() -> str:
+            return resolve_opponent_deck_name(
+                player_hero_id=args.hero_id,
+                opponent_mode=args.opponent_mode,
+                preset_opponent_deck=args.opponent_deck,
+                opponent_agents=p2,
+                opponent_hero_id=args.p2_hero_id,
+                assets_path=assets_path,
+                min_deck_size=_min_size,
+                write_deck_file=_write_deck_file,
+                opponent_equipment_header=args.p2_equipment_header,
+            )
+
+        def _p2_opponent_deck() -> str:
+            return resolve_opponent_deck_name(
+                player_hero_id=args.p2_hero_id,
+                opponent_mode=args.opponent_mode,
+                preset_opponent_deck=args.opponent_deck,
+                opponent_agents=p1,
+                opponent_hero_id=args.hero_id,
+                assets_path=assets_path,
+                min_deck_size=_min_size,
+                write_deck_file=_write_deck_file,
+                opponent_equipment_header=args.equipment_header,
+            )
+
         if p1_fixed_deck:
             # Fixed deck supplied — deckbuilding is always skipped for p1.
             p1.card_pool = dict(p1_fixed_deck)
@@ -2345,8 +2413,8 @@ def main() -> None:
                 hero_class=args.hero_class,
                 equipment_header=args.equipment_header,
                 game_format=args.format,
-                opponent_deck_name=args.opponent_deck,
-                opponent_hero_id=args.opponent_hero_id,
+                opponent_deck_name=_p1_opponent_deck(),
+                opponent_hero_id=p1_eval_opponent_hero,
                 n_episodes=args.deckbuild_episodes,
                 max_build_steps=args.max_build_steps,
                 num_eval_games=args.num_eval_games,
@@ -2371,7 +2439,7 @@ def main() -> None:
                     hero_class=args.p2_hero_class,
                     equipment_header=args.p2_equipment_header,
                     game_format=args.format,
-                    opponent_deck_name=args.opponent_deck,
+                    opponent_deck_name=_p2_opponent_deck(),
                     opponent_hero_id=args.hero_id,
                     n_episodes=args.deckbuild_episodes,
                     max_build_steps=args.max_build_steps,
@@ -2403,7 +2471,7 @@ def main() -> None:
                 hero_id=args.hero_id,
                 equipment_header=args.equipment_header,
                 game_format=args.format,
-                opponent_deck_name=args.opponent_deck,
+                opponent_deck_name=_p1_opponent_deck(),
                 n_episodes_per_opponent=args.sideboard_episodes,
                 max_sideboard_steps=args.max_sideboard_steps,
                 num_eval_games=args.num_eval_games,
@@ -2430,7 +2498,7 @@ def main() -> None:
                     hero_id=args.p2_hero_id,
                     equipment_header=args.p2_equipment_header,
                     game_format=args.format,
-                    opponent_deck_name=args.opponent_deck,
+                    opponent_deck_name=_p2_opponent_deck(),
                     n_episodes_per_opponent=args.sideboard_episodes,
                     max_sideboard_steps=args.max_sideboard_steps,
                     num_eval_games=args.num_eval_games,

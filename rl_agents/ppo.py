@@ -74,8 +74,9 @@ from ._agent_base import (
     _to_env_action,
 )
 
-# Use GPU when available; falls back to CPU transparently.
+# Use GPU when available; float32 for throughput during training rollouts.
 _DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+_TORCH_DTYPE = torch.float32
 
 
 # ── Result dataclass ──────────────────────────────────────────────────────────
@@ -114,11 +115,11 @@ class _MLP:
         if seed is not None:
             torch.manual_seed(seed)
         self._net = nn.Sequential(
-            nn.Linear(in_dim, hidden, dtype=torch.float64),
+            nn.Linear(in_dim, hidden, dtype=_TORCH_DTYPE),
             nn.ReLU(),
-            nn.Linear(hidden, hidden, dtype=torch.float64),
+            nn.Linear(hidden, hidden, dtype=_TORCH_DTYPE),
             nn.ReLU(),
-            nn.Linear(hidden, out_dim, dtype=torch.float64),
+            nn.Linear(hidden, out_dim, dtype=_TORCH_DTYPE),
         ).to(_DEVICE)
         for m in self._net:
             if isinstance(m, nn.Linear):
@@ -130,18 +131,24 @@ class _MLP:
         self._out: Optional[np.ndarray] = None
 
     def forward(self, x: np.ndarray) -> np.ndarray:
-        t = torch.as_tensor(x, dtype=torch.float64, device=_DEVICE)
+        t = torch.as_tensor(x, dtype=_TORCH_DTYPE, device=_DEVICE)
         self._out_t = self._net(t)
         self._out = self._out_t.detach().cpu().numpy()
         return self._out
 
     def predict(self, x: np.ndarray) -> np.ndarray:
         with torch.no_grad():
-            t = torch.as_tensor(x, dtype=torch.float64, device=_DEVICE)
+            t = torch.as_tensor(x, dtype=_TORCH_DTYPE, device=_DEVICE)
+            return self._net(t).cpu().numpy()
+
+    def predict_batch(self, x: np.ndarray) -> np.ndarray:
+        """Batched forward pass; *x* shape ``(batch, in_dim)``."""
+        with torch.no_grad():
+            t = torch.as_tensor(x, dtype=_TORCH_DTYPE, device=_DEVICE)
             return self._net(t).cpu().numpy()
 
     def backward(self, loss_grad: np.ndarray) -> None:
-        grad_t = torch.as_tensor(loss_grad, dtype=torch.float64, device=_DEVICE)
+        grad_t = torch.as_tensor(loss_grad, dtype=_TORCH_DTYPE, device=_DEVICE)
         self._opt.zero_grad()
         assert self._out_t is not None
         self._out_t.backward(grad_t)
@@ -173,7 +180,7 @@ class _MLP:
             arr = np.array(d[np_k], dtype=np.float64)
             if pt_k.endswith(".weight"):
                 arr = arr.T  # (in, out) → (out, in)
-            sd[pt_k] = torch.tensor(arr, dtype=torch.float64, device=_DEVICE)
+            sd[pt_k] = torch.tensor(arr, dtype=_TORCH_DTYPE, device=_DEVICE)
         self._net.load_state_dict(sd)
 
 
@@ -316,16 +323,12 @@ class PPOAgent(AgentBase):
         If obs dimensionality changes across steps (common for dict/list states),
         vectors are padded/truncated to the first observed dimension.
         """
-        vec = np.array(_flat_obs(obs), dtype=np.float64)
-        vec = np.where(np.isfinite(vec), vec, 0.0)  # sanitize NaN/inf
+        from flesh_and_blood_rlbridge.obs_encoding import observation_fingerprint
+
+        vec = observation_fingerprint(obs, obs_dim=self.obs_dim if self.obs_dim > 0 else 0)
         if self.obs_dim <= 0:
-            return vec
-        if vec.shape[0] == self.obs_dim:
-            return vec
-        if vec.shape[0] < self.obs_dim:
-            pad = np.zeros(self.obs_dim - vec.shape[0], dtype=np.float64)
-            return np.concatenate([vec, pad])
-        return vec[: self.obs_dim]
+            self.obs_dim = int(vec.shape[0])
+        return vec
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -344,6 +347,16 @@ class PPOAgent(AgentBase):
         masked = np.array(logits, dtype=np.float64, copy=True)
         masked[..., n_legal:] = -1e9
         return masked
+
+    def predict_batch(self, obs_vecs: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Batched actor logits and critic values for rollout buffers."""
+        if self._actor is None or self._critic is None:
+            n = len(obs_vecs)
+            return np.zeros((n, self.n_actions)), np.zeros(n)
+        batch = np.asarray(obs_vecs, dtype=np.float64)
+        logits = self._actor.predict_batch(batch)
+        values = self._critic.predict_batch(batch).reshape(-1)
+        return logits, values
 
     def act(self, obs: Any) -> Any:
         """Sample an action from the current policy (stochastic).

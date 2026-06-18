@@ -68,6 +68,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 import urllib.parse
 import webbrowser
@@ -97,7 +98,6 @@ from .talishar_default_policy import (
     _POPUP_PHASES as _dp_popup_phases,
     _BLOCK_PHASES as _dp_block_phases,
     _DEFENSE_PHASES as _dp_defense_phases,
-    _REVERT_MODE_CODES as _dp_revert_mode_codes,
 )
 from .talishar_oracle import TalisharConnectionError
 
@@ -208,7 +208,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         # training output.
         verbose: bool = False,
         # Record per-step combat/turn traces and board-state action stats.
-        enable_combat_tracker: bool = True,
+        enable_combat_tracker: bool = False,
     ) -> None:
         self._base_url = (
             base_url or os.environ.get("TALISHAR_URL", "http://localhost")
@@ -275,6 +275,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         # Pitch-window "unaffordable card" loop prevention
         self._last_m_label: Optional[str] = None
         self._last_block_label: Optional[str] = None
+        self._last_played_label: Optional[str] = None
         self._unaffordable_labels: set[str] = set()
         self._last_turn_no_for_unaffordable: int = -1
         # Multi-select popup tracking (mode=16 picks + mode=19 submit payload)
@@ -315,8 +316,17 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                             deck2=lookup_deck2,
                             enable_combat_tracker=self._enable_combat_tracker,
                         )
-                    except Exception:
-                        self._cpp_env = None
+                    except Exception as exc:
+                        raise RuntimeError(
+                            f"C++ engine failed to load from {cpp_engine_dir}: {exc!r}"
+                        ) from exc
+                else:
+                    raise RuntimeError(
+                        f"C++ engine required (--cpp-engine-dir={cpp_engine_dir}) but "
+                        f"fab_engine is not importable for Python "
+                        f"{sys.version_info.major}.{sys.version_info.minor}. "
+                        "Rebuild with scripts/cpp/build_cpp_engine_for_matchup.py"
+                    )
             else:
                 self._cpp_env = _cpp_get_or_none(  # type: ignore[misc]
                     lookup_deck1,
@@ -671,6 +681,10 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         and the first Python call.
         """
         pid = player_id if player_id is not None else self._acting_player_id
+        if _is_revert_action(
+            {"action_code": mode, "button_input": button_input, "label": ""}
+        ):
+            mode, button_input = 99, ""
         chk_payload: list[str] = []
         if mode == 19:
             if self._pending_chk_inputs is not None:
@@ -1128,23 +1142,24 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         legal_actions: list[dict[str, Any]],
         state: dict[str, Any],
     ) -> tuple[int, str]:
-        """Never submit undo/cancel unless pitch abort is the only valid exit."""
-        if mode not in _dp_revert_mode_codes:
-            return mode, button_input
-
-        phase = _dp_get_phase(state)
-        pitch_abort_only = [
-            a for a in legal_actions
-            if _dp_to_int(a.get("action_code", 0)) == 10000
-        ]
-        if (
-            mode == 10000
-            and phase == "p"
-            and pitch_abort_only
-            and len(legal_actions) == len(pitch_abort_only)
+        """Never submit undo/cancel/revert for agents."""
+        del state
+        label = ""
+        for action in legal_actions:
+            if (
+                _dp_to_int(action.get("action_code", 0)) == mode
+                and str(action.get("button_input", "")) == button_input
+            ):
+                label = str(action.get("label", "") or "")
+                break
+        if not _is_revert_action(
+            {
+                "action_code": mode,
+                "button_input": button_input,
+                "label": label,
+            }
         ):
             return mode, button_input
-
         return self._first_pass_action(legal_actions)
 
     def _legal_actions(self, state: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1489,6 +1504,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         self._sample_action_repeat = 0
         self._last_m_label = None
         self._last_block_label = None
+        self._last_played_label = None
         self._unaffordable_labels = set()
         self._last_turn_no_for_unaffordable = -1
         self._multi_select_inputs = []
@@ -1573,6 +1589,22 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             if chosen is not None and chosen.get("zone") == "hand":
                 self._last_block_label = str(chosen.get("label", "") or "")
 
+        if phase_before != "p" and mode in (5, 27, 36, 37, 38):
+            chosen = next(
+                (a for a in legal_actions
+                 if _dp_to_int(a.get("action_code", 0)) == mode
+                 and str(a.get("button_input", "")) == button_input),
+                None,
+            )
+            if chosen is not None:
+                label = str(
+                    chosen.get("label", "")
+                    or chosen.get("card_id", "")
+                    or ""
+                )
+                if label:
+                    self._last_played_label = label
+
         if self._verbose:
             print(f"    [step {self._steps + 1}] P{self._acting_player_id} "
                   f"mode={mode} btn={button_input!r}  "
@@ -1652,12 +1684,17 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         self._opp_hp = new_opp_hp
         self._last_state = new_state
 
-        if phase_before == "p" and mode == 10000:
-            for label in (self._last_block_label, self._last_m_label):
+        if phase_before == "p" and mode in (99, 10000):
+            for label in (
+                self._last_block_label,
+                self._last_m_label,
+                self._last_played_label,
+            ):
                 if label:
                     self._unaffordable_labels.add(label)
             self._last_block_label = None
             self._last_m_label = None
+            self._last_played_label = None
 
         new_phase = _dp_get_phase(new_state)
         if not (
@@ -1931,29 +1968,25 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             (_tp.get("turnPhase", "") if isinstance(_tp, dict) else _tp) or ""
         ).strip().lower()
 
-        # ── Empty pitch window: the played card is unaffordable ───────────────
-        # If we're in the pitch phase (p) and there are NO hand cards to pitch,
-        # the card we just played cannot be paid for.  Pressing Pass (99) undoes
-        # the play silently and returns to the main phase with the same card still
-        # in hand, creating an infinite play→pitch→pass→play loop.
-        # Fix: (a) press Cancel (10000) to explicitly abort, and (b) add the card
-        # to the per-turn blacklist so the main phase won't retry it.
+        # ── Empty pitch window: abort with Pass and blacklist the card ────────
+        # Cancel (10000) is Talishar undo and must never be submitted.  Pass also
+        # reverts the pending play, so blacklist hand/arsenal labels first.
         if _phase == "p":
             _pitch_cards = [
                 a for a in legal
                 if a.get("zone") == "hand" and int(a.get("action_code", 0)) == 27
             ]
             if not _pitch_cards:
-                # Blacklist the card that triggered this empty pitch window.
-                _abort_label = self._last_block_label or self._last_m_label
+                _abort_label = (
+                    self._last_block_label
+                    or self._last_m_label
+                    or self._last_played_label
+                )
                 if _abort_label:
                     self._unaffordable_labels.add(_abort_label)
                     self._last_block_label = None
                     self._last_m_label = None
-                # Return Cancel (10000) to abort the play, else fall back to Pass.
-                for _ci, _ca in enumerate(legal):
-                    if int(_ca.get("action_code", 0)) == 10000:
-                        return str(_ci)
+                    self._last_played_label = None
                 _pi = next(
                     (i for i, a in enumerate(legal) if int(a.get("action_code", 0)) == 99),
                     0,
@@ -1967,16 +2000,25 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             min_resource_cost=self._block_min_resource_cost,
         )
 
-        # Track the last card played in the main phase so we can blacklist it
-        # if the subsequent pitch window turns out to be empty (unaffordable).
-        if _phase == "m":
+        # Track the last card played so we can blacklist it after an empty pitch.
+        if _phase != "p":
             _chosen = legal[idx] if 0 <= idx < len(legal) else None
-            if (
-                _chosen is not None
-                and int(_chosen.get("action_code", 0)) == 27
-                and _chosen.get("zone") == "hand"
-            ):
-                self._last_m_label = _chosen.get("label", "")
+            if _chosen is not None and int(_chosen.get("action_code", 0)) in (5, 27, 36, 37, 38):
+                _label = str(
+                    _chosen.get("label", "")
+                    or _chosen.get("card_id", "")
+                    or ""
+                )
+                if _label:
+                    if (
+                        int(_chosen.get("action_code", 0)) == 27
+                        and _chosen.get("zone") == "hand"
+                        and _phase == "m"
+                    ):
+                        self._last_m_label = _label
+                    self._last_played_label = _label
+                else:
+                    self._last_m_label = None
             else:
                 self._last_m_label = None
 

@@ -80,6 +80,47 @@ def find_cpp_engine_dir(matchup_label: str, cache_root: Path | None = None) -> P
     return max(candidates, key=lambda path: path.stat().st_mtime)
 
 
+def find_cpp_engine_dir_for_decks(
+    deck1: str,
+    deck2: str,
+    *,
+    deck1_json: Path | None = None,
+    deck2_json: Path | None = None,
+    cache_root: Path | None = None,
+) -> Path | None:
+    """Locate the hashed C++ engine directory built for a deck pair."""
+    root = cache_root or (REPO_ROOT / "results" / "cpp_engines")
+    if not root.is_dir():
+        return None
+
+    if str(REPO_ROOT / "src") not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT / "src"))
+    from flesh_and_blood_rlbridge.talishar_deck_assets import resolve_talishar_deck_stem
+
+    assets = assets_path()
+    resolved1 = resolve_talishar_deck_stem(assets, deck1)
+    resolved2 = resolve_talishar_deck_stem(assets, deck2)
+
+    if str(SCRIPTS_CPP) not in sys.path:
+        sys.path.insert(0, str(SCRIPTS_CPP))
+    from build_cpp_engine_for_matchup import deck_input_hash, find_compiled_module
+
+    input_hash = deck_input_hash(resolved1, resolved2, deck1_json, deck2_json)
+    exact = root / f"{resolved1}_vs_{resolved2}-{input_hash}"
+    if exact.is_dir() and find_compiled_module(exact) is not None:
+        return exact
+
+    prefix = f"{resolved1}_vs_{resolved2}-"
+    candidates = [
+        path for path in root.iterdir()
+        if path.is_dir() and path.name.startswith(prefix) and find_compiled_module(path) is not None
+    ]
+    if candidates:
+        return max(candidates, key=lambda path: path.stat().st_mtime)
+
+    return find_cpp_engine_dir(f"{resolved1}_vs_{resolved2}", cache_root=root)
+
+
 def build_cpp_engine_for_matchup(
     *,
     deck1: str,
@@ -122,6 +163,16 @@ class DeckMeta:
     name: str
 
 
+def normalize_pipeline_format(fmt: str) -> str:
+    """Map deck JSON / TUI format labels to train_full_pipeline --format choices."""
+    token = str(fmt or "").strip().lower().replace(" ", "_")
+    if token in {"sage", "silver_age", "silver", "silverage"}:
+        return "silver_age"
+    if token in {"classic_constructed", "blitz", "upf"}:
+        return token
+    return "silver_age"
+
+
 def read_deck_meta(json_path: Path, default_format: str = "silver_age") -> DeckMeta:
     data = json.loads(json_path.read_text(encoding="utf-8"))
     total_cards = 0
@@ -135,7 +186,7 @@ def read_deck_meta(json_path: Path, default_format: str = "silver_age") -> DeckM
         hero_id=hero_id,
         hero_class=str(data.get("hero_class") or ""),
         equipment_header=str(data.get("equipment_header") or ""),
-        fmt=str(data.get("format") or default_format),
+        fmt=normalize_pipeline_format(str(data.get("format") or default_format)),
         short_name=short_name,
         total_cards=total_cards,
         name=str(data.get("name") or hero_id),

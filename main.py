@@ -1,154 +1,67 @@
 #!/usr/bin/env python3
-"""Project launcher for flesh-and-blood-rlbridge.
+"""Flesh and Blood RL Bridge — interactive experiment launcher.
 
-Run with no arguments for an interactive menu, or pass a tool name to run it
-directly (forwarding any remaining arguments):
+Launch the terminal UI (default):
 
-    python main.py                       # interactive menu
-    python main.py play --format silver_age
-    python main.py update-db --dry-run
+    python main.py
+
+Or run a preset non-interactively:
+
+    python main.py preset aurora-fixed
+    python main.py preset simulate-matchup
 """
 
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
-from typing import Callable, Optional
 
-# Make the in-repo package importable when running from a source checkout.
 _SRC = Path(__file__).resolve().parent / "src"
 if _SRC.is_dir() and str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-
-def _run_play(args: list[str]) -> int:
-    from flesh_and_blood_rlbridge.cli import main as play_main
-
-    return int(play_main(args) or 0)
+from fab_tui.app import main as tui_main, run_tui  # noqa: E402
+from fab_tui.runner import run_runscript  # noqa: E402
 
 
-def _run_talishar(args: list[str]) -> int:
-    import runpy
-
-    argv_backup = sys.argv
-    sys.argv = ["cli_talishar.py", *args]
-    try:
-        runpy.run_path(
-            str(Path(__file__).resolve().parent / "scripts" / "cli_talishar.py"),
-            run_name="__main__",
-        )
-        return 0
-    except SystemExit as exc:
-        return int(exc.code) if exc.code is not None else 0
-    finally:
-        sys.argv = argv_backup
-
-
-def _run_train_eval_render(args: list[str]) -> int:
-    import runpy
-
-    argv_backup = sys.argv
-    sys.argv = ["train_eval_render_pipeline.py", *args]
-    try:
-        runpy.run_path(
-            str(
-                Path(__file__).resolve().parent
-                / "scripts"
-                / "training"
-                / "train_eval_render_pipeline.py"
-            ),
-            run_name="__main__",
-        )
-        return 0
-    except SystemExit as exc:
-        return int(exc.code) if exc.code is not None else 0
-    finally:
-        sys.argv = argv_backup
-
-
-def _run_update_db(args: list[str]) -> int:
-    from flesh_and_blood_rlbridge.card_db import update_cards_db_from_fabtcg as updater
-
-    # The updater parses sys.argv directly, so present its own argv to it.
-    argv_backup = sys.argv
-    sys.argv = ["update_cards_db_from_fabtcg.py", *args]
-    try:
-        return int(updater.main() or 0)
-    finally:
-        sys.argv = argv_backup
-
-
-_TOOLS: dict[str, tuple[str, Callable[[list[str]], int]]] = {
-    "play": (
-        "Play a Flesh and Blood match (pick deck + opponent, agent suggestions)",
-        _run_play,
-    ),
-    "talishar": (
-        "Play interactively via the Talishar engine (human or agent vs CombatDummy AI)",
-        _run_talishar,
-    ),
-    "train-eval-render": (
-        "Run full pipeline: train agents, evaluate head-to-head, render optimal policy states",
-        _run_train_eval_render,
-    ),
-    "update-db": (
-        "Update the card database from the official FAB Card Vault API",
-        _run_update_db,
-    ),
+PRESET_ALIASES: dict[str, str] = {
+    "aurora-fixed": "aurora_vs_briar_fixed_opponent.py",
+    "aurora-dual": "sage_aurora_vs_briar_deckbuild.py",
+    "briar-dorinthea": "sage_briar_vs_dorinthea_play.py",
+    "simulate-matchup": "simulate_deck_matchup.py",
 }
 
 
-def _print_help() -> None:
-    print("Flesh and Blood RL Bridge launcher\n")
-    print("Usage: python main.py [tool] [tool-args...]\n")
-    print("Tools:")
-    for name, (desc, _) in _TOOLS.items():
-        print(f"  {name:<12} {desc}")
-    print("\nRun with no tool for an interactive menu.")
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="command")
+
+    sub.add_parser("tui", help="Launch the interactive menu (default)")
+
+    preset = sub.add_parser("preset", help="Run a named preset runscript")
+    preset.add_argument(
+        "name",
+        choices=sorted(PRESET_ALIASES),
+        help="Preset alias",
+    )
+    return parser
 
 
-def _interactive_choice() -> Optional[str]:
-    keys = list(_TOOLS)
-    print("Flesh and Blood RL Bridge - choose a tool:\n")
-    for i, name in enumerate(keys, 1):
-        print(f"  [{i}] {name}: {_TOOLS[name][0]}")
-    while True:
-        raw = input(f"\nSelect [1-{len(keys)}] or name (q to quit): ").strip().lower()
-        if raw in {"q", "quit", "exit"}:
-            return None
-        if raw.isdigit() and 1 <= int(raw) <= len(keys):
-            return keys[int(raw) - 1]
-        if raw in _TOOLS:
-            return raw
-        print("Invalid selection; try again.")
-
-
-def main(argv: Optional[list[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    if not argv:
+        return run_tui()
 
-    if argv and argv[0] in {"-h", "--help"}:
-        _print_help()
-        return 0
+    parser = _build_parser()
+    args = parser.parse_args(argv)
 
-    if argv:
-        tool = argv[0]
-        if tool not in _TOOLS:
-            print(f"Unknown tool: {tool!r}\n")
-            _print_help()
-            return 2
-        rest = argv[1:]
-    else:
-        try:
-            tool = _interactive_choice()
-        except (KeyboardInterrupt, EOFError):
-            print()
-            return 0
-        if tool is None:
-            print("Nothing selected.")
-            return 0
-        rest = []
-
-    return _TOOLS[tool][1](rest)
+    if args.command == "preset":
+        script = PRESET_ALIASES[args.name]
+        return run_runscript(script)
+    if args.command == "tui":
+        return tui_main()
+    return tui_main()
 
 
 if __name__ == "__main__":

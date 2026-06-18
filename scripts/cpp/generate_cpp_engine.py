@@ -51,7 +51,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_SRC_ROOT = _REPO_ROOT / "src"
+if str(_SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(_SRC_ROOT))
+
 import requests
+
+from flesh_and_blood_rlbridge.talishar_deck_assets import resolve_talishar_deck_stem
 
 # ── Card metadata ──────────────────────────────────────────────────────────────
 
@@ -299,7 +306,9 @@ def _hero_intellect(hero_id: str, intellect_by_id: dict[str, int]) -> int:
 
 def resolve_deck_asset_info(talishar_src: Path, deck_name: str) -> DeckAssetInfo:
     """Read Talishar/Assets/<deck_name>.txt preserving hero/equipment setup."""
-    asset_file = talishar_src / "Assets" / f"{deck_name}.txt"
+    assets_dir = talishar_src / "Assets"
+    stem = resolve_talishar_deck_stem(assets_dir, deck_name)
+    asset_file = assets_dir / f"{stem}.txt"
     if not asset_file.exists():
         return DeckAssetInfo()
     lines = [

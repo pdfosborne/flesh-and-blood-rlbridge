@@ -20,6 +20,7 @@ from .talishar_default_policy import (
     _get_phase,
     _is_affordable_hand_play,
     _is_pass_action,
+    _is_revert_action,
     _POPUP_PHASES,
     _strip_revert_actions,
     _to_int,
@@ -162,6 +163,31 @@ def _strip_unaffordable_pay_yes_actions(
     return filtered
 
 
+def _strip_blacklisted_actions(
+    filtered: list[dict[str, Any]],
+    block_blacklist: frozenset[str] | set[str],
+) -> list[dict[str, Any]]:
+    """Drop actions whose label/card_id was blacklisted after an aborted play."""
+    if not block_blacklist:
+        return filtered
+    kept = [
+        action
+        for action in filtered
+        if str(action.get("label", "") or "") not in block_blacklist
+        and str(action.get("card_id", "") or "") not in block_blacklist
+    ]
+    if kept:
+        return kept
+    return filtered
+
+
+def is_pass_only(filtered: list[dict[str, Any]]) -> bool:
+    """Return True when every remaining action is a pass / end-turn no-op."""
+    if not filtered:
+        return True
+    return all(_is_pass_action(action) for action in filtered)
+
+
 def align_filtered_actions(
     original: list[Any],
     filtered: list[dict[str, Any]],
@@ -195,15 +221,16 @@ def filter_legal_actions(
         Strip action-27 hand-card plays whose resource cost exceeds the total
         pitch value of all *other* hand cards.
 
-    **Rule 2 — main-phase equip removal** (phase ``m``):
-        Remove mode-3 (Equip) actions entirely.
+    **Rule 2 — equip removal** (all phases):
+        Remove mode-3 (Equip) actions entirely.  Equipment activation plus undo
+        is a common agent stall vector.
 
     **Rule 3 — pitch-phase Pass removal** (phase ``p``):
         Remove Pass (mode=99) from pitch-phase choices.
 
-    **Rule 4 — pitch-phase Cancel removal** (phase ``p``):
-        When hand cards are still available to pitch, also remove Cancel
-        (10000).
+    **Rule 4 — pitch-phase undo removal** (phase ``p``):
+        Never offer Cancel/undo (10000).  When nothing can be pitched, only
+        Pass remains so the agent aborts without calling ``RevertGamestate``.
 
     **Rule 5 — mandatory-choice phase Pass removal**
         (phases: ``choosehand``, ``choosehandcancel``, ``choosemultizone``,
@@ -214,8 +241,12 @@ def filter_legal_actions(
         When no viable blockers remain, strip hand block plays so only pass
         remains.
 
-    **Rule 7 — block-phase Undo Block removal** (phase ``b``):
-        Handled by :func:`_strip_revert_actions`.
+    **Rule 7 — undo / cancel removal** (all phases):
+        Handled by :func:`_strip_revert_actions`.  Agents never see undo,
+        cancel, or revert actions.
+
+    **Rule 9 — per-turn play blacklist**:
+        Drop hand/arsenal plays blacklisted after an unaffordable pitch abort.
 
     **Rule 8 — unaffordable pay-to-avoid YES removal** (phase ``yesno`` and
         similar popups):
@@ -242,32 +273,24 @@ def filter_legal_actions(
 
     # ── Rules 3 & 4: pitch-phase ──────────────────────────────────────────
     elif phase == "p":
-        no_pass = [
-            a for a in filtered
-            if _to_int(a.get("action_code", 0)) != 99
-        ]
-        if no_pass:
-            filtered = no_pass
-
         pitch_cards = [
             a for a in filtered
             if a.get("zone") == "hand"
             and _to_int(a.get("action_code", 0)) == 27
         ]
-        if not pitch_cards:
-            cancel_only = [
+        if pitch_cards:
+            must_pitch = [
                 a for a in filtered
-                if _to_int(a.get("action_code", 0)) == 10000
+                if not _is_pass_action(a) and not _is_revert_action(a)
             ]
-            if cancel_only:
-                filtered = cancel_only
+            if must_pitch:
+                filtered = must_pitch
         else:
-            no_cancel = [
-                a for a in filtered
-                if _to_int(a.get("action_code", 0)) != 10000
-            ]
-            if no_cancel:
-                filtered = no_cancel
+            pass_only = [a for a in filtered if _is_pass_action(a)]
+            if pass_only:
+                filtered = [pass_only[0]]
+            else:
+                filtered = [dict(_PASS_FALLBACK)]
 
     # ── Rule 5: mandatory-choice phases (CanPassPhase=0) ─────────────────
     elif phase in (
@@ -290,8 +313,17 @@ def filter_legal_actions(
             block_blacklist=frozenset(block_blacklist),
         )
 
+    # ── Rule 2 (global): strip equipment activation in every phase ─────────
+    no_equip = [
+        a for a in filtered
+        if _to_int(a.get("action_code", 0)) != 3
+    ]
+    if no_equip:
+        filtered = no_equip
+
     filtered = _strip_revert_actions(phase, filtered)
     filtered = _strip_unaffordable_pay_yes_actions(state, filtered)
+    filtered = _strip_blacklisted_actions(filtered, block_blacklist)
 
     actionable = [a for a in filtered if not _is_pass_action(a)]
     if actionable:

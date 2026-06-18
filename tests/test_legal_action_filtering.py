@@ -2,6 +2,8 @@ import json
 import sys
 from pathlib import Path
 
+import numpy as np
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from flesh_and_blood_rlbridge.cpp_engine_environment import CppEngineEnvironment
@@ -60,6 +62,27 @@ def _build_cpp_env(hand: list[_FakeCard], *, phase: int = 1) -> CppEngineEnviron
     env._talishar_overlay = None
     env._flow_phase = ""
     return env
+
+
+def test_is_pass_only_helper() -> None:
+    from flesh_and_blood_rlbridge.legal_action_filter import is_pass_only
+
+    assert is_pass_only([{"action_code": 99, "label": "Pass"}])
+    assert not is_pass_only([
+        {"action_code": 27, "label": "Attack"},
+        {"action_code": 99, "label": "Pass"},
+    ])
+    assert is_pass_only([])
+
+
+def test_observation_fingerprint_matches_string_hash() -> None:
+    from flesh_and_blood_rlbridge.obs_encoding import observation_fingerprint
+
+    obs = '{"actingPlayerID":1,"turnNo":3}'
+    vec = observation_fingerprint(obs)
+    assert vec.shape == (1,)
+    assert 0.0 <= float(vec[0]) <= 1.0
+    assert np.allclose(vec, observation_fingerprint(obs))
 
 
 def test_card_cost_uses_card_db_when_talishar_omits_cost() -> None:
@@ -155,7 +178,7 @@ def test_talishar_keeps_affordable_play_when_other_cards_can_pitch() -> None:
     assert "Nimblism" in play_labels
 
 
-def test_talishar_empty_pitch_window_offers_cancel_only() -> None:
+def test_talishar_empty_pitch_window_offers_pass_only() -> None:
     state = {"turnPhase": {"turnPhase": "P"}, "playerHand": []}
     legal = [
         {
@@ -175,10 +198,10 @@ def test_talishar_empty_pitch_window_offers_cancel_only() -> None:
     filtered = filter_legal_actions(state, legal)
 
     assert len(filtered) == 1
-    assert filtered[0]["action_code"] == 10000
+    assert filtered[0]["action_code"] == 99
 
 
-def test_cpp_empty_pitch_window_offers_cancel_only() -> None:
+def test_cpp_empty_pitch_window_offers_pass_only() -> None:
     env = _build_cpp_env([], phase=2)
     legal = [
         _FakeAction(
@@ -200,7 +223,7 @@ def test_cpp_empty_pitch_window_offers_cancel_only() -> None:
     filtered = env._filter_legal_actions(legal)
 
     assert len(filtered) == 1
-    assert filtered[0].action_code == 10000
+    assert filtered[0].action_code == 99
 
 
 def test_is_affordable_hand_play_helper() -> None:
@@ -293,6 +316,7 @@ def test_cpp_observation_excludes_unaffordable_hand_play() -> None:
         ),
     ]
 
+    legal = env._filter_legal_actions(legal)
     obs = json.loads(env._encode_observation(legal))
 
     assert obs["legalActions"] == [{"index": 0, "label": "Pass", "zone": "button"}]
@@ -604,3 +628,105 @@ def test_yesno_strips_yes_when_only_pool_resources_are_insufficient() -> None:
 
     assert len(filtered) == 1
     assert filtered[0]["button_input"] == "NO"
+
+
+def test_filter_strips_undo_and_equip_outside_main_phase() -> None:
+    """Equipment activate + undo stall loops must not be offered to agents."""
+    state = {"turnPhase": {"turnPhase": "INSTANT"}}
+    legal = [
+        {
+            "action_code": 3,
+            "button_input": "4",
+            "zone": "equipment",
+            "card_id": "boltn_boots",
+            "label": "Bolt'n Boots",
+        },
+        {
+            "action_code": 10000,
+            "button_input": "",
+            "zone": "button",
+            "label": "Cancel",
+        },
+        {
+            "action_code": 99,
+            "button_input": "",
+            "zone": "button",
+            "label": "Pass",
+        },
+    ]
+
+    filtered = filter_legal_actions(state, legal)
+    codes = {_a["action_code"] for _a in filtered}
+
+    assert 3 not in codes
+    assert 10000 not in codes
+    assert 99 in codes
+
+
+def test_filter_strips_revert_to_prior_turn() -> None:
+    state = {"turnPhase": {"turnPhase": "M"}}
+    legal = [
+        {
+            "action_code": 10003,
+            "button_input": "beginTurnGamestate.txt",
+            "zone": "button",
+            "label": "Revert",
+        },
+        {
+            "action_code": 99,
+            "button_input": "",
+            "zone": "button",
+            "label": "Pass",
+        },
+    ]
+
+    filtered = filter_legal_actions(state, legal)
+    codes = {_a["action_code"] for _a in filtered}
+
+    assert 10003 not in codes
+    assert 99 in codes
+
+
+def test_filter_blacklists_arsenal_play_after_abort() -> None:
+    state = {"turnPhase": {"turnPhase": "M"}}
+    legal = [
+        {
+            "action_code": 5,
+            "button_input": "0",
+            "zone": "arsenal",
+            "card_id": "spellblade_assault_red",
+            "label": "Spellblade Assault",
+        },
+        {
+            "action_code": 99,
+            "button_input": "",
+            "zone": "button",
+            "label": "Pass",
+        },
+    ]
+
+    filtered = filter_legal_actions(
+        state,
+        legal,
+        block_blacklist=frozenset({"Spellblade Assault"}),
+    )
+    codes = {_a["action_code"] for _a in filtered}
+
+    assert 5 not in codes
+    assert 99 in codes
+
+
+def test_talishar_sanitize_blocks_undo_submission() -> None:
+    env = _build_talishar_env()
+    state = {"turnPhase": {"turnPhase": "INSTANT"}, "playerHand": []}
+    legal = [
+        {
+            "action_code": 99,
+            "button_input": "",
+            "zone": "button",
+            "label": "Pass",
+        },
+    ]
+    mode, button = env._sanitize_revert_submission(10000, "", legal, state)
+    assert mode == 99
+    assert button == ""

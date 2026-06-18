@@ -41,6 +41,15 @@ DEFAULT_CACHE_DIR = REPO_ROOT / "results" / "cpp_engines"
 DEFAULT_TALISHAR_SRC = REPO_ROOT / "Talishar"
 MODULE_EXTENSIONS = {".pyd", ".so"}
 
+if str(REPO_ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT / "src"))
+from flesh_and_blood_rlbridge.cpp_engine_environment import (  # noqa: E402
+    _find_engine_module,
+    expected_fab_engine_module_name,
+    is_cpp_engine_available,
+    load_fab_engine,
+)
+
 
 def _header(text: str) -> None:
     print()
@@ -121,26 +130,36 @@ def deck_names_from_pipeline(path: Path) -> tuple[str, str]:
 
 
 def find_compiled_module(engine_dir: Path) -> Path | None:
-    for path in engine_dir.glob("fab_engine*"):
-        if path.is_file() and path.suffix in MODULE_EXTENSIONS:
-            return path
-    build_dir = engine_dir / "build"
-    if build_dir.is_dir():
-        for path in build_dir.rglob("fab_engine*"):
-            if path.is_file() and path.suffix in MODULE_EXTENSIONS:
-                return path
-    return None
+    return _find_engine_module(engine_dir)
 
 
 def cached_engine_up_to_date(engine_dir: Path, input_hash: str) -> Path | None:
     module = find_compiled_module(engine_dir)
     hash_file = engine_dir / "engine_input_hash.txt"
     if module is None or not hash_file.is_file():
+        stale = sorted(
+            {
+                p.name
+                for p in engine_dir.glob("fab_engine*")
+                if p.is_file() and p.suffix in MODULE_EXTENSIONS
+            }
+        )
+        if stale:
+            print()
+            print(
+                f"  No fab_engine module for Python {sys.version_info.major}.{sys.version_info.minor} "
+                f"(expected {expected_fab_engine_module_name()})."
+            )
+            print(f"  Stale module(s) present: {', '.join(stale)} — rebuilding.")
         return None
     stored_hash = hash_file.read_text(encoding="utf-8").strip()
     if stored_hash != input_hash:
         print()
         print(f"  Deck inputs changed (old={stored_hash}  new={input_hash}) -- rebuilding.")
+        return None
+    if not is_cpp_engine_available(engine_dir):
+        print()
+        print("  Cached fab_engine module cannot be imported for this Python — rebuilding.")
         return None
     return module
 
@@ -511,6 +530,21 @@ def main(argv: list[str] | None = None) -> int:
             "--deck1 BriarSAGEPrecon --deck2 DorintheSAGEPrecon"
         )
         return 1
+
+    talishar_src = Path(args.talishar_src)
+    assets_dir = talishar_src / "Assets"
+    if str(REPO_ROOT / "src") not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT / "src"))
+    from flesh_and_blood_rlbridge.talishar_deck_assets import resolve_talishar_deck_stem
+
+    resolved1 = resolve_talishar_deck_stem(assets_dir, deck1)
+    resolved2 = resolve_talishar_deck_stem(assets_dir, deck2)
+    if resolved1 != deck1:
+        _ok(f"Resolved deck1: {deck1} -> {resolved1}")
+        deck1 = resolved1
+    if resolved2 != deck2:
+        _ok(f"Resolved deck2: {deck2} -> {resolved2}")
+        deck2 = resolved2
 
     deck1_json = Path(args.deck1_json) if args.deck1_json else None
     deck2_json = Path(args.deck2_json) if args.deck2_json else None

@@ -32,7 +32,16 @@ _YES_LABELS = ("yes", "confirm", "continue", "ok", "accept", "done")
 # deliberately excluded — they undo committed plays and cause loops.
 _PASS_MODE_CODES: frozenset[int] = frozenset({99, 101, 105})
 # Talishar maps both "Cancel" (pitch) and general undo to 10000; 10001 is Undo Block.
-_REVERT_MODE_CODES: frozenset[int] = frozenset({10000, 10001})
+# 10003 reverts to a prior turn; 100016–100019 are undo confirmation prompts.
+_REVERT_MODE_CODES: frozenset[int] = frozenset({
+    10000,
+    10001,
+    10003,
+    100016,
+    100017,
+    100018,
+    100019,
+})
 
 # Talishar phase code buckets (normalised to lowercase).
 # ── CanPassPhase=1 (mode=99 advances the game) ───────────────────────────────
@@ -151,7 +160,7 @@ def _is_revert_action(action: dict[str, Any]) -> bool:
     if code in _REVERT_MODE_CODES:
         return True
     label = _normalize(action.get("label", ""))
-    return "undo" in label or label == "cancel"
+    return "undo" in label or label == "cancel" or "revert" in label
 
 
 _REPEAT_ACTION_THRESHOLD = 3
@@ -231,24 +240,13 @@ def _strip_revert_actions(
     phase: str,
     filtered: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Remove state-revert actions except pitch-window abort when nothing can pitch."""
-    allow_cancel_abort = (
-        phase == "p"
-        and not _pitch_hand_actions(filtered)
-    )
-    kept: list[dict[str, Any]] = []
-    for action in filtered:
-        code = _to_int(action.get("action_code", 0))
-        if code == 10001:
-            continue
-        if code == 10000:
-            if allow_cancel_abort:
-                kept.append(action)
-            continue
-        if _is_revert_action(action):
-            continue
-        kept.append(action)
-    return kept
+    """Remove all undo/cancel/revert actions.
+
+    Talishar maps pitch-window *Cancel* (10000) to ``RevertGamestate()`` — the
+    same code path as the UI undo button — so agents must never receive it.
+    """
+    del phase  # kept for call-site compatibility
+    return [action for action in filtered if not _is_revert_action(action)]
 
 
 def _get_phase(state: dict[str, Any]) -> str:

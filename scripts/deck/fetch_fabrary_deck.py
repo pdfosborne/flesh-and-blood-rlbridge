@@ -167,6 +167,7 @@ def _guess_slot(card_id: str) -> str:
         "blade_beckoner_gauntlets":    "arms",
         "blade_beckoner_helm":         "head",
         "blade_beckoner_boots":        "legs",
+        "flail_of_agony":              "weapon",
         # ── Ranger / Riptide ─────────────────────────────────────────────
         "quiver_of_a_thousand_arrows": "weapon",
         # ── Generic ──────────────────────────────────────────────────────
@@ -187,6 +188,7 @@ def _guess_slot(card_id: str) -> str:
         "briar", "aurora", "aurora_shooting_star", "viserai", "lexi",
         "kano", "rhinar", "chane", "bravo", "katsu", "prism", "azalea",
         "dash", "boltyn", "riptide", "dromai", "enigma", "arakni",
+        "vynnset", "vynnset_iron_maiden",
         "blaze", "blaze_firemind", "lyath", "lyath_goldmane",
     ])
     if cid in _HERO_IDS or any(cid.startswith(h + "_") for h in _HERO_IDS):
@@ -263,9 +265,6 @@ _BROWSER_UA = (
 )
 
 # The getDeck GraphQL query (field set sufficient for rlbridge conversion).
-# NOTE: FaBrary's AppSync schema does NOT expose 'types' or 'subtypes' on
-# DeckCard, so those fields must not be requested here.  Equipment
-# classification falls back entirely to _guess_slot() / _KNOWN lookup.
 _GET_DECK_QUERY = """
 query getDeck($deckId: ID!) {
   getDeck(deckId: $deckId) {
@@ -282,6 +281,10 @@ query getDeck($deckId: ID!) {
       cardIdentifier
       quantity
       sideboardQuantity
+      card {
+        types
+        subtypes
+      }
     }
   }
 }
@@ -505,21 +508,16 @@ def _fetch_graphql_iam(slug: str) -> dict[str, Any]:
 
 
 def _normalise_graphql_deck(gql_deck: dict[str, Any]) -> dict[str, Any]:
-    """Convert the AppSync getDeck response to the legacy REST API shape.
-
-    FaBrary's AppSync schema does not expose card type/subtype on DeckCard,
-    so zone classification is delegated entirely to _guess_slot() via the
-    empty-zone fallback path in parse_fabrary_deck().
-    """
+    """Convert the AppSync getDeck response to the legacy REST API shape."""
     cards = []
     for dc in gql_deck.get("deckCards") or []:
+        card_obj = dc.get("card") or {}
         cards.append({
             "identifier": dc.get("cardIdentifier", ""),
             "total": dc.get("quantity", 0),
             "sideboardTotal": dc.get("sideboardQuantity", 0),
-            # Leave zone empty — parse_fabrary_deck will call _guess_slot()
-            # which uses the _KNOWN lookup table + pattern matching to
-            # correctly classify equipment vs play cards.
+            "types": card_obj.get("types") or [],
+            "subtypes": card_obj.get("subtypes") or [],
             "zone": "",
         })
     hero_obj = gql_deck.get("hero") or {}
@@ -565,18 +563,81 @@ def _identifier_to_card_id(identifier: str) -> str:
     return identifier.replace("-", "_").lower()
 
 
+def _equipment_slot_from_card(
+    card_id: str,
+    types: list[str],
+    subtypes: list[str],
+    zone: str,
+) -> str | None:
+    """Return an equipment slot key, or None if the card is a play card."""
+    zone_lower = (zone or "").lower()
+    if zone_lower in ("deck", "main"):
+        return None
+    if zone_lower in ("inventory", "sideboard"):
+        return None
+
+    if types:
+        lowered_types = {t.lower() for t in types}
+        if "hero" in lowered_types:
+            return "character"
+        if "weapon" in lowered_types:
+            return "weapon"
+        if "equipment" in lowered_types:
+            slot = _zone_from_card_types(types, subtypes)
+            return slot or None
+        return None
+
+    if zone_lower in ("character", "hero"):
+        return "character"
+    if zone_lower in ("weapon", "weapon1", "weapon2"):
+        return "weapon"
+    if zone_lower in ("head", "helm"):
+        return "head"
+    if zone_lower in ("chest", "body"):
+        return "chest"
+    if zone_lower in ("arms", "gauntlets"):
+        return "arms"
+    if zone_lower in ("legs", "boots"):
+        return "legs"
+    if zone_lower in ("offhand", "off_hand"):
+        return "offhand"
+
+    slot = _guess_slot(card_id)
+    if slot in {"character", "weapon", "head", "chest", "arms", "legs", "offhand"}:
+        return slot
+    return None
+
+
+def _assign_equipped_card(
+    equipment_by_slot: dict[str, list[str]],
+    sideboard: dict[str, int],
+    *,
+    slot: str,
+    card_id: str,
+    arena_qty: int,
+) -> None:
+    """Place arena-equipped gear, mirroring Talishar's one-per-slot overflow rules."""
+    for _ in range(arena_qty):
+        if not equipment_by_slot[slot]:
+            equipment_by_slot[slot].append(card_id)
+        else:
+            sideboard[card_id] = sideboard.get(card_id, 0) + 1
+
+
 def parse_fabrary_deck(raw: dict[str, Any]) -> dict[str, Any]:
     """Convert the raw FaBrary API response to rlbridge deck format.
 
-    Returns a dict with keys:
-        name, hero_id, hero_class, format, equipment_header, deck, sideboard
+    FaBrary deck layout:
+    - ``quantity`` (REST ``total``) — cards in the main deck list **and** arena equipment.
+    - ``sideboardQuantity`` (REST ``sideboardTotal``) — inventory / sideboard only.
+
+    Equipment with ``quantity > 0`` is arena-equipped and belongs in ``equipment_header``.
+    Equipment with only inventory copies must not be promoted to the header.
     """
     name: str = raw.get("name", "Unnamed Deck")
     fmt: str = raw.get("format", "silver_age")
     cards: list[dict] = raw.get("cards", [])
 
-    hero_id: str = ""
-    equipment: list[str] = []  # ordered: weapon first, then head/chest/arms/legs
     equipment_by_slot: dict[str, list[str]] = {
         "character": [], "weapon": [], "head": [], "chest": [],
         "arms": [], "legs": [], "offhand": [],
@@ -585,68 +646,44 @@ def parse_fabrary_deck(raw: dict[str, Any]) -> dict[str, Any]:
     sideboard: dict[str, int] = {}
 
     for card in cards:
-        # FaBrary 'identifier' field: dash-separated internal ID
         raw_id: str = card.get("identifier") or card.get("cardIdentifier", "")
         if not raw_id:
             continue
         card_id = _identifier_to_card_id(raw_id)
-        total: int = int(card.get("total", 0))
-        sb_total: int = int(card.get("sideboardTotal", 0))
-
-        # FaBrary may provide a 'zone' field directly (legacy REST endpoint)
+        arena_qty: int = int(card.get("total", 0))
+        inv_qty: int = int(card.get("sideboardTotal", 0))
+        types: list[str] = card.get("types") or []
+        subtypes: list[str] = card.get("subtypes") or []
         zone: str = (card.get("zone") or "").lower()
 
-        # If no zone, try type/subtype classification (GraphQL endpoint)
-        if not zone:
-            zone = _zone_from_card_types(
-                card.get("types") or [],
-                card.get("subtypes") or [],
+        equip_slot = _equipment_slot_from_card(card_id, types, subtypes, zone)
+
+        if equip_slot and arena_qty > 0:
+            _assign_equipped_card(
+                equipment_by_slot,
+                sideboard,
+                slot=equip_slot,
+                card_id=card_id,
+                arena_qty=arena_qty,
             )
+        elif arena_qty > 0:
+            deck[card_id] = deck.get(card_id, 0) + arena_qty
 
-        if zone in ("character", "hero"):
-            equipment_by_slot["character"].append(card_id)
-        elif zone in ("weapon", "weapon1", "weapon2"):
-            equipment_by_slot["weapon"].append(card_id)
-        elif zone in ("head", "helm"):
-            equipment_by_slot["head"].append(card_id)
-        elif zone in ("chest", "body"):
-            equipment_by_slot["chest"].append(card_id)
-        elif zone in ("arms", "gauntlets"):
-            equipment_by_slot["arms"].append(card_id)
-        elif zone in ("legs", "boots"):
-            equipment_by_slot["legs"].append(card_id)
-        elif zone in ("offhand", "off_hand"):
-            equipment_by_slot["offhand"].append(card_id)
-        elif zone == "deck":
-            if total > 0:
-                deck[card_id] = deck.get(card_id, 0) + total
-            if sb_total > 0:
-                sideboard[card_id] = sideboard.get(card_id, 0) + sb_total
-        else:
-            # No zone field — use heuristics
-            slot = _guess_slot(card_id)
-            if slot in equipment_by_slot:
-                equipment_by_slot[slot].append(card_id)
-            else:
-                if total > 0:
-                    deck[card_id] = deck.get(card_id, 0) + total
-                if sb_total > 0:
-                    sideboard[card_id] = sideboard.get(card_id, 0) + sb_total
+        if inv_qty > 0:
+            sideboard[card_id] = sideboard.get(card_id, 0) + inv_qty
 
-    # Build equipment header: character, weapons, head, chest, arms, legs, offhand
     header_parts: list[str] = []
     for slot in ("character", "weapon", "head", "chest", "arms", "legs", "offhand"):
         header_parts.extend(equipment_by_slot[slot])
 
     hero_id = equipment_by_slot["character"][0] if equipment_by_slot["character"] else ""
-
-    # GraphQL response provides heroIdentifier directly — prefer that
     if not hero_id and raw.get("heroIdentifier"):
         hero_id = _identifier_to_card_id(raw["heroIdentifier"])
 
-    # Derive hero class from FaBrary 'hero' field if available
     hero_class: str = raw.get("heroClass") or raw.get("class") or "Generic"
 
+    if hero_id and hero_id not in header_parts:
+        header_parts.insert(0, hero_id)
     equipment_header = " ".join(header_parts) if header_parts else hero_id
 
     # Normalise format string to rlbridge convention

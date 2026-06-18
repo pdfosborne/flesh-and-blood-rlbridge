@@ -69,11 +69,13 @@ DEFAULT_LR = 3e-4
 DEFAULT_GAMMA = 0.99
 DEFAULT_LAM = 0.95
 DEFAULT_CLIP_EPS = 0.2
-DEFAULT_N_STEPS = 256
+DEFAULT_N_STEPS = 512
 DEFAULT_PPO_EPOCHS = 4
-DEFAULT_MINI_BATCH = 64
+DEFAULT_MINI_BATCH = 256
+DEFAULT_PPO_ROLLOUT_BATCH = 512
 DEFAULT_WARMUP_EPISODES = 100
 DEFAULT_WARMUP_BASELINE_EVAL_EPISODES = 100
+_TORCH_COMPUTE_DTYPE = torch.float32 if _TORCH_AVAILABLE else None
 
 
 @dataclass
@@ -105,6 +107,7 @@ def make_env(
     request_timeout: float = 30.0,
     use_cpp_engine: bool = True,
     cpp_engine_cache_dir: Optional[str] = None,
+    enable_combat_tracker: bool = False,
 ) -> TalisharEngineEnvironment:
     """Create a :class:`TalisharEngineEnvironment` for *matchup*.
 
@@ -151,6 +154,7 @@ def make_env(
         cpp_engine_deck1=matchup.cpp_engine_deck1,
         cpp_engine_deck2=matchup.cpp_engine_deck2,
         cpp_engine_dir=matchup.cpp_engine_dir,
+        enable_combat_tracker=enable_combat_tracker,
     )
 
 
@@ -178,7 +182,7 @@ def _ppo_update(agent: PPOAgent, buf: dict, next_obs_vec: np.ndarray) -> None:
         # ── GPU-native PPO update (all math stays on _TORCH_DEVICE) ──────────
         dev = _TORCH_DEVICE
 
-        def _t(x, dtype=torch.float64):
+        def _t(x, dtype=_TORCH_COMPUTE_DTYPE):
             return torch.as_tensor(np.asarray(x), dtype=dtype, device=dev)
 
         obs_t     = _t(buf["obs"])                            # (T, D)
@@ -198,8 +202,8 @@ def _ppo_update(agent: PPOAgent, buf: dict, next_obs_vec: np.ndarray) -> None:
 
         # GAE on GPU
         gam, lam = agent.gamma, agent.lam
-        adv_t = torch.zeros(T, dtype=torch.float64, device=dev)
-        last_gae = torch.tensor(0.0, dtype=torch.float64, device=dev)
+        adv_t = torch.zeros(T, dtype=_TORCH_COMPUTE_DTYPE, device=dev)
+        last_gae = torch.tensor(0.0, dtype=_TORCH_COMPUTE_DTYPE, device=dev)
         for i in range(T - 1, -1, -1):
             delta     = rew_t[i] + gam * next_vals_t[i] * (1.0 - done_t[i]) - vals_t[i]
             last_gae  = delta + gam * lam * (1.0 - done_t[i]) * last_gae
@@ -373,7 +377,7 @@ def _bc_update(agent: PPOAgent, buf: dict, next_obs_vec: np.ndarray) -> None:
         # ── GPU-native BC update ──────────────────────────────────────────────
         dev = _TORCH_DEVICE
 
-        def _t(x, dtype=torch.float64):
+        def _t(x, dtype=_TORCH_COMPUTE_DTYPE):
             return torch.as_tensor(np.asarray(x), dtype=dtype, device=dev)
 
         obs_t    = _t(buf["obs"])                        # (T, D)
@@ -392,8 +396,8 @@ def _bc_update(agent: PPOAgent, buf: dict, next_obs_vec: np.ndarray) -> None:
 
         # GAE returns on GPU (only returns needed for BC critic update)
         gam, lam = agent.gamma, agent.lam
-        adv_t = torch.zeros(T, dtype=torch.float64, device=dev)
-        last_gae = torch.tensor(0.0, dtype=torch.float64, device=dev)
+        adv_t = torch.zeros(T, dtype=_TORCH_COMPUTE_DTYPE, device=dev)
+        last_gae = torch.tensor(0.0, dtype=_TORCH_COMPUTE_DTYPE, device=dev)
         for i in range(T - 1, -1, -1):
             delta    = rew_t[i] + gam * next_vals_t[i] * (1.0 - done_t[i]) - vals_t[i]
             last_gae = delta + gam * lam * (1.0 - done_t[i]) * last_gae
@@ -594,6 +598,59 @@ def _write_state_image(obs: Any, out_path: Path, header: str = "") -> None:
         out_path.with_suffix(".txt").write_text(text, encoding="utf-8")
 
 
+def _resolve_obs_vec(obs: Any, info: Any, policy: PPOAgent) -> np.ndarray:
+    """Use env-precomputed observation_vec when available (C++ fast path)."""
+    if isinstance(info, dict):
+        cached = info.get("observation_vec")
+        if cached is not None:
+            vec = np.asarray(cached, dtype=np.float64)
+            if policy.obs_dim > 0 and vec.shape[0] == policy.obs_dim:
+                return vec
+    return policy._obs_to_vec(obs)
+
+
+def _policy_forward(
+    policy: PPOAgent,
+    obs: Any,
+    obs_vec: np.ndarray,
+) -> tuple[np.ndarray, float, np.ndarray]:
+    """Actor logits, critic value, and softmax probs for one observation."""
+    logits = policy._masked_logits(policy._actor.predict(obs_vec[None, :]), obs)
+    lp_all = _log_softmax(logits)[0]
+    probs = _softmax(logits)[0]
+    value = float(policy._critic.predict(obs_vec[None, :]).flatten()[0])
+    return logits, value, probs
+
+
+def _flush_ppo_buffers(
+    p1_tiers: list[PPOAgent],
+    p2_tiers: list[PPOAgent],
+    p1_trans: list[dict[str, Any]],
+    p2_trans: list[dict[str, Any]],
+) -> None:
+    if p1_trans:
+        p1_buf = _transitions_to_buf(p1_trans)
+        _ppo_update_all_tiers(p1_tiers, p1_buf, p1_trans[-1]["next_obs_vec"])
+    if p2_trans:
+        p2_buf = _transitions_to_buf(p2_trans)
+        _ppo_update_all_tiers(p2_tiers, p2_buf, p2_trans[-1]["next_obs_vec"])
+
+
+def _flush_warmup_buffers(
+    p1_tiers: list[PPOAgent],
+    p2_tiers: list[PPOAgent],
+    p1_trans: list[dict[str, Any]],
+    p2_trans: list[dict[str, Any]],
+) -> None:
+    """One behavioural-cloning update from all warmup rollouts."""
+    if p1_trans:
+        p1_buf = _transitions_to_buf(p1_trans)
+        _bc_update_all_tiers(p1_tiers, p1_buf, p1_trans[-1]["next_obs_vec"])
+    if p2_trans:
+        p2_buf = _transitions_to_buf(p2_trans)
+        _bc_update_all_tiers(p2_tiers, p2_buf, p2_trans[-1]["next_obs_vec"])
+
+
 def _write_live_state_snapshot(
     env: TalisharEngineEnvironment,
     obs: Any,
@@ -638,6 +695,7 @@ def _run_one_episode(
 
     reset_out = env.reset(seed=seed)
     obs = _get(reset_out, "observation", reset_out)
+    step_info = _get(reset_out, "info", {})
     terminated = truncated = False
     steps_taken = 0
     final_p1_hp = final_p2_hp = final_turn_no = None
@@ -648,19 +706,21 @@ def _run_one_episode(
         policy = p1_policy if acting == 1 else p2_policy
         rng    = p1_rng    if acting == 1 else p2_rng
 
-        obs_vec = policy._obs_to_vec(obs)
-        logits  = policy._masked_logits(policy._actor.forward(obs_vec[None, :]), obs)
-        lp_all  = _log_softmax(logits)[0]
-        probs   = _softmax(logits)[0]
-        value   = float(policy._critic.predict(obs_vec[None, :]).flatten()[0])
-        n_legal = _n_legal_of(obs)
+        obs_vec = _resolve_obs_vec(obs, step_info, policy)
 
         if warmup:
             env_action = str(env.sample_action())
             action = _env_action_to_index(obs, env_action, policy)
+            value = 0.0
+            lp_all_action = 0.0
         else:
-            action     = int(rng.choice(policy.n_actions, p=probs))
+            logits, value, probs = _policy_forward(policy, obs, obs_vec)
+            lp_all = _log_softmax(logits)[0]
+            action = int(rng.choice(policy.n_actions, p=probs))
             env_action = _to_env_action(obs, action, policy._mask_actions)
+            lp_all_action = float(lp_all[action])
+
+        n_legal = _n_legal_of(obs)
 
         step_out    = env.step(env_action)
         env_reward  = float(_get(step_out, "reward", 0.0))
@@ -668,20 +728,23 @@ def _run_one_episode(
         truncated   = bool(_get(step_out, "truncated",  False))
         done        = terminated or truncated
         next_obs    = _get(step_out, "observation", obs)
+        step_info   = _get(step_out, "info", {})
         steps_taken += 1
         # Track final game state for diagnostics
         try:
-            _s = json.loads(next_obs) if isinstance(next_obs, str) else next_obs
-            # playerHealth is from acting player's POV — use env's tracked HP instead
             final_p1_hp  = int(env._player_hp)
             final_p2_hp  = int(env._opp_hp)
+            if isinstance(next_obs, str):
+                _s = json.loads(next_obs)
+            else:
+                _s = next_obs if isinstance(next_obs, dict) else {}
             final_turn_no = int(_s.get("turnNo", 0) or 0)
             _raw = env._last_state
             final_p1_deck = _raw.get("playerDeckCount")
             final_p2_deck = _raw.get("opponentDeckCount")
         except Exception:
             pass
-        next_obs_vec = policy._obs_to_vec(next_obs)
+        next_obs_vec = _resolve_obs_vec(next_obs, step_info, policy)
 
         agent_reward = env_reward if acting == 1 else -env_reward
         trans = {
@@ -689,7 +752,7 @@ def _run_one_episode(
             "action":      action,
             "reward":      agent_reward,
             "value":       value,
-            "log_prob":    float(lp_all[action]),
+            "log_prob":    lp_all_action,
             "done":        float(done),
             "n_legal":     n_legal if n_legal is not None else policy.n_actions,
             "next_obs_vec": next_obs_vec,
@@ -977,7 +1040,7 @@ def train_agents_from_both_perspectives_parallel(
         envs.append(
             make_env(matchup, base_url=base_url, game_format=game_format, max_turns=max_steps)
         )
-    print(f"  [parallel] {n_workers} sessions ready")
+    print(f"  [parallel] {n_workers} sessions ready", flush=True)
 
     p1_ep_rewards:  list[float] = []
     p2_ep_rewards:  list[float] = []
@@ -986,18 +1049,30 @@ def train_agents_from_both_perspectives_parallel(
     skipped_episodes    = 0
     completed          = 0
     progress_every     = max(1, n_episodes // 100)
+    batch_progress     = max(1, n_workers)
     progress_t0        = time.time()
     # Per-episode wall-clock timeout: max_steps * 5 s per step, floor at 120 s.
     # Per-episode wall-clock timeout: 3 s per step (down from 5 s) is sufficient
     # for a local Docker server.  Floor raised to 180 s to cover game setup time.
     episode_timeout_secs = max(180, max_steps * 3)
     shutdown_flag = False
+    warmup_p1_accum: list[dict[str, Any]] = []
+    warmup_p2_accum: list[dict[str, Any]] = []
+    ppo_p1_accum: list[dict[str, Any]] = []
+    ppo_p2_accum: list[dict[str, Any]] = []
+    warmup_bc_applied = warmup_episodes <= 0
 
     try:
         with ThreadPoolExecutor(max_workers=n_workers) as pool:
             while completed < n_episodes and not shutdown_flag:
                 batch_size = min(n_workers, n_episodes - completed)
                 in_warmup  = completed < warmup_episodes
+                if completed == 0:
+                    print(
+                        f"  [parallel] running first batch ({batch_size} episode(s), "
+                        f"timeout={episode_timeout_secs}s/ep)…",
+                        flush=True,
+                    )
 
                 # Submit one episode per worker in this batch.
                 seed_base = (seed + completed) if seed is not None else None
@@ -1061,7 +1136,6 @@ def train_agents_from_both_perspectives_parallel(
                         print(f"  [unfinished ep #{completed+1}] {hp_str}")
                     if result["terminated"]:
                         terminated_episodes += 1
-                        # Cache this completed episode for future warm-starts.
                         if episode_cache is not None:
                             _save_episode_to_cache(
                                 episode_cache, result,
@@ -1072,7 +1146,6 @@ def train_agents_from_both_perspectives_parallel(
                 if shutdown_flag:
                     break
 
-                # Write live snapshot from last episode result if requested.
                 if live_state_image_path is not None and batch_p1_trans:
                     last_obs_vec = batch_p1_trans[-1]["obs_vec"]
                     _write_state_image(
@@ -1081,22 +1154,41 @@ def train_agents_from_both_perspectives_parallel(
                         header=f"episode={completed}/{n_episodes} parallel_workers={n_workers}",
                     )
 
-                # PPO update on merged buffer (single-threaded, safe).
-                if batch_p1_trans:
-                    p1_buf = _transitions_to_buf(batch_p1_trans)
-                    next_p1 = batch_p1_trans[-1]["next_obs_vec"]
-                    _ppo_update_all_tiers(p1_tiers, p1_buf, next_p1)
-
-                if batch_p2_trans:
-                    p2_buf = _transitions_to_buf(batch_p2_trans)
-                    next_p2 = batch_p2_trans[-1]["next_obs_vec"]
-                    _ppo_update_all_tiers(p2_tiers, p2_buf, next_p2)
+                if in_warmup:
+                    warmup_p1_accum.extend(batch_p1_trans)
+                    warmup_p2_accum.extend(batch_p2_trans)
+                    if completed >= warmup_episodes and not warmup_bc_applied:
+                        print(
+                            f"  [warmup] behavioural-cloning update from "
+                            f"{len(warmup_p1_accum) + len(warmup_p2_accum)} transitions"
+                        )
+                        _flush_warmup_buffers(
+                            p1_tiers, p2_tiers, warmup_p1_accum, warmup_p2_accum,
+                        )
+                        warmup_p1_accum.clear()
+                        warmup_p2_accum.clear()
+                        warmup_bc_applied = True
+                else:
+                    ppo_p1_accum.extend(batch_p1_trans)
+                    ppo_p2_accum.extend(batch_p2_trans)
+                    rollout_ready = (
+                        len(ppo_p1_accum) >= DEFAULT_PPO_ROLLOUT_BATCH
+                        or len(ppo_p2_accum) >= DEFAULT_PPO_ROLLOUT_BATCH
+                        or completed >= n_episodes
+                    )
+                    if rollout_ready:
+                        _flush_ppo_buffers(
+                            p1_tiers, p2_tiers, ppo_p1_accum, ppo_p2_accum,
+                        )
+                        ppo_p1_accum.clear()
+                        ppo_p2_accum.clear()
 
                 # Progress logging.
                 if (
-                    completed <= 10
-                    or completed == n_episodes
+                    completed <= max(10, n_workers)
+                    or completed % batch_progress == 0
                     or completed % progress_every == 0
+                    or completed == n_episodes
                 ):
                     elapsed  = time.time() - progress_t0
                     pct      = (completed / max(1, n_episodes)) * 100.0
@@ -1116,6 +1208,10 @@ def train_agents_from_both_perspectives_parallel(
                         f"p1_avg={p1_avg:+.3f} p2_avg={p2_avg:+.3f}"
                     )
     finally:
+        if not warmup_bc_applied and (warmup_p1_accum or warmup_p2_accum):
+            _flush_warmup_buffers(p1_tiers, p2_tiers, warmup_p1_accum, warmup_p2_accum)
+        if ppo_p1_accum or ppo_p2_accum:
+            _flush_ppo_buffers(p1_tiers, p2_tiers, ppo_p1_accum, ppo_p2_accum)
         for env in envs:
             try:
                 env.close()
@@ -1208,6 +1304,10 @@ def train_agents_from_both_perspectives(
     # when episode_cache is provided to avoid overhead when unused).
     _ep_p1_trans: list[dict[str, Any]] = []
     _ep_p2_trans: list[dict[str, Any]] = []
+    warmup_p1_trans: list[dict[str, Any]] = []
+    warmup_p2_trans: list[dict[str, Any]] = []
+    warmup_bc_applied = warmup_episodes <= 0
+    step_info = _get(reset_out, "info", {})
 
     while completed < n_episodes and global_step < total_steps:
         acting = env._acting_player_id
@@ -1216,17 +1316,19 @@ def train_agents_from_both_perspectives(
         buf = p1_buf if acting == 1 else p2_buf
         in_warmup = completed < warmup_episodes
 
-        obs_vec = policy._obs_to_vec(obs)
-        logits = policy._masked_logits(policy._actor.forward(obs_vec[None, :]), obs)
-        lp_all = _log_softmax(logits)[0]
-        probs = _softmax(logits)[0]
+        obs_vec = _resolve_obs_vec(obs, step_info, policy)
+
         if in_warmup:
             env_action = str(env.sample_action())
             action = _env_action_to_index(obs, env_action, policy)
+            value = 0.0
+            log_prob = 0.0
         else:
+            logits, value, probs = _policy_forward(policy, obs, obs_vec)
+            lp_all = _log_softmax(logits)[0]
             action = int(policy._rng_np.choice(policy.n_actions, p=probs))
             env_action = _to_env_action(obs, action, policy._mask_actions)
-        value = float(policy._critic.predict(obs_vec[None, :]).flatten()[0])
+            log_prob = float(lp_all[action])
         n_legal = _n_legal_of(obs)
 
         step_out = env.step(env_action)
@@ -1235,6 +1337,7 @@ def train_agents_from_both_perspectives(
         truncated = bool(_get(step_out, "truncated", False))
         done = terminated or truncated
         episode_step += 1
+        step_info = _get(step_out, "info", {})
 
         if live_state_image_path is not None:
             current_obs = _get(step_out, "observation", obs)
@@ -1251,31 +1354,37 @@ def train_agents_from_both_perspectives(
         else:
             cur_p2_r += -env_reward
 
-        buf["obs"].append(obs_vec)
-        buf["actions"].append(action)
-        buf["rewards"].append(agent_reward)
-        buf["values"].append(value)
-        buf["log_probs"].append(float(lp_all[action]))
-        buf["dones"].append(float(done))
-        buf["n_legal"].append(n_legal if n_legal is not None else policy.n_actions)
+        next_obs_vec = _resolve_obs_vec(_get(step_out, "observation", obs), step_info, policy)
+        trans = {
+            "obs_vec": obs_vec,
+            "action": action,
+            "reward": agent_reward,
+            "value": value,
+            "log_prob": log_prob,
+            "done": float(done),
+            "n_legal": n_legal if n_legal is not None else policy.n_actions,
+            "next_obs_vec": next_obs_vec,
+        }
 
-        # Accumulate per-episode transitions for episode caching.
-        if episode_cache is not None:
-            _next_obs_vec = policy._obs_to_vec(_get(step_out, "observation", obs))
-            _ep_trans: dict[str, Any] = {
-                "obs_vec":     obs_vec,
-                "action":      action,
-                "reward":      agent_reward,
-                "value":       value,
-                "log_prob":    float(lp_all[action]),
-                "done":        float(done),
-                "n_legal":     n_legal if n_legal is not None else policy.n_actions,
-                "next_obs_vec": _next_obs_vec,
-            }
+        if in_warmup:
             if acting == 1:
-                _ep_p1_trans.append(_ep_trans)
+                warmup_p1_trans.append(trans)
             else:
-                _ep_p2_trans.append(_ep_trans)
+                warmup_p2_trans.append(trans)
+        else:
+            buf["obs"].append(obs_vec)
+            buf["actions"].append(action)
+            buf["rewards"].append(agent_reward)
+            buf["values"].append(value)
+            buf["log_probs"].append(log_prob)
+            buf["dones"].append(float(done))
+            buf["n_legal"].append(n_legal if n_legal is not None else policy.n_actions)
+
+        if episode_cache is not None:
+            if acting == 1:
+                _ep_p1_trans.append(trans)
+            else:
+                _ep_p2_trans.append(trans)
 
         global_step += 1
 
@@ -1283,6 +1392,15 @@ def train_agents_from_both_perspectives(
             p1_ep_rewards.append(cur_p1_r)
             p2_ep_rewards.append(cur_p2_r)
             completed += 1
+            if completed == warmup_episodes and not warmup_bc_applied:
+                print(
+                    f"  [warmup] behavioural-cloning update from "
+                    f"{len(warmup_p1_trans) + len(warmup_p2_trans)} transitions"
+                )
+                _flush_warmup_buffers(p1_tiers, p2_tiers, warmup_p1_trans, warmup_p2_trans)
+                warmup_p1_trans.clear()
+                warmup_p2_trans.clear()
+                warmup_bc_applied = True
             if truncated:
                 timeout_episodes += 1
             if terminated:
@@ -1333,12 +1451,13 @@ def train_agents_from_both_perspectives(
             ep_seed = (seed + completed) if seed is not None else None
             reset_out = env.reset(seed=ep_seed)
             obs = _get(reset_out, "observation", reset_out)
+            step_info = _get(reset_out, "info", {})
         else:
             obs = _get(step_out, "observation", obs)
 
         for tiers, buf_ref in [(p1_tiers, p1_buf), (p2_tiers, p2_buf)]:
-            if len(buf_ref["obs"]) >= tiers[0].n_steps:
-                next_vec = tiers[0]._obs_to_vec(_get(step_out, "observation", obs))
+            if not in_warmup and len(buf_ref["obs"]) >= DEFAULT_PPO_ROLLOUT_BATCH:
+                next_vec = next_obs_vec
                 _ppo_update_all_tiers(tiers, buf_ref, next_vec)
                 buf_ref.clear()
                 buf_ref.update(_empty_buf())
