@@ -1212,8 +1212,8 @@ def main() -> None:
     parser.add_argument(
         "--render-max-steps",
         type=int,
-        default=20,
-        help="Max steps for the single post-eval render replay episode.",
+        default=None,
+        help="Max steps for the single post-eval render replay episode (default: same as --max-steps).",
     )
     parser.add_argument("--gif-fps", type=float, default=3.0)
     parser.add_argument(
@@ -1268,6 +1268,10 @@ def main() -> None:
     if not args.assets_path:
         raise SystemExit("TALISHAR_ASSETS_PATH or --assets-path is required")
 
+    render_max_steps = (
+        args.render_max_steps if args.render_max_steps is not None else args.max_steps
+    )
+
     print("=" * 72)
     print("  Phase 3 Eval Dashboard — starting up")
     print("=" * 72)
@@ -1282,7 +1286,7 @@ def main() -> None:
           f"(poll every {args.poll_seconds}s)")
     print(f"  Render GIF    : {'yes' if not args.no_render_gif else 'no'}")
     if not args.no_render_gif:
-        print(f"  Render steps  : {args.render_max_steps}")
+        print(f"  Render steps  : {render_max_steps}")
     print(f"  Parity check  : {'no' if args.skip_parity else '1 full episode'}")
     print(
         "  Stall guard   : "
@@ -1314,7 +1318,7 @@ def main() -> None:
                 fe_url=args.talishar_fe_url,
                 assets_path=args.assets_path,
                 render_gif=not args.no_render_gif,
-                render_max_steps=args.render_max_steps,
+                render_max_steps=render_max_steps,
                 gif_fps=args.gif_fps,
                 seed=args.seed,
                 stall_no_damage_turns=args.stall_no_damage_turns,

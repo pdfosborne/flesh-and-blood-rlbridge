@@ -13,7 +13,10 @@ _SUBDIRS = ("training", "eval", "cpp", "deck")
 
 
 def configure_paths() -> Path:
-    """Add script subdirectories and ``src`` to ``sys.path``. Returns repo root."""
+    """Add repo root, script subdirectories, and ``src`` to ``sys.path``. Returns repo root."""
+    repo = str(REPO_ROOT)
+    if repo not in sys.path:
+        sys.path.insert(0, repo)
     for sub in _SUBDIRS:
         path = SCRIPTS_ROOT / sub
         if path.is_dir():

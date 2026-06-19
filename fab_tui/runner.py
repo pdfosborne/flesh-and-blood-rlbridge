@@ -187,6 +187,8 @@ def run_eval_dashboard(spec: EvalSpec, env: EnvironmentSettings) -> int:
         str(spec.parallel_workers),
         "--max-steps",
         str(spec.max_steps),
+        "--render-max-steps",
+        str(spec.max_steps),
         "--poll-seconds",
         str(spec.poll_seconds),
     ]

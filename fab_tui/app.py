@@ -33,6 +33,7 @@ from fab_tui.decks import (
     read_deck_hero_info,
 )
 from fab_tui.presets import PRESETS
+from fab_tui.results import discover_evaluable_results
 from fab_tui.runner import (
     build_cpp_engine_for_spec,
     cpp_build_inputs_for_spec,
@@ -644,17 +645,53 @@ def wizard_draft_decks(env: EnvironmentSettings) -> None:
     _pause()
 
 
+def _choose_results_dir(
+    *,
+    title: str = "Select results",
+    manual_hint: str = "Enter results directory path",
+) -> str:
+    entries = discover_evaluable_results()
+    if not entries:
+        console.print(
+            "[yellow]No results with phase-3 checkpoints found under results/.[/yellow]"
+        )
+        return Prompt.ask(manual_hint, default=str(RESULTS_ROOT))
+
+    table = Table(title=title, box=box.SIMPLE)
+    table.add_column("#", style="cyan", justify="right")
+    table.add_column("Category")
+    table.add_column("Matchup / name")
+    table.add_column("Checkpoints")
+    table.add_column("Path")
+    for index, entry in enumerate(entries, start=1):
+        table.add_row(
+            str(index),
+            entry.category,
+            entry.label,
+            entry.checkpoints_summary,
+            entry.display_path,
+        )
+    console.print(table)
+    console.print("[dim]m = enter path manually[/dim]")
+
+    while True:
+        choice = Prompt.ask("Select", default="1").strip()
+        if choice.lower() == "m":
+            return Prompt.ask(manual_hint, default=entries[0].display_path)
+        if choice.isdigit():
+            idx = int(choice)
+            if 1 <= idx <= len(entries):
+                return str(entries[idx - 1].path)
+        console.print("[red]Invalid selection — enter a number or m.[/red]")
+
+
 def wizard_evaluate(env: EnvironmentSettings) -> None:
     _header("Evaluate checkpoints", "Run phase-3 eval dashboard on saved results")
 
-    default_dir = ""
-    experiments_root = RESULTS_ROOT / "experiments"
-    if experiments_root.is_dir():
-        candidates = sorted(experiments_root.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
-        if candidates:
-            default_dir = str(candidates[0])
-
-    results_dir = Prompt.ask("Results directory", default=default_dir or str(RESULTS_ROOT))
+    results_dir = _choose_results_dir(
+        title="Results with phase-3 checkpoints",
+        manual_hint="Results directory",
+    )
     spec = EvalSpec(
         results_dir=results_dir,
         episodes=IntPrompt.ask("Evaluation episodes", default=20),
@@ -726,14 +763,15 @@ def wizard_settings(env: EnvironmentSettings) -> EnvironmentSettings:
 def wizard_browse_results() -> None:
     _header("Browse results", "Recent experiment output folders")
 
-    roots = [RESULTS_ROOT / "experiments", RESULTS_ROOT / "matchup_sims", RESULTS_ROOT / "full_pipeline"]
+    from fab_tui.results import RESULT_CATEGORY_ROOTS
+
     rows: list[tuple[str, Path]] = []
-    for root in roots:
+    for category, root in RESULT_CATEGORY_ROOTS:
         if not root.is_dir():
             continue
         for path in sorted(root.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)[:8]:
             if path.is_dir():
-                rows.append((root.name, path))
+                rows.append((category, path))
 
     if not rows:
         console.print("[yellow]No result directories found yet.[/yellow]")
