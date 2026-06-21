@@ -70,6 +70,7 @@ from train_pipeline_common import (  # noqa: E402
 from train_play import (  # noqa: E402
     DEFAULT_CHECKPOINT_EVAL_EPISODES,
     DEFAULT_CHECKPOINT_INTERVAL_PCT,
+    DEFAULT_PARALLEL_SEEDS,
     DEFAULT_WARMUP_BASELINE_EVAL_EPISODES,
     DEFAULT_WARMUP_EPISODES,
     auto_detect_workers,
@@ -201,6 +202,7 @@ def _train_candidate(
         checkpoint_interval_pct=args.checkpoint_interval_pct,
         checkpoint_eval_episodes=args.checkpoint_eval_episodes,
         parallel_batch_size=args.play_batch_size or play_workers,
+        parallel_seeds=args.parallel_seeds,
     )
 
     checkpoint_history_path = candidate_dir / "checkpoint_eval_history.json"
@@ -393,6 +395,16 @@ def main() -> None:
         help="Shared PPO + episode cache root (reused across sideboard runs)",
     )
     parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument(
+        "--parallel-seeds",
+        type=int,
+        default=DEFAULT_PARALLEL_SEEDS,
+        help=(
+            "Independent RNG seeds per candidate; training win%% is averaged "
+            f"and best P1/P2 agents are used for eval (default: "
+            f"{DEFAULT_PARALLEL_SEEDS}; use 1 to disable)"
+        ),
+    )
 
     parser.add_argument("--out-dir", default=str(OUT_DIR / "sideboard_compare"))
     parser.add_argument("--talishar-url",
@@ -526,6 +538,7 @@ def main() -> None:
         "skip_final_eval": bool(args.skip_final_eval),
         "checkpoint_interval": resolved_ckpt_interval,
         "checkpoint_eval_episodes": args.checkpoint_eval_episodes,
+        "parallel_seeds": args.parallel_seeds,
         "cpp_engine_dir": args.cpp_engine_dir,
         "candidates": [asdict(c) for c in candidates],
     }

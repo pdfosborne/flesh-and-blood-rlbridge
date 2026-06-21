@@ -38,6 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from train_dual_agent_common import (  # noqa: E402
     DEFAULT_N_EPISODES,
+    DEFAULT_PARALLEL_SEEDS,
     DEFAULT_WARMUP_BASELINE_EVAL_EPISODES,
     DEFAULT_WARMUP_EPISODES,
     Matchup,
@@ -176,6 +177,16 @@ def main() -> None:
         help="Number of parallel game sessions for training (default: 1). "
              "Set to 2-4 to saturate Talishar HTTP throughput.",
     )
+    parser.add_argument(
+        "--parallel-seeds",
+        type=int,
+        default=DEFAULT_PARALLEL_SEEDS,
+        help=(
+            "Independent RNG seeds to train in parallel per matchup; training "
+            f"win%% is averaged and best P1/P2 agents are used for eval "
+            f"(default: {DEFAULT_PARALLEL_SEEDS}; use 1 to disable)"
+        ),
+    )
     args = parser.parse_args()
 
     if args.matchup == "all":
@@ -210,6 +221,7 @@ def main() -> None:
         show_frontend=args.show_frontend,
         frontend_url=args.frontend_url,
         n_workers=args.workers,
+        parallel_seeds=args.parallel_seeds,
     )
     print_training_summary(summary, failed, out_dir)
     if failed:

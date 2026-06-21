@@ -56,6 +56,13 @@ from cpp_engine_matchup import (  # noqa: E402
     ensure_cpp_engine_for_matchup,
     resolve_cpp_lookup_decks,
 )
+from parallel_seed_training import (  # noqa: E402
+    DEFAULT_PARALLEL_SEEDS,
+    merge_parallel_seed_checkpoint_history,
+    run_parallel_seed_jobs,
+    select_best_agents_by_win_rate,
+    sync_parallel_seed_dashboard_artifacts,
+)
 from play_outcome_stats import (  # noqa: E402
     absolute_p1_p2_hp_from_env,
     absolute_p1_p2_hp_from_obs,
@@ -297,6 +304,199 @@ def run_phase3_play_dual(
 # ---------------------------------------------------------------------------
 
 
+def _clone_phase_agents_for_seed(
+    p1: PhaseAgents,
+    p2: Optional[PhaseAgents],
+    *,
+    seed: Optional[int],
+) -> tuple[PhaseAgents, Optional[PhaseAgents]]:
+    """Copy deck state for an independent parallel-seed training run."""
+    from agent_cache import clone_agent_weights  # noqa: PLC0415
+
+    def _clone_play(agent: Any) -> Optional[Any]:
+        if agent is None:
+            return None
+        cloned = make_agent(seed=seed)
+        clone_agent_weights(agent, cloned)
+        return cloned
+
+    p1_copy = PhaseAgents(
+        player=p1.player,
+        deckbuilder=p1.deckbuilder,
+        sideboard=p1.sideboard,
+        play=_clone_play(p1.play),
+        equipment_header=p1.equipment_header,
+        card_pool=dict(p1.card_pool),
+        pool_by_id=dict(p1.pool_by_id),
+        active_decks={k: dict(v) for k, v in p1.active_decks.items()},
+    )
+    p2_copy: Optional[PhaseAgents] = None
+    if p2 is not None:
+        p2_copy = PhaseAgents(
+            player=p2.player,
+            deckbuilder=p2.deckbuilder,
+            sideboard=p2.sideboard,
+            play=_clone_play(p2.play),
+            equipment_header=p2.equipment_header,
+            card_pool=dict(p2.card_pool),
+            pool_by_id=dict(p2.pool_by_id),
+            active_decks={k: dict(v) for k, v in p2.active_decks.items()},
+        )
+    return p1_copy, p2_copy
+
+
+def _run_phase3_play_parallel_seeds(
+    p1: PhaseAgents,
+    p2: Optional[PhaseAgents],
+    *,
+    parallel_seeds: int,
+    opponent_mode: str,
+    game_format: str,
+    p1_hero_id: str,
+    p2_hero_id: str,
+    p1_equipment_header: str,
+    p2_equipment_header: str,
+    p1_opponent_hero_id: str,
+    p1_opponent_deck_name: str,
+    n_episodes: int,
+    max_play_steps: int,
+    warmup_episodes: int,
+    warmup_baseline_eval_episodes: int,
+    n_workers: Optional[int],
+    assets_path: str,
+    base_url: str,
+    out_dir: Path,
+    cache_dir: Optional[Path],
+    seed: Optional[int],
+    cpp_engine_dir: Optional[str],
+    checkpoint_interval: Optional[int],
+    checkpoint_interval_pct: float,
+    checkpoint_eval_episodes: int,
+    parallel_batch_size: Optional[int],
+) -> tuple[float, float]:
+    shared_kwargs = dict(
+        opponent_mode=opponent_mode,
+        game_format=game_format,
+        p1_hero_id=p1_hero_id,
+        p2_hero_id=p2_hero_id,
+        p1_equipment_header=p1_equipment_header,
+        p2_equipment_header=p2_equipment_header,
+        p1_opponent_hero_id=p1_opponent_hero_id,
+        p1_opponent_deck_name=p1_opponent_deck_name,
+        n_episodes=n_episodes,
+        max_play_steps=max_play_steps,
+        warmup_episodes=warmup_episodes,
+        warmup_baseline_eval_episodes=warmup_baseline_eval_episodes,
+        n_workers=n_workers,
+        assets_path=assets_path,
+        base_url=base_url,
+        cache_dir=cache_dir,
+        cpp_engine_dir=cpp_engine_dir,
+        checkpoint_interval=checkpoint_interval,
+        checkpoint_interval_pct=checkpoint_interval_pct,
+        parallel_batch_size=parallel_batch_size,
+        parallel_seeds=1,
+        checkpoint_eval_episodes=checkpoint_eval_episodes,
+    )
+
+    def _sync_parent_dashboard() -> None:
+        sync_parallel_seed_dashboard_artifacts(out_dir)
+
+    def _run_one_seed(
+        seed_index: int,
+        seed_i: Optional[int],
+        seed_out: Path,
+    ) -> dict[str, Any]:
+        capture: dict[str, Any] = {}
+        p1_copy, p2_copy = _clone_phase_agents_for_seed(p1, p2, seed=seed_i)
+        p1_wr, p2_wr = run_phase3_play(
+            p1_copy,
+            p2_copy if opponent_mode == "dual" else None,
+            out_dir=seed_out,
+            seed=seed_i,
+            _seed_run_capture=capture,
+            _retain_temp_decks=True,
+            _skip_cache_converge=True,
+            _force_train=True,
+            _parallel_seed_sync_dir=out_dir,
+            **shared_kwargs,
+        )
+        return {
+            **capture,
+            "seed_index": seed_index,
+            "seed": seed_i,
+            "out_dir": str(seed_out),
+            "p1_win_rate": p1_wr,
+            "p2_win_rate": p2_wr,
+        }
+
+    summary = run_parallel_seed_jobs(
+        parallel_seeds,
+        seed,
+        out_dir,
+        _run_one_seed,
+        label="play training",
+        on_seed_complete=lambda _row: _sync_parent_dashboard(),
+    )
+    best_p1, best_p2, best_p1_idx, best_p2_idx = select_best_agents_by_win_rate(
+        summary.seed_rows
+    )
+    best_p1_row = summary.seed_rows[best_p1_idx]
+
+    p1.play = best_p1
+    if opponent_mode == "dual" and p2 is not None:
+        p2.play = best_p2
+
+    p1.win_rates.append(summary.avg_p1_win_rate)
+    if opponent_mode == "dual" and p2 is not None:
+        p2.win_rates.append(summary.avg_p2_win_rate)
+
+    checkpoint_eval_log = merge_parallel_seed_checkpoint_history(out_dir, write=True)
+    latest_ckpt_wr: Optional[float] = None
+    if checkpoint_eval_log:
+        latest = checkpoint_eval_log[-1]
+        latest_ckpt_wr = float(latest.get("p1_win_rate", 0.0))
+        best_seed = latest.get("best_p1_seed_index")
+        print(
+            f"  [p1] Latest merged checkpoint eval (best seed {best_seed}): "
+            f"win%={latest_ckpt_wr:.1%} @ ep {latest.get('episodes_completed')}"
+        )
+
+    if cache_dir is not None and p1.play is not None:
+        cache_store = AgentCacheStore(cache_dir, game_format)
+        p1_deck_fp = best_p1_row.get("p1_deck_fingerprint")
+        p2_deck_fp = best_p1_row.get("p2_deck_fingerprint")
+        if p1_deck_fp and p2_deck_fp:
+            latest_ckpt_wr = (
+                float(checkpoint_eval_log[-1]["p1_win_rate"])
+                if checkpoint_eval_log
+                else None
+            )
+            cache_store.mark_matchup_converged(
+                p1_fingerprint=str(p1_deck_fp),
+                p2_fingerprint=str(p2_deck_fp),
+                p1_hero=p1_hero_id.replace("_", "-"),
+                p2_hero=(p2_hero_id or p1_opponent_hero_id).replace("_", "-"),
+                episodes_completed=n_episodes,
+                target_episodes=n_episodes,
+                p1_win_rate=summary.avg_p1_win_rate,
+                checkpoint_eval_win_rate=latest_ckpt_wr,
+            )
+
+    for row in summary.seed_rows:
+        for deck_file in row.get("temp_deck_files") or []:
+            try:
+                Path(deck_file).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    print(
+        f"\n  Parallel-seed train win% (avg over {parallel_seeds}): "
+        f"p1={summary.avg_p1_win_rate:.1%}  p2={summary.avg_p2_win_rate:.1%}"
+    )
+    return summary.avg_p1_win_rate, summary.avg_p2_win_rate
+
+
 def run_phase3_play(
     p1: PhaseAgents,
     p2: Optional[PhaseAgents],
@@ -324,14 +524,53 @@ def run_phase3_play(
     checkpoint_interval_pct: float = DEFAULT_CHECKPOINT_INTERVAL_PCT,
     checkpoint_eval_episodes: int = DEFAULT_CHECKPOINT_EVAL_EPISODES,
     parallel_batch_size: Optional[int] = None,
+    parallel_seeds: int = 1,
+    _seed_run_capture: Optional[dict[str, Any]] = None,
+    _retain_temp_decks: bool = False,
+    _skip_cache_converge: bool = False,
+    _force_train: bool = False,
+    _parallel_seed_sync_dir: Optional[Path] = None,
 ) -> tuple[float, float]:
     """Co-evolution play using train_dual_agent_common warmup + episode-cache infrastructure.
 
     Both players always get PPO updates (in preset/mirror mode the "opponent"
     agent is discarded afterwards; only ``p1.play`` is updated).
 
+    When ``parallel_seeds`` > 1, runs that many independent trainings in parallel,
+    averages their training win rates for reporting, and uses the best P1/P2
+    agents (by per-seed training win rate) for checkpoint evaluation.
+
     Returns ``(p1_win_rate, p2_win_rate)``.
     """
+    if parallel_seeds > 1 and _seed_run_capture is None:
+        return _run_phase3_play_parallel_seeds(
+            p1,
+            p2,
+            parallel_seeds=parallel_seeds,
+            opponent_mode=opponent_mode,
+            game_format=game_format,
+            p1_hero_id=p1_hero_id,
+            p2_hero_id=p2_hero_id,
+            p1_equipment_header=p1_equipment_header,
+            p2_equipment_header=p2_equipment_header,
+            p1_opponent_hero_id=p1_opponent_hero_id,
+            p1_opponent_deck_name=p1_opponent_deck_name,
+            n_episodes=n_episodes,
+            max_play_steps=max_play_steps,
+            warmup_episodes=warmup_episodes,
+            warmup_baseline_eval_episodes=warmup_baseline_eval_episodes,
+            n_workers=n_workers,
+            assets_path=assets_path,
+            base_url=base_url,
+            out_dir=out_dir,
+            cache_dir=cache_dir,
+            seed=seed,
+            cpp_engine_dir=cpp_engine_dir,
+            checkpoint_interval=checkpoint_interval,
+            checkpoint_interval_pct=checkpoint_interval_pct,
+            checkpoint_eval_episodes=checkpoint_eval_episodes,
+            parallel_batch_size=parallel_batch_size,
+        )
     print(
         f"\n{'='*62}\n"
         f"  PHASE 3 — Play ({opponent_mode})  [{p1.player}"
@@ -392,7 +631,7 @@ def run_phase3_play(
     cache_root = cache_dir or DEFAULT_AGENT_CACHE_DIR
     cache_store = AgentCacheStore(cache_root, game_format)
 
-    if p1.play is None:
+    if p1.play is None and not _force_train:
         cached_record = cache_store.should_skip_training(
             p1_fingerprint=p1_deck_fp,
             p2_fingerprint=p2_deck_fp,
@@ -636,6 +875,8 @@ def run_phase3_play(
             json.dumps(checkpoint_eval_log, indent=2),
             encoding="utf-8",
         )
+        if _parallel_seed_sync_dir is not None:
+            sync_parallel_seed_dashboard_artifacts(_parallel_seed_sync_dir)
         print(
             f"  [p1] Checkpoint eval @ ep {completed}: "
             f"win%={eval_metrics['p1_win_rate']:.1%} "
@@ -705,6 +946,8 @@ def run_phase3_play(
         if not history or int(history[-1].get("episodes_completed", -1)) != completed:
             history.append(point)
             history_path.write_text(json.dumps(history, indent=2), encoding="utf-8")
+        if _parallel_seed_sync_dir is not None:
+            sync_parallel_seed_dashboard_artifacts(_parallel_seed_sync_dir)
 
     # ── training ──────────────────────────────────────────────────────────────
     p1_rewards: list[float] = []
@@ -847,13 +1090,14 @@ def run_phase3_play(
                 _after_play_checkpoint(len(p1_rewards))
 
     finally:
-        # Clean up temp deck files
-        for f in [p1_deck_file] + ([p2_deck_file] if p2_deck_file else []):
-            try:
-                if f.exists():
-                    f.unlink(missing_ok=True)
-            except Exception:
-                pass
+        # Clean up temp deck files (retained for parallel-seed eval orchestration)
+        if not _retain_temp_decks:
+            for f in [p1_deck_file] + ([p2_deck_file] if p2_deck_file else []):
+                try:
+                    if f and f.exists():
+                        f.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
     # ── persist shared agent cache + update in-memory agents ─────────────────
     if p1_bundle is not None:
@@ -875,15 +1119,17 @@ def run_phase3_play(
         sum(1 for r in p2_rewards if r > 0) / max(1, len(p2_rewards))
         if p2_rewards else 0.0
     )
-    p1.win_rates.append(p1_wr)
-    if opponent_mode == "dual" and p2 is not None:
-        p2.win_rates.append(p2_wr)
+    if _seed_run_capture is None:
+        p1.win_rates.append(p1_wr)
+        if opponent_mode == "dual" and p2 is not None:
+            p2.win_rates.append(p2_wr)
 
-    print(
-        f"\n  Win rates: p1={p1_wr:.1%}  p2={p2_wr:.1%}  "
-        f"({train_summary['wins']}W/{train_summary['losses']}L/"
-        f"{train_summary['draws']}D/{train_summary['timeouts']}T)"
-    )
+    if _seed_run_capture is None:
+        print(
+            f"\n  Win rates: p1={p1_wr:.1%}  p2={p2_wr:.1%}  "
+            f"({train_summary['wins']}W/{train_summary['losses']}L/"
+            f"{train_summary['draws']}D/{train_summary['timeouts']}T)"
+        )
     if checkpoint_eval_log:
         history_path = out_dir / "checkpoint_eval_history.json"
         history_path.write_text(
@@ -896,7 +1142,7 @@ def run_phase3_play(
     if checkpoint_eval_log:
         latest_ckpt_wr = float(checkpoint_eval_log[-1].get("p1_win_rate", 0.0))
 
-    if p1_bundle is not None and len(p1_rewards) >= n_episodes:
+    if p1_bundle is not None and len(p1_rewards) >= n_episodes and not _skip_cache_converge:
         cache_store.mark_matchup_converged(
             p1_fingerprint=p1_deck_fp,
             p2_fingerprint=p2_deck_fp,
@@ -906,6 +1152,23 @@ def run_phase3_play(
             target_episodes=n_episodes,
             p1_win_rate=p1_wr,
             checkpoint_eval_win_rate=latest_ckpt_wr,
+        )
+
+    if _seed_run_capture is not None:
+        temp_decks: list[str] = []
+        for f in [p1_deck_file] + ([p2_deck_file] if p2_deck_file else []):
+            if f is not None:
+                temp_decks.append(str(f))
+        _seed_run_capture.update(
+            {
+                "p1_agent": p1_agent,
+                "p2_agent": p2_agent,
+                "matchup": matchup,
+                "use_cpp_backend": use_cpp_backend,
+                "p1_deck_fingerprint": p1_deck_fp,
+                "p2_deck_fingerprint": p2_deck_fp,
+                "temp_deck_files": temp_decks,
+            }
         )
 
     return p1_wr, p2_wr
@@ -2530,6 +2793,16 @@ def main() -> None:
         help="Shared PPO + episode cache root",
     )
     parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument(
+        "--parallel-seeds",
+        type=int,
+        default=DEFAULT_PARALLEL_SEEDS,
+        help=(
+            "Independent RNG seeds to train in parallel; training win%% is "
+            "averaged and the best P1/P2 agents are used for eval (default: "
+            f"{DEFAULT_PARALLEL_SEEDS}; use 1 to disable)"
+        ),
+    )
     parser.add_argument("--iterations", type=int, default=1)
     parser.add_argument("--p1-play", default=None)
     parser.add_argument("--p2-play", default=None)
@@ -2667,6 +2940,7 @@ def main() -> None:
             checkpoint_interval_pct=args.checkpoint_interval_pct,
             checkpoint_eval_episodes=args.checkpoint_eval_episodes,
             parallel_batch_size=args.play_batch_size,
+            parallel_seeds=args.parallel_seeds,
         )
         p1.last_play_win_rate = p1_wr
         if p2 is not None:

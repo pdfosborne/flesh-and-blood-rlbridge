@@ -71,6 +71,7 @@ from train_pipeline_common import (  # noqa: E402
 from train_play import (  # noqa: E402
     DEFAULT_CHECKPOINT_EVAL_EPISODES,
     DEFAULT_CHECKPOINT_INTERVAL_PCT,
+    DEFAULT_PARALLEL_SEEDS,
     DEFAULT_WARMUP_BASELINE_EVAL_EPISODES,
     DEFAULT_WARMUP_EPISODES,
     auto_detect_workers,
@@ -138,6 +139,16 @@ def main() -> None:
         help="Episodes per parallel batch (defaults to --workers)")
     parser.add_argument("--cache-dir", default=None)
     parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument(
+        "--parallel-seeds",
+        type=int,
+        default=DEFAULT_PARALLEL_SEEDS,
+        help=(
+            "Independent RNG seeds for play training; training win%% is averaged "
+            f"and best P1/P2 agents are used for eval (default: "
+            f"{DEFAULT_PARALLEL_SEEDS}; use 1 to disable)"
+        ),
+    )
     parser.add_argument("--iterations", type=int, default=3)
 
     parser.add_argument("--p1-deckbuilder", default=None)
@@ -379,6 +390,7 @@ def main() -> None:
             checkpoint_interval_pct=args.checkpoint_interval_pct,
             checkpoint_eval_episodes=args.checkpoint_eval_episodes,
             parallel_batch_size=args.play_batch_size,
+            parallel_seeds=args.parallel_seeds,
         )
         p1.last_play_win_rate = p1_wr
         if p2 is not None:

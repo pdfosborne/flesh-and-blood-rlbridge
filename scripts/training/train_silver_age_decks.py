@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from train_dual_agent_common import (  # noqa: E402
     DEFAULT_N_EPISODES,
+    DEFAULT_PARALLEL_SEEDS,
     DEFAULT_WARMUP_BASELINE_EVAL_EPISODES,
     DEFAULT_WARMUP_EPISODES,
     REPO_ROOT,
@@ -88,6 +89,16 @@ def main() -> None:
         default=None,
         help="Talishar FE URL override (default: TALISHAR_URL host:port when --show-frontend is set).",
     )
+    parser.add_argument(
+        "--parallel-seeds",
+        type=int,
+        default=DEFAULT_PARALLEL_SEEDS,
+        help=(
+            "Independent RNG seeds per matchup; training win%% is averaged and "
+            f"best P1/P2 agents are used for eval (default: "
+            f"{DEFAULT_PARALLEL_SEEDS}; use 1 to disable)"
+        ),
+    )
     args = parser.parse_args()
 
     if args.matchup == "all":
@@ -122,6 +133,7 @@ def main() -> None:
         warmup_baseline_eval_episodes=args.warmup_baseline_eval_episodes,
         show_frontend=args.show_frontend,
         frontend_url=args.frontend_url,
+        parallel_seeds=args.parallel_seeds,
     )
     print_training_summary(summary, failed, out_dir)
     if failed:

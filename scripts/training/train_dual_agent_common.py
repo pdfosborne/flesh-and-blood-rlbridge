@@ -62,6 +62,11 @@ from episode_cache import (  # noqa: E402
     EpisodeCache,
     DEFAULT_WARMUP_SKIP_THRESHOLD,
 )
+from parallel_seed_training import (  # noqa: E402
+    DEFAULT_PARALLEL_SEEDS,
+    run_parallel_seed_jobs,
+    select_best_agents_by_win_rate,
+)
 
 FORMAT_DECK_RULES: dict[str, dict[str, int]] = {
     "silver_age": {"max_copies": 2, "deck_size": 40},
@@ -1779,6 +1784,164 @@ def _player_context(
     )
 
 
+def _train_matchup_parallel_seeds(
+    matchup: Matchup,
+    *,
+    parallel_seeds: int,
+    base_url: str,
+    n_episodes: int,
+    max_steps: int,
+    out_dir: Path,
+    eval_env_ids: dict[str, str],
+    cache_store: Optional["AgentCacheStore"],
+    seed: Optional[int],
+    game_format: str,
+    warmup_episodes: int,
+    warmup_baseline_eval_episodes: int,
+    show_frontend: bool,
+    frontend_url: Optional[str],
+    n_workers: int,
+) -> dict:
+    shared_kwargs = dict(
+        matchup=matchup,
+        base_url=base_url,
+        n_episodes=n_episodes,
+        max_steps=max_steps,
+        eval_env_ids=eval_env_ids,
+        cache_store=cache_store,
+        game_format=game_format,
+        warmup_episodes=warmup_episodes,
+        warmup_baseline_eval_episodes=0,
+        show_frontend=show_frontend,
+        frontend_url=frontend_url,
+        n_workers=n_workers,
+        parallel_seeds=1,
+        _skip_cache_converge=True,
+        _force_train=True,
+    )
+
+    def _run_one_seed(
+        seed_index: int,
+        seed_i: Optional[int],
+        seed_out: Path,
+    ) -> dict[str, Any]:
+        capture: dict[str, Any] = {}
+        meta = train_matchup(
+            out_dir=seed_out,
+            seed=seed_i,
+            _seed_run_capture=capture,
+            _force_train=True,
+            **shared_kwargs,
+        )
+        return {
+            **capture,
+            "seed_index": seed_index,
+            "seed": seed_i,
+            "out_dir": str(seed_out),
+            "meta": meta,
+            "p1_win_rate": float(capture.get("p1_win_rate", 0.0)),
+            "p2_win_rate": float(capture.get("p2_win_rate", 0.0)),
+        }
+
+    summary = run_parallel_seed_jobs(
+        parallel_seeds,
+        seed,
+        out_dir,
+        _run_one_seed,
+        label=f"matchup {matchup.name}",
+    )
+    best_p1, best_p2, best_p1_idx, best_p2_idx = select_best_agents_by_win_rate(
+        summary.seed_rows
+    )
+
+    warmup_baseline: Optional[dict[str, Any]] = None
+    if warmup_baseline_eval_episodes > 0:
+        baseline = _evaluate_policy_pair(
+            matchup,
+            base_url=base_url,
+            game_format=game_format,
+            max_steps=max_steps,
+            p1_policy=best_p1,
+            p2_policy=best_p2,
+            episodes=warmup_baseline_eval_episodes,
+            seed=(seed + 100_000) if seed is not None else None,
+        )
+        ckpt_dir = _save_warmup_handoff_checkpoint(
+            out_dir=out_dir,
+            matchup=matchup,
+            p1_policy=best_p1,
+            p2_policy=best_p2,
+            baseline={
+                **baseline,
+                "parallel_seeds": parallel_seeds,
+                "best_p1_seed_index": best_p1_idx,
+                "best_p2_seed_index": best_p2_idx,
+                "avg_train_p1_win_rate": summary.avg_p1_win_rate,
+                "avg_train_p2_win_rate": summary.avg_p2_win_rate,
+            },
+        )
+        warmup_baseline = {**baseline, "checkpoint_dir": str(ckpt_dir)}
+        print(
+            "  Combined eval (best seeds): "
+            f"P1 win%={baseline['p1_win_rate'] * 100:.1f} "
+            f"P2 win%={baseline['p2_win_rate'] * 100:.1f} "
+            f"draw%={baseline['draw_rate'] * 100:.1f}"
+        )
+
+    best_p1_row = summary.seed_rows[best_p1_idx]
+    best_meta = best_p1_row.get("meta") or {}
+    p1_id = f"{matchup.name}-p1-{uuid.uuid4().hex[:8]}"
+    p2_id = f"{matchup.name}-p2-{uuid.uuid4().hex[:8]}"
+    elapsed = float(best_meta.get("p1", {}).get("elapsed_secs", 0.0) or 0.0)
+
+    meta_p1 = save_agent(
+        best_p1, p1_id, out_dir, matchup, [],
+        n_episodes, elapsed, game_format, "p1", eval_env_ids,
+        warmup_baseline=warmup_baseline,
+        training_stats={
+            "parallel_seeds": parallel_seeds,
+            "avg_p1_win_rate": summary.avg_p1_win_rate,
+            "best_p1_seed_index": best_p1_idx,
+        },
+    )
+    meta_p2 = save_agent(
+        best_p2, p2_id, out_dir, matchup, [],
+        n_episodes, elapsed, game_format, "p2", eval_env_ids,
+        warmup_baseline=warmup_baseline,
+        training_stats={
+            "parallel_seeds": parallel_seeds,
+            "avg_p2_win_rate": summary.avg_p2_win_rate,
+            "best_p2_seed_index": best_p2_idx,
+        },
+    )
+    meta_p1["training_win_rate"] = summary.avg_p1_win_rate
+    meta_p2["training_win_rate"] = summary.avg_p2_win_rate
+    meta_p1["warmup_baseline"] = warmup_baseline
+    meta_p2["warmup_baseline"] = warmup_baseline
+
+    if cache_store is not None:
+        from agent_cache import talishar_asset_deck_fingerprint  # noqa: PLC0415
+
+        assets = talishar_assets_path()
+        p1_deck_fp = talishar_asset_deck_fingerprint(str(assets), matchup.p1_deck)
+        p2_deck_fp = talishar_asset_deck_fingerprint(str(assets), matchup.p2_deck)
+        cache_store.mark_matchup_converged(
+            p1_fingerprint=p1_deck_fp,
+            p2_fingerprint=p2_deck_fp,
+            p1_hero=matchup.p1_hero,
+            p2_hero=matchup.p2_hero,
+            episodes_completed=n_episodes,
+            target_episodes=n_episodes,
+            p1_win_rate=summary.avg_p1_win_rate,
+        )
+
+    print(
+        f"\n  Parallel-seed train win% (avg over {parallel_seeds}): "
+        f"P1={summary.avg_p1_win_rate:.1%}  P2={summary.avg_p2_win_rate:.1%}"
+    )
+    return {"p1": meta_p1, "p2": meta_p2}
+
+
 def train_matchup(
     matchup: Matchup,
     *,
@@ -1795,7 +1958,29 @@ def train_matchup(
     show_frontend: bool = False,
     frontend_url: Optional[str] = None,
     n_workers: int = 1,
+    parallel_seeds: int = 1,
+    _seed_run_capture: Optional[dict[str, Any]] = None,
+    _skip_cache_converge: bool = False,
+    _force_train: bool = False,
 ) -> dict:
+    if parallel_seeds > 1 and _seed_run_capture is None:
+        return _train_matchup_parallel_seeds(
+            matchup,
+            parallel_seeds=parallel_seeds,
+            base_url=base_url,
+            n_episodes=n_episodes,
+            max_steps=max_steps,
+            out_dir=out_dir,
+            eval_env_ids=eval_env_ids,
+            cache_store=cache_store,
+            seed=seed,
+            game_format=game_format,
+            warmup_episodes=warmup_episodes,
+            warmup_baseline_eval_episodes=warmup_baseline_eval_episodes,
+            show_frontend=show_frontend,
+            frontend_url=frontend_url,
+            n_workers=n_workers,
+        )
     from agent_cache import AgentCacheStore, talishar_asset_deck_fingerprint
     print(f"\n{'=' * 60}")
     print(f"  Matchup : {matchup.name}")
@@ -1835,7 +2020,7 @@ def train_matchup(
         require_p2_agent=True,
         p2_context=p2_cache_ctx,
     )
-    if cached_record is not None:
+    if cached_record is not None and not _force_train:
         p1_bundle = cache_store.bootstrap_player(
             _player_context(
                 matchup,
@@ -2077,7 +2262,8 @@ def train_matchup(
     cache_store.persist_player(p2_bundle)
 
     p1_wr = float(np.mean([1.0 if r > 0 else 0.0 for r in p1_rewards])) if p1_rewards else None
-    if len(p1_rewards) >= n_episodes:
+    p2_wr = float(np.mean([1.0 if r > 0 else 0.0 for r in p2_rewards])) if p2_rewards else None
+    if len(p1_rewards) >= n_episodes and not _skip_cache_converge:
         cache_store.mark_matchup_converged(
             p1_fingerprint=p1_deck_fp,
             p2_fingerprint=p2_deck_fp,
@@ -2095,6 +2281,18 @@ def train_matchup(
         f"timeouts={overall_stats['timeouts']}/{overall_stats['episodes']} "
         f"({overall_stats['timeout_rate'] * 100:.1f}%)"
     )
+    if p1_wr is not None and p2_wr is not None and _seed_run_capture is None:
+        print(f"  Train win%: P1={p1_wr * 100:.1f}  P2={p2_wr * 100:.1f}")
+
+    if _seed_run_capture is not None:
+        _seed_run_capture.update(
+            {
+                "p1_agent": p1_bundle.policy,
+                "p2_agent": p2_bundle.policy,
+                "p1_win_rate": float(p1_wr or 0.0),
+                "p2_win_rate": float(p2_wr or 0.0),
+            }
+        )
 
     p1_id = f"{matchup.name}-p1-{uuid.uuid4().hex[:8]}"
     p2_id = f"{matchup.name}-p2-{uuid.uuid4().hex[:8]}"
@@ -2111,6 +2309,10 @@ def train_matchup(
         warmup_baseline=warmup_baseline,
         training_stats=overall_stats,
     )
+    if p1_wr is not None:
+        meta_p1["training_win_rate"] = p1_wr
+    if p2_wr is not None:
+        meta_p2["training_win_rate"] = p2_wr
     return {"p1": meta_p1, "p2": meta_p2}
 
 
@@ -2136,6 +2338,9 @@ def print_training_summary(summary: list[dict], failed: list[str], out_dir: Path
                 f"  {'package_dir':<28} {r['package_dir']}"
                 f"{timeout_line}"
             )
+            train_wr = r.get("training_win_rate")
+            if train_wr is not None:
+                print(f"  {'train win%':<28} {float(train_wr) * 100:.1f}")
         if isinstance(baseline, dict) and baseline.get("episodes", 0) > 0:
             print(
                 "  "
@@ -2170,6 +2375,7 @@ def run_matchup_training(
     show_frontend: bool = False,
     frontend_url: Optional[str] = None,
     n_workers: int = 1,
+    parallel_seeds: int = 1,
 ) -> tuple[list[dict], list[str]]:
     from agent_cache import AgentCacheStore
 
@@ -2195,6 +2401,7 @@ def run_matchup_training(
                 show_frontend=show_frontend,
                 frontend_url=frontend_url,
                 n_workers=n_workers,
+                parallel_seeds=parallel_seeds,
             )
             summary.append(meta)
         except Exception as exc:

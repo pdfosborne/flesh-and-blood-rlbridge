@@ -66,9 +66,15 @@ def _episode_num_from_dir(path: Path) -> int:
 
 
 def _glob_checkpoint_roots(candidate_dir: Path) -> list[Path]:
+    parallel_roots = sorted(candidate_dir.glob("parallel_seeds/seed_*/p3_*/p1"))
+    if parallel_roots:
+        return parallel_roots
     roots = sorted(candidate_dir.glob("p3_*/p1"))
     if roots:
         return roots
+    parallel_roots = sorted(candidate_dir.glob("parallel_seeds/seed_*/**/p1"))
+    if parallel_roots:
+        return parallel_roots
     return sorted(candidate_dir.glob("*/p1"))
 
 
@@ -128,6 +134,18 @@ def _training_win_series(candidate_dir: Path) -> list[dict[str, Any]]:
 
 
 def _live_training_progress(candidate_dir: Path) -> Optional[dict[str, Any]]:
+    if (candidate_dir / "parallel_seeds").is_dir():
+        _training_root = _SCRIPTS_ROOT / "training"
+        if str(_training_root) not in sys.path:
+            sys.path.insert(0, str(_training_root))
+        from parallel_seed_training import (  # noqa: E402
+            merge_parallel_seed_training_live,
+        )
+
+        live = merge_parallel_seed_training_live(candidate_dir, write=False)
+        if live is not None:
+            return live
+
     live_path = candidate_dir / "play_training_live.json"
     if live_path.is_file():
         data = _read_json(live_path)
@@ -137,6 +155,21 @@ def _live_training_progress(candidate_dir: Path) -> Optional[dict[str, Any]]:
 
 
 def _checkpoint_eval_series(candidate_dir: Path) -> list[dict[str, Any]]:
+    if (candidate_dir / "parallel_seeds").is_dir():
+        _training_root = _SCRIPTS_ROOT / "training"
+        if str(_training_root) not in sys.path:
+            sys.path.insert(0, str(_training_root))
+        from parallel_seed_training import (  # noqa: E402
+            merge_parallel_seed_checkpoint_history,
+        )
+
+        merged = merge_parallel_seed_checkpoint_history(
+            candidate_dir,
+            write=False,
+        )
+        if merged:
+            return merged
+
     history_path = candidate_dir / "checkpoint_eval_history.json"
     if history_path.is_file():
         raw = _read_json(history_path)
@@ -248,6 +281,7 @@ def collect_sideboard_compare_state(out_dir: Path) -> dict[str, Any]:
     default_checkpoint_eval_episodes = int(
         manifest.get("checkpoint_eval_episodes", 0) or 0
     )
+    parallel_seeds = int(manifest.get("parallel_seeds", 1) or 1)
     skip_final_eval = bool(manifest.get("skip_final_eval", False))
     started_at = _parse_started_at(manifest, out_dir)
 
@@ -426,6 +460,11 @@ def collect_sideboard_compare_state(out_dir: Path) -> dict[str, Any]:
             "latest_checkpoint_win_rate": (
                 chart_points[-1]["win_rate"] if chart_points else None
             ),
+            "latest_checkpoint_best_seed": (
+                eval_series[-1].get("best_p1_seed_index")
+                if eval_series and parallel_seeds > 1
+                else None
+            ),
             "final_eval_win_rate": (
                 result.get("final_eval_win_rate") if result else None
             ),
@@ -437,6 +476,7 @@ def collect_sideboard_compare_state(out_dir: Path) -> dict[str, Any]:
             "train_engine_label": train_engine_label,
             "eval_engine_label": eval_engine_label,
             "eval_stability": eval_stability,
+            "parallel_seeds": parallel_seeds,
         })
 
     eta_seconds, eta_label = _estimate_eta(
@@ -481,6 +521,7 @@ def collect_sideboard_compare_state(out_dir: Path) -> dict[str, Any]:
         "max_parallel": int(manifest.get("max_parallel", 1) or 1),
         "checkpoint_interval": manifest.get("checkpoint_interval"),
         "checkpoint_eval_episodes": manifest.get("checkpoint_eval_episodes"),
+        "parallel_seeds": parallel_seeds,
         "cpp_engine_dir": manifest.get("cpp_engine_dir"),
         "complete": summary is not None,
         "winner_id": winner,
@@ -768,8 +809,13 @@ def _render_candidate_card(row: dict[str, Any], *, play_episodes: int) -> str:
 
     train_engine = str(row.get("train_engine_label") or "")
     eval_engine = str(row.get("eval_engine_label") or "")
+    eval_chart_base = (
+        "Best seed checkpoint eval win rate"
+        if int(row.get("parallel_seeds", 1) or 1) > 1
+        else "Checkpoint eval win rate"
+    )
     train_chart_title = _chart_title("Training win rate", train_engine)
-    eval_chart_title = _chart_title("Checkpoint eval win rate", eval_engine)
+    eval_chart_title = _chart_title(eval_chart_base, eval_engine)
 
     chart = _svg_winrate_chart(
         row.get("chart_points") or [],
@@ -802,6 +848,10 @@ def _render_candidate_card(row: dict[str, Any], *, play_episodes: int) -> str:
     ckpt_record = ""
     if ckpt_timeouts is not None:
         ckpt_record = f" · ckpt eval incl. {int(ckpt_timeouts)}T"
+    best_seed = row.get("latest_checkpoint_best_seed")
+    ckpt_seed_hint = ""
+    if best_seed is not None:
+        ckpt_seed_hint = f" · best seed {int(best_seed)}"
     train_record = " · ".join(record_bits)
     train_record_html = (
         f'<span class="train-record">{html.escape(train_record)}{html.escape(ckpt_record)}</span>'
@@ -831,7 +881,7 @@ def _render_candidate_card(row: dict[str, Any], *, play_episodes: int) -> str:
   </section>
   <section class="metrics">
     <div><span class="metric-label">Train win%</span><span class="metric-value">{_pct_text(row.get("play_win_rate"))}</span>{train_record_html}<p class="metric-hint">Self-play P1 vs co-trained P2 on the C++ stub — not fixed-opponent eval.</p></div>
-    <div><span class="metric-label">Checkpoint eval</span><span class="metric-value">{_pct_text(row.get("latest_checkpoint_win_rate"))}</span></div>
+    <div><span class="metric-label">Checkpoint eval</span><span class="metric-value">{_pct_text(row.get("latest_checkpoint_win_rate"))}</span>{html.escape(ckpt_seed_hint) if ckpt_seed_hint else ""}</div>
     {_render_stability_block(row.get("eval_stability"))}
     <div><span class="metric-label">Final eval</span><span class="metric-value">{_pct_text(row.get("final_eval_win_rate"))} {delta_html}</span></div>
   </section>

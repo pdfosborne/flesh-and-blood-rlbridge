@@ -42,8 +42,10 @@ from runscripts._common import (
 )
 
 DEFAULT_NUM_OPTIONS = 4
-DEFAULT_MAX_PARALLEL = 2
+DEFAULT_MAX_PARALLEL = 4
 DEFAULT_PLAY_EPISODES = 10000
+DEFAULT_PARALLEL_SEEDS = 5
+DEFAULT_WORKERS = 16
 DEFAULT_FORMAT = "silver_age"
 
 
@@ -69,8 +71,10 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         help="Checkpoint every N%% of play episodes")
     parser.add_argument("--checkpoint-eval-episodes", type=int, default=100,
         help="C++ eval games with fixed opponent at each checkpoint (0=off)")
+    parser.add_argument("--parallel-seeds", type=int, default=DEFAULT_PARALLEL_SEEDS,
+        help="Independent RNG seeds per candidate (use 1 to disable)")
     parser.add_argument("--out-dir", default=None)
-    parser.add_argument("--workers", type=int, default=None)
+    parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
     parser.add_argument("--play-batch-size", type=int, default=None)
     parser.add_argument("--opponent-deck", default=None,
         help="Talishar Assets deck stem (default: <Opponent>SAGEPrecon when present)")
@@ -113,6 +117,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  Options       : {args.num_options}")
     print(f"  Max parallel  : {args.max_parallel}")
     print(f"  Play episodes : {args.play_episodes}")
+    print(f"  Parallel seeds: {args.parallel_seeds}")
     print(f"  Checkpoints   : every {args.checkpoint_interval_pct:g}%  "
           f"| eval {args.checkpoint_eval_episodes} games @ fixed opponent")
     print(f"  Output        : {out_dir}")
@@ -167,6 +172,7 @@ def main(argv: list[str] | None = None) -> int:
         "--play-episodes", str(args.play_episodes),
         "--checkpoint-interval-pct", str(args.checkpoint_interval_pct),
         "--checkpoint-eval-episodes", str(args.checkpoint_eval_episodes),
+        "--parallel-seeds", str(args.parallel_seeds),
         "--out-dir", str(out_dir),
         "--cache-dir", str(REPO_ROOT / "results" / "agent_cache"),
         "--talishar-url", talishar_url_value,

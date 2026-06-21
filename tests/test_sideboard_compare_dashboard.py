@@ -127,9 +127,11 @@ def test_collect_and_render_dashboard(tmp_path: Path) -> None:
     )
     (swap_dir / "checkpoint_eval_history.json").write_text(
         json.dumps([
-            {"episodes_completed": 25, "p1_win_rate": 0.55, "runtime_backend": "C++ engine"},
-            {"episodes_completed": 50, "p1_win_rate": 0.56, "runtime_backend": "C++ engine"},
-            {"episodes_completed": 75, "p1_win_rate": 0.55, "runtime_backend": "C++ engine"},
+            {"episodes_completed": 10, "p1_win_rate": 0.54, "eval_episodes": 50, "runtime_backend": "C++ engine"},
+            {"episodes_completed": 25, "p1_win_rate": 0.55, "eval_episodes": 50, "runtime_backend": "C++ engine"},
+            {"episodes_completed": 50, "p1_win_rate": 0.56, "eval_episodes": 50, "runtime_backend": "C++ engine"},
+            {"episodes_completed": 75, "p1_win_rate": 0.55, "eval_episodes": 50, "runtime_backend": "C++ engine"},
+            {"episodes_completed": 90, "p1_win_rate": 0.55, "eval_episodes": 50, "runtime_backend": "C++ engine"},
         ]),
         encoding="utf-8",
     )
@@ -166,6 +168,41 @@ def test_collect_and_render_dashboard(tmp_path: Path) -> None:
     stability = swap_row.get("eval_stability") or {}
     assert stability.get("status") == "converged"
     assert stability.get("converged") is True
+
+    # Parallel seeds: dashboard picks best seed win% per checkpoint.
+    parallel_dir = candidates_dir / "parallel_swap"
+    for seed_idx, rate in [(0, 0.52), (1, 0.61)]:
+        seed_dir = parallel_dir / "parallel_seeds" / f"seed_{seed_idx}"
+        seed_dir.mkdir(parents=True)
+        (seed_dir / "checkpoint_eval_history.json").write_text(
+            json.dumps([{
+                "episodes_completed": 50,
+                "p1_win_rate": rate,
+                "p1_wins": int(rate * 100),
+                "losses": 100 - int(rate * 100),
+                "draws": 0,
+                "timeouts": 0,
+                "eval_episodes": 50,
+            }]),
+            encoding="utf-8",
+        )
+    manifest["candidates"].append({
+        "candidate_id": "parallel_swap",
+        "label": "Parallel seeds",
+        "game_deck": {"a_red": 40},
+        "swaps": [],
+    })
+    manifest["parallel_seeds"] = 5
+    (out_dir / "candidates_manifest.json").write_text(
+        json.dumps(manifest),
+        encoding="utf-8",
+    )
+    state_parallel = collect_sideboard_compare_state(out_dir)
+    parallel_row = next(
+        c for c in state_parallel["candidates"] if c["candidate_id"] == "parallel_swap"
+    )
+    assert parallel_row["latest_checkpoint_win_rate"] == pytest.approx(0.61)
+    assert parallel_row["latest_checkpoint_best_seed"] == 1
 
     html = render_sideboard_compare_html(state, auto_refresh_seconds=5.0)
     assert "Sideboard comparison dashboard" in html
