@@ -38,6 +38,7 @@ from fab_tui.runner import (
     build_cpp_engine_for_spec,
     cpp_build_inputs_for_spec,
     discover_cpp_engine_dir,
+    ensure_cpp_engine_for_spec,
     fetch_fabrary_deck,
     run_eval_dashboard,
     run_full_pipeline,
@@ -449,7 +450,21 @@ def _show_results_summary(results_path: Path) -> None:
             wins = int(final.get("wins", 0))
             losses = int(final.get("losses", 0))
             draws = int(final.get("draws", 0))
-            table.add_row(label, f"{rate * 100:.1f}% ({wins}W/{losses}L/{draws}D)")
+            loss_pct = final.get("loss_pct")
+            draw_pct = final.get("draw_pct")
+            cell = f"{rate * 100:.1f}% ({wins}W/{losses}L/{draws}D)"
+            if loss_pct is not None and draw_pct is not None:
+                cell += f"  loss {loss_pct}%  draw {draw_pct}%"
+            hp_chart = final.get("hp_chart")
+            if hp_chart:
+                cell += f"\n[dim]HP: {hp_chart}[/dim]"
+            deck_json = final.get("matchup_deck_json")
+            deck_image = final.get("matchup_deck_image")
+            if deck_json:
+                cell += f"\n[dim]Deck: {deck_json}[/dim]"
+            if deck_image:
+                cell += f"\n[dim]Sheet: {deck_image}[/dim]"
+            table.add_row(label, cell)
         else:
             rates = player.get("win_rates") or []
             table.add_row(label, f"training: {rates[-1] if rates else 'n/a'}")
@@ -504,22 +519,14 @@ def wizard_new_experiment(env: EnvironmentSettings) -> None:
 
     cpp_dir: str | None = None
     if spec.build_cpp_engine:
-        deck1, deck2, _, _ = cpp_build_inputs_for_spec(spec, env)
-        existing = discover_cpp_engine_dir(
-            deck1, deck2, assets_path=env.assets_path
-        )
-        if existing is not None:
-            console.print(f"[green]Using C++ engine: {existing}[/green]")
-            cpp_dir = str(existing)
-        elif Confirm.ask("No cached engine found. Build now?", default=True):
-            rc = build_cpp_engine_for_spec(spec, env)
-            if rc == 0:
-                found = discover_cpp_engine_dir(
-                    deck1, deck2, assets_path=env.assets_path
-                )
-                cpp_dir = str(found) if found else None
-            else:
-                console.print("[yellow]C++ build failed — continuing with HTTP Talishar.[/yellow]")
+        cpp_dir = ensure_cpp_engine_for_spec(spec, env, build=True)
+        if cpp_dir:
+            console.print(f"[green]C++ engine ready: {cpp_dir}[/green]")
+        else:
+            console.print(
+                "[yellow]C++ engine unavailable — play training will use HTTP Talishar "
+                "(or retry build manually).[/yellow]"
+            )
 
     console.print("\n[bold]Running training pipeline...[/bold]\n")
     rc = run_full_pipeline(spec, env, cpp_engine_dir=cpp_dir)

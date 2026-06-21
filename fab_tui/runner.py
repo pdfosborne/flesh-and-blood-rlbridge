@@ -117,26 +117,18 @@ def build_cpp_engine(
     deck1_json: Path | None = None,
     deck2_json: Path | None = None,
 ) -> int:
-    deck1 = _resolve_deck_stem(deck1, env.assets_path)
-    deck2 = _resolve_deck_stem(deck2, env.assets_path)
-    cmd = [
-        _python(),
-        str(SCRIPTS_CPP / "build_cpp_engine_for_matchup.py"),
-        "--deck1",
+    if str(SCRIPTS_TRAINING) not in sys.path:
+        sys.path.insert(0, str(SCRIPTS_TRAINING))
+    from cpp_engine_matchup import build_cpp_engine as _build  # noqa: PLC0415
+
+    return _build(
         deck1,
-        "--deck2",
         deck2,
-        "--talishar-src",
-        str(REPO_ROOT / "Talishar"),
-        "--talishar-url",
-        env.talishar_url,
-        "--no-server",
-    ]
-    if deck1_json and deck1_json.is_file():
-        cmd.extend(["--deck1-json", str(deck1_json)])
-    if deck2_json and deck2_json.is_file():
-        cmd.extend(["--deck2-json", str(deck2_json)])
-    return run_streaming(cmd)
+        assets_path=env.assets_path,
+        talishar_url=env.talishar_url,
+        deck1_json=deck1_json,
+        deck2_json=deck2_json,
+    )
 
 
 def build_cpp_engine_for_spec(spec: ExperimentSpec, env: EnvironmentSettings) -> int:
@@ -197,11 +189,11 @@ def run_eval_dashboard(spec: EvalSpec, env: EnvironmentSettings) -> int:
     return run_streaming(cmd)
 
 
-def run_runscript(script_name: str) -> int:
+def run_runscript(script_name: str, *script_args: str) -> int:
     script = RUNSCRIPTS_ROOT / script_name
     if not script.is_file():
         raise FileNotFoundError(f"Runscript not found: {script}")
-    return run_streaming([_python(), str(script)])
+    return run_streaming([_python(), str(script), *script_args])
 
 
 def discover_cpp_engine_dir(
@@ -212,30 +204,47 @@ def discover_cpp_engine_dir(
     deck1_json: Path | None = None,
     deck2_json: Path | None = None,
 ) -> Path | None:
-    sys.path.insert(0, str(REPO_ROOT / "src"))
-    from flesh_and_blood_rlbridge.cpp_engine_environment import get_engine_dir, is_cpp_engine_available
+    if str(SCRIPTS_TRAINING) not in sys.path:
+        sys.path.insert(0, str(SCRIPTS_TRAINING))
+    from cpp_engine_matchup import discover_cpp_engine_dir as _discover  # noqa: PLC0415
 
-    if assets_path:
-        deck1 = _resolve_deck_stem(deck1, assets_path)
-        deck2 = _resolve_deck_stem(deck2, assets_path)
+    assets = assets_path or str(REPO_ROOT / "Talishar" / "Assets")
+    return _discover(
+        deck1,
+        deck2,
+        assets_path=assets,
+        deck1_json=deck1_json,
+        deck2_json=deck2_json,
+    )
 
-    engine_dir = get_engine_dir(deck1, deck2)
-    if is_cpp_engine_available(engine_dir):
-        return engine_dir
 
-    # Hashed builds include deck JSON in the input hash — try listing cache.
-    if deck1_json or deck2_json:
-        cache_root = REPO_ROOT / "results" / "cpp_engines"
-        prefix = f"{deck1}_vs_{deck2}-"
-        if cache_root.is_dir():
-            for candidate in sorted(
-                cache_root.glob(f"{prefix}*"),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            ):
-                if candidate.is_dir() and is_cpp_engine_available(candidate):
-                    return candidate
-    return None
+def ensure_cpp_engine_for_spec(
+    spec: ExperimentSpec,
+    env: EnvironmentSettings,
+    *,
+    build: bool = True,
+) -> str | None:
+    """Discover or build the C++ engine for *spec*'s matchup."""
+    if str(SCRIPTS_TRAINING) not in sys.path:
+        sys.path.insert(0, str(SCRIPTS_TRAINING))
+    from cpp_engine_matchup import ensure_cpp_engine_for_matchup  # noqa: PLC0415
+
+    deck1, deck2, deck1_json, deck2_json = cpp_build_inputs_for_spec(spec, env)
+    if spec.opponent_mode == "preset":
+        deck2_key = spec.opponent_deck
+    elif spec.opponent_mode == "mirror":
+        deck2_key = spec.hero_id
+    else:
+        deck2_key = spec.p2_hero_id
+    return ensure_cpp_engine_for_matchup(
+        spec.hero_id,
+        deck2_key,
+        assets_path=env.assets_path,
+        talishar_url=env.talishar_url,
+        deck1_json=deck1_json,
+        deck2_json=deck2_json,
+        build=build,
+    )
 
 
 def run_matchup_simulation(
@@ -314,8 +323,6 @@ def run_matchup_simulation(
         p2_meta.hero_id,
         "--deckbuild-episodes",
         "0",
-        "--sideboard-episodes",
-        str(spec.sideboard_episodes),
         "--play-episodes",
         str(spec.play_episodes),
         "--warmup-episodes",

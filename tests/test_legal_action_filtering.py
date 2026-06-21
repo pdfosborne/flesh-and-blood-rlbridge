@@ -11,6 +11,7 @@ from flesh_and_blood_rlbridge.legal_action_filter import filter_legal_actions
 from flesh_and_blood_rlbridge.talishar_default_policy import (
     _apply_block_phase_filter,
     _card_cost,
+    _is_affordable_arsenal_play,
     _is_affordable_hand_play,
     _strip_revert_actions,
 )
@@ -243,6 +244,168 @@ def test_is_affordable_hand_play_helper() -> None:
         "card_id": "infecting_shot_red",
     }
     assert not _is_affordable_hand_play(action, state)
+
+
+def test_is_affordable_arsenal_play_requires_hand_pitch() -> None:
+    state = {
+        "playerPitchCount": 0,
+        "playerHand": [],
+        "playerArse": [
+            {
+                "action": 5,
+                "actionDataOverride": "0",
+                "cardNumber": "adrenaline_rush_red",
+            }
+        ],
+    }
+    action = {
+        "action_code": 5,
+        "button_input": "0",
+        "zone": "arsenal",
+        "card_id": "adrenaline_rush_red",
+        "label": "Adrenaline Rush",
+    }
+    assert not _is_affordable_arsenal_play(action, state)
+
+
+def test_is_affordable_arsenal_play_with_enough_hand_pitch() -> None:
+    state = {
+        "playerPitchCount": 0,
+        "playerHand": [
+            {
+                "action": 27,
+                "actionDataOverride": "0",
+                "cardNumber": "nimblism_blue",
+            },
+            {
+                "action": 27,
+                "actionDataOverride": "1",
+                "cardNumber": "nimblism_blue",
+            },
+        ],
+        "playerArse": [
+            {
+                "action": 5,
+                "actionDataOverride": "0",
+                "cardNumber": "adrenaline_rush_red",
+            }
+        ],
+    }
+    action = {
+        "action_code": 5,
+        "button_input": "0",
+        "zone": "arsenal",
+        "card_id": "adrenaline_rush_red",
+        "label": "Adrenaline Rush",
+    }
+    assert _is_affordable_arsenal_play(action, state)
+
+
+def test_filter_strips_unaffordable_arsenal_play_with_empty_hand() -> None:
+    state = {
+        "turnPhase": {"turnPhase": "M"},
+        "playerPitchCount": 0,
+        "playerHand": [],
+        "playerArse": [
+            {
+                "action": 5,
+                "actionDataOverride": "0",
+                "cardNumber": "adrenaline_rush_red",
+            }
+        ],
+    }
+    legal = [
+        {
+            "action_code": 5,
+            "button_input": "0",
+            "zone": "arsenal",
+            "card_id": "adrenaline_rush_red",
+            "label": "Adrenaline Rush",
+        },
+        {
+            "action_code": 99,
+            "button_input": "",
+            "zone": "button",
+            "label": "Pass",
+        },
+    ]
+
+    filtered = filter_legal_actions(state, legal)
+    codes = {a["action_code"] for a in filtered}
+
+    assert 5 not in codes
+    assert 99 in codes
+
+
+def test_filter_keeps_affordable_arsenal_play_when_hand_can_pitch() -> None:
+    state = {
+        "turnPhase": {"turnPhase": "M"},
+        "playerPitchCount": 0,
+        "playerHand": [
+            {
+                "action": 27,
+                "actionDataOverride": "0",
+                "cardNumber": "nimblism_blue",
+            },
+            {
+                "action": 27,
+                "actionDataOverride": "1",
+                "cardNumber": "nimblism_blue",
+            },
+        ],
+        "playerArse": [
+            {
+                "action": 5,
+                "actionDataOverride": "0",
+                "cardNumber": "adrenaline_rush_red",
+            }
+        ],
+    }
+    legal = [
+        {
+            "action_code": 5,
+            "button_input": "0",
+            "zone": "arsenal",
+            "card_id": "adrenaline_rush_red",
+            "label": "Adrenaline Rush",
+        },
+        {
+            "action_code": 99,
+            "button_input": "",
+            "zone": "button",
+            "label": "Pass",
+        },
+    ]
+
+    filtered = filter_legal_actions(state, legal)
+    codes = {a["action_code"] for a in filtered}
+
+    assert 5 in codes
+
+
+def test_is_affordable_hand_play_counts_floating_resources() -> None:
+    state = {
+        "playerPitchCount": 1,
+        "playerHand": [
+            {
+                "action": 27,
+                "actionDataOverride": "0",
+                "cardNumber": "infecting_shot_red",
+            },
+            {
+                "action": 27,
+                "actionDataOverride": "1",
+                "cardNumber": "nimblism_red",
+            },
+        ],
+    }
+    action = {
+        "action_code": 27,
+        "button_input": "0",
+        "zone": "hand",
+        "card_id": "infecting_shot_red",
+    }
+    assert _is_affordable_hand_play(action, state)
 
 
 def test_cpp_filters_unaffordable_play_using_card_db() -> None:

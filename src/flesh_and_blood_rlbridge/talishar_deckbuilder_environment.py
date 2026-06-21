@@ -42,8 +42,8 @@ from rlbridge.protocol.messages import RenderResult, ResetResult, StepResult, Te
 
 from .talishar_engine_environment import (
     TalisharEngineEnvironment,
-    run_talishar_eval_episode,
-    talishar_deck_player_won,
+    run_matchup_win_rate_eval,
+    try_create_cpp_eval_environment,
 )
 from .talishar_oracle import TalisharConnectionError
 from .talishar_sideboard_environment import TalisharSideboardEnvironment
@@ -245,7 +245,11 @@ class TalisharDeckBuilderEnvironment(rlbridgeEnvironment):
         max_build_steps: int = 200,
         step_penalty: float = 0.005,
         render_mode: Optional[str] = None,
+        use_cpp_engine: bool = True,
         cpp_engine_dir: Optional[str] = None,
+        cpp_engine_cache_dir: Optional[str] = None,
+        cpp_engine_deck1: Optional[str] = None,
+        cpp_engine_deck2: Optional[str] = None,
     ) -> None:
         self._hero_id = hero_id
         self._hero_class = hero_class
@@ -261,7 +265,11 @@ class TalisharDeckBuilderEnvironment(rlbridgeEnvironment):
         self._step_penalty = step_penalty
         self._max_build_steps = max_build_steps
         self._render_mode = render_mode
+        self._use_cpp_engine = use_cpp_engine
         self._cpp_engine_dir: Optional[str] = cpp_engine_dir
+        self._cpp_engine_cache_dir = cpp_engine_cache_dir
+        self._cpp_engine_deck1 = cpp_engine_deck1
+        self._cpp_engine_deck2 = cpp_engine_deck2
 
         # Assets directory: used for reading the hero deck header and writing
         # temporary evaluation deck files.
@@ -564,6 +572,11 @@ class TalisharDeckBuilderEnvironment(rlbridgeEnvironment):
         out_path.write_text(content, encoding="utf-8")
         return out_path
 
+    def _cpp_lookup_decks(self) -> tuple[str, str]:
+        lookup1 = self._cpp_engine_deck1 or self._hero_id
+        lookup2 = self._cpp_engine_deck2 or self._opponent_deck_name
+        return lookup1, lookup2
+
     def _evaluate_deck(self) -> float:
         """Evaluate the current card pool via the sideboard → play pipeline.
 
@@ -573,97 +586,72 @@ class TalisharDeckBuilderEnvironment(rlbridgeEnvironment):
            The sideboard agent (``self._sideboard_agent``) is used when available;
            otherwise actions are sampled randomly.
         2. Play ``num_eval_games`` games with the best-selected deck and return
-           the win rate.  When ``cpp_engine_dir`` is set the C++ engine is used
-           (fast, no HTTP); otherwise Talishar HTTP is used.
+           the win rate.  When a compiled C++ engine is available for this
+           matchup it is used (fast, no HTTP); otherwise Talishar HTTP is used.
 
         Returns the win rate in ``[0.0, 1.0]``.  Returns ``0.5`` (neutral) if
         ``num_eval_games == 0``, the server is unreachable, or evaluation fails.
         """
-        # When num_eval_games == 0 skip internal eval — return neutral.
         if self._num_eval_games == 0:
             return 0.5
 
-        # ── C++ fast-path (no HTTP, no deck file) ──────────────────────────
-        if self._cpp_engine_dir is not None:
-            from .cpp_engine_environment import CppEngineEnvironment  # noqa: PLC0415
-            wins = 0
+        lookup1, lookup2 = self._cpp_lookup_decks()
+        cpp_env = try_create_cpp_eval_environment(
+            base_url=self._base_url,
+            game_format=self._game_format,
+            lookup_deck1=lookup1,
+            lookup_deck2=lookup2,
+            cpp_engine_dir=self._cpp_engine_dir,
+            cpp_engine_cache_dir=self._cpp_engine_cache_dir,
+            max_turns=60,
+            use_cpp_engine=self._use_cpp_engine,
+        )
+        if cpp_env is not None:
             try:
-                for _ in range(self._num_eval_games):
-                    cpp_env = CppEngineEnvironment(
-                        engine_dir=self._cpp_engine_dir, max_turns=2000
-                    )
-                    try:
-                        cpp_env.reset()
-                        done = False
-                        final_reward = 0.0
-                        while not done:
-                            sr = cpp_env.step(cpp_env.sample_action())
-                            done = sr.terminated or sr.truncated
-                            if done:
-                                final_reward = sr.reward
-                        if final_reward > 0.0:
-                            wins += 1
-                    finally:
-                        cpp_env.close()
+                return run_matchup_win_rate_eval(
+                    cpp_env,
+                    self._num_eval_games,
+                    eval_p1_agent=self._eval_p1_agent,
+                    eval_p2_agent=self._eval_p2_agent,
+                    max_steps=60,
+                    deck_player_id=1,
+                )
             except Exception:  # noqa: BLE001
                 return 0.5
-            return wins / self._num_eval_games
+            finally:
+                cpp_env.close()
 
-        # ── Talishar HTTP path ──────────────────────────────────────────────
+        if self._cpp_engine_dir is not None:
+            return 0.5
+
         game_deck = self._run_sideboard_phase()
 
         deck_name = f"rl_deck_{uuid.uuid4().hex[:12]}"
         deck_file: Optional[Path] = None
-        wins = 0
 
         try:
             deck_file = self._write_game_deck_file(deck_name, game_deck)
 
-            p1_policy = self._eval_p1_agent
-            p2_policy = self._eval_p2_agent
-            for _ in range(self._num_eval_games):
-                env = TalisharEngineEnvironment(
-                    base_url=self._base_url,
-                    game_format=self._game_format,
-                    local_deck_name=deck_name,
-                    opponent_deck_name=self._opponent_deck_name,
-                    max_turns=60,
-                    self_play=True,
+            env = TalisharEngineEnvironment(
+                base_url=self._base_url,
+                game_format=self._game_format,
+                local_deck_name=deck_name,
+                opponent_deck_name=self._opponent_deck_name,
+                max_turns=60,
+                self_play=True,
+                use_cpp_engine=False,
+            )
+            try:
+                return run_matchup_win_rate_eval(
+                    env,
+                    self._num_eval_games,
+                    eval_p1_agent=self._eval_p1_agent,
+                    eval_p2_agent=self._eval_p2_agent,
+                    max_steps=60,
+                    deck_player_id=1,
                 )
-                try:
-                    if p1_policy is not None:
-                        out = run_talishar_eval_episode(
-                            env,
-                            p1_policy,
-                            max_steps=60,
-                            p2_agent=p2_policy,
-                            deck_player_id=1,
-                        )
-                        if out.get("deck_player_won") is True:
-                            wins += 1
-                    else:
-                        reset_result = env.reset()
-                        obs_data = json.loads(reset_result.observation)
-                        step_result: Optional[StepResult] = None
-                        done = False
-                        while not done:
-                            step_result = env.step(env.sample_action())
-                            done = step_result.terminated or step_result.truncated
-                            if not done:
-                                obs_data = json.loads(step_result.observation)
-                        if talishar_deck_player_won(
-                            obs_data,
-                            deck_player_id=1,
-                            terminated=bool(
-                                step_result is not None and step_result.terminated
-                            ),
-                            truncated=bool(
-                                step_result is not None and step_result.truncated
-                            ),
-                        ):
-                            wins += 1
-                finally:
-                    env.close()
+            finally:
+                env.close()
 
         except TalisharConnectionError:
             return 0.5
@@ -672,8 +660,6 @@ class TalisharDeckBuilderEnvironment(rlbridgeEnvironment):
         finally:
             if deck_file is not None and deck_file.exists():
                 deck_file.unlink(missing_ok=True)
-
-        return wins / self._num_eval_games
 
     def _run_sideboard_phase(self) -> dict[str, int]:
         """Run the sideboard environment to find the best game deck from the pool.
@@ -698,6 +684,11 @@ class TalisharDeckBuilderEnvironment(rlbridgeEnvironment):
                 opponent_deck_name=self._opponent_deck_name,
                 base_url=self._base_url,
                 talishar_assets_path=self._assets_path,
+                use_cpp_engine=self._use_cpp_engine,
+                cpp_engine_dir=self._cpp_engine_dir,
+                cpp_engine_cache_dir=self._cpp_engine_cache_dir,
+                cpp_engine_deck1=self._cpp_engine_deck1,
+                cpp_engine_deck2=self._cpp_engine_deck2,
             )
         except Exception:  # noqa: BLE001
             return self._greedy_game_deck()

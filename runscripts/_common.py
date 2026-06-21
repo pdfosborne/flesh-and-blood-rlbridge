@@ -254,8 +254,21 @@ def print_final_eval(label: str, player: Mapping[str, Any]) -> None:
         losses = int(final_eval.get("losses", 0))
         draws = int(final_eval.get("draws", 0))
         pct = round(win_rate * 100, 1)
+        loss_pct = final_eval.get("loss_pct")
+        draw_pct = final_eval.get("draw_pct")
         record = f"{wins}W/{losses}L/{draws}D"
         print(f"    Final eval win%    : {pct}%  ({record})")
+        if loss_pct is not None and draw_pct is not None:
+            print(f"    Final eval loss%   : {loss_pct}%   draw%: {draw_pct}%")
+        hp_chart = final_eval.get("hp_chart")
+        if hp_chart:
+            print(f"    Final eval HP chart: {hp_chart}")
+        deck_json = final_eval.get("matchup_deck_json")
+        deck_image = final_eval.get("matchup_deck_image")
+        if deck_json:
+            print(f"    Matchup deck JSON   : {deck_json}")
+        if deck_image:
+            print(f"    Matchup deck sheet  : {deck_image}")
 
     gif_path = player.get("final_eval_gif")
     if gif_path:
@@ -328,6 +341,12 @@ def optional_train_workers_arg(play_workers: int | None) -> list[str]:
     return ["--workers", str(play_workers)]
 
 
+def optional_play_batch_size_arg(play_batch_size: int | None) -> list[str]:
+    if play_batch_size is None:
+        return []
+    return ["--play-batch-size", str(play_batch_size)]
+
+
 def optional_cpp_engine_arg(engine_dir: Path | None) -> list[str]:
     if engine_dir is None:
         return []
@@ -343,3 +362,126 @@ def load_results_json(path: Path) -> dict[str, Any] | None:
 def extend_if_present(args: list[str], flag: str, value: str | None) -> None:
     if value:
         args.extend([flag, value])
+
+
+HERO_CLASSES: dict[str, str] = {
+    "briar": "Elementalist",
+    "dorinthea": "Warrior",
+    "dorinthea_ironsong": "Warrior",
+    "kayo": "Brute",
+    "viserai": "Runeblade",
+    "iyslander": "Elementalist",
+    "dash": "Mechanologist",
+    "fai": "Ninja",
+    "azalea": "Ranger",
+    "boltyn": "Light",
+    "enigma": "Illusionist",
+    "ira": "Ninja",
+    "aurora": "Runeblade",
+}
+
+DEFAULT_FABRARY_SLUGS: dict[str, str] = {
+    "aurora": "01KST88R7JVEQ73M82ZA0PJ9RN",
+    "briar": "01KGZPKM6NBVNFYEEWWS4SGFQ7",
+}
+
+
+def hero_slug(name: str) -> str:
+    return name.strip().lower().replace("-", "_").split("_")[0]
+
+
+def hero_class_for(hero_id: str) -> str:
+    token = hero_slug(hero_id)
+    return HERO_CLASSES.get(hero_id, HERO_CLASSES.get(token, "Warrior"))
+
+
+def export_precon_deck_json(
+    deck_name: str,
+    assets_path: Path,
+    out_path: Path,
+    *,
+    game_format: str = "silver_age",
+) -> Path:
+    """Convert a Talishar ``Assets/<deck>.txt`` precon to rlbridge deck JSON."""
+    asset_file = assets_path / f"{deck_name}.txt"
+    if not asset_file.is_file():
+        raise FileNotFoundError(f"Precon deck not found: {asset_file}")
+
+    lines = [
+        line.strip()
+        for line in asset_file.read_text(encoding="utf-8", errors="replace").splitlines()
+        if line.strip()
+    ]
+    setup = lines[0].split() if lines else []
+    hero_id = setup[0] if setup else deck_name
+    equipment_header = " ".join(setup)
+    deck: dict[str, int] = {}
+    for card in " ".join(lines[1:]).split():
+        card_id = card.strip()
+        if card_id:
+            deck[card_id] = deck.get(card_id, 0) + 1
+
+    payload = {
+        "name": deck_name,
+        "hero_id": hero_id,
+        "hero_class": hero_class_for(hero_id),
+        "format": normalize_pipeline_format(game_format),
+        "equipment_header": equipment_header,
+        "deck": deck,
+        "sideboard": {},
+    }
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return out_path
+
+
+def resolve_hero_starting_deck(
+    hero: str,
+    *,
+    deck_source: str | None,
+    deck_dir: Path,
+    assets_path: Path,
+    label: str,
+    game_format: str = "silver_age",
+) -> Path | None:
+    """Fetch or export a warm-start deck JSON for *hero*."""
+    token = hero_slug(hero)
+    deck_dir.mkdir(parents=True, exist_ok=True)
+
+    if deck_source:
+        info = resolve_deck_source(deck_source, deck_dir)
+        if info.slug:
+            fetch_fabrary_deck(info.slug, info.local_path, label)
+        return info.local_path if info.local_path.is_file() else None
+
+    default_path = deck_dir / f"{token}_warmstart.json"
+    if default_path.is_file():
+        print(f"  [{label}] Using cached deck -> {default_path}")
+        return default_path
+
+    slug = DEFAULT_FABRARY_SLUGS.get(token)
+    if slug and fetch_fabrary_deck(slug, default_path, label):
+        return default_path
+
+    if str(REPO_ROOT / "src") not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT / "src"))
+    from flesh_and_blood_rlbridge.talishar_deck_assets import SAGE_PRECON_BY_HERO
+
+    precon = SAGE_PRECON_BY_HERO.get(token)
+    if precon:
+        print(f"  [{label}] Exporting Talishar precon {precon} ...")
+        try:
+            export_precon_deck_json(
+                precon,
+                assets_path,
+                default_path,
+                game_format=game_format,
+            )
+            print(f"  [{label}] Saved -> {default_path}")
+            return default_path
+        except FileNotFoundError as exc:
+            print(f"  [{label}] WARNING: {exc}")
+            return None
+
+    print(f"  [{label}] WARNING: no FaBrary slug or SAGE precon for hero '{hero}'")
+    return None

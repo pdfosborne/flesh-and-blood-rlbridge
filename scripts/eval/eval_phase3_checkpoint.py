@@ -35,15 +35,15 @@ from flesh_and_blood_rlbridge.cpp_engine_environment import (  # noqa: E402
 )
 from rl_agents.ppo import PPOAgent  # noqa: E402
 from check_cpp_vs_talishar_parity import run_parity_check  # noqa: E402
-from train_full_pipeline import (  # noqa: E402
+from train_play import (  # noqa: E402
     _ensure_playwright,
     _frames_to_gif,
     _infer_render_outcome,
     _prepare_render_dir,
     _save_end_state_frame,
     _save_state_image,
-    _write_deck_file,
 )
+from train_pipeline_common import _write_deck_file  # noqa: E402
 
 
 @dataclass

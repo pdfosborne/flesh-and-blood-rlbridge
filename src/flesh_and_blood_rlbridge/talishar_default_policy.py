@@ -48,7 +48,7 @@ _REVERT_MODE_CODES: frozenset[int] = frozenset({
 # Pass immediately — no useful action to take, or the choice is optional.
 _CONFIRM_PHASES: frozenset[str] = frozenset({
     # Combat window responses — always pass (don't hold priority)
-    "instant", "a", "ars", "chain",
+    "instant", "a", "chain",
     # Trigger / effect ordering — pass accepts default order
     "ordertriggers", "startturn", "endphase",
     # Optional "may choose" phases — pass = decline
@@ -257,6 +257,47 @@ def _get_phase(state: dict[str, Any]) -> str:
     return _normalize(tp)
 
 
+# Phases where Talishar ``CanPassPhase()`` returns 0 (CoreLogic.php).
+# mode=99 is silently ignored — agents must pick a real action.
+_CANNOT_PASS_PHASES: frozenset[str] = frozenset({
+    "p",
+    "choosedeck",
+    "choosetheirdeck",
+    "handtopbottom",
+    "choosecombatchain",
+    "choosecharacter",
+    "choosehand",
+    "choosehandcancel",
+    "multichoosediscard",
+    "choosediscardcancel",
+    "choosearsenal",
+    "choosediscard",
+    "multichoosehand",
+    "choosemultizone",
+    "choosebanish",
+    "multichoosebanish",
+    "buttoninputnopass",
+    "choosefirstplayer",
+    "multichoosedeck",
+    "choosepermanent",
+    "multichoosetext",
+    "choosemysoul",
+    "choosemyaura",
+    "choosecard",
+    "choosecardid",
+    "over",
+    "buttoninput",
+    "multichoosetheirdiscard",
+})
+
+
+def can_pass_phase(state: dict[str, Any]) -> bool:
+    """Return whether Talishar will accept mode=99 (Pass) in this state."""
+    if "canPassPhase" in state:
+        return bool(state.get("canPassPhase"))
+    return _get_phase(state) not in _CANNOT_PASS_PHASES
+
+
 def _match_action_card(
     action: dict[str, Any],
     state: dict[str, Any],
@@ -409,11 +450,27 @@ def _card_defense(
     return 0
 
 
+def _play_resource_budget(
+    state: dict[str, Any],
+    *,
+    exclude_card_pitch: int = 0,
+) -> int:
+    """Resources available to pay for a play: floated pool plus hand pitch.
+
+    When playing from hand, exclude the played card's pitch value because that
+    card is being played, not pitched.
+    """
+    floating = _to_int(state.get("playerPitchCount", 0), 0)
+    hand_cards = [c for c in state.get("playerHand", []) if isinstance(c, dict)]
+    hand_pitch = sum(_card_pitch_value(c) for c in hand_cards)
+    return floating + hand_pitch - exclude_card_pitch
+
+
 def _is_affordable_hand_play(
     action: dict[str, Any],
     state: dict[str, Any],
 ) -> bool:
-    """Return True when a hand play can be paid with other hand cards."""
+    """Return True when a hand play can be paid with pool + other hand cards."""
     zone = _normalize(action.get("zone", ""))
     code = _to_int(action.get("action_code", 0))
     if zone != "hand" or code != 27:
@@ -424,11 +481,30 @@ def _is_affordable_hand_play(
     if cost <= 0:
         return True
 
-    hand_cards = [c for c in state.get("playerHand", []) if isinstance(c, dict)]
-    total_pitch = sum(_card_pitch_value(c) for c in hand_cards)
     card_pitch = _card_pitch_value(card, action)
-    available = total_pitch - card_pitch
-    return cost <= available
+    return cost <= _play_resource_budget(state, exclude_card_pitch=card_pitch)
+
+
+def _is_affordable_arsenal_play(
+    action: dict[str, Any],
+    state: dict[str, Any],
+) -> bool:
+    """Return True when an arsenal play can be paid from hand pitch + pool.
+
+    The arsenal card itself is not pitched; the full hand (and any floated
+    resources) must cover the play cost.
+    """
+    zone = _normalize(action.get("zone", ""))
+    code = _to_int(action.get("action_code", 0))
+    if zone != "arsenal" or code != 5:
+        return True
+
+    card = _match_action_card(action, state)
+    cost = _card_cost(card, action)
+    if cost <= 0:
+        return True
+
+    return cost <= _play_resource_budget(state)
 
 
 def _is_hand_block_action(action: dict[str, Any]) -> bool:
@@ -566,6 +642,40 @@ def choose_talishar_action_index(
 
     if not non_pass:
         return pass_index
+
+    # ── End-of-turn arsenal (ARS) — pick a hand card to add to arsenal ───────
+    if phase == "ars":
+        ars_candidates = [
+            i for i in non_pass
+            if _normalize(legal_actions[i].get("zone", "")) == "hand"
+            and _to_int(legal_actions[i].get("action_code", 0)) == 4
+        ]
+        if ars_candidates:
+            zone_cache_ars: dict[str, list] = {
+                z: state.get(sk, []) for z, sk in _ZONE_KEY_MAP.items()
+            }
+            def _ars_pitch_score(idx: int) -> int:
+                card = _match_action_card(legal_actions[idx], state, zone_cache_ars)
+                return _card_pitch_value(legal_actions[idx], card)
+            return max(ars_candidates, key=_ars_pitch_score)
+        return pass_index
+
+    # ── Mandatory popup pick from arsenal zone (CHOOSEARSENAL) ─────────────
+    if phase == "choosearsenal":
+        popup_ars = [
+            i for i in non_pass
+            if legal_actions[i].get("zone") in ("popup", "arsenal")
+        ]
+        if popup_ars:
+            return popup_ars[0]
+        hand_ars = [
+            i for i in non_pass
+            if _normalize(legal_actions[i].get("zone", "")) == "hand"
+            and _to_int(legal_actions[i].get("action_code", 0)) == 16
+        ]
+        if hand_ars:
+            return hand_ars[0]
+        return non_pass[0]
 
     # ── 1. Confirm phases ────────────────────────────────────────────────────
     if phase in _CONFIRM_PHASES:

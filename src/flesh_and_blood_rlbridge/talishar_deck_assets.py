@@ -6,6 +6,7 @@ from pathlib import Path
 
 # SAGE precon decks (hero slug → Assets file stem)
 SAGE_PRECON_BY_HERO: dict[str, str] = {
+    "aurora": "AuroraSAGEPrecon",
     "briar": "BriarSAGEPrecon",
     "dorinthea": "DorintheSAGEPrecon",
     "kayo": "KayoSAGEPrecon",

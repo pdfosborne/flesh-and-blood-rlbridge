@@ -1084,12 +1084,12 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                     }
                 )
 
-        # Always guarantee at least one pass action in the legal action list.
-        # This ensures the policy can always choose to end its priority window
-        # (e.g. confirm equipment selection) even when Talishar sends no explicit
-        # pass button for that phase.
-        # NOTE: 10000 (Cancel) and 10001 (Undo Block) are intentionally excluded —
-        # they undo committed plays and must never substitute for a real pass.
+        # Guarantee a pass action only when Talishar accepts mode=99 here.
+        # Injecting Pass during CanPassPhase=0 phases causes silent no-ops and
+        # infinite agent loops (e.g. CHOOSEARSENAL, CHOOSEHAND, pitch windows).
+        from .talishar_default_policy import can_pass_phase
+
+        allow_pass = can_pass_phase(state)
         has_pass = any(
             int(a.get("action_code", 0)) in (99, 101, 105)
             or any(
@@ -1098,7 +1098,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             )
             for a in actions
         )
-        if not has_pass or not actions:
+        if allow_pass and (not has_pass or not actions):
             actions.append(
                 {
                     "action_code": 99,
@@ -1108,6 +1108,12 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                     "label": "Pass",
                 }
             )
+        elif not allow_pass:
+            actions = [
+                a for a in actions
+                if int(a.get("action_code", 0)) not in (99, 101, 105)
+                and "pass" not in str(a.get("label", "")).strip().lower()
+            ]
 
         return actions
 
@@ -2043,6 +2049,106 @@ def _eval_agent_action(agent: Any, obs: Any) -> Any:
     if hasattr(agent, "act_greedy"):
         return agent.act_greedy(obs)
     return agent.act(obs)
+
+
+def try_create_cpp_eval_environment(
+    *,
+    base_url: str,
+    game_format: str,
+    lookup_deck1: str,
+    lookup_deck2: str,
+    cpp_engine_dir: Optional[str] = None,
+    cpp_engine_cache_dir: Optional[str] = None,
+    max_turns: int = 60,
+    use_cpp_engine: bool = True,
+) -> Optional["TalisharEngineEnvironment"]:
+    """Return a C++-backed :class:`TalisharEngineEnvironment` when one is available.
+
+    When *cpp_engine_dir* is omitted, searches ``results/cpp_engines/`` for a
+    compiled module matching *lookup_deck1* vs *lookup_deck2*.  Returns ``None``
+    when no engine is importable (caller should fall back to HTTP Talishar).
+    """
+    if not use_cpp_engine or not _CPP_ENGINE_SUPPORT:
+        return None
+
+    kwargs: dict[str, Any] = {
+        "base_url": base_url,
+        "game_format": game_format,
+        "local_deck_name": lookup_deck1,
+        "opponent_deck_name": lookup_deck2,
+        "max_turns": max_turns,
+        "self_play": True,
+        "use_cpp_engine": True,
+        "cpp_engine_cache_dir": cpp_engine_cache_dir,
+        "cpp_engine_deck1": lookup_deck1,
+        "cpp_engine_deck2": lookup_deck2,
+    }
+    if cpp_engine_dir is not None:
+        kwargs["cpp_engine_dir"] = cpp_engine_dir
+
+    try:
+        env = TalisharEngineEnvironment(**kwargs)
+    except RuntimeError:
+        return None
+
+    if env._using_cpp:
+        return env
+    env.close()
+    return None
+
+
+def run_matchup_win_rate_eval(
+    env: Any,
+    num_games: int,
+    *,
+    eval_p1_agent: Optional[Any] = None,
+    eval_p2_agent: Optional[Any] = None,
+    max_steps: int = 60,
+    deck_player_id: int = 1,
+) -> float:
+    """Play *num_games* on *env* and return deck-player win rate in ``[0.0, 1.0]``."""
+    if num_games <= 0:
+        return 0.5
+
+    wins = 0
+    p1_policy = eval_p1_agent
+    p2_policy = eval_p2_agent
+    for _ in range(num_games):
+        try:
+            if p1_policy is not None:
+                out = run_talishar_eval_episode(
+                    env,
+                    p1_policy,
+                    max_steps=max_steps,
+                    p2_agent=p2_policy,
+                    deck_player_id=deck_player_id,
+                )
+                if out.get("deck_player_won") is True:
+                    wins += 1
+            else:
+                reset_result = env.reset()
+                obs_data = json.loads(reset_result.observation)
+                step_result: Optional[StepResult] = None
+                done = False
+                while not done:
+                    step_result = env.step(env.sample_action())
+                    done = step_result.terminated or step_result.truncated
+                    if not done:
+                        obs_data = json.loads(step_result.observation)
+                if talishar_deck_player_won(
+                    obs_data,
+                    deck_player_id=deck_player_id,
+                    terminated=bool(
+                        step_result is not None and step_result.terminated
+                    ),
+                    truncated=bool(
+                        step_result is not None and step_result.truncated
+                    ),
+                ):
+                    wins += 1
+        except Exception:  # noqa: BLE001
+            continue
+    return wins / num_games
 
 
 def run_talishar_eval_episode(

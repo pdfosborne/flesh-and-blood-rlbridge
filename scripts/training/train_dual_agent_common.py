@@ -14,7 +14,7 @@ import base64
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FAB_SRC = REPO_ROOT / "src"
@@ -971,21 +971,31 @@ def train_agents_from_both_perspectives_parallel(
     seed: Optional[int] = None,
     warmup_episodes: int = DEFAULT_WARMUP_EPISODES,
     n_workers: int = 2,
+    parallel_batch_size: Optional[int] = None,
     live_state_image_path: Optional[Path] = None,
     episode_cache: Optional[EpisodeCache] = None,
+    on_episodes_progress: Optional[
+        Callable[[int, list[float], list[float]], None]
+    ] = None,
 ) -> tuple[list[float], list[float], dict[str, Any]]:
     """Parallel rollout version of ``train_agents_from_both_perspectives``.
 
-    Creates ``n_workers`` independent Talishar game sessions.  Each worker
-    runs one complete episode concurrently using ``ThreadPoolExecutor``.  After
-    every worker batch the PPO update runs single-threaded on the merged
-    buffer, then the next batch starts with the updated weights.
+    Creates independent Talishar game sessions and runs episodes in parallel
+    batches via ``ThreadPoolExecutor``.  After each batch the PPO update runs
+    single-threaded on the merged buffer, then the next batch starts with
+    updated weights.
+
+    ``parallel_batch_size`` controls how many episodes run concurrently per
+    batch (defaults to ``n_workers``).  Worker envs are kept alive for the
+    full ``n_episodes`` run so sessions are not respawned between batches.
 
     Each worker has its own ``np.random.default_rng`` so there is no shared
     mutable state between threads.  Agent weight arrays are accessed read-only
     during the forward passes which is safe for simultaneous reads in NumPy.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    batch_parallelism = max(1, parallel_batch_size or n_workers)
 
     p1_policy = p1_tiers[0]
     p2_policy = p2_tiers[0]
@@ -1034,13 +1044,16 @@ def train_agents_from_both_perspectives_parallel(
                 print(f"  [cache] replayed {replayed} cached episode(s) as partial warm-start")
 
     # ── create worker envs ────────────────────────────────────────────────────
-    print(f"  [parallel] spawning {n_workers} worker game sessions…")
+    print(
+        f"  [parallel] spawning {batch_parallelism} worker game session(s) "
+        f"({n_episodes} episodes, batch={batch_parallelism})…"
+    )
     envs: list[TalisharEngineEnvironment] = []
-    for w in range(n_workers):
+    for w in range(batch_parallelism):
         envs.append(
             make_env(matchup, base_url=base_url, game_format=game_format, max_turns=max_steps)
         )
-    print(f"  [parallel] {n_workers} sessions ready", flush=True)
+    print(f"  [parallel] {batch_parallelism} sessions ready", flush=True)
 
     p1_ep_rewards:  list[float] = []
     p2_ep_rewards:  list[float] = []
@@ -1049,7 +1062,7 @@ def train_agents_from_both_perspectives_parallel(
     skipped_episodes    = 0
     completed          = 0
     progress_every     = max(1, n_episodes // 100)
-    batch_progress     = max(1, n_workers)
+    batch_progress     = max(1, batch_parallelism)
     progress_t0        = time.time()
     # Per-episode wall-clock timeout: max_steps * 5 s per step, floor at 120 s.
     # Per-episode wall-clock timeout: 3 s per step (down from 5 s) is sufficient
@@ -1063,9 +1076,9 @@ def train_agents_from_both_perspectives_parallel(
     warmup_bc_applied = warmup_episodes <= 0
 
     try:
-        with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        with ThreadPoolExecutor(max_workers=batch_parallelism) as pool:
             while completed < n_episodes and not shutdown_flag:
-                batch_size = min(n_workers, n_episodes - completed)
+                batch_size = min(batch_parallelism, n_episodes - completed)
                 in_warmup  = completed < warmup_episodes
                 if completed == 0:
                     print(
@@ -1104,6 +1117,13 @@ def train_agents_from_both_perspectives_parallel(
                         print(f"  [parallel] episode timed out after {episode_timeout_secs}s — skipping")
                         skipped_episodes += 1
                         completed += 1
+                        if on_episodes_progress is not None:
+                            try:
+                                on_episodes_progress(
+                                    completed, p1_ep_rewards, p2_ep_rewards
+                                )
+                            except Exception as exc:
+                                print(f"  [parallel] progress callback failed ({exc!r})")
                         continue
                     except KeyboardInterrupt:
                         shutdown_flag = True
@@ -1112,6 +1132,13 @@ def train_agents_from_both_perspectives_parallel(
                         print(f"  [parallel] episode failed ({exc!r}) — skipping")
                         skipped_episodes += 1
                         completed += 1
+                        if on_episodes_progress is not None:
+                            try:
+                                on_episodes_progress(
+                                    completed, p1_ep_rewards, p2_ep_rewards
+                                )
+                            except Exception as exc_cb:
+                                print(f"  [parallel] progress callback failed ({exc_cb!r})")
                         continue
                     batch_p1_trans.extend(result["p1_transitions"])
                     batch_p2_trans.extend(result["p2_transitions"])
@@ -1143,6 +1170,18 @@ def train_agents_from_both_perspectives_parallel(
                                 obs_dim=obs_vec.shape[0],
                             )
                     completed += 1
+                    if on_episodes_progress is not None and (
+                        completed == n_episodes
+                        or completed <= 10
+                        or (warmup_episodes > 0 and completed == warmup_episodes)
+                        or completed % 50 == 0
+                    ):
+                        try:
+                            on_episodes_progress(
+                                completed, p1_ep_rewards, p2_ep_rewards
+                            )
+                        except Exception as exc:
+                            print(f"  [parallel] progress callback failed ({exc!r})")
                 if shutdown_flag:
                     break
 
@@ -1151,7 +1190,10 @@ def train_agents_from_both_perspectives_parallel(
                     _write_state_image(
                         {"obs_vec_shape": str(last_obs_vec.shape)},
                         live_state_image_path,
-                        header=f"episode={completed}/{n_episodes} parallel_workers={n_workers}",
+                        header=(
+                            f"episode={completed}/{n_episodes} "
+                            f"parallel_batch={batch_parallelism}"
+                        ),
                     )
 
                 if in_warmup:
@@ -1185,7 +1227,7 @@ def train_agents_from_both_perspectives_parallel(
 
                 # Progress logging.
                 if (
-                    completed <= max(10, n_workers)
+                    completed <= max(10, batch_parallelism)
                     or completed % batch_progress == 0
                     or completed % progress_every == 0
                     or completed == n_episodes
@@ -1201,7 +1243,7 @@ def train_agents_from_both_perspectives_parallel(
                         f"  [train-progress] episodes={completed}/{n_episodes} "
                         f"({pct:6.2f}%) elapsed={elapsed:.1f}s "
                         f"rate={ep_rate:.3f}ep/s eta={eta_secs / 60:.1f}m "
-                        f"workers={n_workers} "
+                        f"batch={batch_parallelism} "
                         f"warmup={'yes' if in_warmup else 'no '} "
                         f"timeouts={timeout_episodes} ({t_rate * 100:.1f}%) "
                         f"skipped={skipped_episodes} "

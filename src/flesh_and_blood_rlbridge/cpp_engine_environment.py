@@ -854,7 +854,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
     def _filter_legal_actions(self, legal: list[Any]) -> list[Any]:
         """Filter legal actions using the shared Talishar/C++ filter."""
         phase = self._effective_turn_phase().upper()
-        if phase in ("OPENING_MAIN", "ARS"):
+        if phase == "OPENING_MAIN":
             return legal
 
         working = list(legal)

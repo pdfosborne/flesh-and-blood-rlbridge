@@ -23,9 +23,9 @@ PRESETS: list[Preset] = [
         runscript="aurora_vs_briar_fixed_opponent.py",
     ),
     Preset(
-        label="Aurora vs Briar (dual deckbuild)",
-        description="Both heroes co-train deckbuilder, sideboard, and play.",
-        runscript="sage_aurora_vs_briar_deckbuild.py",
+        label="SAGE dual deckbuilder",
+        description="Silver Age guide sideboard + play + deckbuild; pick heroes via main.py sage.",
+        runscript="sage_deckbuilder.py",
     ),
     Preset(
         label="SAGE Briar vs Dorinthea (play only)",

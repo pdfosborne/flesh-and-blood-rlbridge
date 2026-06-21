@@ -18,12 +18,14 @@ from .talishar_default_policy import (
     _DEFENSE_PHASES,
     _BLOCK_PHASES,
     _get_phase,
+    _is_affordable_arsenal_play,
     _is_affordable_hand_play,
     _is_pass_action,
     _is_revert_action,
     _POPUP_PHASES,
     _strip_revert_actions,
     _to_int,
+    can_pass_phase,
 )
 
 _PAY_TO_AVOID_RE = re.compile(r"pay\s+(\d+)\s+to\s+avoid", re.IGNORECASE)
@@ -188,6 +190,20 @@ def is_pass_only(filtered: list[dict[str, Any]]) -> bool:
     return all(_is_pass_action(action) for action in filtered)
 
 
+def _has_arsenal_from_hand_actions(actions: list[dict[str, Any]]) -> bool:
+    """True when hand cards can be moved into arsenal (end-of-turn ARS step)."""
+    return any(
+        _to_int(a.get("action_code", 0)) == 4
+        and str(a.get("zone", "") or "").strip().lower() == "hand"
+        for a in actions
+    )
+
+
+def _strip_pass_actions(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Remove pass / end-turn actions from *actions*."""
+    return [a for a in actions if not _is_pass_action(a)]
+
+
 def align_filtered_actions(
     original: list[Any],
     filtered: list[dict[str, Any]],
@@ -218,8 +234,13 @@ def filter_legal_actions(
     produce an empty set.
 
     **Rule 1 — main-phase affordability** (phase ``m``):
-        Strip action-27 hand-card plays whose resource cost exceeds the total
-        pitch value of all *other* hand cards.
+        Strip action-27 hand-card and action-5 arsenal plays whose resource
+        cost exceeds floated resources plus pitch value available in hand.
+
+    **Rule 1b — arsenal pitch requirement** (phase ``m``):
+        Playing from arsenal (action 5) requires enough hand pitch (and any
+        floated resources) to pay the card's cost; the arsenal card itself
+        cannot be pitched for that payment.
 
     **Rule 2 — equip removal** (all phases):
         Remove mode-3 (Equip) actions entirely.  Equipment activation plus undo
@@ -232,10 +253,13 @@ def filter_legal_actions(
         Never offer Cancel/undo (10000).  When nothing can be pitched, only
         Pass remains so the agent aborts without calling ``RevertGamestate``.
 
-    **Rule 5 — mandatory-choice phase Pass removal**
-        (phases: ``choosehand``, ``choosehandcancel``, ``choosemultizone``,
-        ``buttoninput``, ``buttoninputnopass``):
-        Remove Pass so the agent is forced to make the required pick.
+    **Rule 5 — mandatory-choice Pass removal** (``CanPassPhase=0``):
+        Remove Pass whenever Talishar would ignore mode=99, using
+        ``canPassPhase`` from the game state when available.
+
+    **Rule 5b — end-of-turn arsenal (phase ``ARS``)**:
+        When hand cards can be added to arsenal, strip Pass so the agent
+        must select a card instead of spinning on a no-op pass.
 
     **Rule 6 — block/defense phase pass forcing** (phases ``b``, ``d``):
         When no viable blockers remain, strip hand block plays so only pass
@@ -267,6 +291,8 @@ def filter_legal_actions(
                 continue
             if not _is_affordable_hand_play(action, state):
                 continue
+            if not _is_affordable_arsenal_play(action, state):
+                continue
             affordable.append(action)
         if affordable:
             filtered = affordable
@@ -293,20 +319,23 @@ def filter_legal_actions(
                 filtered = [dict(_PASS_FALLBACK)]
 
     # ── Rule 5: mandatory-choice phases (CanPassPhase=0) ─────────────────
-    elif phase in (
-        _CHOOSE_HAND_PHASES
-        | _BUTTON_INPUT_PHASES
-        | _POPUP_PHASES
-    ):
-        no_pass = [
-            a for a in filtered
-            if _to_int(a.get("action_code", 0)) != 99
-        ]
+    if not can_pass_phase(state):
+        no_pass = _strip_pass_actions(filtered)
+        if no_pass:
+            filtered = no_pass
+    elif phase in (_CHOOSE_HAND_PHASES | _BUTTON_INPUT_PHASES | _POPUP_PHASES):
+        no_pass = _strip_pass_actions(filtered)
+        if no_pass:
+            filtered = no_pass
+
+    # ── Rule 5b: ARS — must pick a card to add to arsenal ────────────────
+    if phase == "ars" and _has_arsenal_from_hand_actions(filtered):
+        no_pass = _strip_pass_actions(filtered)
         if no_pass:
             filtered = no_pass
 
     # ── Rules 6 & 7: block / defense phases ───────────────────────────────
-    elif phase in _BLOCK_PHASES | _DEFENSE_PHASES:
+    if phase in _BLOCK_PHASES | _DEFENSE_PHASES:
         filtered = _apply_block_phase_filter(
             state,
             filtered,
@@ -325,12 +354,14 @@ def filter_legal_actions(
     filtered = _strip_unaffordable_pay_yes_actions(state, filtered)
     filtered = _strip_blacklisted_actions(filtered, block_blacklist)
 
-    actionable = [a for a in filtered if not _is_pass_action(a)]
+    actionable = _strip_pass_actions(filtered)
     if actionable:
         return filtered
 
-    pass_actions = [a for a in filtered if _is_pass_action(a)]
-    if pass_actions:
-        return [pass_actions[0]]
+    if can_pass_phase(state):
+        pass_actions = [a for a in filtered if _is_pass_action(a)]
+        if pass_actions:
+            return [pass_actions[0]]
+        return [dict(_PASS_FALLBACK)]
 
-    return [dict(_PASS_FALLBACK)]
+    return filtered

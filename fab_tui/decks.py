@@ -10,6 +10,7 @@ from fab_tui.config import RESULTS_ROOT, slugify
 
 # SAGE precon decks (hero slug, Talishar Assets deck name)
 SAGE_PRECONS: list[tuple[str, str]] = [
+    ("aurora", "AuroraSAGEPrecon"),
     ("briar", "BriarSAGEPrecon"),
     ("dorinthea", "DorintheSAGEPrecon"),
     ("kayo", "KayoSAGEPrecon"),

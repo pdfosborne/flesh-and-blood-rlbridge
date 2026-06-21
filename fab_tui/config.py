@@ -99,6 +99,7 @@ class ExperimentSpec:
     play_episodes: int = 100
     iterations: int = 3
     num_eval_games: int = 20
+    sideboard_eval_games: int = 1000
     final_eval_episodes: int = 50
     final_eval_max_steps: int = 200
     workers: int | None = None
@@ -137,8 +138,6 @@ class ExperimentSpec:
             self.p2_equipment_header,
             "--deckbuild-episodes",
             str(self.deckbuild_episodes),
-            "--sideboard-episodes",
-            str(self.sideboard_episodes),
             "--play-episodes",
             str(self.play_episodes),
             "--iterations",
