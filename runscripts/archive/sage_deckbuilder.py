@@ -41,7 +41,6 @@ from runscripts._common import (
     hero_slug,
     load_results_json,
     optional_cpp_engine_arg,
-    optional_play_batch_size_arg,
     optional_train_workers_arg,
     print_banner,
     print_final_eval,
@@ -64,7 +63,6 @@ NUM_EVAL_GAMES = 3
 PLAY_EPISODES = 10000
 ITERATIONS = 20
 PLAY_WORKERS: int | None = None
-PLAY_BATCH_SIZE: int | None = None
 
 FINAL_EVAL_EPISODES = 100
 FINAL_EVAL_MAX_STEPS = 200
@@ -126,12 +124,6 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         type=int,
         default=None,
         help="Parallel C++ play sessions (auto-detected from CPU count when omitted)",
-    )
-    parser.add_argument(
-        "--play-batch-size",
-        type=int,
-        default=None,
-        help="Episodes per parallel batch (defaults to --workers)",
     )
     return parser.parse_args(argv)
 
@@ -291,9 +283,6 @@ def main(argv: list[str] | None = None) -> int:
         str(results_json),
         *optional_cpp_engine_arg(cpp_engine_dir),
         *optional_train_workers_arg(args.workers if args.workers is not None else PLAY_WORKERS),
-        *optional_play_batch_size_arg(
-            args.play_batch_size if args.play_batch_size is not None else PLAY_BATCH_SIZE
-        ),
         *starting_deck_args,
     ]
     rc = run_python(SCRIPTS_TRAINING / "train_full_pipeline.py", *train_args)

@@ -435,6 +435,8 @@ def run_sideboard_compare(
         str(spec.checkpoint_interval_pct),
         "--checkpoint-eval-episodes",
         str(spec.checkpoint_eval_episodes),
+        "--parallel-seeds",
+        str(spec.parallel_seeds),
         "--final-eval-episodes",
         str(spec.final_eval_episodes),
         "--final-eval-max-steps",

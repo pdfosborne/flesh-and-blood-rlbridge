@@ -96,7 +96,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="List available SAGE precon decks and exit",
     )
     sage.add_argument("--workers", type=int, default=None)
-    sage.add_argument("--play-batch-size", type=int, default=None)
     return parser
 
 
@@ -135,8 +134,6 @@ def _sage_argv(
         argv.extend(["--format", ns.format])
     if ns.workers is not None:
         argv.extend(["--workers", str(ns.workers)])
-    if ns.play_batch_size is not None:
-        argv.extend(["--play-batch-size", str(ns.play_batch_size)])
     return argv
 
 

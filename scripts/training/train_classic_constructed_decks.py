@@ -28,8 +28,9 @@ from train_dual_agent_common import (  # noqa: E402
     print_training_summary,
     run_matchup_training,
 )
+from runtime_defaults import RUNTIME  # noqa: E402
 
-DEFAULT_MAX_STEPS = 100
+DEFAULT_MAX_STEPS = RUNTIME.dual_matchup.max_steps
 FORMAT_NAME = "classic_constructed"
 ENV_SUFFIX = "CC"
 

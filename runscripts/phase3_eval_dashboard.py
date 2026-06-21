@@ -11,6 +11,8 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from runtime_defaults import RUNTIME  # noqa: E402
+
 from runscripts._common import (
     REPO_ROOT,
     SCRIPTS_EVAL,
@@ -33,16 +35,20 @@ def main(argv: list[str] | None = None) -> int:
     )
     assets = assets_path()
     url = talishar_url()
-    episodes = env_or_default("EPISODES", "20")
-    parallel_workers = env_or_default("PARALLEL_WORKERS", "4")
-    max_steps = env_or_default("MAX_STEPS", "1000")
-    render_max_steps = env_or_default("RENDER_MAX_STEPS", "500")
-    poll_seconds = env_or_default("POLL_SECONDS", "30")
-    stall_no_damage_turns = env_or_default("STALL_NO_DAMAGE_TURNS", "6")
-    stall_low_hand_turns = env_or_default("STALL_LOW_HAND_TURNS", "3")
-    stall_max_single_low_hand_turns = env_or_default("STALL_MAX_SINGLE_LOW_HAND_TURNS", "5")
-    stall_min_attack_hand = env_or_default("STALL_MIN_ATTACK_HAND", "2")
-    gif_fps = env_or_default("GIF_FPS", "3")
+    _eval = RUNTIME.eval_dashboard
+    episodes = env_or_default("EPISODES", str(_eval.episodes))
+    parallel_workers = env_or_default("PARALLEL_WORKERS", str(_eval.parallel_workers))
+    max_steps = env_or_default("MAX_STEPS", str(_eval.max_steps))
+    render_max_steps = env_or_default("RENDER_MAX_STEPS", str(_eval.render_max_steps))
+    poll_seconds = env_or_default("POLL_SECONDS", str(_eval.poll_seconds))
+    stall_no_damage_turns = env_or_default("STALL_NO_DAMAGE_TURNS", str(_eval.stall_no_damage_turns))
+    stall_low_hand_turns = env_or_default("STALL_LOW_HAND_TURNS", str(_eval.stall_low_hand_turns))
+    stall_max_single_low_hand_turns = env_or_default(
+        "STALL_MAX_SINGLE_LOW_HAND_TURNS",
+        str(_eval.stall_max_single_low_hand_turns),
+    )
+    stall_min_attack_hand = env_or_default("STALL_MIN_ATTACK_HAND", str(_eval.stall_min_attack_hand))
+    gif_fps = env_or_default("GIF_FPS", str(_eval.gif_fps))
 
     parity_args: list[str] = []
     cpp_engine_dir = os.environ.get("CPP_ENGINE_DIR")

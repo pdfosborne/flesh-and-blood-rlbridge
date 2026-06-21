@@ -8,10 +8,11 @@ from pathlib import Path
 
 import pytest
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "training"))
 
+from runtime_defaults import DEFAULT_PARALLEL_SEEDS  # noqa: E402
 from parallel_seed_training import (  # noqa: E402
-    DEFAULT_PARALLEL_SEEDS,
     SEED_STRIDE,
     average_win_rates,
     derive_training_seed,
@@ -97,4 +98,4 @@ def test_merge_parallel_seed_checkpoint_history(tmp_path: Path) -> None:
 
 
 def test_default_parallel_seeds() -> None:
-    assert DEFAULT_PARALLEL_SEEDS == 5
+    assert DEFAULT_PARALLEL_SEEDS == 3

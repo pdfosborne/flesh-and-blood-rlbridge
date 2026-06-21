@@ -46,6 +46,7 @@ from train_dual_agent_common import (  # noqa: E402
     print_training_summary,
     run_matchup_training,
 )
+from runtime_defaults import RUNTIME  # noqa: E402
 
 # All available SAGE precon decks (hero_slug, deck_name)
 SAGE_DECKS: list[tuple[str, str]] = [
@@ -90,7 +91,7 @@ EVAL_ENV_IDS: dict[str, str] = {
     for m in SAGE_MATCHUPS
 }
 
-DEFAULT_MAX_STEPS = 100
+DEFAULT_MAX_STEPS = RUNTIME.dual_matchup.max_steps
 
 
 def main() -> None:
@@ -173,9 +174,9 @@ def main() -> None:
     parser.add_argument(
         "--workers",
         type=int,
-        default=1,
-        help="Number of parallel game sessions for training (default: 1). "
-             "Set to 2-4 to saturate Talishar HTTP throughput.",
+        default=RUNTIME.dual_matchup.workers,
+        help="Number of parallel game sessions for training (default: "
+             f"{RUNTIME.dual_matchup.workers}). Set to 2-4 to saturate Talishar HTTP throughput.",
     )
     parser.add_argument(
         "--parallel-seeds",

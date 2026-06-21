@@ -62,8 +62,22 @@ from episode_cache import (  # noqa: E402
     EpisodeCache,
     DEFAULT_WARMUP_SKIP_THRESHOLD,
 )
-from parallel_seed_training import (  # noqa: E402
+from runtime_defaults import (  # noqa: E402
+    DEFAULT_CLIP_EPS,
+    DEFAULT_GAMMA,
+    DEFAULT_HIDDEN_SIZE,
+    DEFAULT_LAM,
+    DEFAULT_LR,
+    DEFAULT_MINI_BATCH,
+    DEFAULT_N_EPISODES,
+    DEFAULT_N_STEPS,
     DEFAULT_PARALLEL_SEEDS,
+    DEFAULT_PPO_EPOCHS,
+    DEFAULT_PPO_ROLLOUT_BATCH,
+    DEFAULT_WARMUP_BASELINE_EVAL_EPISODES,
+    DEFAULT_WARMUP_EPISODES,
+)
+from parallel_seed_training import (  # noqa: E402
     run_parallel_seed_jobs,
     select_best_agents_by_win_rate,
 )
@@ -73,18 +87,6 @@ FORMAT_DECK_RULES: dict[str, dict[str, int]] = {
     "classic_constructed": {"max_copies": 3, "deck_size": 60},
 }
 
-DEFAULT_N_EPISODES = 300
-DEFAULT_HIDDEN_SIZE = 64
-DEFAULT_LR = 3e-4
-DEFAULT_GAMMA = 0.99
-DEFAULT_LAM = 0.95
-DEFAULT_CLIP_EPS = 0.2
-DEFAULT_N_STEPS = 512
-DEFAULT_PPO_EPOCHS = 4
-DEFAULT_MINI_BATCH = 256
-DEFAULT_PPO_ROLLOUT_BATCH = 512
-DEFAULT_WARMUP_EPISODES = 100
-DEFAULT_WARMUP_BASELINE_EVAL_EPISODES = 100
 _TORCH_COMPUTE_DTYPE = torch.float32 if _TORCH_AVAILABLE else None
 
 
@@ -987,7 +989,6 @@ def train_agents_from_both_perspectives_parallel(
     seed: Optional[int] = None,
     warmup_episodes: int = DEFAULT_WARMUP_EPISODES,
     n_workers: int = 2,
-    parallel_batch_size: Optional[int] = None,
     live_state_image_path: Optional[Path] = None,
     episode_cache: Optional[EpisodeCache] = None,
     on_episodes_progress: Optional[
@@ -1001,9 +1002,9 @@ def train_agents_from_both_perspectives_parallel(
     single-threaded on the merged buffer, then the next batch starts with
     updated weights.
 
-    ``parallel_batch_size`` controls how many episodes run concurrently per
-    batch (defaults to ``n_workers``).  Worker envs are kept alive for the
-    full ``n_episodes`` run so sessions are not respawned between batches.
+    ``n_workers`` controls how many episodes run concurrently per batch.
+    Worker envs are kept alive for the full ``n_episodes`` run so sessions are
+    not respawned between batches.
 
     Each worker has its own ``np.random.default_rng`` so there is no shared
     mutable state between threads.  Agent weight arrays are accessed read-only
@@ -1011,7 +1012,7 @@ def train_agents_from_both_perspectives_parallel(
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    batch_parallelism = max(1, parallel_batch_size or n_workers)
+    batch_parallelism = max(1, n_workers)
 
     p1_policy = p1_tiers[0]
     p2_policy = p2_tiers[0]

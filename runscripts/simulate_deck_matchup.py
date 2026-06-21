@@ -27,6 +27,8 @@ if str(_REPO_ROOT) not in sys.path:
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from runtime_defaults import RUNTIME  # noqa: E402
+
 from flesh_and_blood_rlbridge.cpp_engine_environment import is_cpp_engine_available
 
 from runscripts._common import (
@@ -49,20 +51,23 @@ from runscripts._common import (
     title_case_token,
 )
 
-# ─── Default configuration ───────────────────────────────────────────────────
+# ─── Default configuration (see runtime_defaults.py) ─────────────────────────
 
+_MATCHUP = RUNTIME.matchup_sim
 DEFAULT_DECK1_SOURCE = "https://fabrary.net/decks/01KTBBVEZE0TPDAZ74Z4D787G4"
 DEFAULT_DECK2_SOURCE = "https://fabrary.net/decks/01KR0XXRF5MESBQWQH7FW5Y8MG"
-DEFAULT_FORMAT = "silver_age"
-MAX_PLAY_STEPS = 500
-PLAY_EPISODES = 1_000_000
-FINAL_EVAL_EPISODES = 100
-FINAL_EVAL_MAX_STEPS = 500
-SIDEBOARD_EPISODES = 30
-NUM_EVAL_GAMES = 50
-WARMUP_EPISODES = 50
-ITERATIONS = 1
-PLAY_WORKERS: int | None = None
+DEFAULT_FORMAT = _MATCHUP.game_format
+MAX_PLAY_STEPS = _MATCHUP.max_play_steps
+PLAY_EPISODES = _MATCHUP.play_episodes
+FINAL_EVAL_EPISODES = _MATCHUP.final_eval_episodes
+FINAL_EVAL_MAX_STEPS = _MATCHUP.final_eval_max_steps
+SIDEBOARD_EPISODES = _MATCHUP.sideboard_episodes
+NUM_EVAL_GAMES = _MATCHUP.num_eval_games
+WARMUP_EPISODES = _MATCHUP.warmup_episodes
+WARMUP_BASELINE_EVAL_EPISODES = _MATCHUP.warmup_baseline_eval_episodes
+ITERATIONS = _MATCHUP.iterations
+MATCHUP_GIF_FPS = _MATCHUP.gif_fps
+PLAY_WORKERS: int | None = _MATCHUP.workers
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -232,7 +237,7 @@ def main(argv: list[str] | None = None) -> int:
         "--warmup-episodes",
         str(WARMUP_EPISODES),
         "--warmup-baseline-eval-episodes",
-        "20",
+        str(WARMUP_BASELINE_EVAL_EPISODES),
         "--iterations",
         str(ITERATIONS),
         "--final-eval-episodes",
@@ -240,7 +245,7 @@ def main(argv: list[str] | None = None) -> int:
         "--final-eval-max-steps",
         str(FINAL_EVAL_MAX_STEPS),
         "--gif-fps",
-        "2.0",
+        str(MATCHUP_GIF_FPS),
         "--talishar-url",
         talishar_url_value,
         "--assets-path",

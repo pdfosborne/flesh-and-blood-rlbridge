@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -10,7 +11,12 @@ from pathlib import Path
 from statistics import mean
 from typing import Any, Callable, Optional
 
-DEFAULT_PARALLEL_SEEDS = 5
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from runtime_defaults import DEFAULT_PARALLEL_SEEDS  # noqa: E402
+
 SEED_STRIDE = 10_000
 
 

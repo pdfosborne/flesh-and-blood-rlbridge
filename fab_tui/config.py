@@ -9,6 +9,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
+from runtime_defaults import RUNTIME
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS_ROOT = REPO_ROOT / "scripts"
 SCRIPTS_TRAINING = SCRIPTS_ROOT / "training"
@@ -95,15 +97,15 @@ class ExperimentSpec:
     p1_fixed_deck: str | None = None
     p2_fixed_deck: str | None = None
 
-    deckbuild_episodes: int = 50
-    sideboard_episodes: int = 20
-    play_episodes: int = 100
-    iterations: int = 3
-    num_eval_games: int = 20
-    sideboard_eval_games: int = 1000
-    final_eval_episodes: int = 50
-    final_eval_max_steps: int = 200
-    workers: int | None = None
+    deckbuild_episodes: int = RUNTIME.tui.deckbuild_episodes
+    sideboard_episodes: int = RUNTIME.tui.sideboard_episodes
+    play_episodes: int = RUNTIME.tui.play_episodes
+    iterations: int = RUNTIME.tui.iterations
+    num_eval_games: int = RUNTIME.tui.num_eval_games
+    sideboard_eval_games: int = RUNTIME.tui.sideboard_eval_games
+    final_eval_episodes: int = RUNTIME.tui.final_eval_episodes
+    final_eval_max_steps: int = RUNTIME.tui.final_eval_max_steps
+    workers: int | None = RUNTIME.play.workers
 
     build_cpp_engine: bool = True
     out_dir: str | None = None
@@ -179,18 +181,18 @@ class ExperimentSpec:
             self.sideboard_episodes = 0
 
 
-DEFAULT_CHECKPOINT_INTERVAL_PCT = 5.0
-DEFAULT_CHECKPOINT_EVAL_EPISODES = 100
+DEFAULT_CHECKPOINT_INTERVAL_PCT = RUNTIME.play.checkpoint_interval_pct
+DEFAULT_CHECKPOINT_EVAL_EPISODES = RUNTIME.play.checkpoint_eval_episodes
 
 
 @dataclass
 class EvalSpec:
     results_dir: str
-    episodes: int = 20
-    parallel_workers: int = 4
-    max_steps: int = 1000
+    episodes: int = RUNTIME.tui.eval_episodes
+    parallel_workers: int = RUNTIME.tui.eval_parallel_workers
+    max_steps: int = RUNTIME.tui.eval_max_steps
     watch: bool = False
-    poll_seconds: int = 30
+    poll_seconds: int = RUNTIME.tui.eval_poll_seconds
     candidate_id: str | None = None
     render_only: bool = False
 
@@ -200,17 +202,17 @@ class MatchupSimSpec:
     deck1_source: str
     deck2_source: str
     game_format: FormatChoice = "silver_age"
-    play_episodes: int = 500
+    play_episodes: int = RUNTIME.matchup_sim.play_episodes
     checkpoint_interval_pct: float = DEFAULT_CHECKPOINT_INTERVAL_PCT
     checkpoint_eval_episodes: int = DEFAULT_CHECKPOINT_EVAL_EPISODES
-    play_checkpoint_interval: int | None = None
-    final_eval_episodes: int = 50
-    final_eval_max_steps: int = 500
-    sideboard_episodes: int = 30
-    warmup_episodes: int = 50
-    iterations: int = 1
+    play_checkpoint_interval: int | None = RUNTIME.play.play_checkpoint_interval
+    final_eval_episodes: int = RUNTIME.matchup_sim.final_eval_episodes
+    final_eval_max_steps: int = RUNTIME.matchup_sim.final_eval_max_steps
+    sideboard_episodes: int = RUNTIME.matchup_sim.sideboard_episodes
+    warmup_episodes: int = RUNTIME.matchup_sim.warmup_episodes
+    iterations: int = RUNTIME.matchup_sim.iterations
     build_cpp_engine: bool = True
-    workers: int | None = None
+    workers: int | None = RUNTIME.matchup_sim.workers
 
 
 @dataclass
@@ -224,20 +226,21 @@ class SideboardCompareSpec:
     hero_class: str = ""
     equipment_header: str = ""
     game_format: FormatChoice = "silver_age"
-    num_options: int = 4
-    max_parallel: int = 2
-    max_swap_variants: int = 2
-    max_swaps_per_variant: int = 1
-    play_episodes: int = 10000
+    num_options: int = RUNTIME.sideboard_compare.num_options
+    max_parallel: int = RUNTIME.sideboard_compare.max_parallel
+    max_swap_variants: int = RUNTIME.sideboard_compare.max_swap_variants
+    max_swaps_per_variant: int = RUNTIME.sideboard_compare.max_swaps_per_variant
+    play_episodes: int = RUNTIME.sideboard_compare.play_episodes
     checkpoint_interval_pct: float = DEFAULT_CHECKPOINT_INTERVAL_PCT
     checkpoint_eval_episodes: int = DEFAULT_CHECKPOINT_EVAL_EPISODES
-    play_checkpoint_interval: int | None = None
-    final_eval_episodes: int = 50
-    final_eval_max_steps: int = 200
+    play_checkpoint_interval: int | None = RUNTIME.play.play_checkpoint_interval
+    final_eval_episodes: int = RUNTIME.sideboard_compare.final_eval_episodes
+    final_eval_max_steps: int = RUNTIME.sideboard_compare.final_eval_max_steps
+    parallel_seeds: int = RUNTIME.play.parallel_seeds
     skip_final_eval: bool = False
     no_render_gif: bool = True
     build_cpp_engine: bool = True
-    workers: int | None = None
+    workers: int | None = RUNTIME.play.workers
     out_dir: str | None = None
     candidates_json: str | None = None
 

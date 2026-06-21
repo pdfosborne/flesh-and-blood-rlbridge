@@ -21,6 +21,15 @@ from scripts.training.train_pipeline_common import (  # noqa: E402
     generate_sideboard_candidates,
     load_deck_and_pool_from_json,
 )
+from scripts.training.train_sideboard_compare import resolve_max_parallel  # noqa: E402
+
+
+def test_resolve_max_parallel() -> None:
+    assert resolve_max_parallel(0, 4) == 4
+    assert resolve_max_parallel(-1, 3) == 3
+    assert resolve_max_parallel(2, 4) == 2
+    assert resolve_max_parallel(10, 4) == 4
+    assert resolve_max_parallel(0, 0) == 1
 
 
 def test_sideboard_inventory() -> None:

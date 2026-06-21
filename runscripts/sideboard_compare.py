@@ -8,7 +8,7 @@ Resolves a starting deck, generates sideboard candidates, and runs
         --starting-deck path/to/aurora.json
 
     python runscripts/sideboard_compare.py --hero aurora --opponent briar \\
-        --starting-deck path/to/aurora.json --num-options 4 --max-parallel 2
+        --starting-deck path/to/aurora.json --num-options 4
 """
 
 from __future__ import annotations
@@ -21,6 +21,8 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from runtime_defaults import RUNTIME  # noqa: E402
+
 from runscripts._common import (
     REPO_ROOT,
     SCRIPTS_TRAINING,
@@ -29,7 +31,6 @@ from runscripts._common import (
     find_cpp_engine_dir_for_decks,
     hero_slug,
     optional_cpp_engine_arg,
-    optional_play_batch_size_arg,
     optional_train_workers_arg,
     print_banner,
     read_deck_meta,
@@ -41,12 +42,9 @@ from runscripts._common import (
     title_case_token,
 )
 
-DEFAULT_NUM_OPTIONS = 4
-DEFAULT_MAX_PARALLEL = 4
-DEFAULT_PLAY_EPISODES = 10000
-DEFAULT_PARALLEL_SEEDS = 5
-DEFAULT_WORKERS = 16
-DEFAULT_FORMAT = "silver_age"
+_SB = RUNTIME.sideboard_compare
+_PLAY = RUNTIME.play
+# Shared knobs also live on META — edit runtime_defaults.py META block for your hardware.
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -62,25 +60,29 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         help="Deck JSON (FaBrary export or local path)")
     parser.add_argument("--card-pool", default=None,
         help="Optional registered pool JSON")
-    parser.add_argument("--format", default=DEFAULT_FORMAT,
+    parser.add_argument("--format", default=_SB.game_format,
         choices=["silver_age", "sage", "classic_constructed", "blitz", "upf"])
-    parser.add_argument("--num-options", type=int, default=DEFAULT_NUM_OPTIONS)
-    parser.add_argument("--max-parallel", type=int, default=DEFAULT_MAX_PARALLEL)
-    parser.add_argument("--play-episodes", type=int, default=DEFAULT_PLAY_EPISODES)
-    parser.add_argument("--checkpoint-interval-pct", type=float, default=5.0,
+    parser.add_argument("--num-options", type=int, default=_SB.num_options)
+    parser.add_argument("--max-parallel", type=int, default=_SB.max_parallel,
+        help="Max candidates at once (0 = all options in parallel)")
+    parser.add_argument("--play-episodes", type=int, default=_SB.play_episodes)
+    parser.add_argument("--checkpoint-interval-pct", type=float,
+        default=_PLAY.checkpoint_interval_pct,
         help="Checkpoint every N%% of play episodes")
-    parser.add_argument("--checkpoint-eval-episodes", type=int, default=100,
+    parser.add_argument("--checkpoint-eval-episodes", type=int,
+        default=_PLAY.checkpoint_eval_episodes,
         help="C++ eval games with fixed opponent at each checkpoint (0=off)")
-    parser.add_argument("--parallel-seeds", type=int, default=DEFAULT_PARALLEL_SEEDS,
+    parser.add_argument("--parallel-seeds", type=int, default=_PLAY.parallel_seeds,
         help="Independent RNG seeds per candidate (use 1 to disable)")
     parser.add_argument("--out-dir", default=None)
-    parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
-    parser.add_argument("--play-batch-size", type=int, default=None)
+    parser.add_argument("--workers", type=int, default=_PLAY.workers,
+        help="Total C++ workers split across parallel candidates (auto-detected when omitted)")
     parser.add_argument("--opponent-deck", default=None,
         help="Talishar Assets deck stem (default: <Opponent>SAGEPrecon when present)")
     parser.add_argument("--no-dashboard", action="store_true",
         help="Do not launch the live HTML dashboard watcher")
-    parser.add_argument("--dashboard-poll-seconds", type=float, default=5.0)
+    parser.add_argument("--dashboard-poll-seconds", type=float,
+        default=_SB.dashboard_poll_seconds)
     return parser.parse_args(argv)
 
 
@@ -115,7 +117,12 @@ def main(argv: list[str] | None = None) -> int:
         width=58,
     )
     print(f"  Options       : {args.num_options}")
-    print(f"  Max parallel  : {args.max_parallel}")
+    parallel_label = (
+        "all candidates"
+        if args.max_parallel <= 0
+        else str(args.max_parallel)
+    )
+    print(f"  Max parallel  : {parallel_label}")
     print(f"  Play episodes : {args.play_episodes}")
     print(f"  Parallel seeds: {args.parallel_seeds}")
     print(f"  Checkpoints   : every {args.checkpoint_interval_pct:g}%  "
@@ -179,7 +186,6 @@ def main(argv: list[str] | None = None) -> int:
         "--assets-path", str(assets),
         *optional_cpp_engine_arg(cpp_engine_dir),
         *optional_train_workers_arg(args.workers),
-        *optional_play_batch_size_arg(args.play_batch_size),
     ]
     if args.card_pool:
         train_args.extend(["--card-pool", args.card_pool])

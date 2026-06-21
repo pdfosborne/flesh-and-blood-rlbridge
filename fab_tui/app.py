@@ -286,7 +286,10 @@ def wizard_sideboard_compare(env: EnvironmentSettings) -> None:
         "Max card swaps per alternate list",
         default=spec.max_swaps_per_variant,
     )
-    spec.max_parallel = IntPrompt.ask("Train in parallel (max at once)", default=spec.max_parallel)
+    spec.max_parallel = IntPrompt.ask(
+        "Train in parallel (0 = all candidates)",
+        default=spec.max_parallel,
+    )
     spec.play_episodes = IntPrompt.ask("Play episodes per list", default=spec.play_episodes)
     spec.final_eval_episodes = IntPrompt.ask(
         "Final eval games per list",
@@ -322,7 +325,7 @@ def wizard_sideboard_compare(env: EnvironmentSettings) -> None:
         ("Opponent", f"{opponent_hero_id} ({opponent_deck})"),
         ("Lists to compare", str(spec.num_options)),
         ("  default + alternates", f"1 + {len(variants)} manual"),
-        ("Parallel", str(spec.max_parallel)),
+        ("Parallel", "all" if spec.max_parallel <= 0 else str(spec.max_parallel)),
         ("Play episodes", str(spec.play_episodes)),
         ("Final eval games", str(spec.final_eval_episodes)),
         ("Output", str(out_dir)),

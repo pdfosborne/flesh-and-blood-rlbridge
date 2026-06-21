@@ -5,7 +5,7 @@ Given a starting deck and registered card pool, this script:
 
 1. Builds sideboard candidates using :class:`SideboardGuidePolicy` heuristics
    (baseline deck, full guide sideboard, and ranked 1-for-1 swaps).
-2. Trains a play agent for each candidate (``--max-parallel`` at a time).
+2. Trains a play agent for each candidate (all in parallel by default).
 3. Runs a greedy **final eval** per candidate and reports win-rate deltas vs baseline.
 4. Picks the deck with the best final eval win rate vs the configured opponent.
 
@@ -16,7 +16,6 @@ Typical usage::
         --opponent-hero-id briar \\
         --opponent-deck BriarSAGEPrecon \\
         --num-options 4 \\
-        --max-parallel 2 \\
         --play-episodes 500 \\
         --out-dir results/sideboard_compare_aurora_vs_briar
 """
@@ -67,6 +66,14 @@ from train_pipeline_common import (  # noqa: E402
     resolve_assets_path,
     save_deck_state,
 )
+def resolve_max_parallel(requested: int, n_candidates: int) -> int:
+    """How many candidates to train at once (``0`` or negative => all)."""
+    n = max(1, n_candidates)
+    if requested <= 0:
+        return n
+    return max(1, min(requested, n))
+
+
 from train_play import (  # noqa: E402
     DEFAULT_CHECKPOINT_EVAL_EPISODES,
     DEFAULT_CHECKPOINT_INTERVAL_PCT,
@@ -78,6 +85,7 @@ from train_play import (  # noqa: E402
     run_final_evaluation,
     run_phase3_play,
 )
+from runtime_defaults import RUNTIME  # noqa: E402
 
 
 def _baseline_final_eval_win_rate(results: list[dict[str, Any]]) -> Optional[float]:
@@ -201,7 +209,6 @@ def _train_candidate(
         checkpoint_interval=args.play_checkpoint_interval,
         checkpoint_interval_pct=args.checkpoint_interval_pct,
         checkpoint_eval_episodes=args.checkpoint_eval_episodes,
-        parallel_batch_size=args.play_batch_size or play_workers,
         parallel_seeds=args.parallel_seeds,
     )
 
@@ -360,20 +367,20 @@ def main() -> None:
         help="JSON deck export (deck + optional sideboard inventory)")
     parser.add_argument("--card-pool", default=None,
         help="Optional JSON with full registered pool (overrides sideboard key)")
-    parser.add_argument("--num-options", type=int, default=4,
+    parser.add_argument("--num-options", type=int, default=RUNTIME.sideboard_compare.num_options,
         help="Total sideboard variants to compare (including baseline)")
-    parser.add_argument("--max-parallel", type=int, default=2,
-        help="How many candidates to train/evaluate concurrently")
+    parser.add_argument("--max-parallel", type=int, default=RUNTIME.sideboard_compare.max_parallel,
+        help="Max candidates to train at once (0 = all candidates in parallel)")
     parser.add_argument("--no-baseline", action="store_true",
         help="Skip the unmodified starting deck candidate")
     parser.add_argument("--no-guide-full", action="store_true",
         help="Skip the full SideboardGuidePolicy deck candidate")
-    parser.add_argument("--min-swap-margin", type=float, default=0.75,
+    parser.add_argument("--min-swap-margin", type=float, default=RUNTIME.sideboard_compare.min_swap_margin,
         help="Minimum guide score margin for ranked swap candidates")
     parser.add_argument("--candidates-json", default=None,
         help="Pre-built candidate manifest from the TUI sideboard picker")
 
-    parser.add_argument("--play-episodes", type=int, default=500)
+    parser.add_argument("--play-episodes", type=int, default=RUNTIME.sideboard_compare.play_episodes)
     parser.add_argument("--play-checkpoint-interval", type=int, default=None,
         help="Fixed checkpoint interval in episodes (default: 10%% of --play-episodes)")
     parser.add_argument("--checkpoint-interval-pct", type=float,
@@ -382,13 +389,12 @@ def main() -> None:
     parser.add_argument("--checkpoint-eval-episodes", type=int,
         default=DEFAULT_CHECKPOINT_EVAL_EPISODES,
         help="C++ eval games vs opponent agent (greedy) at each checkpoint (0=off)")
-    parser.add_argument("--max-play-steps", type=int, default=200)
+    parser.add_argument("--max-play-steps", type=int, default=RUNTIME.play.max_play_steps)
     parser.add_argument("--warmup-episodes", type=int, default=DEFAULT_WARMUP_EPISODES)
     parser.add_argument("--warmup-baseline-eval-episodes", type=int,
         default=DEFAULT_WARMUP_BASELINE_EVAL_EPISODES)
     parser.add_argument("--workers", type=int, default=None,
         help="Parallel C++ sessions per candidate (auto-detected when omitted)")
-    parser.add_argument("--play-batch-size", type=int, default=None)
     parser.add_argument(
         "--cache-dir",
         default=str(DEFAULT_AGENT_CACHE_DIR),
@@ -416,15 +422,15 @@ def main() -> None:
         action="store_true",
         help="Do not auto-build a C++ engine when none is cached",
     )
-    parser.add_argument("--final-eval-episodes", type=int, default=50,
+    parser.add_argument("--final-eval-episodes", type=int, default=RUNTIME.sideboard_compare.final_eval_episodes,
         help="Greedy final eval games per candidate after training")
-    parser.add_argument("--final-eval-max-steps", type=int, default=200)
+    parser.add_argument("--final-eval-max-steps", type=int, default=RUNTIME.sideboard_compare.final_eval_max_steps)
     parser.add_argument("--skip-final-eval", action="store_true")
     parser.add_argument("--talishar-fe-url",
         default=os.environ.get("TALISHAR_FE_URL", "http://localhost:5173"))
     parser.add_argument("--no-render-gif", action="store_true",
         help="Skip GIF render during final eval")
-    parser.add_argument("--gif-fps", type=float, default=3.0)
+    parser.add_argument("--gif-fps", type=float, default=RUNTIME.play.gif_fps)
 
     args = parser.parse_args()
 
@@ -479,8 +485,6 @@ def main() -> None:
             cpp_engine_dir=args.cpp_engine_dir,
             assets_path=assets_path,
         )
-    max_parallel = max(1, args.max_parallel)
-    workers_per_candidate = max(1, total_workers // max_parallel)
     resolved_ckpt_interval = resolve_play_checkpoint_interval(
         args.play_episodes,
         checkpoint_interval=args.play_checkpoint_interval,
@@ -509,6 +513,9 @@ def main() -> None:
     if not candidates:
         print("ERROR: no sideboard candidates generated")
         raise SystemExit(1)
+
+    max_parallel = resolve_max_parallel(args.max_parallel, len(candidates))
+    workers_per_candidate = max(1, total_workers // max_parallel)
 
     print(
         f"\n{'='*62}\n"

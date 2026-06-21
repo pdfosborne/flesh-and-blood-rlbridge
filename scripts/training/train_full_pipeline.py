@@ -78,6 +78,7 @@ from train_play import (  # noqa: E402
     run_final_evaluation,
     run_phase3_play,
 )
+from runtime_defaults import RUNTIME  # noqa: E402
 from cpp_engine_matchup import ensure_cpp_engine_for_matchup  # noqa: E402
 
 # Re-export symbols used by eval_phase3_checkpoint.py and other tools.
@@ -113,8 +114,8 @@ def main() -> None:
         default="dorinthea_ironsong dori_equipment_sword dori_equipment_sword "
                 "helm_of_avarice gauntlet_of_might ironrot_legs valor_boots")
 
-    parser.add_argument("--deckbuild-episodes", type=int, default=50)
-    parser.add_argument("--play-episodes", type=int, default=30)
+    parser.add_argument("--deckbuild-episodes", type=int, default=RUNTIME.full_pipeline.deckbuild_episodes)
+    parser.add_argument("--play-episodes", type=int, default=RUNTIME.full_pipeline.play_episodes)
     parser.add_argument("--play-checkpoint-interval", type=int, default=None,
         help="Fixed checkpoint interval in episodes (default: 10%% of --play-episodes)")
     parser.add_argument("--checkpoint-interval-pct", type=float,
@@ -123,20 +124,18 @@ def main() -> None:
     parser.add_argument("--checkpoint-eval-episodes", type=int,
         default=DEFAULT_CHECKPOINT_EVAL_EPISODES,
         help="C++ eval games vs opponent agent (greedy) at each checkpoint (0=off)")
-    parser.add_argument("--max-build-steps", type=int, default=200)
-    parser.add_argument("--max-sideboard-steps", type=int, default=100)
-    parser.add_argument("--max-play-steps", type=int, default=200)
-    parser.add_argument("--num-eval-games", type=int, default=3,
+    parser.add_argument("--max-build-steps", type=int, default=RUNTIME.full_pipeline.max_build_steps)
+    parser.add_argument("--max-sideboard-steps", type=int, default=RUNTIME.full_pipeline.max_sideboard_steps)
+    parser.add_argument("--max-play-steps", type=int, default=RUNTIME.play.max_play_steps)
+    parser.add_argument("--num-eval-games", type=int, default=RUNTIME.full_pipeline.num_eval_games,
         help="Internal eval games for deckbuilder phase")
-    parser.add_argument("--num-sideboard-episodes", type=int, default=1,
+    parser.add_argument("--num-sideboard-episodes", type=int, default=RUNTIME.full_pipeline.num_sideboard_episodes,
         help="Sideboard episodes inside deckbuilder finalize (guide policy, max 1)")
     parser.add_argument("--warmup-episodes", type=int, default=DEFAULT_WARMUP_EPISODES)
     parser.add_argument("--warmup-baseline-eval-episodes", type=int,
         default=DEFAULT_WARMUP_BASELINE_EVAL_EPISODES)
     parser.add_argument("--workers", type=int, default=None,
         help="Parallel C++ game sessions for play training (auto-detected when omitted)")
-    parser.add_argument("--play-batch-size", type=int, default=None,
-        help="Episodes per parallel batch (defaults to --workers)")
     parser.add_argument("--cache-dir", default=None)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument(
@@ -149,7 +148,7 @@ def main() -> None:
             f"{DEFAULT_PARALLEL_SEEDS}; use 1 to disable)"
         ),
     )
-    parser.add_argument("--iterations", type=int, default=3)
+    parser.add_argument("--iterations", type=int, default=RUNTIME.full_pipeline.iterations)
 
     parser.add_argument("--p1-deckbuilder", default=None)
     parser.add_argument("--p1-sideboard", default=None)
@@ -176,10 +175,10 @@ def main() -> None:
         action="store_true",
         help="Do not auto-build a C++ engine when none is cached",
     )
-    parser.add_argument("--final-eval-episodes", type=int, default=20)
-    parser.add_argument("--final-eval-max-steps", type=int, default=60)
+    parser.add_argument("--final-eval-episodes", type=int, default=RUNTIME.full_pipeline.final_eval_episodes)
+    parser.add_argument("--final-eval-max-steps", type=int, default=RUNTIME.full_pipeline.final_eval_max_steps)
     parser.add_argument("--no-render-gif", action="store_true")
-    parser.add_argument("--gif-fps", type=float, default=3.0)
+    parser.add_argument("--gif-fps", type=float, default=RUNTIME.play.gif_fps)
 
     args = parser.parse_args()
 
@@ -238,8 +237,6 @@ def main() -> None:
         _gpu_label = "CPU (torch not available)"
     print(f"  [device] PPO gradient updates: {_gpu_label}")
     print(f"  [workers] Parallel game sessions: {args.workers}")
-    if args.play_batch_size:
-        print(f"  [workers] Parallel batch size: {args.play_batch_size}")
 
     min_warmup = max(1, math.ceil(args.play_episodes / 10))
     warmup_eps = min(max(args.warmup_episodes, min_warmup), args.play_episodes)
@@ -389,7 +386,6 @@ def main() -> None:
             checkpoint_interval=args.play_checkpoint_interval,
             checkpoint_interval_pct=args.checkpoint_interval_pct,
             checkpoint_eval_episodes=args.checkpoint_eval_episodes,
-            parallel_batch_size=args.play_batch_size,
             parallel_seeds=args.parallel_seeds,
         )
         p1.last_play_win_rate = p1_wr

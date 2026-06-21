@@ -12,6 +12,11 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from runtime_defaults import RUNTIME  # noqa: E402
+
 SCRIPTS_DIR = REPO_ROOT / "scripts"
 SCRIPTS_TRAINING = SCRIPTS_DIR / "training"
 SCRIPTS_EVAL = SCRIPTS_DIR / "eval"
@@ -72,7 +77,7 @@ def stop_background_process(proc: subprocess.Popen[Any] | None) -> None:
 def start_sideboard_compare_dashboard(
     out_dir: Path,
     *,
-    poll_seconds: float = 5.0,
+    poll_seconds: float = RUNTIME.sideboard_compare.dashboard_poll_seconds,
 ) -> subprocess.Popen[Any]:
     """Launch the live HTML dashboard watcher for a sideboard compare run."""
     return run_python_background(
@@ -376,12 +381,6 @@ def optional_train_workers_arg(play_workers: int | None) -> list[str]:
     if play_workers is None:
         return []
     return ["--workers", str(play_workers)]
-
-
-def optional_play_batch_size_arg(play_batch_size: int | None) -> list[str]:
-    if play_batch_size is None:
-        return []
-    return ["--play-batch-size", str(play_batch_size)]
 
 
 def optional_cpp_engine_arg(engine_dir: Path | None) -> list[str]:

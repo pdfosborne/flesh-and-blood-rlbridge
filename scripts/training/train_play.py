@@ -70,6 +70,11 @@ from play_outcome_stats import (  # noqa: E402
     compute_eval_stability,
     summarize_p1_outcomes,
 )
+from runtime_defaults import (  # noqa: E402
+    DEFAULT_CHECKPOINT_EVAL_EPISODES,
+    DEFAULT_CHECKPOINT_INTERVAL_PCT,
+    RUNTIME,
+)
 
 try:
     from train_dual_agent_common import (  # noqa: E402
@@ -94,12 +99,9 @@ try:
     _DUAL_AGENT_AVAILABLE = True
 except ImportError:
     _DUAL_AGENT_AVAILABLE = False
-    DEFAULT_N_EPISODES = 300
-    DEFAULT_WARMUP_EPISODES = 50
-    DEFAULT_WARMUP_BASELINE_EVAL_EPISODES = 20
-
-DEFAULT_CHECKPOINT_INTERVAL_PCT = 5.0
-DEFAULT_CHECKPOINT_EVAL_EPISODES = 100
+    DEFAULT_N_EPISODES = RUNTIME.dual_matchup.episodes
+    DEFAULT_WARMUP_EPISODES = RUNTIME.play.warmup_episodes
+    DEFAULT_WARMUP_BASELINE_EVAL_EPISODES = RUNTIME.play.warmup_baseline_eval_episodes
 
 
 def resolve_play_checkpoint_interval(
@@ -372,7 +374,6 @@ def _run_phase3_play_parallel_seeds(
     checkpoint_interval: Optional[int],
     checkpoint_interval_pct: float,
     checkpoint_eval_episodes: int,
-    parallel_batch_size: Optional[int],
 ) -> tuple[float, float]:
     shared_kwargs = dict(
         opponent_mode=opponent_mode,
@@ -394,7 +395,6 @@ def _run_phase3_play_parallel_seeds(
         cpp_engine_dir=cpp_engine_dir,
         checkpoint_interval=checkpoint_interval,
         checkpoint_interval_pct=checkpoint_interval_pct,
-        parallel_batch_size=parallel_batch_size,
         parallel_seeds=1,
         checkpoint_eval_episodes=checkpoint_eval_episodes,
     )
@@ -523,7 +523,6 @@ def run_phase3_play(
     checkpoint_interval: Optional[int] = None,
     checkpoint_interval_pct: float = DEFAULT_CHECKPOINT_INTERVAL_PCT,
     checkpoint_eval_episodes: int = DEFAULT_CHECKPOINT_EVAL_EPISODES,
-    parallel_batch_size: Optional[int] = None,
     parallel_seeds: int = 1,
     _seed_run_capture: Optional[dict[str, Any]] = None,
     _retain_temp_decks: bool = False,
@@ -569,7 +568,6 @@ def run_phase3_play(
             checkpoint_interval=checkpoint_interval,
             checkpoint_interval_pct=checkpoint_interval_pct,
             checkpoint_eval_episodes=checkpoint_eval_episodes,
-            parallel_batch_size=parallel_batch_size,
         )
     print(
         f"\n{'='*62}\n"
@@ -738,11 +736,10 @@ def run_phase3_play(
             assets_path=assets_path,
         )
 
-    batch_parallelism = parallel_batch_size or n_workers
     if use_cpp_backend:
         print(
             f"  Parallel play: {n_episodes} episodes, "
-            f"{n_workers} worker(s), batch={batch_parallelism}"
+            f"{n_workers} worker(s)"
         )
     elif n_workers > 1:
         print(
@@ -750,7 +747,6 @@ def run_phase3_play(
             "capping workers to 1."
         )
         n_workers = 1
-        batch_parallelism = 1
 
     # ── Matchup + EpisodeCache ────────────────────────────────────────────────
     matchup = Matchup(
@@ -999,7 +995,6 @@ def run_phase3_play(
                 seed=seed,
                 warmup_episodes=min(warmup_episodes, n_episodes),
                 n_workers=n_workers,
-                parallel_batch_size=batch_parallelism,
                 live_state_image_path=live_path,
                 episode_cache=episode_cache,
                 on_episodes_progress=_on_episodes_progress,
@@ -2770,7 +2765,7 @@ def main() -> None:
     parser.add_argument("--p2-equipment-header",
         default="dorinthea_ironsong dori_equipment_sword dori_equipment_sword "
                 "helm_of_avarice gauntlet_of_might ironrot_legs valor_boots")
-    parser.add_argument("--play-episodes", type=int, default=30)
+    parser.add_argument("--play-episodes", type=int, default=RUNTIME.full_pipeline.play_episodes)
     parser.add_argument("--play-checkpoint-interval", type=int, default=None,
         help="Fixed checkpoint interval in episodes (default: 10%% of --play-episodes)")
     parser.add_argument("--checkpoint-interval-pct", type=float,
@@ -2779,14 +2774,12 @@ def main() -> None:
     parser.add_argument("--checkpoint-eval-episodes", type=int,
         default=DEFAULT_CHECKPOINT_EVAL_EPISODES,
         help="C++ eval games vs opponent agent (greedy) at each checkpoint (0=off)")
-    parser.add_argument("--max-play-steps", type=int, default=200)
+    parser.add_argument("--max-play-steps", type=int, default=RUNTIME.play.max_play_steps)
     parser.add_argument("--warmup-episodes", type=int, default=DEFAULT_WARMUP_EPISODES)
     parser.add_argument("--warmup-baseline-eval-episodes", type=int,
         default=DEFAULT_WARMUP_BASELINE_EVAL_EPISODES)
     parser.add_argument("--workers", type=int, default=None,
         help="Parallel C++ game sessions for play training (auto-detected when omitted)")
-    parser.add_argument("--play-batch-size", type=int, default=None,
-        help="Episodes per parallel batch (defaults to --workers)")
     parser.add_argument(
         "--cache-dir",
         default=str(DEFAULT_AGENT_CACHE_DIR),
@@ -2823,10 +2816,10 @@ def main() -> None:
     )
     parser.add_argument("--deck-state", default=None,
         help="Path to deck_state.json (default: <out-dir>/deck_state.json)")
-    parser.add_argument("--final-eval-episodes", type=int, default=20)
-    parser.add_argument("--final-eval-max-steps", type=int, default=60)
+    parser.add_argument("--final-eval-episodes", type=int, default=RUNTIME.full_pipeline.final_eval_episodes)
+    parser.add_argument("--final-eval-max-steps", type=int, default=RUNTIME.full_pipeline.final_eval_max_steps)
     parser.add_argument("--no-render-gif", action="store_true")
-    parser.add_argument("--gif-fps", type=float, default=3.0)
+    parser.add_argument("--gif-fps", type=float, default=RUNTIME.play.gif_fps)
     parser.add_argument("--skip-final-eval", action="store_true")
 
     args = parser.parse_args()
@@ -2939,7 +2932,6 @@ def main() -> None:
             checkpoint_interval=args.play_checkpoint_interval,
             checkpoint_interval_pct=args.checkpoint_interval_pct,
             checkpoint_eval_episodes=args.checkpoint_eval_episodes,
-            parallel_batch_size=args.play_batch_size,
             parallel_seeds=args.parallel_seeds,
         )
         p1.last_play_win_rate = p1_wr
