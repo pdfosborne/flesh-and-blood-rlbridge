@@ -1,13 +1,22 @@
 """Central runtime defaults for FaB RL training and runscripts.
 
-Edit ``META`` below to tune parallelism, training budget, checkpoints, and eval
-settings for **all** experiments on your hardware. Workflow-specific sections
-under ``RUNTIME`` are derived from ``META`` plus a few fixed per-script knobs.
+Edit ``META`` below to tune parallelism, training budget, checkpoints, eval,
+and game-control settings. Workflow sections under ``RUNTIME`` are derived from
+``META`` plus a few fixed per-script knobs.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
+
+@dataclass
+class MetaGameControls:
+    """Stall detection — when to force-skip stuck eval / replay sessions."""
+
+    stall_no_damage_turns: int = 6
+    stall_low_hand_turns: int = 3
+    stall_max_single_low_hand_turns: int = 5
+    stall_min_attack_hand: int = 2
 
 
 @dataclass
@@ -15,29 +24,34 @@ class MetaRuntime:
     """Shared runtime knobs — edit this block for your machine and training budget."""
 
     # ── Parallelism ──────────────────────────────────────────────────────────
-    workers: int | None = 16*4 # C++ env workers (None = auto-detect)
-    parallel_seeds: int = 3  # independent seeds; best model used for eval
+    workers: int | None = 16*8  # C++ env workers (None = auto-detect)
+    parallel_seeds: int = 2  # independent seeds; best model used for eval
     sideboard_max_parallel: int = 0  # 0 = train all sideboard candidates at once
     eval_parallel_workers: int = 4
 
     # ── Training budget (episodes) ───────────────────────────────────────────
-    play_episodes: int = 10_000  # Phase 3 play training (all workflows)
+    play_episodes: int = 100_000  # Phase 3 play training (all workflows)
 
     # ── Checkpoints during training ──────────────────────────────────────────
     checkpoint_interval_pct: float = 5.0
     checkpoint_eval_episodes: int = 100
-    play_checkpoint_interval: int | None = None # (None = default to checkpoint every 5% of play episodes)
+    play_checkpoint_interval: int | None = None
 
     # ── Per-episode limits & warmup ──────────────────────────────────────────
-    max_play_steps: int = 1000  # max turns per play-training episode (all workflows)
-    warmup_episodes: int = 250  # heuristic-policy episodes before PPO
+    max_play_steps: int = 1_000  # max turns per play-training episode (all workflows)
+    warmup_episodes: int = 1_000  # heuristic-policy episodes before PPO
     warmup_baseline_eval_episodes: int = 100
 
-    # ── Final evaluation (after training) ────────────────────────────────────
-    final_eval_episodes: int = 50
-    final_eval_max_steps: int = 200
-    eval_episodes: int = 20  # checkpoint / phase-3 eval watcher
-    eval_max_steps: int = 1000
+    # ── Training Checkpoint evaluation (uses cpp engine if possible)  ────────
+    eval_episodes: int = 100  # checkpoint / phase-3 eval watcher
+    eval_max_steps: int = 1_000
+
+    # ── Final evaluation (after training, uses Talishar engine) ──────────────
+    final_eval_episodes: int = 100
+    final_eval_max_steps: int = 1_000
+    
+    # ── Game controls (stall / force-skip) ───────────────────────────────────
+    game: MetaGameControls = field(default_factory=MetaGameControls)
 
     # ── Dashboard / rendering ────────────────────────────────────────────────
     dashboard_poll_seconds: float = 5.0
@@ -45,9 +59,16 @@ class MetaRuntime:
     gif_fps: float = 3.0
     gif_fps_matchup_sim: float = 2.0
 
+# ─────────────────────────────────────────────────────────────────────────────
 
-# ── Edit runtime for your hardware here ──────────────────────────────────────
-META = MetaRuntime()
+@dataclass(frozen=True)
+class GameControlsDefaults:
+    """Force-skip thresholds for stuck games (eval checkpoint watcher, etc.)."""
+
+    stall_no_damage_turns: int
+    stall_low_hand_turns: int
+    stall_max_single_low_hand_turns: int
+    stall_min_attack_hand: int
 
 
 @dataclass(frozen=True)
@@ -124,10 +145,6 @@ class EvalDashboardDefaults:
     max_steps: int = 0
     render_max_steps: int = 500
     poll_seconds: int = 30
-    stall_no_damage_turns: int = 6
-    stall_low_hand_turns: int = 3
-    stall_max_single_low_hand_turns: int = 5
-    stall_min_attack_hand: int = 2
     gif_fps: int = 3
 
 
@@ -173,9 +190,13 @@ class TuiDefaults:
     eval_poll_seconds: int = 30
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+META = MetaRuntime()
+
 @dataclass(frozen=True)
 class RuntimeDefaults:
     meta: MetaRuntime
+    game: GameControlsDefaults
     play: PlayDefaults
     sideboard_compare: SideboardCompareDefaults
     full_pipeline: FullPipelineDefaults
@@ -185,10 +206,20 @@ class RuntimeDefaults:
     ppo: PpoDefaults
     tui: TuiDefaults
 
+def _game_controls(meta: MetaRuntime) -> GameControlsDefaults:
+    g = meta.game
+    return GameControlsDefaults(
+        stall_no_damage_turns=g.stall_no_damage_turns,
+        stall_low_hand_turns=g.stall_low_hand_turns,
+        stall_max_single_low_hand_turns=g.stall_max_single_low_hand_turns,
+        stall_min_attack_hand=g.stall_min_attack_hand,
+    )
+
 
 def build_runtime(meta: MetaRuntime) -> RuntimeDefaults:
     """Derive per-script defaults from shared ``MetaRuntime`` settings."""
     dual_workers = 1 if meta.workers is None else meta.workers
+    game = _game_controls(meta)
 
     play = PlayDefaults(
         workers=meta.workers,
@@ -204,6 +235,7 @@ def build_runtime(meta: MetaRuntime) -> RuntimeDefaults:
 
     return RuntimeDefaults(
         meta=meta,
+        game=game,
         play=play,
         sideboard_compare=SideboardCompareDefaults(
             max_parallel=meta.sideboard_max_parallel,
@@ -261,6 +293,11 @@ DEFAULT_CHECKPOINT_EVAL_EPISODES = RUNTIME.play.checkpoint_eval_episodes
 DEFAULT_WARMUP_EPISODES = RUNTIME.play.warmup_episodes
 DEFAULT_WARMUP_BASELINE_EVAL_EPISODES = RUNTIME.play.warmup_baseline_eval_episodes
 
+DEFAULT_STALL_NO_DAMAGE_TURNS = RUNTIME.game.stall_no_damage_turns
+DEFAULT_STALL_LOW_HAND_TURNS = RUNTIME.game.stall_low_hand_turns
+DEFAULT_STALL_MAX_SINGLE_LOW_HAND_TURNS = RUNTIME.game.stall_max_single_low_hand_turns
+DEFAULT_STALL_MIN_ATTACK_HAND = RUNTIME.game.stall_min_attack_hand
+
 DEFAULT_N_EPISODES = RUNTIME.dual_matchup.episodes
 DEFAULT_HIDDEN_SIZE = RUNTIME.ppo.hidden_size
 DEFAULT_LR = RUNTIME.ppo.lr
@@ -279,6 +316,8 @@ def apply_meta(**overrides: object) -> RuntimeDefaults:
     global DEFAULT_PARALLEL_SEEDS, DEFAULT_CHECKPOINT_INTERVAL_PCT  # noqa: PLW0603
     global DEFAULT_CHECKPOINT_EVAL_EPISODES, DEFAULT_WARMUP_EPISODES  # noqa: PLW0603
     global DEFAULT_WARMUP_BASELINE_EVAL_EPISODES, DEFAULT_N_EPISODES  # noqa: PLW0603
+    global DEFAULT_STALL_NO_DAMAGE_TURNS, DEFAULT_STALL_LOW_HAND_TURNS  # noqa: PLW0603
+    global DEFAULT_STALL_MAX_SINGLE_LOW_HAND_TURNS, DEFAULT_STALL_MIN_ATTACK_HAND  # noqa: PLW0603
     global DEFAULT_HIDDEN_SIZE, DEFAULT_LR, DEFAULT_GAMMA, DEFAULT_LAM  # noqa: PLW0603
     global DEFAULT_CLIP_EPS, DEFAULT_N_STEPS, DEFAULT_PPO_EPOCHS  # noqa: PLW0603
     global DEFAULT_MINI_BATCH, DEFAULT_PPO_ROLLOUT_BATCH  # noqa: PLW0603
@@ -291,6 +330,10 @@ def apply_meta(**overrides: object) -> RuntimeDefaults:
     DEFAULT_CHECKPOINT_EVAL_EPISODES = RUNTIME.play.checkpoint_eval_episodes
     DEFAULT_WARMUP_EPISODES = RUNTIME.play.warmup_episodes
     DEFAULT_WARMUP_BASELINE_EVAL_EPISODES = RUNTIME.play.warmup_baseline_eval_episodes
+    DEFAULT_STALL_NO_DAMAGE_TURNS = RUNTIME.game.stall_no_damage_turns
+    DEFAULT_STALL_LOW_HAND_TURNS = RUNTIME.game.stall_low_hand_turns
+    DEFAULT_STALL_MAX_SINGLE_LOW_HAND_TURNS = RUNTIME.game.stall_max_single_low_hand_turns
+    DEFAULT_STALL_MIN_ATTACK_HAND = RUNTIME.game.stall_min_attack_hand
     DEFAULT_N_EPISODES = RUNTIME.dual_matchup.episodes
     DEFAULT_HIDDEN_SIZE = RUNTIME.ppo.hidden_size
     DEFAULT_LR = RUNTIME.ppo.lr

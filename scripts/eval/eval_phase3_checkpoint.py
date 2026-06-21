@@ -50,6 +50,12 @@ from scripts.training.play_outcome_stats import (  # noqa: E402
     absolute_p1_p2_hp_from_obs,
     classify_p1_episode_outcome,
 )
+from runtime_defaults import (  # noqa: E402
+    DEFAULT_STALL_LOW_HAND_TURNS,
+    DEFAULT_STALL_MAX_SINGLE_LOW_HAND_TURNS,
+    DEFAULT_STALL_MIN_ATTACK_HAND,
+    DEFAULT_STALL_NO_DAMAGE_TURNS,
+)
 from scripts.training.train_pipeline_common import _write_deck_file  # noqa: E402
 
 
@@ -1353,25 +1359,25 @@ def main() -> None:
     parser.add_argument(
         "--stall-no-damage-turns",
         type=int,
-        default=6,
+        default=DEFAULT_STALL_NO_DAMAGE_TURNS,
         help="Early-end eval episode after this many consecutive no-damage turns when low-hand stall pattern is also present.",
     )
     parser.add_argument(
         "--stall-low-hand-turns",
         type=int,
-        default=3,
+        default=DEFAULT_STALL_LOW_HAND_TURNS,
         help="Require both players to have this many consecutive low-hand main phases for one stall condition.",
     )
     parser.add_argument(
         "--stall-max-single-low-hand-turns",
         type=int,
-        default=5,
+        default=DEFAULT_STALL_MAX_SINGLE_LOW_HAND_TURNS,
         help="Alternative stall condition: either player reaches this many consecutive low-hand main phases.",
     )
     parser.add_argument(
         "--stall-min-attack-hand",
         type=int,
-        default=2,
+        default=DEFAULT_STALL_MIN_ATTACK_HAND,
         help="Hand size threshold considered too low to mount attacks in main phase.",
     )
     parser.add_argument("--verbose", action="store_true",

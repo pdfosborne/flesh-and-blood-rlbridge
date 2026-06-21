@@ -15,6 +15,7 @@ from runtime_defaults import (  # noqa: E402
     DEFAULT_CHECKPOINT_INTERVAL_PCT,
     DEFAULT_PARALLEL_SEEDS,
     META,
+    MetaGameControls,
     RUNTIME,
     apply_meta,
     build_runtime,
@@ -69,6 +70,15 @@ def test_build_runtime_propagates_meta_workers() -> None:
     assert runtime.matchup_sim.workers == 8
     assert runtime.dual_matchup.workers == 8
     assert runtime.eval_dashboard.parallel_workers == META.eval_parallel_workers
+
+
+def test_game_controls_from_meta() -> None:
+    runtime = build_runtime(
+        replace(META, game=MetaGameControls(stall_no_damage_turns=9, stall_min_attack_hand=1))
+    )
+    assert runtime.game.stall_no_damage_turns == 9
+    assert runtime.game.stall_min_attack_hand == 1
+    assert runtime.game.stall_low_hand_turns == META.game.stall_low_hand_turns
 
 
 def test_apply_meta_updates_module_aliases() -> None:
