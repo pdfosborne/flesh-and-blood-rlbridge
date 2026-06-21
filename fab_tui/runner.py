@@ -189,6 +189,8 @@ def run_eval_dashboard(spec: EvalSpec, env: EnvironmentSettings) -> int:
         cmd.extend(["--candidate-id", spec.candidate_id])
     if spec.watch:
         cmd.append("--watch")
+    if spec.render_only:
+        cmd.append("--render-only")
     return run_streaming(cmd)
 
 

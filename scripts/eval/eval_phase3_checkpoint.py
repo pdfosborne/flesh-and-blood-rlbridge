@@ -981,6 +981,7 @@ def _evaluate_checkpoint(
     parallel_workers: int,
     verbose: bool = False,
     run_parity: bool = True,
+    render_only: bool = False,
     cpp_engine_dir: Optional[str] = None,
     cpp_engine_cache_dir: Optional[str] = None,
 ) -> dict[str, Any]:
@@ -988,15 +989,18 @@ def _evaluate_checkpoint(
     print(f"  Evaluating checkpoint  : {p1_bundle.checkpoint_dir.name}")
     print(f"  Matchup                : {p1_bundle.matchup}")
     print(f"  Training episodes done : {p1_bundle.episodes_completed}")
-    print(f"  Eval episodes          : {episodes}  |  max steps: {max_steps}")
-    print(
-        "  Stall guard            : "
-        f"no-dmg-turns>={stall_no_damage_turns}, "
-        f"low-hand<{stall_min_attack_hand} for "
-        f"{stall_low_hand_turns}/{stall_max_single_low_hand_turns} turns"
-    )
-    if render_gif:
-        print(f"  Render replay          : enabled (single episode, max steps: {render_max_steps})")
+    if render_only:
+        print(f"  Mode                   : render optimal policy only (max steps: {render_max_steps})")
+    else:
+        print(f"  Eval episodes          : {episodes}  |  max steps: {max_steps}")
+        print(
+            "  Stall guard            : "
+            f"no-dmg-turns>={stall_no_damage_turns}, "
+            f"low-hand<{stall_min_attack_hand} for "
+            f"{stall_low_hand_turns}/{stall_max_single_low_hand_turns} turns"
+        )
+        if render_gif:
+            print(f"  Render replay          : enabled (single episode, max steps: {render_max_steps})")
     print(f"  Talishar URL           : {base_url}")
     print(f"{'='*72}")
 
@@ -1061,15 +1065,7 @@ def _evaluate_checkpoint(
     stall_timeouts = 0
     episode_log: list[dict[str, Any]] = []
 
-    # Keep evaluation episodes fast: no frame rendering/capture during batch eval.
-    env_render_mode = None
-    env_fe_url = None
-
     # ── Pre-flight: verify Talishar is reachable before creating the env ──────
-    # Eval always uses HTTP Talishar (not the C++ engine) so the full game
-    # flow is exercised and the frontend render works.  Check connectivity
-    # immediately with a short timeout so we fail fast with a clear message
-    # instead of silently hanging for 90 s at env.reset().
     print(f"  Backend      : HTTP Talishar  ({base_url})", flush=True)
     import requests as _requests
     try:
@@ -1083,7 +1079,7 @@ def _evaluate_checkpoint(
         ) from _conn_exc
 
     parity_result: Optional[dict[str, Any]] = None
-    if run_parity:
+    if run_parity and not render_only:
         parity_result = _run_checkpoint_parity_check(
             p1_bundle=p1_bundle,
             p2_bundle=p2_bundle,
@@ -1095,91 +1091,94 @@ def _evaluate_checkpoint(
             deck2=p2_deck_name,
         )
 
-    workers = max(1, min(int(parallel_workers), episodes))
-    print(
-        f"  Starting {episodes} evaluation episode(s) "
-        f"with {workers} worker(s)...",
-        flush=True,
-    )
-    all_logs: list[dict[str, Any]] = []
-    mirror_opponent = opponent_mode == "mirror"
-    p2_weights_path = p2_bundle.weights_path if p2_bundle is not None else None
-
-    if workers == 1:
-        all_logs = _run_eval_episode_batch(
-            episode_numbers=list(range(1, episodes + 1)),
-            seed=seed,
-            base_url=base_url,
-            game_format=p1_bundle.game_format,
-            p1_deck_name=p1_deck_name,
-            p2_deck_name=p2_deck_name,
-            max_steps=max_steps,
-            p1_weights_path=p1_bundle.weights_path,
-            p2_weights_path=p2_weights_path,
-            mirror_opponent=mirror_opponent,
-            stall_no_damage_turns=stall_no_damage_turns,
-            stall_low_hand_turns=stall_low_hand_turns,
-            stall_max_single_low_hand_turns=stall_max_single_low_hand_turns,
-            stall_min_attack_hand=stall_min_attack_hand,
-            verbose=verbose,
-        )
+    if render_only:
+        render_gif = True
     else:
-        from concurrent.futures import ThreadPoolExecutor, as_completed  # noqa: PLC0415
-
-        batches: list[list[int]] = [[] for _ in range(workers)]
-        for i, ep in enumerate(range(1, episodes + 1)):
-            batches[i % workers].append(ep)
-
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = [
-                executor.submit(
-                    _run_eval_episode_batch,
-                    episode_numbers=batch,
-                    seed=seed,
-                    base_url=base_url,
-                    game_format=p1_bundle.game_format,
-                    p1_deck_name=p1_deck_name,
-                    p2_deck_name=p2_deck_name,
-                    max_steps=max_steps,
-                    p1_weights_path=p1_bundle.weights_path,
-                    p2_weights_path=p2_weights_path,
-                    mirror_opponent=mirror_opponent,
-                    stall_no_damage_turns=stall_no_damage_turns,
-                    stall_low_hand_turns=stall_low_hand_turns,
-                    stall_max_single_low_hand_turns=stall_max_single_low_hand_turns,
-                    stall_min_attack_hand=stall_min_attack_hand,
-                    verbose=verbose,
-                )
-                for batch in batches
-                if batch
-            ]
-            for future in as_completed(futures):
-                all_logs.extend(future.result())
-
-    all_logs.sort(key=lambda x: int(x.get("episode", 0)))
-    for i, rec in enumerate(all_logs, start=1):
-        outcome = str(rec.get("outcome", "timeout"))
-        if outcome == "win":
-            wins += 1
-        elif outcome == "loss":
-            losses += 1
-        else:
-            timeouts += 1
-            if outcome == "stall_timeout":
-                stall_timeouts += 1
-        episode_log.append(rec)
-        _print_dashboard(
-            bundle=p1_bundle,
-            opponent_label=opponent_label,
-            episode=i,
-            total_episodes=episodes,
-            wins=wins,
-            losses=losses,
-            timeouts=timeouts,
-            last_outcome=outcome,
-            last_steps=int(rec.get("steps", 0) or 0),
-            eval_dir=eval_dir,
+        workers = max(1, min(int(parallel_workers), episodes))
+        print(
+            f"  Starting {episodes} evaluation episode(s) "
+            f"with {workers} worker(s)...",
+            flush=True,
         )
+        all_logs: list[dict[str, Any]] = []
+        mirror_opponent = opponent_mode == "mirror"
+        p2_weights_path = p2_bundle.weights_path if p2_bundle is not None else None
+
+        if workers == 1:
+            all_logs = _run_eval_episode_batch(
+                episode_numbers=list(range(1, episodes + 1)),
+                seed=seed,
+                base_url=base_url,
+                game_format=p1_bundle.game_format,
+                p1_deck_name=p1_deck_name,
+                p2_deck_name=p2_deck_name,
+                max_steps=max_steps,
+                p1_weights_path=p1_bundle.weights_path,
+                p2_weights_path=p2_weights_path,
+                mirror_opponent=mirror_opponent,
+                stall_no_damage_turns=stall_no_damage_turns,
+                stall_low_hand_turns=stall_low_hand_turns,
+                stall_max_single_low_hand_turns=stall_max_single_low_hand_turns,
+                stall_min_attack_hand=stall_min_attack_hand,
+                verbose=verbose,
+            )
+        else:
+            from concurrent.futures import ThreadPoolExecutor, as_completed  # noqa: PLC0415
+
+            batches: list[list[int]] = [[] for _ in range(workers)]
+            for i, ep in enumerate(range(1, episodes + 1)):
+                batches[i % workers].append(ep)
+
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = [
+                    executor.submit(
+                        _run_eval_episode_batch,
+                        episode_numbers=batch,
+                        seed=seed,
+                        base_url=base_url,
+                        game_format=p1_bundle.game_format,
+                        p1_deck_name=p1_deck_name,
+                        p2_deck_name=p2_deck_name,
+                        max_steps=max_steps,
+                        p1_weights_path=p1_bundle.weights_path,
+                        p2_weights_path=p2_weights_path,
+                        mirror_opponent=mirror_opponent,
+                        stall_no_damage_turns=stall_no_damage_turns,
+                        stall_low_hand_turns=stall_low_hand_turns,
+                        stall_max_single_low_hand_turns=stall_max_single_low_hand_turns,
+                        stall_min_attack_hand=stall_min_attack_hand,
+                        verbose=verbose,
+                    )
+                    for batch in batches
+                    if batch
+                ]
+                for future in as_completed(futures):
+                    all_logs.extend(future.result())
+
+        all_logs.sort(key=lambda x: int(x.get("episode", 0)))
+        for i, rec in enumerate(all_logs, start=1):
+            outcome = str(rec.get("outcome", "timeout"))
+            if outcome == "win":
+                wins += 1
+            elif outcome == "loss":
+                losses += 1
+            else:
+                timeouts += 1
+                if outcome == "stall_timeout":
+                    stall_timeouts += 1
+            episode_log.append(rec)
+            _print_dashboard(
+                bundle=p1_bundle,
+                opponent_label=opponent_label,
+                episode=i,
+                total_episodes=episodes,
+                wins=wins,
+                losses=losses,
+                timeouts=timeouts,
+                last_outcome=outcome,
+                last_steps=int(rec.get("steps", 0) or 0),
+                eval_dir=eval_dir,
+            )
 
     gif_path: Optional[Path] = None
     render_dir: Optional[Path] = None
@@ -1187,7 +1186,10 @@ def _evaluate_checkpoint(
     try:
         if render_gif:
             gif_path = eval_dir / "optimal_policy.gif"
-            print("  [render] Evaluation complete; running a single dedicated replay episode…")
+            if render_only:
+                print("  [render] Running optimal-policy replay episode…")
+            else:
+                print("  [render] Evaluation complete; running a single dedicated replay episode…")
             render_dir = eval_dir / "optimal_policy_frames"
             frame_paths, render_outcome = _run_render_episode(
                 p1_agent=p1_agent,
@@ -1213,20 +1215,36 @@ def _evaluate_checkpoint(
             except Exception:
                 pass
 
-    summary = {
-        "checkpoint_dir": str(p1_bundle.checkpoint_dir),
-        "matchup": p1_bundle.matchup,
-        "episodes_completed": p1_bundle.episodes_completed,
-        "eval": {
-            "episodes": episodes,
+    summary_path = eval_dir / "latest_eval.json"
+    existing_eval: dict[str, Any] = {}
+    if render_only and summary_path.is_file():
+        try:
+            existing_summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            if isinstance(existing_summary.get("eval"), dict):
+                existing_eval = existing_summary["eval"]
+        except Exception:
+            existing_eval = {}
+
+    if render_only and existing_eval:
+        eval_section = existing_eval
+    else:
+        eval_episodes = 0 if render_only else episodes
+        eval_section = {
+            "episodes": eval_episodes,
             "wins": wins,
             "losses": losses,
             "timeouts": timeouts,
             "stall_timeouts": stall_timeouts,
-            "win_rate": wins / max(1, episodes),
-            "win_rate_decided": wins / max(1, episodes - timeouts),
+            "win_rate": wins / max(1, eval_episodes),
+            "win_rate_decided": wins / max(1, eval_episodes - timeouts),
             "episode_log": episode_log,
-        },
+        }
+
+    summary = {
+        "checkpoint_dir": str(p1_bundle.checkpoint_dir),
+        "matchup": p1_bundle.matchup,
+        "episodes_completed": p1_bundle.episodes_completed,
+        "eval": eval_section,
         "render": {
             "frames_dir": str(render_dir) if render_dir is not None else None,
             "gif": str(gif_path) if gif_path is not None else None,
@@ -1234,12 +1252,15 @@ def _evaluate_checkpoint(
             "max_steps": render_max_steps if render_gif else None,
         },
         "parity": parity_result,
+        "render_only": render_only,
     }
-    summary_path = eval_dir / "latest_eval.json"
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(f"\nSaved evaluation summary -> {summary_path}")
     if gif_path is not None:
         print(f"Saved optimal-policy GIF -> {gif_path}")
+
+    if render_only:
+        return summary
 
     # Update persistent win-rate history and chart for this training run.
     # Store at the p1 run-level dir (.../p3_xxx/p1/) so every episode
@@ -1306,6 +1327,11 @@ def main() -> None:
                         help="Keep watching results/ and re-evaluate when a new checkpoint appears.")
     parser.add_argument("--poll-seconds", type=float, default=30.0)
     parser.add_argument("--no-render-gif", action="store_true")
+    parser.add_argument(
+        "--render-only",
+        action="store_true",
+        help="Skip win-rate evaluation episodes; only render the optimal-policy GIF replay.",
+    )
     parser.add_argument(
         "--render-max-steps",
         type=int,
@@ -1388,22 +1414,33 @@ def main() -> None:
                 print("  Candidate     : (all under candidates/)")
     print(f"  Talishar URL  : {args.talishar_url}")
     print(f"  Assets path   : {args.assets_path}")
-    print(
-        f"  Episodes      : {args.episodes}  |  workers: {max(1, args.parallel_workers)}"
-        f"  |  max steps: {args.max_steps}"
-    )
+    if args.render_only:
+        print(f"  Mode          : render optimal policy only")
+        print(f"  Render steps  : {render_max_steps}")
+    else:
+        print(
+            f"  Episodes      : {args.episodes}  |  workers: {max(1, args.parallel_workers)}"
+            f"  |  max steps: {args.max_steps}"
+        )
     print(f"  Watch mode    : {'yes' if args.watch else 'no'}  "
           f"(poll every {args.poll_seconds}s)")
-    print(f"  Render GIF    : {'yes' if not args.no_render_gif else 'no'}")
-    if not args.no_render_gif:
-        print(f"  Render steps  : {render_max_steps}")
-    print(f"  Parity check  : {'no' if args.skip_parity else '1 full episode'}")
-    print(
-        "  Stall guard   : "
-        f"{args.stall_no_damage_turns} no-dmg turns, "
-        f"< {args.stall_min_attack_hand} cards for "
-        f"{args.stall_low_hand_turns}/{args.stall_max_single_low_hand_turns} turns"
-    )
+    if args.render_only:
+        print(f"  Render GIF    : yes")
+    else:
+        print(f"  Render GIF    : {'yes' if not args.no_render_gif else 'no'}")
+        if not args.no_render_gif:
+            print(f"  Render steps  : {render_max_steps}")
+    if args.render_only:
+        print(f"  Parity check  : no (render-only mode)")
+    else:
+        print(f"  Parity check  : {'no' if args.skip_parity else '1 full episode'}")
+    if not args.render_only:
+        print(
+            "  Stall guard   : "
+            f"{args.stall_no_damage_turns} no-dmg turns, "
+            f"< {args.stall_min_attack_hand} cards for "
+            f"{args.stall_low_hand_turns}/{args.stall_max_single_low_hand_turns} turns"
+        )
     print("=" * 72, flush=True)
 
     last_seen: Optional[Path] = None
@@ -1434,7 +1471,7 @@ def main() -> None:
                 base_url=args.talishar_url,
                 fe_url=args.talishar_fe_url,
                 assets_path=args.assets_path,
-                render_gif=not args.no_render_gif,
+                render_gif=not args.no_render_gif or args.render_only,
                 render_max_steps=render_max_steps,
                 gif_fps=args.gif_fps,
                 seed=args.seed,
@@ -1445,6 +1482,7 @@ def main() -> None:
                 parallel_workers=args.parallel_workers,
                 verbose=args.verbose,
                 run_parity=not args.skip_parity,
+                render_only=args.render_only,
                 cpp_engine_dir=args.parity_cpp_engine_dir,
                 cpp_engine_cache_dir=args.parity_cpp_engine_cache_dir,
             )

@@ -125,6 +125,37 @@ _DEFAULT_RENDER_WIDTH = 1920
 _DEFAULT_RENDER_HEIGHT = 1080
 _TRUNCATION_PENALTY = -0.1  # negative reward for hitting max_turns without a winner
 _STEP_PENALTY = -0.001  # small per-step penalty to encourage faster game completion
+_DISABLE_CARD_HOVER_STORAGE_KEY = "talishar-disable-card-hover"
+
+_PLAYWRIGHT_GDPR_INIT_SCRIPT = (
+    "localStorage.setItem('gdpr-analytics-enabled','true');"
+    "localStorage.setItem('gdpr-consent-accepted','true');"
+)
+
+_PLAYWRIGHT_DISABLE_CARD_HOVER_INIT_SCRIPT = (
+    f"localStorage.setItem('{_DISABLE_CARD_HOVER_STORAGE_KEY}','true');"
+    "(function(){"
+    "const styleId='rlbridge-disable-card-hover';"
+    "if(document.getElementById(styleId)){return;}"
+    "const style=document.createElement('style');"
+    "style.id=styleId;"
+    "style.textContent="
+    "'[class*=\"popUpContainer\"]{display:none!important;visibility:hidden!important;opacity:0!important;}';"
+    "document.documentElement.appendChild(style);"
+    "const disableHover=()=>{if(document.body){document.body.style.pointerEvents='none';}};"
+    "if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',disableHover);}"
+    "else{disableHover();}"
+    "})();"
+)
+
+_PLAYWRIGHT_PREPARE_CAPTURE_SCRIPT = """() => {
+  document.body && (document.body.style.pointerEvents = 'none');
+  document.querySelectorAll('[class*="popUpContainer"]').forEach((el) => {
+    el.style.display = 'none';
+    el.style.visibility = 'hidden';
+    el.style.opacity = '0';
+  });
+}"""
 
 
 def _normalize_game_format(fmt: str) -> str:
@@ -1224,6 +1255,8 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             "gameName": self._game_name,
             "playerID": str(player_id),
         }
+        if self._render_mode == "rgb_array":
+            params["disableCardHover"] = "1"
         auth_key = self._auth_key_for(player_id)
         if auth_key:
             params["authKey"] = auth_key
@@ -1788,10 +1821,10 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                     viewport={"width": self._render_width, "height": self._render_height}
                 )
                 page = ctx.new_page()
-                page.add_init_script(
-                    "localStorage.setItem('gdpr-analytics-enabled','true');"
-                    "localStorage.setItem('gdpr-consent-accepted','true');"
-                )
+                init_script = _PLAYWRIGHT_GDPR_INIT_SCRIPT
+                if self._render_mode == "rgb_array":
+                    init_script += _PLAYWRIGHT_DISABLE_CARD_HOVER_INIT_SCRIPT
+                page.add_init_script(init_script)
                 page.goto(url, timeout=20000)
                 page.wait_for_load_state("domcontentloaded", timeout=15000)
                 page.wait_for_timeout(5000)
@@ -1897,6 +1930,11 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             # after state updates. 800ms was observed to be too short on some
             # machines / network conditions; increase to 1500ms.
             page.wait_for_timeout(1500)
+            page.mouse.move(8, 8)
+            try:
+                page.evaluate(_PLAYWRIGHT_PREPARE_CAPTURE_SCRIPT)
+            except Exception:
+                pass
             return page.screenshot(full_page=False)
 
         q.put((_shot, done, result_box))

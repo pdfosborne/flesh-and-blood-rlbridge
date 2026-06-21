@@ -190,6 +190,7 @@ class EvalSpec:
     watch: bool = False
     poll_seconds: int = 30
     candidate_id: str | None = None
+    render_only: bool = False
 
 
 @dataclass

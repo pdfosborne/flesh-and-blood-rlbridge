@@ -48,6 +48,11 @@ PLAYER_DECK_CHOICES = {
     "2": ("fabrary", "FaBrary URL or slug"),
 }
 
+EVAL_MODE_CHOICES = {
+    "1": ("eval", "Run evaluation (win-rate episodes + GIF replay)"),
+    "2": ("render", "Render optimal policy only (GIF replay, no eval episodes)"),
+}
+
 
 def _header(title: str, subtitle: str = "") -> None:
     console.clear()
@@ -479,7 +484,12 @@ def _choose_results_dir(
 
 
 def wizard_evaluate(env: EnvironmentSettings) -> None:
-    _header("Evaluate checkpoints", "Run phase-3 eval on saved training results")
+    _header(
+        "Evaluate checkpoints",
+        "Run evaluation or render optimal policy from saved checkpoints",
+    )
+    mode = _choose_mapping(EVAL_MODE_CHOICES, "What would you like to do?")
+    render_only = mode == "render"
 
     results_dir = _choose_results_dir(
         title="Results with phase-3 checkpoints",
@@ -509,20 +519,33 @@ def wizard_evaluate(env: EnvironmentSettings) -> None:
         elif choice:
             candidate_id = choice
 
-    spec = EvalSpec(
-        results_dir=results_dir,
-        candidate_id=candidate_id,
-        episodes=IntPrompt.ask("Evaluation episodes", default=20),
-        parallel_workers=IntPrompt.ask("Parallel workers", default=4),
-        max_steps=IntPrompt.ask("Max steps per game", default=1000),
-        watch=Confirm.ask("Watch for new checkpoints?", default=True),
-    )
-    if spec.watch:
-        spec.poll_seconds = IntPrompt.ask("Poll interval (seconds)", default=30)
+    if render_only:
+        spec = EvalSpec(
+            results_dir=results_dir,
+            candidate_id=candidate_id,
+            max_steps=IntPrompt.ask("Max steps for render replay", default=1000),
+            watch=Confirm.ask("Watch for new checkpoints?", default=False),
+            render_only=True,
+        )
+        if spec.watch:
+            spec.poll_seconds = IntPrompt.ask("Poll interval (seconds)", default=30)
+        console.print("\n[bold]Rendering optimal policy…[/bold]\n")
+    else:
+        spec = EvalSpec(
+            results_dir=results_dir,
+            candidate_id=candidate_id,
+            episodes=IntPrompt.ask("Evaluation episodes", default=20),
+            parallel_workers=IntPrompt.ask("Parallel workers", default=4),
+            max_steps=IntPrompt.ask("Max steps per game", default=1000),
+            watch=Confirm.ask("Watch for new checkpoints?", default=True),
+        )
+        if spec.watch:
+            spec.poll_seconds = IntPrompt.ask("Poll interval (seconds)", default=30)
+        console.print("\n[bold]Starting evaluation dashboard…[/bold]\n")
 
-    console.print("\n[bold]Starting evaluation dashboard…[/bold]\n")
     rc = run_eval_dashboard(spec, env)
-    console.print(f"\n[bold]Evaluation finished (exit {rc}).[/bold]")
+    finished = "Render finished" if render_only else "Evaluation finished"
+    console.print(f"\n[bold]{finished} (exit {rc}).[/bold]")
     _pause()
 
 

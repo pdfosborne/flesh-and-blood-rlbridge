@@ -901,22 +901,22 @@ def render_sideboard_compare_html(
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
   <style>
     :root {{
-      --bg: #f5f5f5;
-      --surface: #ffffff;
-      --surface-variant: #eeeeee;
-      --text: #212121;
-      --muted: #616161;
-      --primary: #1976d2;
-      --primary-light: #e3f2fd;
-      --good: #2e7d32;
-      --good-light: #e8f5e9;
-      --warn: #ef6c00;
-      --warn-light: #fff3e0;
-      --bad: #c62828;
-      --bad-light: #ffebee;
-      --border: #e0e0e0;
-      --shadow-1: 0 1px 3px rgba(0, 0, 0, 0.12), 0 1px 2px rgba(0, 0, 0, 0.08);
-      --shadow-2: 0 2px 4px rgba(0, 0, 0, 0.1), 0 1px 3px rgba(0, 0, 0, 0.08);
+      --bg: #0f1419;
+      --surface: #1a2332;
+      --surface-variant: #243044;
+      --text: #e8eef7;
+      --muted: #93a4bd;
+      --primary: #5b9cff;
+      --primary-light: rgba(91, 156, 255, 0.16);
+      --good: #3ecf8e;
+      --good-light: rgba(62, 207, 142, 0.14);
+      --warn: #f0b429;
+      --warn-light: rgba(240, 180, 41, 0.14);
+      --bad: #f07178;
+      --bad-light: rgba(240, 113, 120, 0.14);
+      --border: #2f3f56;
+      --shadow-1: 0 1px 3px rgba(0, 0, 0, 0.35), 0 1px 2px rgba(0, 0, 0, 0.25);
+      --shadow-2: 0 2px 6px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.3);
       --radius: 4px;
       --font: "JetBrains Mono", "Cascadia Code", "Fira Code", "Consolas", "Liberation Mono", ui-monospace, monospace;
     }}
@@ -1085,8 +1085,8 @@ def render_sideboard_compare_html(
       padding: 12px;
     }}
     .chart {{ width: 100%; height: auto; display: block; }}
-    .chart-grid {{ stroke: #e0e0e0; stroke-width: 1; }}
-    .chart-axis-line {{ stroke: #bdbdbd; stroke-width: 1; }}
+    .chart-grid {{ stroke: #2f3f56; stroke-width: 1; }}
+    .chart-axis-line {{ stroke: #3d4f66; stroke-width: 1; }}
     .chart-axis {{ fill: var(--muted); font-size: 10px; font-family: var(--font); }}
     .chart-line {{
       fill: none;
@@ -1096,8 +1096,8 @@ def render_sideboard_compare_html(
       stroke-linejoin: round;
     }}
     .chart-line-train {{ stroke: var(--good); }}
-    .chart-error-bar {{ stroke: rgba(25, 118, 210, 0.55); stroke-width: 1.5; }}
-    .chart-error-bar-train {{ stroke: rgba(46, 125, 50, 0.55); }}
+    .chart-error-bar {{ stroke: rgba(91, 156, 255, 0.65); stroke-width: 1.5; }}
+    .chart-error-bar-train {{ stroke: rgba(62, 207, 142, 0.65); }}
     .chart-dot {{ fill: var(--primary); stroke: var(--surface); stroke-width: 1.5; }}
     .chart-dot-train {{ fill: var(--good); stroke: var(--surface); stroke-width: 1.5; }}
     .train-record {{ display: block; font-size: 0.72rem; color: var(--muted); font-weight: 400; margin-top: 4px; }}
