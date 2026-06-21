@@ -172,18 +172,43 @@ def _parse_observation(source: str, observation: Any) -> tuple[Optional[dict[str
     return parsed, ""
 
 
-def _summary_value(value: Any, max_items: int = 12) -> Any:
+def _json_safe_value(value: Any, max_items: int = 12) -> Any:
+    """Recursively convert *value* to JSON-serializable Python types."""
+    try:
+        import numpy as np
+
+        if isinstance(value, np.ndarray):
+            return _json_safe_value(value.tolist(), max_items=max_items)
+        if isinstance(value, np.generic):
+            return value.item()
+    except ImportError:
+        pass
+
+    if isinstance(value, (bytes, bytearray)):
+        return value.decode("utf-8", errors="replace")
     if isinstance(value, str):
-        parsed, _ = _parse_observation("value", value)
-        return parsed if parsed is not None else value[:1000]
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return value[:1000]
+        if isinstance(parsed, (dict, list)):
+            return _json_safe_value(parsed, max_items=max_items)
+        return parsed
     if isinstance(value, list):
-        out = [_summary_value(item, max_items=max_items) for item in value[:max_items]]
+        out = [_json_safe_value(item, max_items=max_items) for item in value[:max_items]]
         if len(value) > max_items:
             out.append(f"... {len(value) - max_items} more")
         return out
     if isinstance(value, dict):
-        return {key: _summary_value(val, max_items=max_items) for key, val in value.items()}
+        return {
+            key: _json_safe_value(val, max_items=max_items)
+            for key, val in value.items()
+        }
     return value
+
+
+def _summary_value(value: Any, max_items: int = 12) -> Any:
+    return _json_safe_value(value, max_items=max_items)
 
 
 def _normalise_action(action: dict[str, Any], fields: tuple[str, ...]) -> dict[str, Any]:
@@ -1001,8 +1026,8 @@ def generate_html_discrepancy_report(report: ParityReport) -> str:
             f"{html.escape(discrepancy['category'].upper())}</h2>"
             f"<p>{html.escape(discrepancy['description'])}</p>"
             "<div class='cols'>"
-            f"<pre>{html.escape(json.dumps(discrepancy['talishar_value'], indent=2, sort_keys=True))}</pre>"
-            f"<pre>{html.escape(json.dumps(discrepancy['cpp_value'], indent=2, sort_keys=True))}</pre>"
+            f"<pre>{html.escape(json.dumps(_json_safe_value(discrepancy['talishar_value']), indent=2, sort_keys=True))}</pre>"
+            f"<pre>{html.escape(json.dumps(_json_safe_value(discrepancy['cpp_value']), indent=2, sort_keys=True))}</pre>"
             "</div></section>"
         )
     return f"""<!doctype html>
@@ -1246,7 +1271,8 @@ def _create_envs(args: argparse.Namespace) -> tuple[TalisharEngineEnvironment, T
 
 def _write_reports(report: ParityReport, out_dir: Path) -> None:
     json_report_path = out_dir / "parity_report.json"
-    json_report_path.write_text(json.dumps(report.to_dict(), indent=2), encoding="utf-8")
+    payload = _json_safe_value(report.to_dict())
+    json_report_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     print(f"[OK] JSON report written to: {json_report_path}")
 
     summary_path = out_dir / "parity_summary.txt"

@@ -533,6 +533,17 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             return int(extra["turn"])
         return self._obs_turn_no()
 
+    def _contract_acting_player_id(self) -> int:
+        extra = self._talishar_parity_extra or {}
+        acting_id = extra.get("acting_player_id")
+        if acting_id is not None:
+            return int(acting_id)
+        if self._talishar_overlay:
+            overlay_id = self._talishar_overlay.get("acting_player_id")
+            if overlay_id is not None:
+                return int(overlay_id)
+        return int(self._acting_player)
+
     def _contract_repeat_fields(self, repeat_penalty: float) -> tuple[int, float]:
         extra = self._talishar_parity_extra or {}
         repeat_streak = extra.get("repeat_streak")
@@ -1355,8 +1366,75 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             info=info,
         )
 
+    def _step_from_talishar_mirror(self, action: Any) -> StepResult:
+        """Return Talishar-mirrored step fields without local flow/auto-advance."""
+        legal = self._filter_legal_actions(self._legal_actions())
+        before_snapshot = (
+            self._tracker_state_snapshot(legal) if self._enable_combat_tracker else None
+        )
+        legal_before = self._legal_to_dicts(legal) if self._enable_combat_tracker else []
+        _, chosen = self._parse_action(action, legal)
+        chosen_dict = self._action_to_dict(chosen)
+
+        self._steps += 1
+        self._consume_talishar_mirror_state()
+
+        terminated, truncated = self._mirrored_termination(
+            terminated=False,
+            truncated=False,
+        )
+        repeat_streak, repeat_penalty = self._contract_repeat_fields(0.0)
+        reward = self._mirrored_reward(0.0)
+
+        new_legal = self._filter_legal_actions(self._legal_actions())
+        obs = self._encode_observation(new_legal)
+        after_snapshot = (
+            self._tracker_state_snapshot(new_legal) if self._enable_combat_tracker else None
+        )
+        player_hp, opponent_hp = self._contract_player_hp()
+        contract_legal = self._contract_legal_actions(new_legal)
+
+        tracker_event: Optional[dict[str, Any]] = None
+        if self._enable_combat_tracker and before_snapshot is not None and after_snapshot is not None:
+            tracker_event = self._combat_tracker.record_step(
+                before_snapshot=before_snapshot,
+                after_snapshot=after_snapshot,
+                action=chosen_dict,
+                legal_before=legal_before,
+                legal_after=contract_legal,
+                reward=float(reward),
+                terminated=terminated,
+                truncated=truncated,
+                combat_log_lines=self._synthetic_combat_log,
+            )
+
+        step_info: dict[str, Any] = {
+            "engine": "cpp",
+            "legal_actions": contract_legal,
+            "turn": self._contract_turn(),
+            "player_hp": player_hp,
+            "opponent_hp": opponent_hp,
+            "acting_player_id": self._contract_acting_player_id(),
+            "self_play": True,
+            "repeat_streak": repeat_streak,
+            "repeat_penalty": repeat_penalty,
+            "combat_tracker": self._tracker_stub(tracker_event),
+        }
+        if self._last_observation_vec is not None:
+            step_info["observation_vec"] = self._last_observation_vec
+
+        return StepResult(
+            observation=obs,
+            reward=reward,
+            terminated=terminated,
+            truncated=truncated,
+            info=step_info,
+        )
+
     def step(self, action: Any) -> StepResult:
         assert self._gs is not None, "call reset() first"
+        if self._talishar_mirror_state is not None:
+            return self._step_from_talishar_mirror(action)
 
         legal = self._filter_legal_actions(self._legal_actions())
         before_snapshot = (
@@ -1459,7 +1537,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             "turn": self._contract_turn(),
             "player_hp": player_hp,
             "opponent_hp": opponent_hp,
-            "acting_player_id": self._acting_player,
+            "acting_player_id": self._contract_acting_player_id(),
             "self_play": True,
             "repeat_streak": repeat_streak,
             "repeat_penalty": repeat_pen,
