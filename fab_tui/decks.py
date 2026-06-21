@@ -65,6 +65,27 @@ def hero_class_for(hero_id: str) -> str:
     return HERO_CLASSES.get(token, "Warrior")
 
 
+def resolve_deck_link(
+    source: str,
+    *,
+    label: str,
+    cache_dir: Path,
+    fetch_fn,
+) -> Path | None:
+    """Resolve a FaBrary URL/slug or local JSON path to a deck file."""
+    raw = source.strip()
+    if not raw:
+        return None
+    local = Path(raw)
+    if local.is_file():
+        return local.resolve()
+    slug = raw.rsplit("/", 1)[-1][:26]
+    out = cache_dir / f"{slugify(label)}_{slug.lower()}.json"
+    if fetch_fn(raw, out) != 0:
+        return None
+    return out
+
+
 def list_precon_options(assets_path: Path) -> list[tuple[str, str]]:
     """Return ``(label, deck_asset_name)`` for available Talishar precons."""
     options: list[tuple[str, str]] = []
@@ -100,6 +121,26 @@ def export_precon_deck_json(
         if card_id:
             deck[card_id] = deck.get(card_id, 0) + 1
 
+    sideboard: dict[str, int] = {}
+    fmt_norm = str(game_format or "sage").lower()
+    min_game = 40 if fmt_norm in {"sage", "silver_age", "blitz"} else 60
+    total = sum(deck.values())
+    if total > min_game:
+        game_deck: dict[str, int] = {}
+        remaining = min_game
+        for card_id, count in deck.items():
+            if remaining <= 0:
+                sideboard[card_id] = count
+                continue
+            take = min(count, remaining)
+            if take:
+                game_deck[card_id] = take
+            leftover = count - take
+            if leftover:
+                sideboard[card_id] = sideboard.get(card_id, 0) + leftover
+            remaining -= take
+        deck = game_deck
+
     payload = {
         "name": deck_name,
         "hero_id": hero_id,
@@ -107,7 +148,7 @@ def export_precon_deck_json(
         "format": game_format,
         "equipment_header": equipment_header,
         "deck": deck,
-        "sideboard": {},
+        "sideboard": sideboard,
     }
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")

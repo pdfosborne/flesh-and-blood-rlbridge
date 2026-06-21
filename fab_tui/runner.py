@@ -20,6 +20,7 @@ from fab_tui.config import (
     EvalSpec,
     ExperimentSpec,
     MatchupSimSpec,
+    SideboardCompareSpec,
     normalize_pipeline_format,
 )
 
@@ -184,6 +185,8 @@ def run_eval_dashboard(spec: EvalSpec, env: EnvironmentSettings) -> int:
         "--poll-seconds",
         str(spec.poll_seconds),
     ]
+    if spec.candidate_id:
+        cmd.extend(["--candidate-id", spec.candidate_id])
     if spec.watch:
         cmd.append("--watch")
     return run_streaming(cmd)
@@ -355,3 +358,123 @@ def run_matchup_simulation(
     if spec.workers is not None:
         cmd.extend(["--workers", str(spec.workers)])
     return run_streaming(cmd)
+
+
+def run_sideboard_compare(
+    spec: SideboardCompareSpec,
+    env: EnvironmentSettings,
+    *,
+    starting_deck: Path,
+    candidates_json: Path | None = None,
+) -> int:
+    """Run sideboard variant comparison via ``train_sideboard_compare.py``."""
+    from runscripts._common import read_deck_meta  # noqa: PLC0415
+
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT))
+
+    env.apply_to_environ()
+    deck_meta = read_deck_meta(starting_deck, spec.game_format)
+    out_dir = spec.resolved_out_dir()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    cpp_dir: str | None = None
+    if spec.build_cpp_engine:
+        deck1 = _resolve_deck_stem(deck_meta.hero_id or spec.hero_id, env.assets_path)
+        deck2 = _resolve_deck_stem(spec.opponent_deck, env.assets_path)
+        existing = discover_cpp_engine_dir(
+            deck1,
+            deck2,
+            assets_path=env.assets_path,
+            deck1_json=starting_deck,
+        )
+        if existing is not None:
+            cpp_dir = str(existing)
+        else:
+            rc = build_cpp_engine(
+                deck1,
+                deck2,
+                env,
+                deck1_json=starting_deck,
+            )
+            if rc == 0:
+                found = discover_cpp_engine_dir(
+                    deck1,
+                    deck2,
+                    assets_path=env.assets_path,
+                    deck1_json=starting_deck,
+                )
+                cpp_dir = str(found) if found else None
+
+    cmd = [
+        _python(),
+        str(SCRIPTS_TRAINING / "train_sideboard_compare.py"),
+        "--format",
+        normalize_pipeline_format(spec.game_format),
+        "--hero-id",
+        spec.hero_id or deck_meta.hero_id,
+        "--hero-class",
+        spec.hero_class or deck_meta.hero_class,
+        "--equipment-header",
+        spec.equipment_header or deck_meta.equipment_header,
+        "--opponent-hero-id",
+        spec.opponent_hero_id,
+        "--opponent-deck",
+        spec.opponent_deck,
+        "--starting-deck",
+        str(starting_deck),
+        "--num-options",
+        str(spec.num_options),
+        "--max-parallel",
+        str(spec.max_parallel),
+        "--play-episodes",
+        str(spec.play_episodes),
+        "--checkpoint-interval-pct",
+        str(spec.checkpoint_interval_pct),
+        "--checkpoint-eval-episodes",
+        str(spec.checkpoint_eval_episodes),
+        "--final-eval-episodes",
+        str(spec.final_eval_episodes),
+        "--final-eval-max-steps",
+        str(spec.final_eval_max_steps),
+        "--out-dir",
+        str(out_dir),
+        "--cache-dir",
+        str(REPO_ROOT / "results" / "agent_cache"),
+        "--talishar-url",
+        env.talishar_url,
+        "--talishar-fe-url",
+        env.talishar_fe_url,
+        "--assets-path",
+        env.assets_path,
+    ]
+    if spec.play_checkpoint_interval is not None:
+        cmd.extend([
+            "--play-checkpoint-interval",
+            str(spec.play_checkpoint_interval),
+        ])
+    if spec.skip_final_eval:
+        cmd.append("--skip-final-eval")
+    if spec.no_render_gif:
+        cmd.append("--no-render-gif")
+    if candidates_json is not None:
+        cmd.extend(["--candidates-json", str(candidates_json)])
+    if cpp_dir:
+        cmd.extend(["--cpp-engine-dir", cpp_dir])
+    if spec.workers is not None:
+        cmd.extend(["--workers", str(spec.workers)])
+
+    dashboard_proc = None
+    try:
+        from runscripts._common import (  # noqa: PLC0415
+            start_sideboard_compare_dashboard,
+            stop_background_process,
+        )
+
+        dashboard_proc = start_sideboard_compare_dashboard(out_dir)
+        return run_streaming(cmd)
+    finally:
+        if dashboard_proc is not None:
+            from runscripts._common import stop_background_process  # noqa: PLC0415
+
+            stop_background_process(dashboard_proc)

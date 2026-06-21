@@ -35,6 +35,8 @@ from flesh_and_blood_rlbridge.talishar_engine_environment import (  # noqa: E402
 )
 from rl_agents.ppo import PPOAgent  # noqa: E402
 
+from play_outcome_stats import classify_p1_episode_outcome  # noqa: E402
+
 
 def _load_agent(weights_path: Path) -> PPOAgent:
     agent = PPOAgent()
@@ -255,7 +257,9 @@ def _eval_agents(
                 if terminated or truncated:
                     break
 
-            winner = None
+            if not terminated and not truncated and steps >= max_steps:
+                truncated = True
+
             if isinstance(obs, str):
                 try:
                     obs_dict = json.loads(obs)
@@ -266,15 +270,24 @@ def _eval_agents(
 
             p1_hp = float(obs_dict.get("playerHealth", 0) or 0)
             p2_hp = float(obs_dict.get("opponentHealth", 0) or 0)
-            if p1_hp > p2_hp:
+            outcome = classify_p1_episode_outcome(
+                p1_hp=p1_hp,
+                p2_hp=p2_hp,
+                terminated=terminated,
+                truncated=truncated,
+            )
+            if outcome == "win":
                 p1_wins += 1
                 winner = "p1"
-            elif p2_hp > p1_hp:
+            elif outcome == "loss":
                 p2_wins += 1
                 winner = "p2"
-            else:
+            elif outcome == "draw":
                 draws += 1
                 winner = "draw"
+            else:
+                timeouts += 1
+                winner = "timeout"
 
             episodes_log.append(
                 {
@@ -286,8 +299,6 @@ def _eval_agents(
                     "winner": winner,
                 }
             )
-            if truncated:
-                timeouts += 1
             pct = (ep / max(1, episodes)) * 100.0
             print(
                 f"  [eval {ep:3d}/{episodes:3d} | {pct:6.2f}%] "

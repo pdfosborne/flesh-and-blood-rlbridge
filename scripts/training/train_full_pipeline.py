@@ -69,6 +69,8 @@ from train_pipeline_common import (  # noqa: E402
     save_deck_state,
 )
 from train_play import (  # noqa: E402
+    DEFAULT_CHECKPOINT_EVAL_EPISODES,
+    DEFAULT_CHECKPOINT_INTERVAL_PCT,
     DEFAULT_WARMUP_BASELINE_EVAL_EPISODES,
     DEFAULT_WARMUP_EPISODES,
     auto_detect_workers,
@@ -112,7 +114,14 @@ def main() -> None:
 
     parser.add_argument("--deckbuild-episodes", type=int, default=50)
     parser.add_argument("--play-episodes", type=int, default=30)
-    parser.add_argument("--play-checkpoint-interval", type=int, default=10000)
+    parser.add_argument("--play-checkpoint-interval", type=int, default=None,
+        help="Fixed checkpoint interval in episodes (default: 10%% of --play-episodes)")
+    parser.add_argument("--checkpoint-interval-pct", type=float,
+        default=DEFAULT_CHECKPOINT_INTERVAL_PCT,
+        help="Checkpoint every N%% of play episodes when interval is unset")
+    parser.add_argument("--checkpoint-eval-episodes", type=int,
+        default=DEFAULT_CHECKPOINT_EVAL_EPISODES,
+        help="C++ eval games with fixed opponent policy at each checkpoint (0=off)")
     parser.add_argument("--max-build-steps", type=int, default=200)
     parser.add_argument("--max-sideboard-steps", type=int, default=100)
     parser.add_argument("--max-play-steps", type=int, default=200)
@@ -367,6 +376,8 @@ def main() -> None:
             seed=args.seed,
             cpp_engine_dir=args.cpp_engine_dir,
             checkpoint_interval=args.play_checkpoint_interval,
+            checkpoint_interval_pct=args.checkpoint_interval_pct,
+            checkpoint_eval_episodes=args.checkpoint_eval_episodes,
             parallel_batch_size=args.play_batch_size,
         )
         p1.last_play_win_rate = p1_wr

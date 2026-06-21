@@ -49,6 +49,43 @@ def run_python(script: Path | str, *args: str, cwd: Path | None = None) -> int:
     return run_command([PYTHON, str(script), *args], cwd=cwd)
 
 
+def run_python_background(
+    script: Path | str,
+    *args: str,
+    cwd: Path | None = None,
+) -> subprocess.Popen[Any]:
+    cmd = [PYTHON, str(script), *args]
+    print(f"  $ {' '.join(cmd)}  [background]")
+    return subprocess.Popen(cmd, cwd=str(cwd or REPO_ROOT))
+
+
+def stop_background_process(proc: subprocess.Popen[Any] | None) -> None:
+    if proc is None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
+def start_sideboard_compare_dashboard(
+    out_dir: Path,
+    *,
+    poll_seconds: float = 5.0,
+) -> subprocess.Popen[Any]:
+    """Launch the live HTML dashboard watcher for a sideboard compare run."""
+    return run_python_background(
+        SCRIPTS_EVAL / "sideboard_compare_dashboard.py",
+        "--out-dir",
+        str(out_dir),
+        "--watch",
+        "--poll-seconds",
+        str(poll_seconds),
+        cwd=REPO_ROOT,
+    )
+
+
 def title_case_token(token: str) -> str:
     token = token.strip()
     if not token:

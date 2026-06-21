@@ -29,6 +29,7 @@ from flesh_and_blood_rlbridge import TalisharEngineEnvironment  # noqa: E402
 from flesh_and_blood_rlbridge.opponent_deck import normalize_talishar_asset_name  # noqa: E402
 
 from train_pipeline_common import (  # noqa: E402
+    DEFAULT_AGENT_CACHE_DIR,
     DEFAULT_EQUIPMENT_HEADER,
     DEFAULT_FORMAT,
     DEFAULT_HERO_ID,
@@ -55,6 +56,11 @@ from cpp_engine_matchup import (  # noqa: E402
     ensure_cpp_engine_for_matchup,
     resolve_cpp_lookup_decks,
 )
+from play_outcome_stats import (  # noqa: E402
+    classify_p1_episode_outcome,
+    compute_eval_stability,
+    summarize_p1_outcomes,
+)
 
 try:
     from train_dual_agent_common import (  # noqa: E402
@@ -64,10 +70,16 @@ try:
         train_agents_from_both_perspectives,
         train_agents_from_both_perspectives_parallel,
         _evaluate_policy_pair,
+        _player_context,
         _save_warmup_handoff_checkpoint,
         DEFAULT_N_EPISODES,
         DEFAULT_WARMUP_EPISODES,
         DEFAULT_WARMUP_BASELINE_EVAL_EPISODES,
+    )
+    from agent_cache import (  # noqa: E402
+        AgentCacheStore,
+        deck_content_fingerprint,
+        talishar_asset_deck_fingerprint,
     )
     from episode_cache import EpisodeCache  # noqa: E402
     _DUAL_AGENT_AVAILABLE = True
@@ -76,6 +88,98 @@ except ImportError:
     DEFAULT_N_EPISODES = 300
     DEFAULT_WARMUP_EPISODES = 50
     DEFAULT_WARMUP_BASELINE_EVAL_EPISODES = 20
+
+DEFAULT_CHECKPOINT_INTERVAL_PCT = 5.0
+DEFAULT_CHECKPOINT_EVAL_EPISODES = 100
+
+
+def resolve_play_checkpoint_interval(
+    n_episodes: int,
+    *,
+    checkpoint_interval: Optional[int] = None,
+    checkpoint_interval_pct: float = DEFAULT_CHECKPOINT_INTERVAL_PCT,
+) -> int:
+    """Resolve checkpoint cadence — fixed interval or a %% of total episodes."""
+    if checkpoint_interval is not None and checkpoint_interval > 0:
+        return int(checkpoint_interval)
+    pct = max(0.1, float(checkpoint_interval_pct))
+    return max(1, int(math.ceil(n_episodes * pct / 100.0)))
+
+
+def _resolve_phase3_deck_fingerprints(
+    *,
+    opponent_mode: str,
+    p1_game_deck: dict[str, int],
+    p1_equipment_header: str,
+    p1_opponent_deck_name: str,
+    assets_path: str,
+    p2_game_deck: Optional[dict[str, int]] = None,
+    p2_equipment_header: str = "",
+) -> tuple[str, str]:
+    """Content fingerprints for exact deck-vs-deck cache lookup."""
+    p1_fp = deck_content_fingerprint(
+        p1_game_deck,
+        equipment_header=p1_equipment_header,
+    )
+    if opponent_mode == "preset":
+        p2_fp = talishar_asset_deck_fingerprint(assets_path, p1_opponent_deck_name)
+    elif opponent_mode == "mirror":
+        p2_fp = p1_fp
+    else:
+        if not p2_game_deck:
+            raise ValueError("dual play requires p2_game_deck for fingerprinting")
+        p2_fp = deck_content_fingerprint(
+            p2_game_deck,
+            equipment_header=p2_equipment_header,
+        )
+    return p1_fp, p2_fp
+
+
+def _load_converged_play_agent(
+    cache_store: "AgentCacheStore",
+    *,
+    matchup: "Matchup",
+    p1_deck_fingerprint: str,
+    p2_deck_fingerprint: str,
+    seed: Optional[int],
+) -> tuple[Any, Any]:
+    """Bootstrap P1 tiers from converged deck-vs-deck cache."""
+    def _make_p1() -> Any:
+        return make_agent(seed=seed)
+
+    p1_bundle = cache_store.bootstrap_player(
+        _player_context(
+            matchup,
+            as_p1=True,
+            p1_deck_fingerprint=p1_deck_fingerprint,
+            p2_deck_fingerprint=p2_deck_fingerprint,
+        ),
+        _make_p1,
+    )
+    return p1_bundle.agents[0], p1_bundle
+
+
+def _write_play_cache_hit(
+    out_dir: Path,
+    *,
+    cached_record: Any,
+    p1_deck_fingerprint: str,
+    p2_deck_fingerprint: str,
+) -> None:
+    from dataclasses import asdict
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "skipped_training": True,
+        "reason": "converged_deck_matchup_cache",
+        "p1_deck_fingerprint": p1_deck_fingerprint,
+        "p2_deck_fingerprint": p2_deck_fingerprint,
+        **asdict(cached_record),
+    }
+    (out_dir / "play_cache_hit.json").write_text(
+        json.dumps(payload, indent=2),
+        encoding="utf-8",
+    )
 
 def run_phase3_play_preset(
     agents: PhaseAgents,
@@ -214,7 +318,9 @@ def run_phase3_play(
     cache_dir: Optional[Path],
     seed: Optional[int] = None,
     cpp_engine_dir: Optional[str] = None,
-    checkpoint_interval: int = 10000,
+    checkpoint_interval: Optional[int] = None,
+    checkpoint_interval_pct: float = DEFAULT_CHECKPOINT_INTERVAL_PCT,
+    checkpoint_eval_episodes: int = DEFAULT_CHECKPOINT_EVAL_EPISODES,
     parallel_batch_size: Optional[int] = None,
 ) -> tuple[float, float]:
     """Co-evolution play using train_dual_agent_common warmup + episode-cache infrastructure.
@@ -271,6 +377,63 @@ def run_phase3_play(
     else:
         p2_game_deck = None  # preset mode: p2_deck_name refers to assets file
 
+    p1_deck_fp, p2_deck_fp = _resolve_phase3_deck_fingerprints(
+        opponent_mode=opponent_mode,
+        p1_game_deck=p1_game_deck,
+        p1_equipment_header=p1_equipment_header,
+        p1_opponent_deck_name=p1_opponent_deck_name,
+        assets_path=assets_path,
+        p2_game_deck=p2_game_deck if opponent_mode == "dual" else None,
+        p2_equipment_header=p2_equipment_header,
+    )
+
+    cache_root = cache_dir or DEFAULT_AGENT_CACHE_DIR
+    cache_store = AgentCacheStore(cache_root, game_format)
+
+    if p1.play is None:
+        cached_record = cache_store.should_skip_training(
+            p1_fingerprint=p1_deck_fp,
+            p2_fingerprint=p2_deck_fp,
+            target_episodes=n_episodes,
+        )
+        if cached_record is not None:
+            stub_matchup = Matchup(
+                name="cached",
+                p1_deck="cached",
+                p2_deck=(
+                    p1_opponent_deck_name
+                    if opponent_mode == "preset"
+                    else "cached"
+                ),
+                description="cached deck-vs-deck agent",
+                p1_hero=p1_hero_id.replace("_", "-"),
+                p2_hero=(p2_hero_id or p1_opponent_hero_id).replace("_", "-"),
+            )
+            p1_agent, _ = _load_converged_play_agent(
+                cache_store,
+                matchup=stub_matchup,
+                p1_deck_fingerprint=p1_deck_fp,
+                p2_deck_fingerprint=p2_deck_fp,
+                seed=seed,
+            )
+            p1.play = p1_agent
+            p1_wr = float(cached_record.p1_win_rate or 0.0)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            _write_play_cache_hit(
+                out_dir,
+                cached_record=cached_record,
+                p1_deck_fingerprint=p1_deck_fp,
+                p2_deck_fingerprint=p2_deck_fp,
+            )
+            p1.win_rates.append(p1_wr)
+            print(
+                f"\n  Cache hit — converged deck-vs-deck matchup "
+                f"({cached_record.episodes_completed}/{cached_record.target_episodes} ep) "
+                f"— skipping training\n"
+                f"  Cached P1 win rate: {p1_wr:.1%}"
+            )
+            return p1_wr, 0.0
+
     # ── write deck files ──────────────────────────────────────────────────────
     p1_deck_name = f"rl_p3_p1_{uuid.uuid4().hex[:8]}"
     p1_deck_file = _write_deck_file(p1_game_deck, p1_equipment_header, p1_deck_name, assets_path)
@@ -311,6 +474,9 @@ def run_phase3_play(
     try:
         print(f"  Runtime backend (Phase 3): {_runtime_backend_label(probe_env)}")
         use_cpp_backend = bool(getattr(probe_env, "_using_cpp", False))
+        train_runtime_backend = (
+            "C++ engine" if use_cpp_backend else "HTTP Talishar"
+        )
         if cpp_engine_dir and not use_cpp_backend:
             raise RuntimeError(
                 f"C++ engine required (--cpp-engine-dir={cpp_engine_dir}) but "
@@ -359,32 +525,188 @@ def run_phase3_play(
         cpp_engine_dir=cpp_engine_dir,
     )
 
-    cache_root = cache_dir or (out_dir.parent / "agent_cache")
     episode_cache = EpisodeCache(cache_root=cache_root, game_format=game_format)
 
     _ep_cache_info = episode_cache.info(p1_deck_name, p2_deck_name)
+    print(f"  Agent cache: {cache_root / game_format}")
     print(
         f"  Episode cache: {_ep_cache_info['total_episodes']} stored episode(s) "
         f"(skip threshold: {episode_cache.warmup_skip_threshold})"
     )
 
-    # ── create / reuse play agents ────────────────────────────────────────────
-    p1_agent = p1.play if p1.play is not None else make_agent(seed=seed)
+    # ── create / reuse play agents (four-tier cache when bootstrapping) ───────
+    p1_bundle = None
+    p2_bundle = None
     p2_seed = (seed + 1) if seed is not None else None
-    p2_agent = (
-        (p2.play if p2.play is not None else make_agent(seed=p2_seed))
-        if (opponent_mode == "dual" and p2 is not None)
-        else make_agent(seed=p2_seed)
-    )
-    p1_tiers: list[Any] = [p1_agent]
-    p2_tiers: list[Any] = [p2_agent]
+
+    if p1.play is not None:
+        p1_agent = p1.play
+        p1_tiers: list[Any] = [p1_agent]
+    else:
+        def _make_p1() -> Any:
+            return make_agent(seed=seed)
+
+        p1_bundle = cache_store.bootstrap_player(
+            _player_context(
+                matchup,
+                as_p1=True,
+                p1_deck_fingerprint=p1_deck_fp,
+                p2_deck_fingerprint=p2_deck_fp,
+            ),
+            _make_p1,
+        )
+        print("  P1 cache init:", ", ".join(p1_bundle.init_sources))
+        p1_agent = p1_bundle.agents[0]
+        p1_tiers = p1_bundle.agents
+
+    if opponent_mode == "dual" and p2 is not None:
+        if p2.play is not None:
+            p2_agent = p2.play
+            p2_tiers: list[Any] = [p2_agent]
+        else:
+            def _make_p2() -> Any:
+                return make_agent(seed=p2_seed)
+
+            p2_bundle = cache_store.bootstrap_player(
+                _player_context(
+                    matchup,
+                    as_p1=False,
+                    p1_deck_fingerprint=p1_deck_fp,
+                    p2_deck_fingerprint=p2_deck_fp,
+                ),
+                _make_p2,
+            )
+            print("  P2 cache init:", ", ".join(p2_bundle.init_sources))
+            p2_agent = p2_bundle.agents[0]
+            p2_tiers = p2_bundle.agents
+    else:
+        p2_agent = make_agent(seed=p2_seed)
+        p2_tiers = [p2_agent]
 
     live_path: Optional[Path] = out_dir / "play_live_state.png"
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    effective_checkpoint_interval = resolve_play_checkpoint_interval(
+        n_episodes,
+        checkpoint_interval=checkpoint_interval,
+        checkpoint_interval_pct=checkpoint_interval_pct,
+    )
+    if checkpoint_interval is None:
+        print(
+            f"  Checkpoint interval: every {effective_checkpoint_interval} episode(s) "
+            f"({checkpoint_interval_pct:g}% of {n_episodes})"
+        )
+    checkpoint_eval_log: list[dict[str, Any]] = []
+
+    def _record_checkpoint_eval(completed: int) -> None:
+        if (
+            checkpoint_eval_episodes <= 0
+            or not use_cpp_backend
+            or opponent_mode != "preset"
+        ):
+            return
+        eval_metrics = _evaluate_p1_vs_fixed_opponent(
+            matchup,
+            p1_agent,
+            base_url=base_url,
+            game_format=game_format,
+            max_steps=max_play_steps,
+            episodes=checkpoint_eval_episodes,
+            seed=(seed + completed) if seed is not None else None,
+        )
+        ckpt_dir = out_dir / matchup.name / "p1" / f"episode_{completed:06d}"
+        eval_record = {
+            "episodes_completed": completed,
+            "target_episodes": n_episodes,
+            "eval_episodes": checkpoint_eval_episodes,
+            "opponent_policy": "talishar_default",
+            **eval_metrics,
+        }
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        (ckpt_dir / "checkpoint_eval.json").write_text(
+            json.dumps(eval_record, indent=2),
+            encoding="utf-8",
+        )
+        checkpoint_eval_log.append(eval_record)
+        history_path = out_dir / "checkpoint_eval_history.json"
+        history_path.write_text(
+            json.dumps(checkpoint_eval_log, indent=2),
+            encoding="utf-8",
+        )
+        print(
+            f"  [p1] Checkpoint eval @ ep {completed}: "
+            f"win%={eval_metrics['p1_win_rate']:.1%} "
+            f"({eval_metrics['p1_wins']}W/"
+            f"{eval_metrics['losses']}L/{eval_metrics['draws']}D/"
+            f"{eval_metrics['timeouts']}T "
+            f"over {checkpoint_eval_episodes} games, fixed opponent)"
+        )
+
+    def _after_play_checkpoint(completed: int) -> None:
+        _save_phase3_play_checkpoints(
+            out_dir=out_dir,
+            matchup=matchup,
+            game_format=game_format,
+            p1_agent=p1_agent,
+            p2_agent=p2_agent,
+            p1_rewards=p1_rewards,
+            p2_rewards=p2_rewards,
+            episodes_completed=completed,
+            total_target_episodes=n_episodes,
+            opponent_mode=opponent_mode,
+            p1_deck_cards=p1_game_deck,
+            p2_deck_cards=p2_game_deck,
+            p1_equipment_header=p1_equipment_header,
+            p2_equipment_header=p2_equipment_header,
+            p1_opponent_deck_name=p1_opponent_deck_name,
+            p1_outcomes=p1_outcomes,
+            runtime_backend=train_runtime_backend,
+        )
+        _record_checkpoint_eval(completed)
+        _write_play_training_progress(completed)
+
+    def _write_play_training_progress(completed: int) -> None:
+        summary = summarize_p1_outcomes(
+            p1_outcomes[:completed],
+            episodes=completed,
+        )
+        eval_rates = [
+            float(row.get("p1_win_rate", 0.0))
+            for row in checkpoint_eval_log
+            if row.get("p1_win_rate") is not None
+        ]
+        stability = compute_eval_stability(
+            eval_rates,
+            episodes_completed=completed,
+            target_episodes=n_episodes,
+        )
+        point = {
+            "episodes_completed": completed,
+            "target_episodes": n_episodes,
+            "updated_at": datetime.now().isoformat(),
+            "runtime_backend": train_runtime_backend,
+            **summary,
+            "eval_stability": stability,
+        }
+        live_path = out_dir / "play_training_live.json"
+        live_path.write_text(json.dumps(point, indent=2), encoding="utf-8")
+        history_path = out_dir / "play_training_history.json"
+        history: list[dict[str, Any]] = []
+        if history_path.is_file():
+            try:
+                loaded = json.loads(history_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, list):
+                    history = [row for row in loaded if isinstance(row, dict)]
+            except Exception:
+                history = []
+        if not history or int(history[-1].get("episodes_completed", -1)) != completed:
+            history.append(point)
+            history_path.write_text(json.dumps(history, indent=2), encoding="utf-8")
+
     # ── training ──────────────────────────────────────────────────────────────
     p1_rewards: list[float] = []
     p2_rewards: list[float] = []
+    p1_outcomes: list[str] = []
     baseline_saved = False
     last_checkpoint_at = 0
 
@@ -392,10 +714,13 @@ def run_phase3_play(
         completed: int,
         p1_r: list[float],
         p2_r: list[float],
+        outcomes: Optional[list[str]] = None,
     ) -> None:
-        nonlocal baseline_saved, last_checkpoint_at, p1_rewards, p2_rewards
+        nonlocal baseline_saved, last_checkpoint_at, p1_rewards, p2_rewards, p1_outcomes
         p1_rewards = p1_r
         p2_rewards = p2_r
+        if outcomes is not None:
+            p1_outcomes = outcomes
         if (
             not baseline_saved
             and warmup_episodes > 0
@@ -409,31 +734,15 @@ def run_phase3_play(
                 episodes=warmup_baseline_eval_episodes, seed=seed,
             )
             baseline_saved = True
-        if checkpoint_interval <= 0 or completed <= 0:
+        if effective_checkpoint_interval <= 0 or completed <= 0:
             return
-        if completed == n_episodes or completed >= last_checkpoint_at + checkpoint_interval:
+        if completed == n_episodes or completed >= last_checkpoint_at + effective_checkpoint_interval:
             last_checkpoint_at = completed
-            _save_phase3_play_checkpoints(
-                out_dir=out_dir,
-                matchup=matchup,
-                game_format=game_format,
-                p1_agent=p1_agent,
-                p2_agent=p2_agent,
-                p1_rewards=p1_rewards,
-                p2_rewards=p2_rewards,
-                episodes_completed=completed,
-                total_target_episodes=n_episodes,
-                opponent_mode=opponent_mode,
-                p1_deck_cards=p1_game_deck,
-                p2_deck_cards=p2_game_deck,
-                p1_equipment_header=p1_equipment_header,
-                p2_equipment_header=p2_equipment_header,
-                p1_opponent_deck_name=p1_opponent_deck_name,
-            )
+            _after_play_checkpoint(completed)
 
     try:
         if use_cpp_backend:
-            p1_rewards, p2_rewards, _ = train_agents_from_both_perspectives_parallel(
+            p1_rewards, p2_rewards, train_stats = train_agents_from_both_perspectives_parallel(
                 matchup=matchup,
                 base_url=base_url,
                 game_format=game_format,
@@ -449,6 +758,7 @@ def run_phase3_play(
                 episode_cache=episode_cache,
                 on_episodes_progress=_on_episodes_progress,
             )
+            p1_outcomes = list(train_stats.get("p1_outcomes") or p1_outcomes)
             if (
                 not baseline_saved
                 and warmup_episodes > 0
@@ -461,24 +771,8 @@ def run_phase3_play(
                     max_steps=max_play_steps, out_dir=out_dir,
                     episodes=warmup_baseline_eval_episodes, seed=seed,
                 )
-            if checkpoint_interval > 0 and p1_rewards and len(p1_rewards) != last_checkpoint_at:
-                _save_phase3_play_checkpoints(
-                    out_dir=out_dir,
-                    matchup=matchup,
-                    game_format=game_format,
-                    p1_agent=p1_agent,
-                    p2_agent=p2_agent,
-                    p1_rewards=p1_rewards,
-                    p2_rewards=p2_rewards,
-                    episodes_completed=len(p1_rewards),
-                    total_target_episodes=n_episodes,
-                    opponent_mode=opponent_mode,
-                    p1_deck_cards=p1_game_deck,
-                    p2_deck_cards=p2_game_deck,
-                    p1_equipment_header=p1_equipment_header,
-                    p2_equipment_header=p2_equipment_header,
-                    p1_opponent_deck_name=p1_opponent_deck_name,
-                )
+            if effective_checkpoint_interval > 0 and p1_rewards and len(p1_rewards) != last_checkpoint_at:
+                _after_play_checkpoint(len(p1_rewards))
         else:
             # Serial HTTP fallback — chunked for checkpointing.
             env = make_env(
@@ -491,8 +785,8 @@ def run_phase3_play(
                 while total_completed < n_episodes:
                     remaining = n_episodes - total_completed
                     chunk_size = remaining
-                    if checkpoint_interval > 0:
-                        chunk_size = min(chunk_size, checkpoint_interval)
+                    if effective_checkpoint_interval > 0:
+                        chunk_size = min(chunk_size, effective_checkpoint_interval)
                     chunk_warmup = min(warmup_remaining, chunk_size)
                     chunk_seed = (seed + total_completed) if seed is not None else None
                     if chunk_warmup == chunk_size:
@@ -511,7 +805,7 @@ def run_phase3_play(
                             f"starting at ep {total_completed + 1}…"
                         )
 
-                    c_p1, c_p2, _ = train_agents_from_both_perspectives(
+                    c_p1, c_p2, chunk_stats = train_agents_from_both_perspectives(
                         env, p1_tiers, p2_tiers,
                         n_episodes=chunk_size,
                         max_steps=max_play_steps,
@@ -524,6 +818,7 @@ def run_phase3_play(
                     )
                     p1_rewards.extend(c_p1)
                     p2_rewards.extend(c_p2)
+                    p1_outcomes.extend(chunk_stats.get("p1_outcomes") or [])
                     total_completed += chunk_size
                     warmup_remaining -= chunk_warmup
 
@@ -540,45 +835,13 @@ def run_phase3_play(
                             episodes=warmup_baseline_eval_episodes, seed=seed,
                         )
                         baseline_saved = True
-                    if checkpoint_interval > 0 and total_completed % checkpoint_interval == 0:
-                        _save_phase3_play_checkpoints(
-                            out_dir=out_dir,
-                            matchup=matchup,
-                            game_format=game_format,
-                            p1_agent=p1_agent,
-                            p2_agent=p2_agent,
-                            p1_rewards=p1_rewards,
-                            p2_rewards=p2_rewards,
-                            episodes_completed=total_completed,
-                            total_target_episodes=n_episodes,
-                            opponent_mode=opponent_mode,
-                            p1_deck_cards=p1_game_deck,
-                            p2_deck_cards=p2_game_deck,
-                            p1_equipment_header=p1_equipment_header,
-                            p2_equipment_header=p2_equipment_header,
-                            p1_opponent_deck_name=p1_opponent_deck_name,
-                        )
+                    if effective_checkpoint_interval > 0 and total_completed % effective_checkpoint_interval == 0:
+                        _after_play_checkpoint(total_completed)
             finally:
                 env.close()
 
-            if checkpoint_interval > 0 and p1_rewards:
-                _save_phase3_play_checkpoints(
-                    out_dir=out_dir,
-                    matchup=matchup,
-                    game_format=game_format,
-                    p1_agent=p1_agent,
-                    p2_agent=p2_agent,
-                    p1_rewards=p1_rewards,
-                    p2_rewards=p2_rewards,
-                    episodes_completed=len(p1_rewards),
-                    total_target_episodes=n_episodes,
-                    opponent_mode=opponent_mode,
-                    p1_deck_cards=p1_game_deck,
-                    p2_deck_cards=p2_game_deck,
-                    p1_equipment_header=p1_equipment_header,
-                    p2_equipment_header=p2_equipment_header,
-                    p1_opponent_deck_name=p1_opponent_deck_name,
-                )
+            if effective_checkpoint_interval > 0 and p1_rewards:
+                _after_play_checkpoint(len(p1_rewards))
 
     finally:
         # Clean up temp deck files
@@ -589,16 +852,22 @@ def run_phase3_play(
             except Exception:
                 pass
 
-    # ── update agents ─────────────────────────────────────────────────────────
+    # ── persist shared agent cache + update in-memory agents ─────────────────
+    if p1_bundle is not None:
+        cache_store.persist_player(p1_bundle)
+    if p2_bundle is not None:
+        cache_store.persist_player(p2_bundle)
+
     p1.play = p1_agent
     if opponent_mode == "dual" and p2 is not None:
         p2.play = p2_agent
 
-    # ── win rates from reward signs ───────────────────────────────────────────
-    p1_wr = (
-        sum(1 for r in p1_rewards if r > 0) / max(1, len(p1_rewards))
-        if p1_rewards else 0.0
+    # ── win rates from episode outcomes (draws/timeouts count in denominator) ─
+    train_summary = summarize_p1_outcomes(
+        p1_outcomes,
+        episodes=max(len(p1_outcomes), len(p1_rewards)),
     )
+    p1_wr = float(train_summary["win_rate"])
     p2_wr = (
         sum(1 for r in p2_rewards if r > 0) / max(1, len(p2_rewards))
         if p2_rewards else 0.0
@@ -607,8 +876,145 @@ def run_phase3_play(
     if opponent_mode == "dual" and p2 is not None:
         p2.win_rates.append(p2_wr)
 
-    print(f"\n  Win rates: p1={p1_wr:.1%}  p2={p2_wr:.1%}")
+    print(
+        f"\n  Win rates: p1={p1_wr:.1%}  p2={p2_wr:.1%}  "
+        f"({train_summary['wins']}W/{train_summary['losses']}L/"
+        f"{train_summary['draws']}D/{train_summary['timeouts']}T)"
+    )
+    if checkpoint_eval_log:
+        history_path = out_dir / "checkpoint_eval_history.json"
+        history_path.write_text(
+            json.dumps(checkpoint_eval_log, indent=2),
+            encoding="utf-8",
+        )
+        print(f"  Checkpoint eval history → {history_path}")
+
+    latest_ckpt_wr: Optional[float] = None
+    if checkpoint_eval_log:
+        latest_ckpt_wr = float(checkpoint_eval_log[-1].get("p1_win_rate", 0.0))
+
+    if p1_bundle is not None and len(p1_rewards) >= n_episodes:
+        cache_store.mark_matchup_converged(
+            p1_fingerprint=p1_deck_fp,
+            p2_fingerprint=p2_deck_fp,
+            p1_hero=p1_hero_id.replace("_", "-"),
+            p2_hero=(p2_hero_id or p1_opponent_hero_id).replace("_", "-"),
+            episodes_completed=len(p1_rewards),
+            target_episodes=n_episodes,
+            p1_win_rate=p1_wr,
+            checkpoint_eval_win_rate=latest_ckpt_wr,
+        )
+
     return p1_wr, p2_wr
+
+
+def _agent_action_for_eval(agent: Any, observation: Any) -> str:
+    if hasattr(agent, "act_greedy"):
+        return str(agent.act_greedy(observation))
+    if hasattr(agent, "act"):
+        return str(agent.act(observation))
+    raise TypeError("play agent missing act/act_greedy")
+
+
+def _evaluate_p1_vs_fixed_opponent(
+    matchup: "Matchup",
+    p1_agent: Any,
+    *,
+    base_url: str,
+    game_format: str,
+    max_steps: int,
+    episodes: int,
+    seed: Optional[int] = None,
+) -> dict[str, Any]:
+    """Evaluate P1 greedy policy vs Talishar default opponent (C++ when available)."""
+    empty = {
+        "episodes": 0,
+        "p1_wins": 0,
+        "p2_wins": 0,
+        "draws": 0,
+        "timeouts": 0,
+        "losses": 0,
+        "p1_win_rate": 0.0,
+        "p2_win_rate": 0.0,
+        "draw_rate": 0.0,
+        "timeout_rate": 0.0,
+    }
+    if not _DUAL_AGENT_AVAILABLE or episodes <= 0:
+        return empty
+
+    env = make_env(
+        matchup,
+        base_url=base_url,
+        game_format=game_format,
+        max_turns=max_steps,
+    )
+    wins = 0
+    losses = 0
+    draws = 0
+    timeouts = 0
+    runtime_backend: Optional[str] = None
+    backend_printed = False
+    try:
+        for ep in range(episodes):
+            ep_seed = (seed + ep) if seed is not None else None
+            result = env.reset(seed=ep_seed)
+            obs = result.observation
+            if not backend_printed:
+                runtime_backend = _runtime_backend_label(env)
+                print(f"  Checkpoint eval backend: {runtime_backend}")
+                backend_printed = True
+            done = False
+            steps = 0
+            terminated = False
+            truncated = False
+            while not done and steps < max_steps:
+                obs_data = json.loads(obs) if isinstance(obs, str) else (obs or {})
+                acting = int(obs_data.get("actingPlayerID", 1) or 1)
+                if acting == 1:
+                    action = _agent_action_for_eval(p1_agent, obs)
+                else:
+                    action = env.sample_action()
+                step = env.step(action)
+                obs = step.observation
+                terminated = bool(step.terminated)
+                truncated = bool(step.truncated)
+                done = terminated or truncated
+                steps += 1
+
+            obs_data = json.loads(obs) if isinstance(obs, str) else (obs or {})
+            p1_hp = float(obs_data.get("playerHealth", 0) or 0)
+            p2_hp = float(obs_data.get("opponentHealth", 0) or 0)
+            outcome = classify_p1_episode_outcome(
+                p1_hp=p1_hp,
+                p2_hp=p2_hp,
+                terminated=terminated,
+                truncated=truncated,
+            )
+            if outcome == "win":
+                wins += 1
+            elif outcome == "loss":
+                losses += 1
+            elif outcome == "draw":
+                draws += 1
+            else:
+                timeouts += 1
+    finally:
+        env.close()
+
+    total = max(1, episodes)
+    return {
+        "episodes": episodes,
+        "p1_wins": wins,
+        "p2_wins": losses,
+        "draws": draws,
+        "timeouts": timeouts,
+        "losses": losses,
+        "p1_win_rate": wins / total,
+        "p2_win_rate": losses / total,
+        "draw_rate": draws / total,
+        "timeout_rate": timeouts / total,
+        "runtime_backend": runtime_backend or "HTTP Talishar",
+    }
 
 
 def _run_warmup_baseline(
@@ -761,6 +1167,8 @@ def _save_play_checkpoint_package(
     equipment_header: str,
     opponent_mode: str,
     opponent_deck_name: str,
+    p1_outcomes: Optional[list[str]] = None,
+    runtime_backend: Optional[str] = None,
 ) -> Optional[Path]:
     """Persist a discoverable phase-3 checkpoint package under results/."""
     if not hasattr(agent, "save"):
@@ -777,6 +1185,26 @@ def _save_play_checkpoint_package(
 
     rewards = reward_history[:episodes_completed]
     avg_reward = float(sum(rewards) / len(rewards)) if rewards else 0.0
+    if p1_outcomes is not None:
+        outcome_stats = summarize_p1_outcomes(
+            p1_outcomes[:episodes_completed],
+            episodes=episodes_completed,
+        )
+    else:
+        wins = sum(1 for r in rewards if r > 0)
+        losses = sum(1 for r in rewards if r < 0)
+        draws = len(rewards) - wins - losses
+        total = max(1, len(rewards)) if rewards else 1
+        outcome_stats = {
+            "wins": wins,
+            "losses": losses,
+            "draws": draws,
+            "timeouts": 0,
+            "win_rate": wins / total,
+            "loss_rate": losses / total,
+            "draw_rate": draws / total,
+            "timeout_rate": 0.0,
+        }
     metadata = {
         "checkpoint_type": "phase3_play",
         "created_at": datetime.now().isoformat(),
@@ -793,7 +1221,16 @@ def _save_play_checkpoint_package(
         "cpp_engine_deck1": matchup.cpp_engine_deck1,
         "cpp_engine_deck2": matchup.cpp_engine_deck2,
         "cpp_engine_dir": matchup.cpp_engine_dir,
+        "runtime_backend": runtime_backend,
         "avg_reward": avg_reward,
+        "win_rate": outcome_stats["win_rate"],
+        "wins": outcome_stats["wins"],
+        "losses": outcome_stats["losses"],
+        "draws": outcome_stats["draws"],
+        "timeouts": outcome_stats["timeouts"],
+        "loss_rate": outcome_stats["loss_rate"],
+        "draw_rate": outcome_stats["draw_rate"],
+        "timeout_rate": outcome_stats["timeout_rate"],
         "opponent_mode": opponent_mode,
         "opponent_deck_name": opponent_deck_name,
         "deck_spec": {
@@ -839,6 +1276,8 @@ def _save_phase3_play_checkpoints(
     p1_equipment_header: str,
     p2_equipment_header: str,
     p1_opponent_deck_name: str,
+    p1_outcomes: Optional[list[str]] = None,
+    runtime_backend: Optional[str] = None,
 ) -> None:
     # Always store the hero ID as the first token so eval scripts can
     # reconstruct a valid deck file without needing external hero metadata.
@@ -858,6 +1297,8 @@ def _save_phase3_play_checkpoints(
         equipment_header=_p1_header,
         opponent_mode=opponent_mode,
         opponent_deck_name=p1_opponent_deck_name,
+        p1_outcomes=p1_outcomes,
+        runtime_backend=runtime_backend,
     )
     if p1_ckpt is not None:
         print(f"  [p1] Phase-3 checkpoint → {p1_ckpt}")
@@ -1063,18 +1504,15 @@ def _infer_render_outcome(
     truncated: bool,
 ) -> str:
     """Classify a rendered rollout as win/loss/draw/timeout from P1's perspective."""
-    if terminated:
-        obs_data = json.loads(obs) if isinstance(obs, str) else (obs or {})
-        p1_hp = float(obs_data.get("playerHealth", 0) or 0)
-        p2_hp = float(obs_data.get("opponentHealth", 0) or 0)
-        if p1_hp > p2_hp:
-            return "win"
-        if p2_hp > p1_hp:
-            return "loss"
-        return "draw"
-    if truncated:
-        return "timeout"
-    return "timeout"
+    obs_data = json.loads(obs) if isinstance(obs, str) else (obs or {})
+    p1_hp = float(obs_data.get("playerHealth", 0) or 0)
+    p2_hp = float(obs_data.get("opponentHealth", 0) or 0)
+    return classify_p1_episode_outcome(
+        p1_hp=p1_hp,
+        p2_hp=p2_hp,
+        terminated=terminated,
+        truncated=truncated,
+    )
 
 
 def _save_end_state_frame(
@@ -1246,9 +1684,10 @@ def _build_eval_outcome_summary(
     wins: int,
     losses: int,
     draws: int,
+    timeouts: int = 0,
     episode_log: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Win/loss/draw summary plus simple episode aggregates."""
+    """Win/loss/draw/timeout summary plus simple episode aggregates."""
     total = max(1, episodes)
     steps = [int(ep.get("steps", 0) or 0) for ep in episode_log]
     final_p1 = [float(ep.get("p1_hp", 0) or 0) for ep in episode_log]
@@ -1258,12 +1697,15 @@ def _build_eval_outcome_summary(
         "wins": wins,
         "losses": losses,
         "draws": draws,
+        "timeouts": timeouts,
         "win_rate": wins / total,
         "loss_rate": losses / total,
         "draw_rate": draws / total,
+        "timeout_rate": timeouts / total,
         "win_pct": round(100.0 * wins / total, 1),
         "loss_pct": round(100.0 * losses / total, 1),
         "draw_pct": round(100.0 * draws / total, 1),
+        "timeout_pct": round(100.0 * timeouts / total, 1),
         "avg_steps": round(statistics.mean(steps), 1) if steps else 0.0,
         "avg_final_player_hp": round(statistics.mean(final_p1), 2) if final_p1 else 0.0,
         "avg_final_opponent_hp": round(statistics.mean(final_p2), 2) if final_p2 else 0.0,
@@ -1724,6 +2166,7 @@ def run_final_evaluation(
     wins = 0
     losses = 0
     draws = 0
+    timeouts = 0
     episode_log: list[dict[str, Any]] = []
     turn_trajectories: list[dict[int, tuple[int, int]]] = []
 
@@ -1751,6 +2194,8 @@ def run_final_evaluation(
                 _track_turn_hp(turn_hp, t0, p1_hp0, p2_hp0)
                 done = False
                 steps = 0
+                terminated = False
+                truncated = False
                 while not done:
                     if agents.play is not None and hasattr(agents.play, "act_greedy"):
                         action = agents.play.act_greedy(obs)
@@ -1760,7 +2205,9 @@ def run_final_evaluation(
                         action = env.sample_action()
                     step = env.step(action)
                     obs = step.observation
-                    done = step.terminated or step.truncated
+                    terminated = bool(step.terminated)
+                    truncated = bool(step.truncated)
+                    done = terminated or truncated
                     steps += 1
                     turn_no, p1_hp, p2_hp = _parse_obs_hp(obs)
                     _track_turn_hp(turn_hp, turn_no, p1_hp, p2_hp)
@@ -1768,15 +2215,20 @@ def run_final_evaluation(
                 obs_data = json.loads(obs) if isinstance(obs, str) else (obs or {})
                 p1_hp = float(obs_data.get("playerHealth", 0) or 0)
                 p2_hp = float(obs_data.get("opponentHealth", 0) or 0)
-                if p1_hp > p2_hp:
+                outcome = classify_p1_episode_outcome(
+                    p1_hp=p1_hp,
+                    p2_hp=p2_hp,
+                    terminated=terminated,
+                    truncated=truncated and not terminated,
+                )
+                if outcome == "win":
                     wins += 1
-                    outcome = "win"
-                elif p2_hp > p1_hp:
+                elif outcome == "loss":
                     losses += 1
-                    outcome = "loss"
-                else:
+                elif outcome == "draw":
                     draws += 1
-                    outcome = "draw"
+                else:
+                    timeouts += 1
 
                 turn_trajectories.append(turn_hp)
                 episode_log.append({
@@ -1802,7 +2254,7 @@ def run_final_evaluation(
     win_rate = wins / total
     print(
         f"\n  [{player}] Final win rate: {win_rate:.1%}  "
-        f"({wins}W / {losses}L / {draws}D  over {num_eval_episodes} games)"
+        f"({wins}W / {losses}L / {draws}D / {timeouts}T  over {num_eval_episodes} games)"
     )
 
     outcome_summary = _build_eval_outcome_summary(
@@ -1810,6 +2262,7 @@ def run_final_evaluation(
         wins=wins,
         losses=losses,
         draws=draws,
+        timeouts=timeouts,
         episode_log=episode_log,
     )
     hp_by_turn = _aggregate_hp_by_turn(turn_trajectories)
@@ -2039,7 +2492,14 @@ def main() -> None:
         default="dorinthea_ironsong dori_equipment_sword dori_equipment_sword "
                 "helm_of_avarice gauntlet_of_might ironrot_legs valor_boots")
     parser.add_argument("--play-episodes", type=int, default=30)
-    parser.add_argument("--play-checkpoint-interval", type=int, default=10000)
+    parser.add_argument("--play-checkpoint-interval", type=int, default=None,
+        help="Fixed checkpoint interval in episodes (default: 10%% of --play-episodes)")
+    parser.add_argument("--checkpoint-interval-pct", type=float,
+        default=DEFAULT_CHECKPOINT_INTERVAL_PCT,
+        help="Checkpoint every N%% of play episodes when interval is unset")
+    parser.add_argument("--checkpoint-eval-episodes", type=int,
+        default=DEFAULT_CHECKPOINT_EVAL_EPISODES,
+        help="C++ eval games with fixed opponent policy at each checkpoint (0=off)")
     parser.add_argument("--max-play-steps", type=int, default=200)
     parser.add_argument("--warmup-episodes", type=int, default=DEFAULT_WARMUP_EPISODES)
     parser.add_argument("--warmup-baseline-eval-episodes", type=int,
@@ -2048,7 +2508,11 @@ def main() -> None:
         help="Parallel C++ game sessions for play training (auto-detected when omitted)")
     parser.add_argument("--play-batch-size", type=int, default=None,
         help="Episodes per parallel batch (defaults to --workers)")
-    parser.add_argument("--cache-dir", default=None)
+    parser.add_argument(
+        "--cache-dir",
+        default=str(DEFAULT_AGENT_CACHE_DIR),
+        help="Shared PPO + episode cache root",
+    )
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--iterations", type=int, default=1)
     parser.add_argument("--p1-play", default=None)
@@ -2180,10 +2644,12 @@ def main() -> None:
             assets_path=assets_path,
             base_url=args.talishar_url,
             out_dir=out_dir,
-            cache_dir=Path(args.cache_dir) if args.cache_dir else None,
+            cache_dir=Path(args.cache_dir),
             seed=args.seed,
             cpp_engine_dir=args.cpp_engine_dir,
             checkpoint_interval=args.play_checkpoint_interval,
+            checkpoint_interval_pct=args.checkpoint_interval_pct,
+            checkpoint_eval_episodes=args.checkpoint_eval_episodes,
             parallel_batch_size=args.play_batch_size,
         )
         p1.last_play_win_rate = p1_wr

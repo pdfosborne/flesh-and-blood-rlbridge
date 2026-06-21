@@ -20,6 +20,7 @@ The guide emphasises matchup-specific swaps:
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
@@ -269,3 +270,240 @@ class SideboardGuidePolicy:
         if move_out:
             return min(move_out, key=lambda a: _score(a.split(":", 1)[1]))
         return avail[0]
+
+
+# ---------------------------------------------------------------------------
+# Sideboard swap enumeration (for deck comparison workflows)
+# ---------------------------------------------------------------------------
+
+_FORMAT_MIN_DECK: dict[str, int] = {
+    "blitz": 40,
+    "classic_constructed": 60,
+    "living_legend": 60,
+    "silver_age": 40,
+    "upf": 60,
+}
+
+_FORMAT_MAX_DECK: dict[str, int] = {
+    "blitz": 40,
+    "classic_constructed": 80,
+    "living_legend": 80,
+    "silver_age": 40,
+    "upf": 80,
+}
+
+
+@dataclass(frozen=True)
+class RankedSwap:
+    """A single 1-for-1 sideboard swap ranked by guide policy score margin."""
+
+    out_card: str
+    in_card: str
+    margin: float
+    out_score: float
+    in_score: float
+
+
+def sideboard_inventory(
+    card_pool: dict[str, int],
+    game_deck: dict[str, int],
+) -> dict[str, int]:
+    """Cards registered in the pool but not in the active game deck."""
+    inventory: dict[str, int] = {}
+    for card_id in set(card_pool) | set(game_deck):
+        remaining = int(card_pool.get(card_id, 0)) - int(game_deck.get(card_id, 0))
+        if remaining > 0:
+            inventory[card_id] = remaining
+    return inventory
+
+
+def enumerate_ranked_swaps(
+    card_pool: dict[str, int],
+    game_deck: dict[str, int],
+    opponent_hero_id: str,
+    pool_by_id: Optional[dict[str, dict[str, Any]]] = None,
+    *,
+    min_margin: float = _SWAP_MARGIN,
+) -> list[RankedSwap]:
+    """Return guide-ranked 1-for-1 swaps available from *game_deck* + inventory."""
+    archetype = classify_opponent_archetype(opponent_hero_id)
+    pool_meta = pool_by_id or {}
+    inventory = sideboard_inventory(card_pool, game_deck)
+    swaps: list[RankedSwap] = []
+
+    for out_card, out_count in game_deck.items():
+        if out_count <= 0:
+            continue
+        out_meta = _card_meta(out_card, pool_meta)
+        out_score = score_card_for_archetype(out_card, out_meta, archetype)
+        for in_card, in_count in inventory.items():
+            if in_count <= 0:
+                continue
+            in_meta = _card_meta(in_card, pool_meta)
+            in_score = score_card_for_archetype(in_card, in_meta, archetype)
+            margin = in_score - out_score
+            if margin >= min_margin:
+                swaps.append(
+                    RankedSwap(
+                        out_card=out_card,
+                        in_card=in_card,
+                        margin=margin,
+                        out_score=out_score,
+                        in_score=in_score,
+                    )
+                )
+
+    swaps.sort(key=lambda s: (-s.margin, s.out_card, s.in_card))
+    return swaps
+
+
+def apply_sideboard_swap(
+    game_deck: dict[str, int],
+    card_pool: dict[str, int],
+    out_card: str,
+    in_card: str,
+) -> Optional[dict[str, int]]:
+    """Apply one copy of *out_card* → *in_card*; return None when invalid."""
+    deck = {str(k): int(v) for k, v in game_deck.items() if int(v) > 0}
+    pool = {str(k): int(v) for k, v in card_pool.items() if int(v) > 0}
+    if deck.get(out_card, 0) <= 0:
+        return None
+    inventory = sideboard_inventory(pool, deck)
+    if inventory.get(in_card, 0) <= 0:
+        return None
+
+    deck[out_card] -= 1
+    if deck[out_card] <= 0:
+        del deck[out_card]
+    deck[in_card] = deck.get(in_card, 0) + 1
+    return deck
+
+
+def _sideboard_observation(
+    *,
+    hero_id: str,
+    game_format: str,
+    opponent_hero_id: str,
+    deck: dict[str, int],
+    sideboard: dict[str, int],
+    min_size: int,
+    max_size: int,
+    step_no: int,
+    available_actions: list[str],
+) -> dict[str, Any]:
+    deck_entries = [
+        {"id": cid, "count": count}
+        for cid, count in sorted(deck.items())
+        if count > 0
+    ]
+    sb_entries = [
+        {"id": cid, "count": count}
+        for cid, count in sorted(sideboard.items())
+        if count > 0
+    ]
+    deck_size = sum(deck.values())
+    return {
+        "hero": hero_id,
+        "format": game_format,
+        "opponentHero": opponent_hero_id,
+        "deck": deck_entries,
+        "sideboard": sb_entries,
+        "deckSize": deck_size,
+        "sideboardSize": sum(sideboard.values()),
+        "minDeckSize": min_size,
+        "maxDeckSize": max_size,
+        "isValid": deck_size >= min_size,
+        "stepNo": step_no,
+        "availableActions": list(available_actions),
+    }
+
+
+def _available_sideboard_actions(
+    deck: dict[str, int],
+    sideboard: dict[str, int],
+    *,
+    min_size: int,
+    max_size: int,
+) -> list[str]:
+    actions: list[str] = []
+    deck_size = sum(deck.values())
+    for cid, count in sideboard.items():
+        if count > 0 and deck_size < max_size:
+            actions.append(f"move_to_deck:{cid}")
+    for cid, count in deck.items():
+        if count > 0:
+            actions.append(f"move_to_sideboard:{cid}")
+    if deck_size >= min_size:
+        actions.append("finalize")
+    return actions
+
+
+def _apply_sideboard_action(
+    deck: dict[str, int],
+    sideboard: dict[str, int],
+    action: str,
+) -> bool:
+    if action == "finalize":
+        return True
+    if action.startswith("move_to_deck:"):
+        cid = action.split(":", 1)[1]
+        if sideboard.get(cid, 0) <= 0:
+            return False
+        sideboard[cid] -= 1
+        if sideboard[cid] <= 0:
+            del sideboard[cid]
+        deck[cid] = deck.get(cid, 0) + 1
+        return False
+    if action.startswith("move_to_sideboard:"):
+        cid = action.split(":", 1)[1]
+        if deck.get(cid, 0) <= 0:
+            return False
+        deck[cid] -= 1
+        if deck[cid] <= 0:
+            del deck[cid]
+        sideboard[cid] = sideboard.get(cid, 0) + 1
+        return False
+    return False
+
+
+def simulate_guide_sideboard_deck(
+    card_pool: dict[str, int],
+    opponent_hero_id: str,
+    *,
+    hero_id: str = "",
+    game_format: str = "silver_age",
+    pool_by_id: Optional[dict[str, dict[str, Any]]] = None,
+    max_steps: int = 100,
+) -> dict[str, int]:
+    """Run SideboardGuidePolicy in-memory and return the resulting game deck."""
+    pool = {str(k): int(v) for k, v in card_pool.items() if int(v) > 0}
+    deck: dict[str, int] = {}
+    sideboard = dict(pool)
+    min_size = _FORMAT_MIN_DECK.get(game_format, 40)
+    max_size = _FORMAT_MAX_DECK.get(game_format, sum(pool.values()))
+    policy = SideboardGuidePolicy(pool_by_id=pool_by_id)
+
+    for step_no in range(max_steps):
+        actions = _available_sideboard_actions(
+            deck, sideboard, min_size=min_size, max_size=max_size
+        )
+        if not actions:
+            break
+        obs = _sideboard_observation(
+            hero_id=hero_id,
+            game_format=game_format,
+            opponent_hero_id=opponent_hero_id,
+            deck=deck,
+            sideboard=sideboard,
+            min_size=min_size,
+            max_size=max_size,
+            step_no=step_no,
+            available_actions=actions,
+        )
+        action = policy.act(obs)
+        if _apply_sideboard_action(deck, sideboard, action):
+            break
+
+    if sum(deck.values()) < min_size:
+        return {}
+    return {cid: count for cid, count in deck.items() if count > 0}

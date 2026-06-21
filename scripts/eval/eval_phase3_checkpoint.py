@@ -2,9 +2,11 @@
 """Evaluate saved phase-3 play checkpoints with a live terminal dashboard.
 
 The script auto-discovers the latest checkpoint package produced by
-scripts/training/train_full_pipeline.py, reconstructs the saved matchup from the
-checkpoint metadata, runs evaluation episodes, and optionally renders one
-optimal-policy rollout GIF.
+``train_full_pipeline.py``, ``train_sideboard_compare.py``, or other phase-3
+play trainers.  For sideboard compare runs, checkpoints live under
+``candidates/<candidate_id>/p3_*/p1/episode_*/`` — pass ``--results-dir`` to
+the sideboard output folder and optionally ``--candidate-id`` to pin one
+variant (default: latest checkpoint across all candidates).
 """
 
 from __future__ import annotations
@@ -34,8 +36,8 @@ from flesh_and_blood_rlbridge.cpp_engine_environment import (  # noqa: E402
     is_cpp_engine_available,
 )
 from rl_agents.ppo import PPOAgent  # noqa: E402
-from check_cpp_vs_talishar_parity import run_parity_check  # noqa: E402
-from train_play import (  # noqa: E402
+from scripts.cpp.check_cpp_vs_talishar_parity import run_parity_check  # noqa: E402
+from scripts.training.train_play import (  # noqa: E402
     _ensure_playwright,
     _frames_to_gif,
     _infer_render_outcome,
@@ -43,7 +45,7 @@ from train_play import (  # noqa: E402
     _save_end_state_frame,
     _save_state_image,
 )
-from train_pipeline_common import _write_deck_file  # noqa: E402
+from scripts.training.train_pipeline_common import _write_deck_file  # noqa: E402
 
 
 @dataclass
@@ -120,9 +122,79 @@ def _load_checkpoint(checkpoint_dir: Path, role: str) -> Optional[CheckpointBund
     )
 
 
-def _latest_checkpoint(results_dir: Path, role: str) -> Optional[CheckpointBundle]:
+_SIDEBOARD_MANIFEST = "candidates_manifest.json"
+_SIDEBOARD_CANDIDATES_DIR = "candidates"
+
+
+def is_sideboard_compare_dir(path: Path) -> bool:
+    """True when *path* is a ``train_sideboard_compare.py`` output directory."""
+    return (
+        (path / _SIDEBOARD_MANIFEST).is_file()
+        and (path / _SIDEBOARD_CANDIDATES_DIR).is_dir()
+    )
+
+
+def _iter_checkpoint_metadata_paths(
+    results_dir: Path,
+    role: str,
+    *,
+    candidate_id: Optional[str] = None,
+) -> list[Path]:
+    """Collect ``metadata.json`` paths for phase-3 checkpoints under *results_dir*."""
+    paths: list[Path] = []
+
+    def add_from_root(root: Path) -> None:
+        paths.extend(root.glob(f"p3_*/{role}/episode_*/metadata.json"))
+
+    if is_sideboard_compare_dir(results_dir):
+        candidates_root = results_dir / _SIDEBOARD_CANDIDATES_DIR
+        if candidate_id:
+            candidate_dir = candidates_root / candidate_id
+            if candidate_dir.is_dir():
+                add_from_root(candidate_dir)
+        else:
+            for candidate_dir in sorted(candidates_root.iterdir()):
+                if candidate_dir.is_dir():
+                    add_from_root(candidate_dir)
+    else:
+        add_from_root(results_dir)
+
+    return paths
+
+
+def list_sideboard_candidate_ids(results_dir: Path) -> list[str]:
+    """Return candidate IDs from a sideboard compare manifest, if present."""
+    if not is_sideboard_compare_dir(results_dir):
+        return []
+    try:
+        manifest = json.loads(
+            (results_dir / _SIDEBOARD_MANIFEST).read_text(encoding="utf-8")
+        )
+    except (json.JSONDecodeError, OSError):
+        return []
+    raw = manifest.get("candidates") or []
+    ids: list[str] = []
+    if isinstance(raw, list):
+        for row in raw:
+            if isinstance(row, dict):
+                cid = str(row.get("candidate_id", "") or "").strip()
+                if cid:
+                    ids.append(cid)
+    return ids
+
+
+def _latest_checkpoint(
+    results_dir: Path,
+    role: str,
+    *,
+    candidate_id: Optional[str] = None,
+) -> Optional[CheckpointBundle]:
     best: Optional[tuple[float, int, CheckpointBundle]] = None
-    for meta_path in results_dir.glob(f"p3_*/{role}/episode_*/metadata.json"):
+    for meta_path in _iter_checkpoint_metadata_paths(
+        results_dir,
+        role,
+        candidate_id=candidate_id,
+    ):
         bundle = _load_checkpoint(meta_path.parent, role)
         if bundle is None:
             continue
@@ -543,21 +615,28 @@ def _resolve_cpp_engine_lookup_names(p1_bundle: CheckpointBundle) -> tuple[str, 
 def _resolve_parity_deck_names(
     p1_bundle: CheckpointBundle,
     p2_bundle: Optional[CheckpointBundle],
+    *,
+    deck1: Optional[str] = None,
+    deck2: Optional[str] = None,
 ) -> tuple[Optional[str], Optional[str], str]:
-    """Return exact Talishar asset deck names for parity, or an error message."""
-    del p2_bundle  # parity deck names come from checkpoint metadata only
+    """Return Talishar asset deck names for parity, or an error message.
 
-    deck1 = _exact_metadata_deck_name(p1_bundle, "p1_deck")
-    deck2 = _exact_metadata_deck_name(p1_bundle, "p2_deck")
+    When *deck1* / *deck2* are supplied (e.g. freshly written eval decks), they
+    take precedence over ephemeral training UUID names stored in metadata.
+    """
+    del p2_bundle
+
+    resolved1 = str(deck1 or "").strip() or _exact_metadata_deck_name(p1_bundle, "p1_deck")
+    resolved2 = str(deck2 or "").strip() or _exact_metadata_deck_name(p1_bundle, "p2_deck")
 
     missing: list[str] = []
-    if not deck1:
+    if not resolved1:
         missing.append("p1_deck")
-    if not deck2:
+    if not resolved2:
         missing.append("p2_deck")
     if missing:
         return None, None, f"Checkpoint missing exact deck name(s): {', '.join(missing)}"
-    return deck1, deck2, ""
+    return resolved1, resolved2, ""
 
 
 def _run_checkpoint_parity_check(
@@ -568,9 +647,16 @@ def _run_checkpoint_parity_check(
     eval_dir: Path,
     cpp_engine_dir: Optional[str] = None,
     cpp_engine_cache_dir: Optional[str] = None,
+    deck1: Optional[str] = None,
+    deck2: Optional[str] = None,
 ) -> dict[str, Any]:
     """Run one full-episode parity check for the checkpoint matchup."""
-    deck1, deck2, deck_error = _resolve_parity_deck_names(p1_bundle, p2_bundle)
+    deck1, deck2, deck_error = _resolve_parity_deck_names(
+        p1_bundle,
+        p2_bundle,
+        deck1=deck1,
+        deck2=deck2,
+    )
     parity_dir = eval_dir / "parity_check"
     if deck_error or not deck1 or not deck2:
         print(f"  [parity] Skipped — {deck_error}", flush=True)
@@ -1005,6 +1091,8 @@ def _evaluate_checkpoint(
             eval_dir=eval_dir,
             cpp_engine_dir=cpp_engine_dir,
             cpp_engine_cache_dir=cpp_engine_cache_dir,
+            deck1=p1_deck_name,
+            deck2=p2_deck_name,
         )
 
     workers = max(1, min(int(parallel_workers), episodes))
@@ -1194,6 +1282,15 @@ def main() -> None:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--results-dir", default=str(REPO_ROOT / "results" / "full_pipeline"))
+    parser.add_argument(
+        "--candidate-id",
+        default=None,
+        help=(
+            "Sideboard compare candidate to evaluate (e.g. baseline, manual_01). "
+            "When omitted on a sideboard compare output dir, uses the most recently "
+            "updated checkpoint across all candidates."
+        ),
+    )
     parser.add_argument("--checkpoint-dir", default=None,
                         help="Specific p1 checkpoint directory to evaluate.")
     parser.add_argument("--episodes", type=int, default=100)
@@ -1276,6 +1373,19 @@ def main() -> None:
     print("  Phase 3 Eval Dashboard — starting up")
     print("=" * 72)
     print(f"  Watching      : {results_dir}")
+    if is_sideboard_compare_dir(results_dir):
+        print("  Run type      : sideboard compare")
+        if args.candidate_id:
+            print(f"  Candidate     : {args.candidate_id}")
+        else:
+            ids = list_sideboard_candidate_ids(results_dir)
+            if ids:
+                print(
+                    f"  Candidate     : (all — latest of {len(ids)}: "
+                    f"{', '.join(ids[:4])}{'…' if len(ids) > 4 else ''})"
+                )
+            else:
+                print("  Candidate     : (all under candidates/)")
     print(f"  Talishar URL  : {args.talishar_url}")
     print(f"  Assets path   : {args.assets_path}")
     print(
@@ -1302,10 +1412,17 @@ def main() -> None:
         if args.checkpoint_dir:
             p1_bundle = _load_checkpoint(Path(args.checkpoint_dir).expanduser().resolve(), "p1")
         else:
-            p1_bundle = _latest_checkpoint(results_dir, "p1")
+            p1_bundle = _latest_checkpoint(
+                results_dir,
+                "p1",
+                candidate_id=args.candidate_id,
+            )
 
         if p1_bundle is None:
-            print(f"  [watch] No checkpoints found under {results_dir}  "
+            scope = results_dir
+            if args.candidate_id and is_sideboard_compare_dir(results_dir):
+                scope = results_dir / _SIDEBOARD_CANDIDATES_DIR / args.candidate_id
+            print(f"  [watch] No checkpoints found under {scope}  "
                   f"(poll #{poll_count + 1})", flush=True)
         elif p1_bundle.checkpoint_dir != last_seen:
             p2_bundle = _paired_checkpoint(p1_bundle, "p2")

@@ -17,6 +17,7 @@ SCRIPTS_CPP = SCRIPTS_ROOT / "cpp"
 SCRIPTS_DECK = SCRIPTS_ROOT / "deck"
 RUNSCRIPTS_ROOT = REPO_ROOT / "runscripts"
 RESULTS_ROOT = REPO_ROOT / "results"
+AGENT_CACHE_DIR = RESULTS_ROOT / "agent_cache"
 
 OpponentMode = Literal["preset", "mirror", "dual"]
 FormatChoice = Literal["silver_age", "classic_constructed", "blitz", "upf", "sage"]
@@ -176,6 +177,10 @@ class ExperimentSpec:
             self.sideboard_episodes = 0
 
 
+DEFAULT_CHECKPOINT_INTERVAL_PCT = 5.0
+DEFAULT_CHECKPOINT_EVAL_EPISODES = 100
+
+
 @dataclass
 class EvalSpec:
     results_dir: str
@@ -184,6 +189,7 @@ class EvalSpec:
     max_steps: int = 1000
     watch: bool = False
     poll_seconds: int = 30
+    candidate_id: str | None = None
 
 
 @dataclass
@@ -192,6 +198,9 @@ class MatchupSimSpec:
     deck2_source: str
     game_format: FormatChoice = "silver_age"
     play_episodes: int = 500
+    checkpoint_interval_pct: float = DEFAULT_CHECKPOINT_INTERVAL_PCT
+    checkpoint_eval_episodes: int = DEFAULT_CHECKPOINT_EVAL_EPISODES
+    play_checkpoint_interval: int | None = None
     final_eval_episodes: int = 50
     final_eval_max_steps: int = 500
     sideboard_episodes: int = 30
@@ -199,3 +208,40 @@ class MatchupSimSpec:
     iterations: int = 1
     build_cpp_engine: bool = True
     workers: int | None = None
+
+
+@dataclass
+class SideboardCompareSpec:
+    """Sideboard variant comparison via ``train_sideboard_compare.py``."""
+
+    starting_deck: str
+    opponent_hero_id: str
+    opponent_deck: str
+    hero_id: str = ""
+    hero_class: str = ""
+    equipment_header: str = ""
+    game_format: FormatChoice = "silver_age"
+    num_options: int = 4
+    max_parallel: int = 2
+    max_swap_variants: int = 2
+    max_swaps_per_variant: int = 1
+    play_episodes: int = 10000
+    checkpoint_interval_pct: float = DEFAULT_CHECKPOINT_INTERVAL_PCT
+    checkpoint_eval_episodes: int = DEFAULT_CHECKPOINT_EVAL_EPISODES
+    play_checkpoint_interval: int | None = None
+    final_eval_episodes: int = 50
+    final_eval_max_steps: int = 200
+    skip_final_eval: bool = False
+    no_render_gif: bool = True
+    build_cpp_engine: bool = True
+    workers: int | None = None
+    out_dir: str | None = None
+    candidates_json: str | None = None
+
+    def resolved_out_dir(self) -> Path:
+        if self.out_dir:
+            return Path(self.out_dir)
+        hero = slugify(self.hero_id or "player")
+        opp = slugify(self.opponent_hero_id or "opponent")
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return RESULTS_ROOT / "sideboard_compare" / f"{hero}_vs_{opp}_{stamp}"

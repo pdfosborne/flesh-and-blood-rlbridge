@@ -29,6 +29,7 @@ for p in (FAB_SRC, REPO_ROOT, RL_SRC):
     if s not in sys.path:
         sys.path.insert(0, s)
 
+from play_outcome_stats import classify_p1_episode_outcome, summarize_p1_outcomes  # noqa: E402
 import numpy as np  # noqa: E402
 try:
     import torch
@@ -768,6 +769,9 @@ def _run_one_episode(
             break
         obs = next_obs
 
+    if not terminated and not truncated and steps_taken >= max_steps:
+        truncated = True
+
     # ── inject terminal loss for the loser ───────────────────────────────────
     # The terminal +1 reward only goes to the player who happened to be ACTING
     # on the final step.  The other player received no terminal signal at all,
@@ -975,7 +979,7 @@ def train_agents_from_both_perspectives_parallel(
     live_state_image_path: Optional[Path] = None,
     episode_cache: Optional[EpisodeCache] = None,
     on_episodes_progress: Optional[
-        Callable[[int, list[float], list[float]], None]
+        Callable[..., None]
     ] = None,
 ) -> tuple[list[float], list[float], dict[str, Any]]:
     """Parallel rollout version of ``train_agents_from_both_perspectives``.
@@ -1057,6 +1061,7 @@ def train_agents_from_both_perspectives_parallel(
 
     p1_ep_rewards:  list[float] = []
     p2_ep_rewards:  list[float] = []
+    p1_outcomes:    list[str] = []
     timeout_episodes  = 0
     terminated_episodes = 0
     skipped_episodes    = 0
@@ -1116,9 +1121,18 @@ def train_agents_from_both_perspectives_parallel(
                     except FutureTimeoutError:
                         print(f"  [parallel] episode timed out after {episode_timeout_secs}s — skipping")
                         skipped_episodes += 1
+                        p1_ep_rewards.append(0.0)
+                        p2_ep_rewards.append(0.0)
+                        p1_outcomes.append(
+                            classify_p1_episode_outcome(skipped=True)
+                        )
                         completed += 1
                         if on_episodes_progress is not None:
                             try:
+                                on_episodes_progress(
+                                    completed, p1_ep_rewards, p2_ep_rewards, p1_outcomes
+                                )
+                            except TypeError:
                                 on_episodes_progress(
                                     completed, p1_ep_rewards, p2_ep_rewards
                                 )
@@ -1131,9 +1145,18 @@ def train_agents_from_both_perspectives_parallel(
                     except Exception as exc:
                         print(f"  [parallel] episode failed ({exc!r}) — skipping")
                         skipped_episodes += 1
+                        p1_ep_rewards.append(0.0)
+                        p2_ep_rewards.append(0.0)
+                        p1_outcomes.append(
+                            classify_p1_episode_outcome(skipped=True)
+                        )
                         completed += 1
                         if on_episodes_progress is not None:
                             try:
+                                on_episodes_progress(
+                                    completed, p1_ep_rewards, p2_ep_rewards, p1_outcomes
+                                )
+                            except TypeError:
                                 on_episodes_progress(
                                     completed, p1_ep_rewards, p2_ep_rewards
                                 )
@@ -1144,6 +1167,14 @@ def train_agents_from_both_perspectives_parallel(
                     batch_p2_trans.extend(result["p2_transitions"])
                     p1_ep_rewards.append(result["p1_reward"])
                     p2_ep_rewards.append(result["p2_reward"])
+                    p1_outcomes.append(
+                        classify_p1_episode_outcome(
+                            p1_hp=result.get("p1_hp"),
+                            p2_hp=result.get("p2_hp"),
+                            terminated=bool(result.get("terminated")),
+                            truncated=bool(result.get("truncated")),
+                        )
+                    )
                     if result["truncated"]:
                         timeout_episodes += 1
                         p1_hp    = result.get("p1_hp")
@@ -1177,6 +1208,10 @@ def train_agents_from_both_perspectives_parallel(
                         or completed % 50 == 0
                     ):
                         try:
+                            on_episodes_progress(
+                                completed, p1_ep_rewards, p2_ep_rewards, p1_outcomes
+                            )
+                        except TypeError:
                             on_episodes_progress(
                                 completed, p1_ep_rewards, p2_ep_rewards
                             )
@@ -1261,12 +1296,15 @@ def train_agents_from_both_perspectives_parallel(
                 pass
 
     total_eps = len(p1_ep_rewards)
+    outcome_summary = summarize_p1_outcomes(p1_outcomes, episodes=total_eps)
     stats = {
         "episodes":   total_eps,
-        "timeouts":   timeout_episodes,
+        "timeouts":   outcome_summary["timeouts"],
         "terminated": terminated_episodes,
         "skipped":    skipped_episodes,
-        "timeout_rate": timeout_episodes / max(1, total_eps),
+        "timeout_rate": outcome_summary["timeout_rate"],
+        "p1_outcomes": p1_outcomes,
+        **outcome_summary,
     }
     return p1_ep_rewards, p2_ep_rewards, stats
 
@@ -1295,6 +1333,7 @@ def train_agents_from_both_perspectives(
 
     p1_ep_rewards: list[float] = []
     p2_ep_rewards: list[float] = []
+    p1_outcomes: list[str] = []
     p1_buf = _empty_buf()
     p2_buf = _empty_buf()
 
@@ -1431,6 +1470,20 @@ def train_agents_from_both_perspectives(
         global_step += 1
 
         if done:
+            p1_hp = p2_hp = None
+            try:
+                p1_hp = int(env._player_hp)
+                p2_hp = int(env._opp_hp)
+            except Exception:
+                pass
+            p1_outcomes.append(
+                classify_p1_episode_outcome(
+                    p1_hp=p1_hp,
+                    p2_hp=p2_hp,
+                    terminated=terminated,
+                    truncated=truncated,
+                )
+            )
             p1_ep_rewards.append(cur_p1_r)
             p2_ep_rewards.append(cur_p2_r)
             completed += 1
@@ -1510,11 +1563,14 @@ def train_agents_from_both_perspectives(
             _ppo_update_all_tiers(tiers, buf_ref, next_vec)
 
     total_eps = len(p1_ep_rewards)
+    outcome_summary = summarize_p1_outcomes(p1_outcomes, episodes=total_eps)
     stats = {
         "episodes": total_eps,
-        "timeouts": timeout_episodes,
+        "timeouts": outcome_summary["timeouts"],
         "terminated": terminated_episodes,
-        "timeout_rate": (timeout_episodes / max(1, total_eps)),
+        "timeout_rate": outcome_summary["timeout_rate"],
+        "p1_outcomes": p1_outcomes,
+        **outcome_summary,
     }
     return p1_ep_rewards, p2_ep_rewards, stats
 
@@ -1685,7 +1741,13 @@ def _save_warmup_handoff_checkpoint(
     return ckpt_dir
 
 
-def _player_context(matchup: Matchup, *, as_p1: bool) -> "PlayerCacheContext":
+def _player_context(
+    matchup: Matchup,
+    *,
+    as_p1: bool,
+    p1_deck_fingerprint: Optional[str] = None,
+    p2_deck_fingerprint: Optional[str] = None,
+) -> "PlayerCacheContext":
     from agent_cache import PlayerCacheContext
 
     if as_p1:
@@ -1694,12 +1756,16 @@ def _player_context(matchup: Matchup, *, as_p1: bool) -> "PlayerCacheContext":
             player_hero=matchup.p1_hero,
             opponent_deck=matchup.p2_deck,
             opponent_hero=matchup.p2_hero,
+            player_deck_fingerprint=p1_deck_fingerprint,
+            opponent_deck_fingerprint=p2_deck_fingerprint,
         )
     return PlayerCacheContext(
         player_deck=matchup.p2_deck,
         player_hero=matchup.p2_hero,
         opponent_deck=matchup.p1_deck,
         opponent_hero=matchup.p1_hero,
+        player_deck_fingerprint=p2_deck_fingerprint,
+        opponent_deck_fingerprint=p1_deck_fingerprint,
     )
 
 
@@ -1720,7 +1786,7 @@ def train_matchup(
     frontend_url: Optional[str] = None,
     n_workers: int = 1,
 ) -> dict:
-    from agent_cache import AgentCacheStore
+    from agent_cache import AgentCacheStore, talishar_asset_deck_fingerprint
     print(f"\n{'=' * 60}")
     print(f"  Matchup : {matchup.name}")
     print(f"  Decks   : {matchup.p1_deck} (P1) vs {matchup.p2_deck} (P2)")
@@ -1736,18 +1802,14 @@ def train_matchup(
     if cache_store is None:
         cache_store = AgentCacheStore(REPO_ROOT / "results" / "agent_cache", game_format)
 
-    # Create a persistent episode cache for this game format.  Completed
-    # (non-truncated) episodes are stored per deck matchup and replayed as PPO
-    # warm-start data on future runs.  The cache root sits alongside the agent
-    # cache so both can be shared across training scripts.
-    episode_cache = EpisodeCache(
-        cache_root=REPO_ROOT / "results" / "agent_cache",
-        game_format=game_format,
-    )
-    _ep_cache_info = episode_cache.info(matchup.p1_deck, matchup.p2_deck)
-    print(
-        f"  Episode cache: {_ep_cache_info['total_episodes']} stored episode(s) for this matchup "
-        f"(skip threshold: {episode_cache.warmup_skip_threshold})"
+    assets = talishar_assets_path()
+    p1_deck_fp = talishar_asset_deck_fingerprint(str(assets), matchup.p1_deck)
+    p2_deck_fp = talishar_asset_deck_fingerprint(str(assets), matchup.p2_deck)
+    p2_cache_ctx = _player_context(
+        matchup,
+        as_p1=False,
+        p1_deck_fingerprint=p1_deck_fp,
+        p2_deck_fingerprint=p2_deck_fp,
     )
 
     def _make_p1() -> PPOAgent:
@@ -1756,8 +1818,75 @@ def train_matchup(
     def _make_p2() -> PPOAgent:
         return make_agent(seed=(seed + 1) if seed is not None else None)
 
-    p1_bundle = cache_store.bootstrap_player(_player_context(matchup, as_p1=True), _make_p1)
-    p2_bundle = cache_store.bootstrap_player(_player_context(matchup, as_p1=False), _make_p2)
+    cached_record = cache_store.should_skip_training(
+        p1_fingerprint=p1_deck_fp,
+        p2_fingerprint=p2_deck_fp,
+        target_episodes=n_episodes,
+        require_p2_agent=True,
+        p2_context=p2_cache_ctx,
+    )
+    if cached_record is not None:
+        p1_bundle = cache_store.bootstrap_player(
+            _player_context(
+                matchup,
+                as_p1=True,
+                p1_deck_fingerprint=p1_deck_fp,
+                p2_deck_fingerprint=p2_deck_fp,
+            ),
+            _make_p1,
+        )
+        p2_bundle = cache_store.bootstrap_player(p2_cache_ctx, _make_p2)
+        print(
+            f"  Cache hit — converged deck-vs-deck matchup "
+            f"({cached_record.episodes_completed}/{cached_record.target_episodes} ep) "
+            f"— skipping training"
+        )
+        return {
+            "p1": {
+                "matchup": matchup.name,
+                "cached": True,
+                "avg_reward": 0.0,
+                "best_reward": 0.0,
+                "elapsed_secs": 0.0,
+                "agent_id": "cached",
+                "package_dir": str(out_dir / matchup.name / "cached_p1"),
+            },
+            "p2": {
+                "matchup": matchup.name,
+                "cached": True,
+                "avg_reward": 0.0,
+                "best_reward": 0.0,
+                "elapsed_secs": 0.0,
+                "agent_id": "cached",
+                "package_dir": str(out_dir / matchup.name / "cached_p2"),
+            },
+            "skipped_training": True,
+        }
+
+    # Create a persistent episode cache for this game format.  Completed
+    # (non-truncated) episodes are stored per deck matchup and replayed as PPO
+    # warm-start data on future runs.  The cache root sits alongside the agent
+    # cache so both can be shared across training scripts.
+    episode_cache = EpisodeCache(
+        cache_root=cache_store.user_cache_root,
+        game_format=game_format,
+    )
+    _ep_cache_info = episode_cache.info(matchup.p1_deck, matchup.p2_deck)
+    print(
+        f"  Episode cache: {_ep_cache_info['total_episodes']} stored episode(s) for this matchup "
+        f"(skip threshold: {episode_cache.warmup_skip_threshold})"
+    )
+
+    p1_bundle = cache_store.bootstrap_player(
+        _player_context(
+            matchup,
+            as_p1=True,
+            p1_deck_fingerprint=p1_deck_fp,
+            p2_deck_fingerprint=p2_deck_fp,
+        ),
+        _make_p1,
+    )
+    p2_bundle = cache_store.bootstrap_player(p2_cache_ctx, _make_p2)
 
     print("  P1 cache init:", ", ".join(p1_bundle.init_sources))
     print("  P2 cache init:", ", ".join(p2_bundle.init_sources))
@@ -1936,6 +2065,18 @@ def train_matchup(
 
     cache_store.persist_player(p1_bundle)
     cache_store.persist_player(p2_bundle)
+
+    p1_wr = float(np.mean([1.0 if r > 0 else 0.0 for r in p1_rewards])) if p1_rewards else None
+    if len(p1_rewards) >= n_episodes:
+        cache_store.mark_matchup_converged(
+            p1_fingerprint=p1_deck_fp,
+            p2_fingerprint=p2_deck_fp,
+            p1_hero=matchup.p1_hero,
+            p2_hero=matchup.p2_hero,
+            episodes_completed=len(p1_rewards),
+            target_episodes=n_episodes,
+            p1_win_rate=p1_wr,
+        )
 
     print(
         f"  Done in {elapsed:.1f}s — "

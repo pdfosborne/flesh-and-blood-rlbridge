@@ -24,7 +24,13 @@ from flesh_and_blood_rlbridge import (  # noqa: E402
     TalisharDeckBuilderEnvironment,
     TalisharSideboardEnvironment,
 )
-from flesh_and_blood_rlbridge.sideboard_guide_policy import SideboardGuidePolicy  # noqa: E402
+from flesh_and_blood_rlbridge.sideboard_guide_policy import (  # noqa: E402
+    RankedSwap,
+    SideboardGuidePolicy,
+    apply_sideboard_swap,
+    enumerate_ranked_swaps,
+    simulate_guide_sideboard_deck,
+)
 from flesh_and_blood_rlbridge.opponent_deck import (  # noqa: E402
     hero_class_for_id,
     normalize_talishar_asset_name,
@@ -46,6 +52,7 @@ _DEFAULT_OPPONENT_DECK = "Ira"
 _DEFAULT_OPPONENT_HERO = "dorinthea_ironsong"
 
 _OUT_DIR = REPO_ROOT / "results" / "full_pipeline"
+_AGENT_CACHE_DIR = REPO_ROOT / "results" / "agent_cache"
 
 
 def _load_agent(path: Optional[str]) -> Optional[Any]:
@@ -871,6 +878,203 @@ def sideboard_from_pool(
     return sideboard
 
 
+@dataclass(frozen=True)
+class SideboardCandidate:
+    """One sideboard variant to train and compare in play."""
+
+    candidate_id: str
+    label: str
+    game_deck: dict[str, int]
+    swaps: tuple[tuple[str, str], ...] = ()
+    guide_margin: Optional[float] = None
+
+
+def _deck_signature(deck: dict[str, int]) -> tuple[tuple[str, int], ...]:
+    return tuple(sorted((str(k), int(v)) for k, v in deck.items() if int(v) > 0))
+
+
+def load_deck_and_pool_from_json(
+    deck_json_path: Optional[str],
+    *,
+    card_pool_path: Optional[str] = None,
+) -> tuple[dict[str, int], dict[str, int]]:
+    """Load a game deck and registered card pool from JSON export files.
+
+    When ``deck`` and ``sideboard`` keys are both present, the pool is their
+    union.  When only ``deck`` is present and it is larger than the format
+    minimum, that dict is treated as both pool and starting game deck.
+    """
+    if not deck_json_path:
+        return {}, {}
+
+    data = json.loads(Path(deck_json_path).read_text(encoding="utf-8"))
+    game_deck = {
+        str(k): int(v) for k, v in (data.get("deck") or {}).items() if int(v) > 0
+    }
+    sideboard_cards = {
+        str(k): int(v) for k, v in (data.get("sideboard") or {}).items() if int(v) > 0
+    }
+
+    if card_pool_path:
+        pool_data = json.loads(Path(card_pool_path).read_text(encoding="utf-8"))
+        if pool_data.get("card_pool"):
+            card_pool = {
+                str(k): int(v) for k, v in pool_data["card_pool"].items() if int(v) > 0
+            }
+        elif pool_data.get("deck"):
+            card_pool = {
+                str(k): int(v) for k, v in pool_data["deck"].items() if int(v) > 0
+            }
+        else:
+            card_pool = dict(game_deck)
+    elif sideboard_cards:
+        card_pool = dict(game_deck)
+        for cid, count in sideboard_cards.items():
+            card_pool[cid] = card_pool.get(cid, 0) + count
+    else:
+        card_pool = dict(game_deck)
+
+    return game_deck, card_pool
+
+
+def generate_sideboard_candidates(
+    card_pool: dict[str, int],
+    game_deck: dict[str, int],
+    opponent_hero_id: str,
+    pool_by_id: dict[str, Any],
+    *,
+    hero_id: str,
+    game_format: str,
+    num_options: int,
+    include_baseline: bool = True,
+    include_guide_full: bool = True,
+    min_swap_margin: float = 0.75,
+) -> list[SideboardCandidate]:
+    """Build sideboard variants for play comparison using guide policy swaps."""
+    if num_options <= 0:
+        return []
+
+    min_size = min_deck_size_for_format(game_format)
+    normalized_deck = greedy_game_deck_cut(game_deck, min_size) if game_deck else {}
+    if sum(normalized_deck.values()) < min_size:
+        normalized_deck = greedy_game_deck_cut(card_pool, min_size)
+
+    candidates: list[SideboardCandidate] = []
+    seen: set[tuple[tuple[str, int], ...]] = set()
+
+    def _add(candidate: SideboardCandidate) -> None:
+        if len(candidates) >= num_options:
+            return
+        sig = _deck_signature(candidate.game_deck)
+        if sig in seen or sum(candidate.game_deck.values()) < min_size:
+            return
+        seen.add(sig)
+        candidates.append(candidate)
+
+    if include_baseline and normalized_deck:
+        _add(
+            SideboardCandidate(
+                candidate_id="baseline",
+                label="Starting deck",
+                game_deck=dict(normalized_deck),
+            )
+        )
+
+    if include_guide_full and card_pool:
+        guide_deck = simulate_guide_sideboard_deck(
+            card_pool,
+            opponent_hero_id,
+            hero_id=hero_id,
+            game_format=game_format,
+            pool_by_id=pool_by_id,
+        )
+        if guide_deck:
+            _add(
+                SideboardCandidate(
+                    candidate_id="guide_full",
+                    label="Guide policy (full sideboard)",
+                    game_deck=dict(guide_deck),
+                )
+            )
+
+    ranked_swaps: list[RankedSwap] = enumerate_ranked_swaps(
+        card_pool,
+        normalized_deck,
+        opponent_hero_id,
+        pool_by_id,
+        min_margin=min_swap_margin,
+    )
+    swap_index = 0
+    for swap in ranked_swaps:
+        if len(candidates) >= num_options:
+            break
+        swapped = apply_sideboard_swap(
+            normalized_deck,
+            card_pool,
+            swap.out_card,
+            swap.in_card,
+        )
+        if not swapped:
+            continue
+        swap_index += 1
+        _add(
+            SideboardCandidate(
+                candidate_id=f"swap_{swap_index:02d}",
+                label=(
+                    f"Swap {swap.out_card} → {swap.in_card} "
+                    f"(margin {swap.margin:+.2f})"
+                ),
+                game_deck=swapped,
+                swaps=((swap.out_card, swap.in_card),),
+                guide_margin=swap.margin,
+            )
+        )
+
+    return candidates
+
+
+def load_sideboard_candidates_from_json(
+    path: str | Path,
+    *,
+    card_pool: dict[str, int],
+    min_deck_size: int,
+) -> tuple[list[SideboardCandidate], dict[str, int]]:
+    """Load comparison candidates written by the TUI sideboard picker."""
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    pool = dict(card_pool)
+    if data.get("card_pool"):
+        for cid, count in data["card_pool"].items():
+            pool[str(cid)] = int(count)
+
+    candidates: list[SideboardCandidate] = []
+    for raw in data.get("candidates") or []:
+        game_deck = {
+            str(k): int(v) for k, v in (raw.get("game_deck") or {}).items() if int(v) > 0
+        }
+        if sum(game_deck.values()) < min_deck_size:
+            continue
+        swaps_raw = raw.get("swaps") or []
+        swaps = tuple(
+            (str(pair[0]), str(pair[1]))
+            for pair in swaps_raw
+            if isinstance(pair, (list, tuple)) and len(pair) == 2
+        )
+        candidates.append(
+            SideboardCandidate(
+                candidate_id=str(raw.get("candidate_id") or f"candidate_{len(candidates)}"),
+                label=str(raw.get("label") or raw.get("candidate_id") or "candidate"),
+                game_deck=game_deck,
+                swaps=swaps,
+                guide_margin=(
+                    float(raw["guide_margin"])
+                    if raw.get("guide_margin") is not None
+                    else None
+                ),
+            )
+        )
+    return candidates, pool
+
+
 def _card_sort_key(
     card_id: str,
     *,
@@ -1149,3 +1353,4 @@ DEFAULT_EQUIPMENT_HEADER = _DEFAULT_EQUIPMENT_HEADER
 DEFAULT_OPPONENT_DECK = _DEFAULT_OPPONENT_DECK
 DEFAULT_OPPONENT_HERO = _DEFAULT_OPPONENT_HERO
 OUT_DIR = _OUT_DIR
+DEFAULT_AGENT_CACHE_DIR = _AGENT_CACHE_DIR

@@ -5,14 +5,10 @@ Launch the terminal UI (default):
 
     python main.py
 
-Or run a preset / SAGE deckbuilder non-interactively:
+Or run SAGE pipelines non-interactively:
 
-    python main.py preset sage-deckbuilder
-    python main.py preset sage-deckbuilder -- dorinthea kayo
     python main.py sage
-    python main.py sage --defaults
-    python main.py sage dorinthea kayo
-    python main.py sage --p1-deck path/to/deck.json
+    python main.py preset sage-deckbuilder
 """
 
 from __future__ import annotations
