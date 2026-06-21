@@ -11,6 +11,7 @@ _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO / "scripts" / "training"))
 
 from play_outcome_stats import (  # noqa: E402
+    absolute_p1_p2_hp_from_obs,
     classify_p1_episode_outcome,
     compute_eval_stability,
     summarize_p1_outcomes,
@@ -28,6 +29,23 @@ def test_classify_outcomes() -> None:
     assert classify_p1_episode_outcome(p1_hp=20, p2_hp=10, truncated=True, terminated=True) == "timeout"
     assert classify_p1_episode_outcome(p1_hp=20, p2_hp=10, terminated=True) == "draw"
     assert classify_p1_episode_outcome(skipped=True) == "timeout"
+
+
+def test_absolute_p1_p2_hp_from_obs_swaps_when_p2_acting() -> None:
+    p1_hp, p2_hp = absolute_p1_p2_hp_from_obs(
+        {
+            "actingPlayerID": 2,
+            "playerHealth": 0,
+            "opponentHealth": 14,
+        }
+    )
+    assert p1_hp == 14.0
+    assert p2_hp == 0.0
+    assert classify_p1_episode_outcome(
+        p1_hp=p1_hp,
+        p2_hp=p2_hp,
+        terminated=True,
+    ) == "win"
 
 
 def test_summarize_includes_draws_and_timeouts_in_denominator() -> None:

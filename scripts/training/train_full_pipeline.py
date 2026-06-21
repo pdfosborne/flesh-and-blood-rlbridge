@@ -121,7 +121,7 @@ def main() -> None:
         help="Checkpoint every N%% of play episodes when interval is unset")
     parser.add_argument("--checkpoint-eval-episodes", type=int,
         default=DEFAULT_CHECKPOINT_EVAL_EPISODES,
-        help="C++ eval games with fixed opponent policy at each checkpoint (0=off)")
+        help="C++ eval games vs opponent agent (greedy) at each checkpoint (0=off)")
     parser.add_argument("--max-build-steps", type=int, default=200)
     parser.add_argument("--max-sideboard-steps", type=int, default=100)
     parser.add_argument("--max-play-steps", type=int, default=200)

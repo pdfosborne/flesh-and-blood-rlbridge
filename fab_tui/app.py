@@ -303,6 +303,7 @@ def wizard_sideboard_compare(env: EnvironmentSettings) -> None:
     )
 
     out_dir = spec.resolved_out_dir()
+    out_dir.mkdir(parents=True, exist_ok=True)
     candidates_path = write_candidates_manifest(
         out_dir / "candidates_manifest.json",
         baseline_deck=baseline_deck,

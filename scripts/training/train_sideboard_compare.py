@@ -379,7 +379,7 @@ def main() -> None:
         help="Checkpoint every N%% of play episodes when interval is unset")
     parser.add_argument("--checkpoint-eval-episodes", type=int,
         default=DEFAULT_CHECKPOINT_EVAL_EPISODES,
-        help="C++ eval games with fixed opponent policy at each checkpoint (0=off)")
+        help="C++ eval games vs opponent agent (greedy) at each checkpoint (0=off)")
     parser.add_argument("--max-play-steps", type=int, default=200)
     parser.add_argument("--warmup-episodes", type=int, default=DEFAULT_WARMUP_EPISODES)
     parser.add_argument("--warmup-baseline-eval-episodes", type=int,
@@ -506,7 +506,7 @@ def main() -> None:
         f"|  workers/candidate={workers_per_candidate}\n"
         f"  Play episodes/candidate: {args.play_episodes}\n"
         f"  Checkpoints: every {resolved_ckpt_interval} ep  |  "
-        f"eval {args.checkpoint_eval_episodes} games @ fixed opponent\n"
+        f"eval {args.checkpoint_eval_episodes} games @ opponent agent (greedy)\n"
         f"  Agent cache : {args.cache_dir}\n"
         f"{'='*62}"
     )

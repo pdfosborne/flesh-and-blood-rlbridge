@@ -830,7 +830,7 @@ def _render_candidate_card(row: dict[str, Any], *, play_episodes: int) -> str:
     <div class="progress-bar"><div class="progress-fill" style="width:{float(row.get("train_pct", 0)):.1f}%"></div></div>
   </section>
   <section class="metrics">
-    <div><span class="metric-label">Train win%</span><span class="metric-value">{_pct_text(row.get("play_win_rate"))}</span>{train_record_html}</div>
+    <div><span class="metric-label">Train win%</span><span class="metric-value">{_pct_text(row.get("play_win_rate"))}</span>{train_record_html}<p class="metric-hint">Self-play P1 vs co-trained P2 on the C++ stub — not fixed-opponent eval.</p></div>
     <div><span class="metric-label">Checkpoint eval</span><span class="metric-value">{_pct_text(row.get("latest_checkpoint_win_rate"))}</span></div>
     {_render_stability_block(row.get("eval_stability"))}
     <div><span class="metric-label">Final eval</span><span class="metric-value">{_pct_text(row.get("final_eval_win_rate"))} {delta_html}</span></div>
@@ -1067,6 +1067,13 @@ def render_sideboard_compare_html(
       font-weight: 600;
     }}
     .metric-value {{ font-size: 0.92rem; font-weight: 600; margin-top: 2px; }}
+    .metric-hint {{
+      margin: 4px 0 0;
+      font-size: 0.68rem;
+      color: var(--muted);
+      font-weight: 400;
+      line-height: 1.35;
+    }}
     .stability-converged {{ color: var(--good); }}
     .stability-learning {{ color: var(--warn); }}
     .stability-insufficient {{ color: var(--muted); }}

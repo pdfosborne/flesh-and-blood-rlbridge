@@ -2,12 +2,64 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, Optional
 
 OUTCOME_WIN = "win"
 OUTCOME_LOSS = "loss"
 OUTCOME_DRAW = "draw"
 OUTCOME_TIMEOUT = "timeout"
+
+
+def _observation_dict(obs: Any) -> dict[str, Any]:
+    if isinstance(obs, dict):
+        return obs
+    if isinstance(obs, str):
+        try:
+            loaded = json.loads(obs)
+            return loaded if isinstance(loaded, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def absolute_p1_p2_hp_from_obs(obs: Any) -> tuple[Optional[float], Optional[float]]:
+    """Return fixed-seat P1/P2 HP from a Talishar-shaped observation.
+
+    ``playerHealth`` / ``opponentHealth`` are from the acting player's view;
+    swap them back when P2 has priority so win/loss classification is stable.
+    """
+    obs_data = _observation_dict(obs)
+    player_hp = obs_data.get("playerHealth")
+    opponent_hp = obs_data.get("opponentHealth")
+    if player_hp is None or opponent_hp is None:
+        return None, None
+    p_player = float(player_hp or 0)
+    p_opponent = float(opponent_hp or 0)
+    acting = int(obs_data.get("actingPlayerID", 1) or 1)
+    if acting == 2:
+        return p_opponent, p_player
+    return p_player, p_opponent
+
+
+def absolute_p1_p2_hp_from_env(env: Any) -> tuple[Optional[int], Optional[int]]:
+    """Return absolute P1/P2 HP from a training or eval environment."""
+    cpp_env = getattr(env, "_cpp_env", None)
+    if cpp_env is not None:
+        gs = getattr(cpp_env, "_gs", None)
+        if gs is not None:
+            return int(gs.p1_health), int(gs.p2_health)
+
+    if getattr(env, "_using_cpp", False):
+        return int(getattr(env, "_player_hp", 0)), int(getattr(env, "_opp_hp", 0))
+
+    last_state = getattr(env, "_last_state", None)
+    if isinstance(last_state, dict) and last_state:
+        p1_hp, p2_hp = absolute_p1_p2_hp_from_obs(last_state)
+        if p1_hp is not None and p2_hp is not None:
+            return int(p1_hp), int(p2_hp)
+
+    return None, None
 
 
 def classify_p1_episode_outcome(
@@ -78,8 +130,8 @@ def summarize_p1_outcomes(
 
 
 DEFAULT_EVAL_STABILITY_WINDOW = 3
-DEFAULT_EVAL_STABILITY_MAX_STD = 0.03
-DEFAULT_EVAL_STABILITY_MIN_POINTS = 2
+DEFAULT_EVAL_STABILITY_MAX_STD = 0.01
+DEFAULT_EVAL_STABILITY_MIN_POINTS = 5
 
 
 def rolling_std(values: list[float], window: int) -> Optional[float]:

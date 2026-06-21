@@ -113,7 +113,9 @@ class ExperimentSpec:
         if self.out_dir:
             return Path(self.out_dir)
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        return RESULTS_ROOT / "experiments" / f"{slugify(self.name)}_{stamp}"
+        path = RESULTS_ROOT / "experiments" / f"{slugify(self.name)}_{stamp}"
+        self.out_dir = str(path)
+        return path
 
     def pipeline_argv(self) -> list[str]:
         args = [
@@ -245,4 +247,6 @@ class SideboardCompareSpec:
         hero = slugify(self.hero_id or "player")
         opp = slugify(self.opponent_hero_id or "opponent")
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        return RESULTS_ROOT / "sideboard_compare" / f"{hero}_vs_{opp}_{stamp}"
+        path = RESULTS_ROOT / "sideboard_compare" / f"{hero}_vs_{opp}_{stamp}"
+        self.out_dir = str(path)
+        return path

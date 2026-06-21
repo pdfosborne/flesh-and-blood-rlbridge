@@ -29,7 +29,11 @@ for p in (FAB_SRC, REPO_ROOT, RL_SRC):
     if s not in sys.path:
         sys.path.insert(0, s)
 
-from play_outcome_stats import classify_p1_episode_outcome, summarize_p1_outcomes  # noqa: E402
+from play_outcome_stats import (  # noqa: E402
+    absolute_p1_p2_hp_from_env,
+    classify_p1_episode_outcome,
+    summarize_p1_outcomes,
+)
 import numpy as np  # noqa: E402
 try:
     import torch
@@ -733,8 +737,11 @@ def _run_one_episode(
         steps_taken += 1
         # Track final game state for diagnostics
         try:
-            final_p1_hp  = int(env._player_hp)
-            final_p2_hp  = int(env._opp_hp)
+            final_p1_hp, final_p2_hp = absolute_p1_p2_hp_from_env(env)
+            if final_p1_hp is not None:
+                final_p1_hp = int(final_p1_hp)
+            if final_p2_hp is not None:
+                final_p2_hp = int(final_p2_hp)
             if isinstance(next_obs, str):
                 _s = json.loads(next_obs)
             else:
@@ -1472,8 +1479,11 @@ def train_agents_from_both_perspectives(
         if done:
             p1_hp = p2_hp = None
             try:
-                p1_hp = int(env._player_hp)
-                p2_hp = int(env._opp_hp)
+                p1_hp, p2_hp = absolute_p1_p2_hp_from_env(env)
+                if p1_hp is not None:
+                    p1_hp = int(p1_hp)
+                if p2_hp is not None:
+                    p2_hp = int(p2_hp)
             except Exception:
                 pass
             p1_outcomes.append(

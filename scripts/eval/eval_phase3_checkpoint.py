@@ -45,6 +45,11 @@ from scripts.training.train_play import (  # noqa: E402
     _save_end_state_frame,
     _save_state_image,
 )
+from scripts.training.play_outcome_stats import (  # noqa: E402
+    absolute_p1_p2_hp_from_env,
+    absolute_p1_p2_hp_from_obs,
+    classify_p1_episode_outcome,
+)
 from scripts.training.train_pipeline_common import _write_deck_file  # noqa: E402
 
 
@@ -371,7 +376,7 @@ def _run_render_episode(
                     frame_paths.append(fpath)
 
         outcome = _infer_render_outcome(
-            obs, terminated=terminated, truncated=truncated,
+            obs, terminated=terminated, truncated=truncated, env=env,
         )
         end_path = render_dir / f"frame_{step_no + 1:04d}_end_{outcome}.png"
         if _save_end_state_frame(env, obs, end_path, outcome=outcome, steps=step_no):
@@ -934,14 +939,20 @@ def _run_eval_episode_batch(
                 truncated = bool(step.truncated)
 
             obs_data = json.loads(obs) if isinstance(obs, str) else (obs or {})
-            p1_hp = float(obs_data.get("playerHealth", 0) or 0)
-            p2_hp = float(obs_data.get("opponentHealth", 0) or 0)
-            if p1_hp <= 0 and p2_hp > 0:
-                outcome = "loss"
-            elif p2_hp <= 0 and p1_hp > 0:
-                outcome = "win"
+            p1_hp, p2_hp = absolute_p1_p2_hp_from_env(env)
+            if p1_hp is None or p2_hp is None:
+                p1_hp_f, p2_hp_f = absolute_p1_p2_hp_from_obs(obs_data)
+                p1_hp = int(p1_hp_f) if p1_hp_f is not None else None
+                p2_hp = int(p2_hp_f) if p2_hp_f is not None else None
+            if stall_triggered and not terminated:
+                outcome = "stall_timeout"
             else:
-                outcome = "stall_timeout" if stall_triggered else "timeout"
+                outcome = classify_p1_episode_outcome(
+                    p1_hp=p1_hp,
+                    p2_hp=p2_hp,
+                    terminated=terminated,
+                    truncated=truncated,
+                )
 
             logs.append(
                 {

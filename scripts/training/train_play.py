@@ -57,6 +57,8 @@ from cpp_engine_matchup import (  # noqa: E402
     resolve_cpp_lookup_decks,
 )
 from play_outcome_stats import (  # noqa: E402
+    absolute_p1_p2_hp_from_env,
+    absolute_p1_p2_hp_from_obs,
     classify_p1_episode_outcome,
     compute_eval_stability,
     summarize_p1_outcomes,
@@ -608,6 +610,7 @@ def run_phase3_play(
         eval_metrics = _evaluate_p1_vs_fixed_opponent(
             matchup,
             p1_agent,
+            p2_agent=p2_agent,
             base_url=base_url,
             game_format=game_format,
             max_steps=max_play_steps,
@@ -619,7 +622,7 @@ def run_phase3_play(
             "episodes_completed": completed,
             "target_episodes": n_episodes,
             "eval_episodes": checkpoint_eval_episodes,
-            "opponent_policy": "talishar_default",
+            "opponent_policy": "opponent_agent_greedy",
             **eval_metrics,
         }
         ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -639,7 +642,7 @@ def run_phase3_play(
             f"({eval_metrics['p1_wins']}W/"
             f"{eval_metrics['losses']}L/{eval_metrics['draws']}D/"
             f"{eval_metrics['timeouts']}T "
-            f"over {checkpoint_eval_episodes} games, fixed opponent)"
+            f"over {checkpoint_eval_episodes} games, opponent agent greedy)"
         )
 
     def _after_play_checkpoint(completed: int) -> None:
@@ -920,13 +923,14 @@ def _evaluate_p1_vs_fixed_opponent(
     matchup: "Matchup",
     p1_agent: Any,
     *,
+    p2_agent: Any,
     base_url: str,
     game_format: str,
     max_steps: int,
     episodes: int,
     seed: Optional[int] = None,
 ) -> dict[str, Any]:
-    """Evaluate P1 greedy policy vs Talishar default opponent (C++ when available)."""
+    """Evaluate P1 greedy vs opponent agent greedy (C++ when available)."""
     empty = {
         "episodes": 0,
         "p1_wins": 0,
@@ -973,7 +977,7 @@ def _evaluate_p1_vs_fixed_opponent(
                 if acting == 1:
                     action = _agent_action_for_eval(p1_agent, obs)
                 else:
-                    action = env.sample_action()
+                    action = _agent_action_for_eval(p2_agent, obs)
                 step = env.step(action)
                 obs = step.observation
                 terminated = bool(step.terminated)
@@ -982,8 +986,11 @@ def _evaluate_p1_vs_fixed_opponent(
                 steps += 1
 
             obs_data = json.loads(obs) if isinstance(obs, str) else (obs or {})
-            p1_hp = float(obs_data.get("playerHealth", 0) or 0)
-            p2_hp = float(obs_data.get("opponentHealth", 0) or 0)
+            p1_hp, p2_hp = absolute_p1_p2_hp_from_env(env)
+            if p1_hp is None or p2_hp is None:
+                p1_hp_f, p2_hp_f = absolute_p1_p2_hp_from_obs(obs_data)
+                p1_hp = int(p1_hp_f) if p1_hp_f is not None else None
+                p2_hp = int(p2_hp_f) if p2_hp_f is not None else None
             outcome = classify_p1_episode_outcome(
                 p1_hp=p1_hp,
                 p2_hp=p2_hp,
@@ -1446,7 +1453,7 @@ def _render_game_with_talishar_frontend(
                     frame_paths.append(fpath)
 
             outcome = _infer_render_outcome(
-                obs, terminated=terminated, truncated=truncated,
+                obs, terminated=terminated, truncated=truncated, env=env,
             )
             end_path = render_dir / f"frame_{step_no + 1:04d}_end_{outcome}.png"
             if _save_end_state_frame(env, obs, end_path, outcome=outcome, steps=step_no):
@@ -1502,11 +1509,16 @@ def _infer_render_outcome(
     *,
     terminated: bool,
     truncated: bool,
+    env: Any = None,
 ) -> str:
     """Classify a rendered rollout as win/loss/draw/timeout from P1's perspective."""
-    obs_data = json.loads(obs) if isinstance(obs, str) else (obs or {})
-    p1_hp = float(obs_data.get("playerHealth", 0) or 0)
-    p2_hp = float(obs_data.get("opponentHealth", 0) or 0)
+    p1_hp = p2_hp = None
+    if env is not None:
+        p1_hp, p2_hp = absolute_p1_p2_hp_from_env(env)
+    if p1_hp is None or p2_hp is None:
+        p1_hp_f, p2_hp_f = absolute_p1_p2_hp_from_obs(obs)
+        p1_hp = p1_hp_f
+        p2_hp = p2_hp_f
     return classify_p1_episode_outcome(
         p1_hp=p1_hp,
         p2_hp=p2_hp,
@@ -1626,11 +1638,12 @@ def _save_state_image(env: Any, obs: Any, out_path: Path) -> bool:
 
 
 def _parse_obs_hp(obs: Any) -> tuple[int, int, int]:
-    """Return ``(turn_no, player_hp, opponent_hp)`` from an observation."""
+    """Return ``(turn_no, p1_hp, p2_hp)`` from an observation."""
     obs_data = json.loads(obs) if isinstance(obs, str) else (obs or {})
     turn_no = int(obs_data.get("turnNo", 0) or 0)
-    p1_hp = int(float(obs_data.get("playerHealth", 0) or 0))
-    p2_hp = int(float(obs_data.get("opponentHealth", 0) or 0))
+    p1_hp_f, p2_hp_f = absolute_p1_p2_hp_from_obs(obs_data)
+    p1_hp = int(p1_hp_f or 0)
+    p2_hp = int(p2_hp_f or 0)
     return turn_no, p1_hp, p2_hp
 
 
@@ -2213,8 +2226,11 @@ def run_final_evaluation(
                     _track_turn_hp(turn_hp, turn_no, p1_hp, p2_hp)
 
                 obs_data = json.loads(obs) if isinstance(obs, str) else (obs or {})
-                p1_hp = float(obs_data.get("playerHealth", 0) or 0)
-                p2_hp = float(obs_data.get("opponentHealth", 0) or 0)
+                p1_hp, p2_hp = absolute_p1_p2_hp_from_env(env)
+                if p1_hp is None or p2_hp is None:
+                    p1_hp_f, p2_hp_f = absolute_p1_p2_hp_from_obs(obs_data)
+                    p1_hp = int(p1_hp_f) if p1_hp_f is not None else None
+                    p2_hp = int(p2_hp_f) if p2_hp_f is not None else None
                 outcome = classify_p1_episode_outcome(
                     p1_hp=p1_hp,
                     p2_hp=p2_hp,
@@ -2499,7 +2515,7 @@ def main() -> None:
         help="Checkpoint every N%% of play episodes when interval is unset")
     parser.add_argument("--checkpoint-eval-episodes", type=int,
         default=DEFAULT_CHECKPOINT_EVAL_EPISODES,
-        help="C++ eval games with fixed opponent policy at each checkpoint (0=off)")
+        help="C++ eval games vs opponent agent (greedy) at each checkpoint (0=off)")
     parser.add_argument("--max-play-steps", type=int, default=200)
     parser.add_argument("--warmup-episodes", type=int, default=DEFAULT_WARMUP_EPISODES)
     parser.add_argument("--warmup-baseline-eval-episodes", type=int,
