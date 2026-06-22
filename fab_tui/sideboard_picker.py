@@ -328,6 +328,8 @@ def prompt_policy_baseline_deck(
     info = read_deck_hero_info(deck_path)
     file_equipment = info.equipment_header if info else ""
 
+    skip_loadout_refinement = False
+
     if saved_list:
         _header(console, "Saved sideboard list")
         if info:
@@ -367,8 +369,9 @@ def prompt_policy_baseline_deck(
             console.print(f"[bold]{info.name or info.hero_id}[/bold]  ({info.hero_id})")
         console.print(f"Opponent matchup: [bold]{opponent_hero_id}[/bold]\n")
         console.print(
-            "[dim]Review the starting list vs guide recommendations, then adjust "
-            "equipment first, then deck cards — confirm each when you are happy.[/dim]\n"
+            "[dim]Review the starting list vs guide recommendations. "
+            "If you accept the guide, equipment and deck are used as-is; "
+            "otherwise adjust each loadout and confirm when happy.[/dim]\n"
         )
         _show_default_deck(
             console,
@@ -408,33 +411,38 @@ def prompt_policy_baseline_deck(
             equipment_header = guide_equipment
             source = "guide_policy"
             baseline_label = "Guide policy deck"
+            skip_loadout_refinement = True
         else:
             baseline_deck = dict(file_deck)
             equipment_header = file_equipment
             source = "deck_file"
             baseline_label = "Starting deck"
 
-    console.print(
-        "\n[bold]Step 1 — Equipment[/bold]  "
-        "[dim]Swap slots until you are happy with the loadout.[/dim]"
-    )
-    equipment_header, equip_changes = _refine_equipment_until_happy(
-        console,
-        equipment_header,
-        hero_id=hero_id,
-        equip_index=equip_index,
-    )
+    if skip_loadout_refinement:
+        equip_changes: list[tuple[str, str]] = []
+        swaps: list[tuple[str, str]] = []
+    else:
+        console.print(
+            "\n[bold]Step 1 — Equipment[/bold]  "
+            "[dim]Swap slots until you are happy with the loadout.[/dim]"
+        )
+        equipment_header, equip_changes = _refine_equipment_until_happy(
+            console,
+            equipment_header,
+            hero_id=hero_id,
+            equip_index=equip_index,
+        )
 
-    console.print(
-        "\n[bold]Step 2 — Deck cards[/bold]  "
-        "[dim]Swap cards until you are happy with the list.[/dim]"
-    )
-    baseline_deck, card_pool, swaps = _refine_deck_until_happy(
-        console,
-        baseline_deck,
-        card_pool,
-        card_index,
-    )
+        console.print(
+            "\n[bold]Step 2 — Deck cards[/bold]  "
+            "[dim]Swap cards until you are happy with the list.[/dim]"
+        )
+        baseline_deck, card_pool, swaps = _refine_deck_until_happy(
+            console,
+            baseline_deck,
+            card_pool,
+            card_index,
+        )
 
     if equip_changes:
         source = f"{source}_equip_edited"
