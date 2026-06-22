@@ -292,8 +292,8 @@ def run_parallel_seed_jobs(
     its own subprocess with optional CPU affinity.  Otherwise falls back to threads
     via *job_fn*.
     """
-    if n_seeds <= 1:
-        raise ValueError("run_parallel_seed_jobs requires n_seeds > 1")
+    if n_seeds < 1:
+        raise ValueError("run_parallel_seed_jobs requires n_seeds >= 1")
 
     seeds_root = out_dir / "parallel_seeds"
     seeds_root.mkdir(parents=True, exist_ok=True)
@@ -355,7 +355,10 @@ def run_parallel_seed_jobs(
     avg_p1, avg_p2 = average_win_rates(
         [(float(r["p1_win_rate"]), float(r["p2_win_rate"])) for r in rows]
     )
-    _, _, best_p1_idx, best_p2_idx = select_best_agents_by_win_rate(rows)
+    if len(rows) == 1:
+        best_p1_idx = best_p2_idx = int(rows[0].get("seed_index", 0))
+    else:
+        _, _, best_p1_idx, best_p2_idx = select_best_agents_by_win_rate(rows)
 
     print(f"\n  Seed training win rates ({n_seeds} seeds, avg shown):")
     for row in rows:

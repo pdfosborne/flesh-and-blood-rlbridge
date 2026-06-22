@@ -26,6 +26,7 @@ class MetaRuntime:
     # ── Parallelism ──────────────────────────────────────────────────────────
     workers: int | None = 16  # C++ env workers (None = auto-detect)
     parallel_seeds: int = 5  # independent seeds; best model used for eval
+    parallel_seeds_until_first_checkpoint: bool = True
     sideboard_max_parallel: int = 0  # 0 = train all sideboard candidates at once
     eval_parallel_workers: int = 4
 
@@ -77,6 +78,7 @@ class PlayDefaults:
 
     workers: int | None
     parallel_seeds: int
+    parallel_seeds_until_first_checkpoint: bool
     checkpoint_interval_pct: float
     checkpoint_eval_episodes: int
     play_checkpoint_interval: int | None
@@ -224,6 +226,7 @@ def build_runtime(meta: MetaRuntime) -> RuntimeDefaults:
     play = PlayDefaults(
         workers=meta.workers,
         parallel_seeds=meta.parallel_seeds,
+        parallel_seeds_until_first_checkpoint=meta.parallel_seeds_until_first_checkpoint,
         checkpoint_interval_pct=meta.checkpoint_interval_pct,
         checkpoint_eval_episodes=meta.checkpoint_eval_episodes,
         play_checkpoint_interval=meta.play_checkpoint_interval,

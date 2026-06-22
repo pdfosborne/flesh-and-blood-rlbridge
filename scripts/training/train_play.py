@@ -72,6 +72,8 @@ from checkpoint_eval_async import (  # noqa: E402
     wait_for_checkpoint_evals,
 )
 from play_outcome_stats import (  # noqa: E402
+    absolute_p1_p2_deck_from_env,
+    absolute_p1_p2_deck_from_obs,
     absolute_p1_p2_hp_from_env,
     absolute_p1_p2_hp_from_obs,
     classify_p1_episode_outcome,
@@ -477,6 +479,7 @@ def _run_phase3_play_parallel_seeds(
     checkpoint_interval: Optional[int],
     checkpoint_interval_pct: float,
     checkpoint_eval_episodes: int,
+    parallel_seeds_until_first_checkpoint: bool,
 ) -> tuple[float, float]:
     workers_per_seed = workers_per_parallel_seed(n_workers, parallel_seeds)
     if n_workers is not None and workers_per_seed != n_workers:
@@ -509,47 +512,263 @@ def _run_phase3_play_parallel_seeds(
         checkpoint_eval_episodes=checkpoint_eval_episodes,
     )
 
+    def _build_process_jobs(
+        *,
+        run_kwargs: dict[str, Any],
+        seed_offset: int = 0,
+        initial_p1: Optional[PhaseAgents] = None,
+        initial_p2: Optional[PhaseAgents] = None,
+        seed_indices: Optional[list[int]] = None,
+    ) -> list[dict[str, Any]]:
+        jobs: list[dict[str, Any]] = []
+        indices = seed_indices if seed_indices is not None else list(range(parallel_seeds))
+        for seed_index in indices:
+            seed_i = derive_training_seed(seed, seed_index)
+            if seed_i is not None:
+                seed_i += seed_offset
+            source_p1 = initial_p1 if initial_p1 is not None else p1
+            source_p2 = initial_p2 if initial_p2 is not None else p2
+            p1_copy, p2_copy = _clone_phase_agents_for_seed(source_p1, source_p2, seed=seed_i)
+            seed_staging = staging_root / f"seed_{seed_index}_offset_{seed_offset}"
+            job: dict[str, Any] = {
+                "handler": "play_parallel_seed",
+                "seed_index": seed_index,
+                "n_seeds": parallel_seeds,
+                "workers_per_seed": workers_per_seed,
+                "seed": seed_i,
+                "seed_out": str(seeds_root / f"seed_{seed_index}"),
+                "parallel_seed_sync_dir": str(out_dir),
+                "p1": _serialize_phase_agent_for_process(
+                    p1_copy, seed_staging / "p1", role="p1"
+                ),
+                "run_kwargs": run_kwargs,
+            }
+            if opponent_mode == "dual" and p2_copy is not None:
+                job["p2"] = _serialize_phase_agent_for_process(
+                    p2_copy, seed_staging / "p2", role="p2"
+                )
+            jobs.append(job)
+        return jobs
+
     def _sync_parent_dashboard() -> None:
         sync_parallel_seed_dashboard_artifacts(out_dir)
 
+    def _read_checkpoint_history(path: Path) -> list[dict[str, Any]]:
+        if not path.is_file():
+            return []
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return []
+        return [row for row in raw if isinstance(row, dict)] if isinstance(raw, list) else []
+
     seeds_root = out_dir / "parallel_seeds"
     staging_root = seeds_root / "_agent_staging"
-    process_jobs: list[dict[str, Any]] = []
-    for seed_index in range(parallel_seeds):
-        seed_i = derive_training_seed(seed, seed_index)
-        p1_copy, p2_copy = _clone_phase_agents_for_seed(p1, p2, seed=seed_i)
-        seed_staging = staging_root / f"seed_{seed_index}"
-        job: dict[str, Any] = {
-            "handler": "play_parallel_seed",
-            "seed_index": seed_index,
-            "n_seeds": parallel_seeds,
-            "workers_per_seed": workers_per_seed,
-            "seed": seed_i,
-            "seed_out": str(seeds_root / f"seed_{seed_index}"),
-            "parallel_seed_sync_dir": str(out_dir),
-            "p1": _serialize_phase_agent_for_process(
-                p1_copy, seed_staging / "p1", role="p1"
-            ),
-            "run_kwargs": shared_kwargs,
-        }
-        if opponent_mode == "dual" and p2_copy is not None:
-            job["p2"] = _serialize_phase_agent_for_process(
-                p2_copy, seed_staging / "p2", role="p2"
-            )
-        process_jobs.append(job)
+    staged_temp_deck_files: list[str] = []
 
-    try:
-        summary = run_parallel_seed_jobs(
-            parallel_seeds,
-            seed,
-            out_dir,
-            process_jobs=process_jobs,
-            workers_per_seed=workers_per_seed,
-            label="play training",
-            on_seed_complete=lambda _row: _sync_parent_dashboard(),
+    if parallel_seeds_until_first_checkpoint and parallel_seeds > 1:
+        first_checkpoint = min(
+            n_episodes,
+            resolve_play_checkpoint_interval(
+                n_episodes,
+                checkpoint_interval=checkpoint_interval,
+                checkpoint_interval_pct=checkpoint_interval_pct,
+            ),
         )
-    finally:
-        shutdown_checkpoint_eval_executor(wait=True)
+        remaining_episodes = max(0, n_episodes - first_checkpoint)
+        if remaining_episodes > 0:
+            print(
+                f"  Parallel seeds until first checkpoint: {parallel_seeds} seed(s) "
+                f"for {first_checkpoint} episode(s), then continue best seed for "
+                f"{remaining_episodes} episode(s)"
+            )
+            first_kwargs = dict(shared_kwargs)
+            first_kwargs["n_episodes"] = first_checkpoint
+            first_kwargs["warmup_episodes"] = min(warmup_episodes, first_checkpoint)
+            first_kwargs["checkpoint_interval"] = first_checkpoint
+            first_jobs = _build_process_jobs(run_kwargs=first_kwargs)
+            try:
+                first_summary = run_parallel_seed_jobs(
+                    parallel_seeds,
+                    seed,
+                    out_dir,
+                    process_jobs=first_jobs,
+                    workers_per_seed=workers_per_seed,
+                    label="play training first checkpoint",
+                    on_seed_complete=lambda _row: _sync_parent_dashboard(),
+                )
+            finally:
+                shutdown_checkpoint_eval_executor(wait=True)
+
+            for row in first_summary.seed_rows:
+                staged_temp_deck_files.extend(str(p) for p in row.get("temp_deck_files") or [])
+                row.setdefault(
+                    "p1_agent",
+                    _load_play_agent_from_path(row.get("p1_play_path"), seed=row.get("seed")),
+                )
+                row.setdefault(
+                    "p2_agent",
+                    _load_play_agent_from_path(row.get("p2_play_path"), seed=row.get("seed")),
+                )
+            best_p1, best_p2, best_p1_idx, best_p2_idx = select_best_agents_by_win_rate(
+                first_summary.seed_rows
+            )
+            first_checkpoint_eval = merge_parallel_seed_checkpoint_history(out_dir, write=True)
+            if first_checkpoint_eval:
+                eval_best_p1_idx = first_checkpoint_eval[-1].get("best_p1_seed_index")
+                if eval_best_p1_idx is not None:
+                    try:
+                        best_p1_idx = int(eval_best_p1_idx)
+                        best_p1 = next(
+                            row["p1_agent"] for row in first_summary.seed_rows
+                            if int(row.get("seed_index", -1)) == best_p1_idx
+                        )
+                    except (KeyError, StopIteration, TypeError, ValueError):
+                        pass
+            first_p1_row = next(
+                row for row in first_summary.seed_rows
+                if int(row.get("seed_index", -1)) == best_p1_idx
+            )
+            first_p2_row = next(
+                row for row in first_summary.seed_rows
+                if int(row.get("seed_index", -1)) == best_p2_idx
+            )
+            print(
+                f"  Continuing only best seed after first checkpoint: "
+                f"P1 seed {best_p1_idx}, P2 seed {best_p2_idx}"
+            )
+            selected_seed_history_path = (
+                seeds_root / f"seed_{best_p1_idx}" / "checkpoint_eval_history.json"
+            )
+            selected_first_checkpoint_history = _read_checkpoint_history(
+                selected_seed_history_path
+            )
+
+            continuation_p1 = PhaseAgents(
+                player=p1.player,
+                play=best_p1,
+                equipment_header=p1.equipment_header,
+                card_pool=dict(p1.card_pool),
+                pool_by_id=dict(p1.pool_by_id),
+                active_decks={k: dict(v) for k, v in p1.active_decks.items()},
+                deck_asset_name=p1.deck_asset_name,
+            )
+            continuation_p2: Optional[PhaseAgents] = None
+            if opponent_mode == "dual" and p2 is not None:
+                continuation_p2 = PhaseAgents(
+                    player=p2.player,
+                    play=best_p2,
+                    equipment_header=p2.equipment_header,
+                    card_pool=dict(p2.card_pool),
+                    pool_by_id=dict(p2.pool_by_id),
+                    active_decks={k: dict(v) for k, v in p2.active_decks.items()},
+                    deck_asset_name=p2.deck_asset_name,
+                )
+            elif p2 is not None:
+                continuation_p2 = PhaseAgents(
+                    player=p2.player,
+                    play=best_p2,
+                    equipment_header=p2.equipment_header,
+                    card_pool=dict(p2.card_pool),
+                    pool_by_id=dict(p2.pool_by_id),
+                    active_decks={k: dict(v) for k, v in p2.active_decks.items()},
+                    deck_asset_name=p2.deck_asset_name,
+                )
+
+            continuation_kwargs = dict(shared_kwargs)
+            continuation_kwargs["n_episodes"] = remaining_episodes
+            continuation_kwargs["warmup_episodes"] = max(0, warmup_episodes - first_checkpoint)
+            continuation_kwargs["checkpoint_interval"] = first_checkpoint
+            continuation_jobs = _build_process_jobs(
+                run_kwargs=continuation_kwargs,
+                seed_offset=first_checkpoint,
+                initial_p1=continuation_p1,
+                initial_p2=continuation_p2,
+                seed_indices=[best_p1_idx],
+            )
+            try:
+                continuation_summary = run_parallel_seed_jobs(
+                    1,
+                    seed,
+                    out_dir,
+                    process_jobs=continuation_jobs,
+                    workers_per_seed=workers_per_seed,
+                    label="play training best-seed continuation",
+                    on_seed_complete=lambda _row: _sync_parent_dashboard(),
+                )
+            finally:
+                shutdown_checkpoint_eval_executor(wait=True)
+            continuation_history = _read_checkpoint_history(selected_seed_history_path)
+            if continuation_history:
+                adjusted_history = list(selected_first_checkpoint_history)
+                for row in continuation_history:
+                    adjusted = dict(row)
+                    adjusted["episodes_completed"] = (
+                        int(adjusted.get("episodes_completed", 0) or 0)
+                        + first_checkpoint
+                    )
+                    adjusted["target_episodes"] = n_episodes
+                    adjusted_history.append(adjusted)
+                selected_seed_history_path.write_text(
+                    json.dumps(adjusted_history, indent=2),
+                    encoding="utf-8",
+                )
+                merge_parallel_seed_checkpoint_history(out_dir, write=True)
+            summary = continuation_summary
+            final_row = summary.seed_rows[0]
+            combined_p1_wr = (
+                float(first_p1_row.get("p1_win_rate", 0.0)) * first_checkpoint
+                + float(final_row.get("p1_win_rate", 0.0)) * remaining_episodes
+            ) / max(1, n_episodes)
+            combined_p2_wr = (
+                float(first_p2_row.get("p2_win_rate", 0.0)) * first_checkpoint
+                + float(final_row.get("p2_win_rate", 0.0)) * remaining_episodes
+            ) / max(1, n_episodes)
+            final_row["p1_win_rate"] = combined_p1_wr
+            final_row["p2_win_rate"] = combined_p2_wr
+            final_row["first_checkpoint_p1_seed_index"] = best_p1_idx
+            final_row["first_checkpoint_p2_seed_index"] = best_p2_idx
+            final_row["first_checkpoint_episodes"] = first_checkpoint
+            final_row["continued_episodes"] = remaining_episodes
+            final_row["temp_deck_files"] = list(final_row.get("temp_deck_files") or []) + staged_temp_deck_files
+            summary.avg_p1_win_rate = combined_p1_wr
+            summary.avg_p2_win_rate = combined_p2_wr
+            summary.best_p1_seed_index = best_p1_idx
+            summary.best_p2_seed_index = best_p2_idx
+            summary.n_seeds = 1
+            (out_dir / "parallel_seeds_summary.json").write_text(
+                json.dumps(summary.to_dict(), indent=2),
+                encoding="utf-8",
+            )
+        else:
+            process_jobs = _build_process_jobs(run_kwargs=shared_kwargs)
+            try:
+                summary = run_parallel_seed_jobs(
+                    parallel_seeds,
+                    seed,
+                    out_dir,
+                    process_jobs=process_jobs,
+                    workers_per_seed=workers_per_seed,
+                    label="play training",
+                    on_seed_complete=lambda _row: _sync_parent_dashboard(),
+                )
+            finally:
+                shutdown_checkpoint_eval_executor(wait=True)
+    else:
+        process_jobs = _build_process_jobs(run_kwargs=shared_kwargs)
+
+        try:
+            summary = run_parallel_seed_jobs(
+                parallel_seeds,
+                seed,
+                out_dir,
+                process_jobs=process_jobs,
+                workers_per_seed=workers_per_seed,
+                label="play training",
+                on_seed_complete=lambda _row: _sync_parent_dashboard(),
+            )
+        finally:
+            shutdown_checkpoint_eval_executor(wait=True)
 
     for row in summary.seed_rows:
         if "p1_agent" not in row:
@@ -565,7 +784,13 @@ def _run_phase3_play_parallel_seeds(
     best_p1, best_p2, best_p1_idx, best_p2_idx = select_best_agents_by_win_rate(
         summary.seed_rows
     )
-    best_p1_row = summary.seed_rows[best_p1_idx]
+    best_p1_row = next(
+        (
+            row for row in summary.seed_rows
+            if int(row.get("seed_index", -1)) == best_p1_idx
+        ),
+        summary.seed_rows[0],
+    )
 
     p1.play = best_p1
     if opponent_mode == "dual" and p2 is not None:
@@ -615,7 +840,7 @@ def _run_phase3_play_parallel_seeds(
                 pass
 
     print(
-        f"\n  Parallel-seed train win% (avg over {parallel_seeds}): "
+        f"\n  Parallel-seed train win% (avg over {summary.n_seeds} active seed(s)): "
         f"p1={summary.avg_p1_win_rate:.1%}  p2={summary.avg_p2_win_rate:.1%}"
     )
     return summary.avg_p1_win_rate, summary.avg_p2_win_rate
@@ -648,6 +873,7 @@ def run_phase3_play(
     checkpoint_interval_pct: float = DEFAULT_CHECKPOINT_INTERVAL_PCT,
     checkpoint_eval_episodes: int = DEFAULT_CHECKPOINT_EVAL_EPISODES,
     parallel_seeds: int = 1,
+    parallel_seeds_until_first_checkpoint: bool = RUNTIME.play.parallel_seeds_until_first_checkpoint,
     _seed_run_capture: Optional[dict[str, Any]] = None,
     _retain_temp_decks: bool = False,
     _skip_cache_converge: bool = False,
@@ -692,6 +918,7 @@ def run_phase3_play(
             checkpoint_interval=checkpoint_interval,
             checkpoint_interval_pct=checkpoint_interval_pct,
             checkpoint_eval_episodes=checkpoint_eval_episodes,
+            parallel_seeds_until_first_checkpoint=parallel_seeds_until_first_checkpoint,
         )
     print(
         f"\n{'='*62}\n"
@@ -1394,13 +1621,18 @@ def _evaluate_p1_vs_fixed_opponent(
 
             obs_data = json.loads(obs) if isinstance(obs, str) else (obs or {})
             p1_hp, p2_hp = absolute_p1_p2_hp_from_env(env)
+            p1_deck, p2_deck = absolute_p1_p2_deck_from_env(env)
             if p1_hp is None or p2_hp is None:
                 p1_hp_f, p2_hp_f = absolute_p1_p2_hp_from_obs(obs_data)
                 p1_hp = int(p1_hp_f) if p1_hp_f is not None else None
                 p2_hp = int(p2_hp_f) if p2_hp_f is not None else None
+            if p1_deck is None or p2_deck is None:
+                p1_deck, p2_deck = absolute_p1_p2_deck_from_obs(obs_data)
             outcome = classify_p1_episode_outcome(
                 p1_hp=p1_hp,
                 p2_hp=p2_hp,
+                p1_deck=p1_deck,
+                p2_deck=p2_deck,
                 terminated=terminated,
                 truncated=truncated,
             )
@@ -1920,15 +2152,21 @@ def _infer_render_outcome(
 ) -> str:
     """Classify a rendered rollout as win/loss/draw/timeout from P1's perspective."""
     p1_hp = p2_hp = None
+    p1_deck = p2_deck = None
     if env is not None:
         p1_hp, p2_hp = absolute_p1_p2_hp_from_env(env)
+        p1_deck, p2_deck = absolute_p1_p2_deck_from_env(env)
     if p1_hp is None or p2_hp is None:
         p1_hp_f, p2_hp_f = absolute_p1_p2_hp_from_obs(obs)
         p1_hp = p1_hp_f
         p2_hp = p2_hp_f
+    if p1_deck is None or p2_deck is None:
+        p1_deck, p2_deck = absolute_p1_p2_deck_from_obs(obs)
     return classify_p1_episode_outcome(
         p1_hp=p1_hp,
         p2_hp=p2_hp,
+        p1_deck=p1_deck,
+        p2_deck=p2_deck,
         terminated=terminated,
         truncated=truncated,
     )
@@ -2634,13 +2872,18 @@ def run_final_evaluation(
 
                 obs_data = json.loads(obs) if isinstance(obs, str) else (obs or {})
                 p1_hp, p2_hp = absolute_p1_p2_hp_from_env(env)
+                p1_deck, p2_deck = absolute_p1_p2_deck_from_env(env)
                 if p1_hp is None or p2_hp is None:
                     p1_hp_f, p2_hp_f = absolute_p1_p2_hp_from_obs(obs_data)
                     p1_hp = int(p1_hp_f) if p1_hp_f is not None else None
                     p2_hp = int(p2_hp_f) if p2_hp_f is not None else None
+                if p1_deck is None or p2_deck is None:
+                    p1_deck, p2_deck = absolute_p1_p2_deck_from_obs(obs_data)
                 outcome = classify_p1_episode_outcome(
                     p1_hp=p1_hp,
                     p2_hp=p2_hp,
+                    p1_deck=p1_deck,
+                    p2_deck=p2_deck,
                     terminated=terminated,
                     truncated=truncated and not terminated,
                 )
@@ -2945,6 +3188,15 @@ def main() -> None:
             f"{DEFAULT_PARALLEL_SEEDS}; use 1 to disable)"
         ),
     )
+    parser.add_argument(
+        "--parallel-seeds-until-first-checkpoint",
+        action=argparse.BooleanOptionalAction,
+        default=RUNTIME.play.parallel_seeds_until_first_checkpoint,
+        help=(
+            "Run all parallel seeds only through the first checkpoint, then "
+            "continue training only the best seed"
+        ),
+    )
     parser.add_argument("--iterations", type=int, default=1)
     parser.add_argument("--p1-play", default=None)
     parser.add_argument("--p2-play", default=None)
@@ -3082,6 +3334,7 @@ def main() -> None:
             checkpoint_interval_pct=args.checkpoint_interval_pct,
             checkpoint_eval_episodes=args.checkpoint_eval_episodes,
             parallel_seeds=args.parallel_seeds,
+            parallel_seeds_until_first_checkpoint=args.parallel_seeds_until_first_checkpoint,
         )
         p1.last_play_win_rate = p1_wr
         if p2 is not None:
@@ -3133,30 +3386,4 @@ def main() -> None:
                 opponent_equipment_header=args.equipment_header,
                 game_format=args.format,
                 opponent_deck_name=args.opponent_deck,
-                opponent_hero_id=args.hero_id,
-                opponent_mode=args.opponent_mode,
-                num_eval_episodes=args.final_eval_episodes,
-                max_steps=args.final_eval_max_steps,
-                assets_path=assets_path,
-                base_url=args.talishar_url,
-                fe_url=args.talishar_fe_url,
-                out_dir=final_eval_dir,
-                render_gif=not args.no_render_gif,
-                gif_fps=args.gif_fps,
-            )
-        _write_results_json(
-            results_json,
-            game_format=args.format,
-            opponent_mode=args.opponent_mode,
-            p1=p1,
-            p2=p2,
-            iterations=args.iterations,
-            p1_final_eval=p1_eval,
-            p2_final_eval=p2_eval,
-        )
-
-    print(f"\n  Play training complete → {out_dir}")
-
-
-if __name__ == "__main__":
-    main()
+                opponent_hero_id=args.he
