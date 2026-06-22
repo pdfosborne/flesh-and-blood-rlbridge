@@ -1225,7 +1225,7 @@ def run_phase3_play(
                 "episodes_completed": completed,
                 "target_episodes": n_episodes,
                 "eval_episodes": checkpoint_eval_episodes,
-                "opponent_policy": "opponent_agent_greedy",
+                "opponent_policy": "fixed_policy_sample",
                 **eval_metrics,
             }
             ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -1248,7 +1248,7 @@ def run_phase3_play(
                 f"({eval_metrics['p1_wins']}W/"
                 f"{eval_metrics['losses']}L/{eval_metrics['draws']}D/"
                 f"{eval_metrics['timeouts']}T "
-                f"over {checkpoint_eval_episodes} games, opponent agent greedy)"
+                f"over {checkpoint_eval_episodes} games, fixed sampled policies)"
             )
             _write_play_training_progress(completed)
 
@@ -1550,19 +1550,34 @@ def run_phase3_play(
 
 
 def _agent_action_for_eval(agent: Any, observation: Any) -> Any:
-    if hasattr(agent, "act_greedy"):
-        return agent.act_greedy(observation)
     if hasattr(agent, "act"):
         return agent.act(observation)
+    if hasattr(agent, "act_greedy"):
+        return agent.act_greedy(observation)
     raise TypeError("play agent missing act/act_greedy")
 
 
-def _fast_greedy_action_index(agent: Any, obs_vec: np.ndarray, n_legal: int) -> int:
+def _softmax_logits(logits: np.ndarray) -> np.ndarray:
+    shifted = logits - np.max(logits)
+    exp = np.exp(shifted)
+    total = float(np.sum(exp))
+    if total <= 0.0 or not np.isfinite(total):
+        return np.full_like(exp, 1.0 / max(1, exp.size), dtype=np.float64)
+    return exp / total
+
+
+def _fast_sample_action_index(
+    agent: Any,
+    obs_vec: np.ndarray,
+    n_legal: int,
+    rng: np.random.Generator,
+) -> int:
     if getattr(agent, "_actor", None) is None:
         return 0
     logits = agent._actor.predict(obs_vec[None, :])
     logits = _mask_logits_to_legal(logits, max(1, int(n_legal)))
-    action = int(np.argmax(logits[0]))
+    probs = _softmax_logits(np.asarray(logits[0], dtype=np.float64))
+    action = int(rng.choice(len(probs), p=probs))
     if action >= n_legal:
         action = max(0, n_legal - 1)
     return action
@@ -1581,6 +1596,7 @@ def _evaluate_fast_p1_vs_fixed_opponent(
         return None
 
     wins = losses = draws = timeouts = 0
+    eval_rng = np.random.default_rng(seed)
     for ep in range(episodes):
         ep_seed = (seed + ep) if seed is not None else None
         state = env.fast_reset(seed=ep_seed, starting_player_id=1 + (ep % 2))
@@ -1596,7 +1612,7 @@ def _evaluate_fast_p1_vs_fixed_opponent(
             agent = p1_agent if acting == 1 else p2_agent
             obs_vec = np.asarray(state["obs_vec"], dtype=np.float64)
             n_legal = max(1, int(state.get("legal_count", 1) or 1))
-            action = _fast_greedy_action_index(agent, obs_vec, n_legal)
+            action = _fast_sample_action_index(agent, obs_vec, n_legal, eval_rng)
             state = env.fast_step_index(action)
             terminated = bool(state.get("terminated", False))
             truncated = bool(state.get("truncated", False))
@@ -1640,7 +1656,7 @@ def _evaluate_fast_p1_vs_fixed_opponent(
         "p2_win_rate": losses / total,
         "draw_rate": draws / total,
         "timeout_rate": timeouts / total,
-        "runtime_backend": "C++ engine fast eval",
+        "runtime_backend": "C++ engine fast sampled eval",
     }
 
 
@@ -1655,7 +1671,7 @@ def _evaluate_p1_vs_fixed_opponent(
     episodes: int,
     seed: Optional[int] = None,
 ) -> dict[str, Any]:
-    """Evaluate P1 greedy vs opponent agent greedy (C++ when available)."""
+    """Evaluate frozen P1/P2 policies against each other (C++ when available)."""
     empty = {
         "episodes": 0,
         "p1_wins": 0,
@@ -1687,7 +1703,7 @@ def _evaluate_p1_vs_fixed_opponent(
     )
     if fast_metrics is not None:
         env.close()
-        print("  Checkpoint eval backend: C++ engine fast eval")
+        print("  Checkpoint eval backend: C++ engine fast sampled eval")
         return fast_metrics
 
     wins = 0
@@ -3272,7 +3288,7 @@ def main() -> None:
         help="Checkpoint every N%% of play episodes when interval is unset")
     parser.add_argument("--checkpoint-eval-episodes", type=int,
         default=DEFAULT_CHECKPOINT_EVAL_EPISODES,
-        help="C++ eval games vs opponent agent (greedy) at each checkpoint (0=off)")
+        help="C++ eval games vs fixed sampled opponent policy at each checkpoint (0=off)")
     parser.add_argument("--max-play-steps", type=int, default=RUNTIME.play.max_play_steps)
     parser.add_argument("--warmup-episodes", type=int, default=DEFAULT_WARMUP_EPISODES)
     parser.add_argument("--warmup-baseline-eval-episodes", type=int,

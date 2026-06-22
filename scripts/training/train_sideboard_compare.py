@@ -526,7 +526,7 @@ def main() -> None:
         f"|  workers/candidate={workers_per_candidate}\n"
         f"  Play episodes/candidate: {args.play_episodes}\n"
         f"  Checkpoints: every {resolved_ckpt_interval} ep  |  "
-        f"eval {args.checkpoint_eval_episodes} games @ opponent agent (greedy)\n"
+        f"eval {args.checkpoint_eval_episodes} games @ fixed sampled policies\n"
         f"  Agent cache : {args.cache_dir}\n"
         f"{'='*62}"
     )
