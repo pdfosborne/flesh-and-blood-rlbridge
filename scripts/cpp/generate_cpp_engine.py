@@ -58,6 +58,7 @@ if str(_SRC_ROOT) not in sys.path:
 
 import requests
 
+from flesh_and_blood_rlbridge.card_db.talishar_card_ids import TalisharCardIdResolver
 from flesh_and_blood_rlbridge.talishar_deck_assets import resolve_talishar_deck_stem
 
 # ── Card metadata ──────────────────────────────────────────────────────────────
@@ -318,14 +319,20 @@ def resolve_deck_asset_info(talishar_src: Path, deck_name: str) -> DeckAssetInfo
     ]
     setup_cards = lines[0].split() if lines else []
     deck_cards = "\n".join(lines[1:]).split()
+    resolver = TalisharCardIdResolver(talishar_php_path=talishar_src / "GeneratedCode" / "GeneratedCardDictionaries.php")
     counts: dict[str, int] = {}
     for name in deck_cards:
         card_name = str(name or "").strip()
         if card_name:
+            card_name = resolver.resolve(card_name) or card_name
             counts[card_name] = counts.get(card_name, 0) + 1
+    equipment_ids = [
+        resolver.resolve(card_id) or card_id
+        for card_id in setup_cards[1:]
+    ]
     return DeckAssetInfo(
         hero_id=setup_cards[0] if setup_cards else "",
-        equipment_ids=setup_cards[1:],
+        equipment_ids=equipment_ids,
         deck_counts=counts,
     )
 
@@ -454,7 +461,10 @@ _GAMESTATE_H = """\
 // Generated: {timestamp}
 
 #include <array>
+#include <cstdint>
+#include <cstddef>
 #include <functional>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -505,6 +515,20 @@ struct LegalAction {{
     std::string label;
 }};
 
+// ── Fast training result ─────────────────────────────────────────────────────
+
+struct FastStepResult {{
+    std::vector<double> obs_vec;
+    int legal_count = 0;
+    int acting_player_id = 1;  // 1-indexed, Talishar-compatible
+    double reward = 0.0;       // P1-centric
+    bool terminated = false;
+    int winner = -1;
+    int p1_health = 0;
+    int p2_health = 0;
+    int turn_no = 0;
+}};
+
 // ── Game state ────────────────────────────────────────────────────────────────
 
 struct GameState {{
@@ -519,6 +543,7 @@ struct GameState {{
     // Prevents infinite loops when card stubs are not yet implemented.
     int         consecutive_passes     = 0;
     int         max_consecutive_passes = 20;
+    std::mt19937 rng = std::mt19937(0xFAB123u);
 
     using EffectFn = std::function<void(GameState&, int /*player_idx*/)>;
     std::unordered_map<std::string, EffectFn> effects;
@@ -526,12 +551,20 @@ struct GameState {{
     // Core API
     std::vector<LegalAction> get_legal_actions() const;
     void apply_action(const LegalAction& action);
+    int fast_legal_count() const;
+    std::vector<double> fast_observation_vector(int legal_count = -1) const;
+    FastStepResult fast_step_index(int action_index);
+    int fast_action_capacity() const;
+    void seed_rng(uint32_t seed);
     void register_all_cards();
     void init_standard_decks();   // deal opening hands from pre-built deck lists
     void sync_opening_hand(int player_idx, const std::vector<std::string>& card_ids);
     void set_priority(int player_idx);
 
 private:
+    void _apply_hand_index(size_t idx);
+    void _apply_pass();
+    void _check_game_over();
     void _advance_phase();
     void _draw_cards(int player_idx, int n);
 }};
@@ -542,10 +575,18 @@ _GAMESTATE_CPP = """\
 #include "gamestate.h"
 #include "cards.h"
 #include <algorithm>
-#include <random>
+
+namespace {{
+constexpr int kFastHandSlots = 8;
+
+double _scaled(int value, double denom) {{
+    return static_cast<double>(value) / denom;
+}}
+}}  // namespace
 
 std::vector<LegalAction> GameState::get_legal_actions() const {{
     std::vector<LegalAction> actions;
+    actions.reserve(static_cast<size_t>(fast_legal_count()));
     const auto& p = players[priority];
 
     // Play affordable cards from hand: pitch available = sum of pitch of all
@@ -564,43 +605,162 @@ std::vector<LegalAction> GameState::get_legal_actions() const {{
     return actions;
 }}
 
+int GameState::fast_legal_count() const {{
+    const auto& p = players[priority];
+    int count = 1;  // pass
+    for (size_t i = 0; i < p.hand.size(); ++i) {{
+        int avail = 0;
+        for (size_t j = 0; j < p.hand.size(); ++j) {{
+            if (j != i) avail += p.hand[j].pitch;
+        }}
+        if (p.hand[i].cost <= avail) ++count;
+    }}
+    return count;
+}}
+
+int GameState::fast_action_capacity() const {{
+    return 32;
+}}
+
+void GameState::seed_rng(uint32_t seed) {{
+    rng.seed(seed);
+}}
+
+std::vector<double> GameState::fast_observation_vector(int legal_count) const {{
+    if (legal_count < 0) legal_count = fast_legal_count();
+    const auto& self = players[priority];
+    const auto& opp = players[1 - priority];
+
+    std::vector<double> out;
+    out.reserve(16 + kFastHandSlots * 4);
+    out.push_back(priority == 0 ? 1.0 : 2.0);
+    out.push_back(_scaled(self.health, 40.0));
+    out.push_back(_scaled(opp.health, 40.0));
+    out.push_back(_scaled(players[0].health, 40.0));
+    out.push_back(_scaled(players[1].health, 40.0));
+    out.push_back(_scaled(turn_no, 100.0));
+    out.push_back(_scaled(static_cast<int>(phase), 10.0));
+    out.push_back(_scaled(static_cast<int>(self.hand.size()), 10.0));
+    out.push_back(_scaled(static_cast<int>(opp.hand.size()), 10.0));
+    out.push_back(_scaled(static_cast<int>(self.deck.size()), 80.0));
+    out.push_back(_scaled(static_cast<int>(opp.deck.size()), 80.0));
+    out.push_back(_scaled(static_cast<int>(self.pitch_zone.size()), 20.0));
+    out.push_back(_scaled(static_cast<int>(legal_count), 32.0));
+    out.push_back(_scaled(consecutive_passes, 20.0));
+    out.push_back(game_over ? 1.0 : 0.0);
+    out.push_back(_scaled(winner + 1, 3.0));
+
+    for (int slot = 0; slot < kFastHandSlots; ++slot) {{
+        if (slot < static_cast<int>(self.hand.size())) {{
+            const auto& c = self.hand[static_cast<size_t>(slot)];
+            out.push_back(_scaled(c.cost, 10.0));
+            out.push_back(_scaled(c.pitch, 4.0));
+            out.push_back(_scaled(c.power, 12.0));
+            out.push_back(_scaled(c.defense, 5.0));
+        }} else {{
+            out.push_back(0.0);
+            out.push_back(0.0);
+            out.push_back(0.0);
+            out.push_back(0.0);
+        }}
+    }}
+    return out;
+}}
+
+void GameState::_apply_pass() {{
+    consecutive_passes += 1;
+    if (consecutive_passes >= max_consecutive_passes) {{
+        game_over = true;
+        winner    = -1;  // draw
+        return;
+    }}
+    _advance_phase();
+}}
+
+void GameState::_apply_hand_index(size_t idx) {{
+    consecutive_passes = 0;
+    auto& hand = players[priority].hand;
+    if (idx < hand.size()) {{
+        Card card = hand[idx];
+        hand.erase(hand.begin() + static_cast<std::ptrdiff_t>(idx));
+        auto it = effects.find(card.card_id);
+        if (it != effects.end()) {{
+            it->second(*this, priority);
+        }}
+    }}
+    _check_game_over();
+}}
+
+void GameState::_check_game_over() {{
+    for (int i = 0; i < 2; ++i) {{
+        if (players[i].health <= 0) {{
+            game_over = true;
+            winner    = 1 - i;
+        }}
+    }}
+}}
+
 void GameState::apply_action(const LegalAction& action) {{
     if (action.action_code == 99) {{
-        // Pass: count consecutive passes for stalemate detection
-        consecutive_passes += 1;
-        if (consecutive_passes >= max_consecutive_passes) {{
-            game_over = true;
-            winner    = -1;  // draw
-            return;
-        }}
-        _advance_phase();
+        _apply_pass();
         return;
     }}
     if (action.action_code == 27) {{
-        // Any card played resets the stalemate counter
-        consecutive_passes = 0;
-        auto& hand = players[priority].hand;
-        size_t idx = static_cast<size_t>(std::stoi(action.button_input));
-        if (idx < hand.size()) {{
-            Card card = hand[idx];
-            hand.erase(hand.begin() + idx);
-            auto it = effects.find(card.card_id);
-            if (it != effects.end()) {{
-                it->second(*this, priority);
-            }}
-        }}
-        // Check for game over immediately after damage — this ensures the
-        // reward is attributed to the player who dealt lethal (priority
-        // has NOT yet switched).
-        for (int i = 0; i < 2; ++i) {{
-            if (players[i].health <= 0) {{
-                game_over = true;
-                winner    = 1 - i;
-            }}
-        }}
+        _apply_hand_index(static_cast<size_t>(std::stoi(action.button_input)));
         return;
     }}
     throw std::runtime_error("Unknown action_code: " + std::to_string(action.action_code));
+}}
+
+FastStepResult GameState::fast_step_index(int action_index) {{
+    const int prev_p1 = players[0].health;
+    const int prev_p2 = players[1].health;
+    const int actor = priority;
+
+    int legal_cursor = 0;
+    bool applied = false;
+    auto& p = players[priority];
+    for (size_t i = 0; i < p.hand.size(); ++i) {{
+        int avail = 0;
+        for (size_t j = 0; j < p.hand.size(); ++j) {{
+            if (j != i) avail += p.hand[j].pitch;
+        }}
+        if (p.hand[i].cost <= avail) {{
+            if (legal_cursor == action_index) {{
+                _apply_hand_index(i);
+                applied = true;
+                break;
+            }}
+            ++legal_cursor;
+        }}
+    }}
+    if (!applied) {{
+        _apply_pass();
+    }}
+
+    const bool terminated = game_over || players[0].health <= 0 || players[1].health <= 0;
+    double reward = 0.0;
+    if (terminated) {{
+        if (winner == 0) reward = 1.0;
+        else if (winner == 1) reward = -1.0;
+    }} else {{
+        const int dmg_dealt = std::max(0, prev_p2 - players[1].health);
+        const int dmg_taken = std::max(0, prev_p1 - players[0].health);
+        reward = dmg_dealt * 0.01 - dmg_taken * 0.01 - 0.001;
+    }}
+    (void)actor;
+
+    FastStepResult result;
+    result.legal_count = fast_legal_count();
+    result.obs_vec = fast_observation_vector(result.legal_count);
+    result.acting_player_id = priority + 1;
+    result.reward = reward;
+    result.terminated = terminated;
+    result.winner = winner;
+    result.p1_health = players[0].health;
+    result.p2_health = players[1].health;
+    result.turn_no = turn_no;
+    return result;
 }}
 
 void GameState::_draw_cards(int player_idx, int n) {{
@@ -611,8 +771,7 @@ void GameState::_draw_cards(int player_idx, int n) {{
             if (p.discard.empty()) break;
             p.deck = p.discard;
             p.discard.clear();
-            std::shuffle(p.deck.begin(), p.deck.end(),
-                         std::mt19937{{std::random_device{{}}()}});
+            std::shuffle(p.deck.begin(), p.deck.end(), rng);
         }}
         if (!p.deck.empty()) {{
             p.hand.push_back(p.deck.back());
@@ -678,12 +837,7 @@ void GameState::_advance_phase() {{
         }}
         default: break;
     }}
-    for (int i = 0; i < 2; ++i) {{
-        if (players[i].health <= 0) {{
-            game_over = true;
-            winner    = 1 - i;
-        }}
-    }}
+    _check_game_over();
 }}
 """
 
@@ -787,11 +941,9 @@ void GameState::init_standard_decks() {{
     // ── P2 deck ({deck2}) ────────────────────────────────────────────────
 {p2_cards}
 
-    // Shuffle both decks
-    auto rng0 = std::mt19937{{std::random_device{{}}()}};
-    auto rng1 = std::mt19937{{std::random_device{{}}()}};
-    std::shuffle(players[0].deck.begin(), players[0].deck.end(), rng0);
-    std::shuffle(players[1].deck.begin(), players[1].deck.end(), rng1);
+    // Shuffle both decks with the per-state RNG so Python can seed resets.
+    std::shuffle(players[0].deck.begin(), players[0].deck.end(), rng);
+    std::shuffle(players[1].deck.begin(), players[1].deck.end(), rng);
 
     // Deal starting hands from Talishar character intellect.
     _draw_cards(0, players[0].intellect);
@@ -833,6 +985,17 @@ PYBIND11_MODULE(fab_engine, m) {{
                    std::to_string(a.action_code) + ">";
         }});
 
+    py::class_<FastStepResult>(m, "FastStepResult")
+        .def_readonly("obs_vec", &FastStepResult::obs_vec)
+        .def_readonly("legal_count", &FastStepResult::legal_count)
+        .def_readonly("acting_player_id", &FastStepResult::acting_player_id)
+        .def_readonly("reward", &FastStepResult::reward)
+        .def_readonly("terminated", &FastStepResult::terminated)
+        .def_readonly("winner", &FastStepResult::winner)
+        .def_readonly("p1_health", &FastStepResult::p1_health)
+        .def_readonly("p2_health", &FastStepResult::p2_health)
+        .def_readonly("turn_no", &FastStepResult::turn_no);
+
     py::class_<PlayerState>(m, "PlayerState")
         .def_readonly("health",    &PlayerState::health)
         .def_readonly("resources", &PlayerState::resources)
@@ -847,8 +1010,20 @@ PYBIND11_MODULE(fab_engine, m) {{
         .def("init_standard_decks", &GameState::init_standard_decks)
         .def("sync_opening_hand", &GameState::sync_opening_hand)
         .def("set_priority", &GameState::set_priority)
-        .def("get_legal_actions",  &GameState::get_legal_actions)
-        .def("apply_action",       &GameState::apply_action)
+        .def("seed_rng", &GameState::seed_rng)
+        .def("get_legal_actions",  &GameState::get_legal_actions,
+             py::call_guard<py::gil_scoped_release>())
+        .def("apply_action",       &GameState::apply_action,
+             py::call_guard<py::gil_scoped_release>())
+        .def("fast_legal_count", &GameState::fast_legal_count,
+             py::call_guard<py::gil_scoped_release>())
+        .def("fast_observation_vector", &GameState::fast_observation_vector,
+             py::arg("legal_count") = -1,
+             py::call_guard<py::gil_scoped_release>())
+        .def("fast_step_index", &GameState::fast_step_index,
+             py::call_guard<py::gil_scoped_release>())
+        .def("fast_action_capacity", &GameState::fast_action_capacity,
+             py::call_guard<py::gil_scoped_release>())
         .def_property_readonly("game_over",
             [](const GameState& g) {{ return g.game_over; }})
         .def_property_readonly("winner",
@@ -904,6 +1079,31 @@ pybind11_add_module(fab_engine
     bindings.cpp
 )
 target_include_directories(fab_engine PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(fab_engine PRIVATE NDEBUG)
+
+include(CheckIPOSupported)
+check_ipo_supported(RESULT FAB_ENGINE_IPO_SUPPORTED OUTPUT FAB_ENGINE_IPO_ERROR)
+if(FAB_ENGINE_IPO_SUPPORTED)
+    set_property(TARGET fab_engine PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+endif()
+
+if(MSVC)
+    target_compile_options(fab_engine PRIVATE
+        $<$<CONFIG:Release>:/O2 /Ob3 /Oi /Ot /GL /fp:fast>
+    )
+    target_link_options(fab_engine PRIVATE
+        $<$<CONFIG:Release>:/LTCG /OPT:REF /OPT:ICF>
+    )
+else()
+    target_compile_options(fab_engine PRIVATE
+        $<$<CONFIG:Release>:-O3 -ffast-math -fno-math-errno>
+    )
+    include(CheckCXXCompilerFlag)
+    check_cxx_compiler_flag("-march=native" FAB_ENGINE_HAS_MARCH_NATIVE)
+    if(FAB_ENGINE_HAS_MARCH_NATIVE)
+        target_compile_options(fab_engine PRIVATE $<$<CONFIG:Release>:-march=native>)
+    endif()
+endif()
 
 # Copy the built module next to the source so Python can import it directly
 add_custom_command(TARGET fab_engine POST_BUILD
@@ -918,7 +1118,7 @@ _BUILD_SH = """\
 set -e
 pip install pybind11 --quiet
 cmake -B build -DCMAKE_BUILD_TYPE=Release .
-cmake --build build --config Release
+cmake --build build --config Release --parallel
 echo "Build complete. Module: $(ls fab_engine*.so fab_engine*.pyd 2>/dev/null | head -1)"
 """
 
@@ -926,7 +1126,7 @@ _BUILD_PS1 = """\
 # Build the fab_engine C++ module (PowerShell)
 pip install pybind11 --quiet
 cmake -B build -DCMAKE_BUILD_TYPE=Release .
-cmake --build build --config Release
+cmake --build build --config Release --parallel
 Write-Host "Build complete."
 """
 

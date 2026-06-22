@@ -74,6 +74,7 @@ import urllib.parse
 import webbrowser
 from typing import Any, Optional
 
+import numpy as np
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -87,6 +88,7 @@ from .frontend_action_overlay import (
     overlay_hints_payload,
     playwright_update_overlay_script,
 )
+from .fast_observation import fast_observation_payload, fast_observation_vector
 from .legal_action_filter import filter_legal_actions
 from .talishar_default_policy import (
     choose_talishar_action_index,
@@ -330,6 +332,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         # Multi-select popup tracking (mode=16 picks + mode=19 submit payload)
         self._multi_select_inputs: list[str] = []
         self._pending_chk_inputs: Optional[list[str]] = None
+        self._last_observation_vec: Optional[np.ndarray] = None
 
         # Persistent Playwright worker thread for rgb_array rendering
         self._pw_page: Any = None
@@ -401,6 +404,38 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
     def _using_cpp(self) -> bool:
         """True when all environment calls are delegated to the C++ engine."""
         return self._cpp_env is not None
+
+    @property
+    def supports_fast_training(self) -> bool:
+        return bool(
+            self._using_cpp
+            and getattr(self._cpp_env, "supports_fast_training", False)
+        )
+
+    def fast_action_capacity(self) -> int:
+        if self._using_cpp and hasattr(self._cpp_env, "fast_action_capacity"):
+            return int(self._cpp_env.fast_action_capacity())  # type: ignore[union-attr]
+        return 32
+
+    def fast_reset(self, seed: Optional[int] = None) -> dict[str, Any]:
+        if not self._using_cpp or not hasattr(self._cpp_env, "fast_reset"):
+            raise RuntimeError("fast_reset requires a C++ engine with fast training support")
+        result = self._cpp_env.fast_reset(seed=seed)  # type: ignore[union-attr]
+        self._acting_player_id = int(result["acting_player_id"])
+        self._player_hp = int(result["p1_health"])
+        self._opp_hp = int(result["p2_health"])
+        self._steps = 0
+        return result
+
+    def fast_step_index(self, action_index: int) -> dict[str, Any]:
+        if not self._using_cpp or not hasattr(self._cpp_env, "fast_step_index"):
+            raise RuntimeError("fast_step_index requires a C++ engine with fast training support")
+        result = self._cpp_env.fast_step_index(action_index)  # type: ignore[union-attr]
+        self._acting_player_id = int(result["acting_player_id"])
+        self._player_hp = int(result["p1_health"])
+        self._opp_hp = int(result["p2_health"])
+        self._steps = int(getattr(self._cpp_env, "_steps", self._steps + 1))  # type: ignore[union-attr]
+        return result
 
     def _tracker_state_snapshot(
         self,
@@ -1322,7 +1357,25 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                 {"index": i, "label": a["label"], "zone": a["zone"]}
                 for i, a in enumerate(legal_actions)
             ],
+            "legal_actions": legal_actions,
         }
+        self._last_observation_vec = fast_observation_vector(
+            obs,
+            legal_actions,
+            acting_player_id=self._acting_player_id,
+            p1_health=(
+                _dp_to_int(obs["playerHealth"])
+                if self._acting_player_id == 1
+                else _dp_to_int(obs["opponentHealth"])
+            ),
+            p2_health=(
+                _dp_to_int(obs["opponentHealth"])
+                if self._acting_player_id == 1
+                else _dp_to_int(obs["playerHealth"])
+            ),
+            game_over=self._is_game_over(state),
+        )
+        obs["fastObservationVec"] = fast_observation_payload(self._last_observation_vec)
         return json.dumps(obs, separators=(",", ":"))
 
     def _render_player_id(self) -> int:
@@ -1414,6 +1467,23 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         legal_actions: list[dict[str, Any]],
     ) -> tuple[int, str]:
         """Parse an action value into ``(mode, button_input)``."""
+        if isinstance(action, dict):
+            mode = _dp_to_int(action.get("action_code", action.get("mode", 0)))
+            button = str(action.get("button_input", action.get("buttonInput", "")) or "")
+            for candidate in legal_actions:
+                if (
+                    _dp_to_int(candidate.get("action_code", 0)) == mode
+                    and str(candidate.get("button_input", "") or "") == button
+                ):
+                    mode, button = self._maybe_prepare_multiselect_submit(
+                        mode,
+                        button,
+                        legal_actions,
+                    )
+                    return self._coerce_progress_action(mode, button, legal_actions)
+            if mode:
+                return self._coerce_progress_action(mode, button, legal_actions)
+
         action_str = str(action).strip().lower()
         if action_str == "pass":
             return self._coerce_progress_action(99, "", legal_actions)
@@ -1659,9 +1729,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         else:
             self._combat_tracker.clear()
 
-        return ResetResult(
-            observation=obs,
-            info={
+        reset_info: dict[str, Any] = {
                 "game_name": self._game_name,
                 "legal_actions": legal_actions,
                 "player_hp": self._player_hp,
@@ -1669,7 +1737,12 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                 "acting_player_id": self._acting_player_id,
                 "self_play": self._self_play,
                 "combat_tracker": self._tracker_stub(),
-            },
+        }
+        if self._last_observation_vec is not None:
+            reset_info["observation_vec"] = self._last_observation_vec
+        return ResetResult(
+            observation=obs,
+            info=reset_info,
         )
 
     def step(self, action: Any) -> StepResult:
@@ -1844,12 +1917,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                 combat_log_lines=extract_talishar_chat_log_lines(new_state.get("chatLog", "")),
             )
 
-        return StepResult(
-            observation=obs,
-            reward=reward,
-            terminated=terminated,
-            truncated=truncated,
-            info={
+        step_info: dict[str, Any] = {
                 "legal_actions": new_legal_actions,
                 "turn": new_state.get("turnNo", 0),
                 "player_hp": new_player_hp,
@@ -1859,7 +1927,15 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                 "repeat_streak": self._repeat_tracker.repeat_streak,
                 "repeat_penalty": repeat_penalty,
                 "combat_tracker": self._tracker_stub(tracker_event),
-            },
+        }
+        if self._last_observation_vec is not None:
+            step_info["observation_vec"] = self._last_observation_vec
+        return StepResult(
+            observation=obs,
+            reward=reward,
+            terminated=terminated,
+            truncated=truncated,
+            info=step_info,
         )
 
     def _open_playwright_page(self) -> None:

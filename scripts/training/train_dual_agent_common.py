@@ -635,6 +635,21 @@ def _policy_forward(
     return logits, value, probs
 
 
+def _mask_logits_to_legal(logits: np.ndarray, n_legal: int) -> np.ndarray:
+    masked = np.asarray(logits, dtype=np.float64).copy()
+    if 0 < n_legal < masked.shape[-1]:
+        masked[..., n_legal:] = -1e9
+    return masked
+
+
+def _env_supports_fast_training(env: Any) -> bool:
+    return bool(
+        getattr(env, "supports_fast_training", False)
+        and hasattr(env, "fast_reset")
+        and hasattr(env, "fast_step_index")
+    )
+
+
 def _flush_ppo_buffers(
     p1_tiers: list[PPOAgent],
     p2_tiers: list[PPOAgent],
@@ -685,6 +700,131 @@ def _write_live_state_snapshot(
     _write_state_image(obs, out_path, header=header)
 
 
+def _run_one_fast_episode(
+    env: TalisharEngineEnvironment,
+    p1_policy: PPOAgent,
+    p2_policy: PPOAgent,
+    max_steps: int,
+    seed: Optional[int],
+    warmup: bool,
+    p1_rng: np.random.Generator,
+    p2_rng: np.random.Generator,
+) -> dict[str, Any]:
+    """Run one episode through the generated C++ numeric fast path."""
+    p1_trans: list[dict[str, Any]] = []
+    p2_trans: list[dict[str, Any]] = []
+    cur_p1_r = cur_p2_r = 0.0
+
+    state = env.fast_reset(seed=seed)
+    terminated = truncated = False
+    steps_taken = 0
+    final_p1_hp = int(state.get("p1_health", 0) or 0)
+    final_p2_hp = int(state.get("p2_health", 0) or 0)
+    final_turn_no = int(state.get("turn_no", 0) or 0)
+
+    for _ in range(max_steps):
+        acting = int(state["acting_player_id"])
+        policy = p1_policy if acting == 1 else p2_policy
+        rng = p1_rng if acting == 1 else p2_rng
+        obs_vec = np.asarray(state["obs_vec"], dtype=np.float64)
+        n_legal = max(1, int(state.get("legal_count", policy.n_actions) or 1))
+
+        if warmup:
+            action = int(rng.integers(n_legal))
+            value = 0.0
+            lp_all_action = 0.0
+        else:
+            logits = policy._actor.predict(obs_vec[None, :])
+            logits = _mask_logits_to_legal(logits, n_legal)
+            lp_all = _log_softmax(logits)[0]
+            probs = _softmax(logits)[0]
+            value = float(policy._critic.predict(obs_vec[None, :]).flatten()[0])
+            action = int(rng.choice(policy.n_actions, p=probs))
+            if action >= n_legal:
+                action = n_legal - 1
+            lp_all_action = float(lp_all[action])
+
+        next_state = env.fast_step_index(action)
+        env_reward = float(next_state.get("reward", 0.0) or 0.0)
+        terminated = bool(next_state.get("terminated", False))
+        truncated = bool(next_state.get("truncated", False))
+        done = terminated or truncated
+        steps_taken += 1
+
+        next_obs_vec = np.asarray(next_state["obs_vec"], dtype=np.float64)
+        agent_reward = env_reward if acting == 1 else -env_reward
+        trans = {
+            "obs_vec": obs_vec,
+            "action": action,
+            "reward": agent_reward,
+            "value": value,
+            "log_prob": lp_all_action,
+            "done": float(done),
+            "n_legal": n_legal,
+            "next_obs_vec": next_obs_vec,
+        }
+        if acting == 1:
+            p1_trans.append(trans)
+            cur_p1_r += env_reward
+        else:
+            p2_trans.append(trans)
+            cur_p2_r += -env_reward
+
+        final_p1_hp = int(next_state.get("p1_health", final_p1_hp) or final_p1_hp)
+        final_p2_hp = int(next_state.get("p2_health", final_p2_hp) or final_p2_hp)
+        final_turn_no = int(next_state.get("turn_no", final_turn_no) or final_turn_no)
+        state = next_state
+        if done:
+            break
+
+    if not terminated and not truncated and steps_taken >= max_steps:
+        truncated = True
+
+    if terminated:
+        if final_p1_hp > final_p2_hp and p2_trans:
+            last = p2_trans[-1]
+            p2_trans.append({
+                "obs_vec": last["next_obs_vec"],
+                "action": last["action"],
+                "reward": -1.0,
+                "value": 0.0,
+                "log_prob": last["log_prob"],
+                "done": 1.0,
+                "n_legal": last["n_legal"],
+                "next_obs_vec": np.zeros_like(last["next_obs_vec"]),
+            })
+            cur_p2_r -= 1.0
+        elif final_p2_hp > final_p1_hp and p1_trans:
+            last = p1_trans[-1]
+            p1_trans.append({
+                "obs_vec": last["next_obs_vec"],
+                "action": last["action"],
+                "reward": -1.0,
+                "value": 0.0,
+                "log_prob": last["log_prob"],
+                "done": 1.0,
+                "n_legal": last["n_legal"],
+                "next_obs_vec": np.zeros_like(last["next_obs_vec"]),
+            })
+            cur_p1_r -= 1.0
+
+    return {
+        "p1_transitions": p1_trans,
+        "p2_transitions": p2_trans,
+        "p1_reward": cur_p1_r,
+        "p2_reward": cur_p2_r,
+        "terminated": terminated,
+        "truncated": truncated,
+        "warmup": warmup,
+        "steps": steps_taken,
+        "p1_hp": final_p1_hp,
+        "p2_hp": final_p2_hp,
+        "turn_no": final_turn_no,
+        "p1_deck": None,
+        "p2_deck": None,
+    }
+
+
 def _run_one_episode(
     env: TalisharEngineEnvironment,
     p1_policy: PPOAgent,
@@ -702,6 +842,11 @@ def _run_one_episode(
     supply its own ``p1_rng`` / ``p2_rng`` instances so there is no shared
     mutable RNG state between threads.
     """
+    if _env_supports_fast_training(env):
+        return _run_one_fast_episode(
+            env, p1_policy, p2_policy, max_steps, seed, warmup, p1_rng, p2_rng
+        )
+
     p1_trans: list[dict[str, Any]] = []
     p2_trans: list[dict[str, Any]] = []
     cur_p1_r = cur_p2_r = 0.0
@@ -1020,11 +1165,17 @@ def train_agents_from_both_perspectives_parallel(
 
     # ── bootstrap: infer dims and init nets on a throw-away env ──────────────
     probe_env = make_env(matchup, base_url=base_url, game_format=game_format, max_turns=max_steps)
-    n_actions_p1, mask_p1 = _infer_action_capacity(probe_env, seed=seed)
-    n_actions_p2, mask_p2 = _infer_action_capacity(probe_env, seed=seed)
-    probe_reset = probe_env.reset(seed=seed)
-    probe_obs   = _get(probe_reset, "observation", probe_reset)
-    obs_vec     = p1_policy._obs_to_vec(probe_obs)
+    if _env_supports_fast_training(probe_env):
+        probe_state = probe_env.fast_reset(seed=seed)
+        n_actions_p1 = n_actions_p2 = int(probe_env.fast_action_capacity())
+        mask_p1 = mask_p2 = True
+        obs_vec = np.asarray(probe_state["obs_vec"], dtype=np.float64)
+    else:
+        n_actions_p1, mask_p1 = _infer_action_capacity(probe_env, seed=seed)
+        n_actions_p2, mask_p2 = _infer_action_capacity(probe_env, seed=seed)
+        probe_reset = probe_env.reset(seed=seed)
+        probe_obs   = _get(probe_reset, "observation", probe_reset)
+        obs_vec     = p1_policy._obs_to_vec(probe_obs)
     probe_env.close()
 
     _sync_tier_agent_config(p1_tiers, n_actions_p1, mask_p1)
@@ -1339,8 +1490,12 @@ def train_agents_from_both_perspectives(
     p1_policy = p1_tiers[0]
     p2_policy = p2_tiers[0]
 
-    n_actions_p1, mask_p1 = _infer_action_capacity(env, seed=seed)
-    n_actions_p2, mask_p2 = _infer_action_capacity(env, seed=seed)
+    if _env_supports_fast_training(env):
+        n_actions_p1 = n_actions_p2 = int(env.fast_action_capacity())
+        mask_p1 = mask_p2 = True
+    else:
+        n_actions_p1, mask_p1 = _infer_action_capacity(env, seed=seed)
+        n_actions_p2, mask_p2 = _infer_action_capacity(env, seed=seed)
 
     _sync_tier_agent_config(p1_tiers, n_actions_p1, mask_p1)
     _sync_tier_agent_config(p2_tiers, n_actions_p2, mask_p2)
@@ -1352,10 +1507,14 @@ def train_agents_from_both_perspectives(
     p2_buf = _empty_buf()
 
     ep_seed = seed
-    reset_out = env.reset(seed=ep_seed)
-    obs = _get(reset_out, "observation", reset_out)
-
-    obs_vec = p1_policy._obs_to_vec(obs)
+    if _env_supports_fast_training(env):
+        reset_out = {"info": env.fast_reset(seed=ep_seed)}
+        obs = np.asarray(reset_out["info"]["obs_vec"], dtype=np.float64)
+        obs_vec = obs
+    else:
+        reset_out = env.reset(seed=ep_seed)
+        obs = _get(reset_out, "observation", reset_out)
+        obs_vec = p1_policy._obs_to_vec(obs)
     _init_tier_nets(p1_tiers, obs_vec.shape[0])
     _init_tier_nets(p2_tiers, obs_vec.shape[0])
 

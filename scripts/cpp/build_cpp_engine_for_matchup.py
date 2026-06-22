@@ -108,7 +108,8 @@ def deck_input_hash(
 ) -> str:
     json_hash1 = _file_sha256(deck1_json) if deck1_json and deck1_json.is_file() else "none"
     json_hash2 = _file_sha256(deck2_json) if deck2_json and deck2_json.is_file() else "none"
-    combined = f"{deck1.lower()}|{deck2.lower()}|{json_hash1}|{json_hash2}"
+    generator_hash = _file_sha256(GENERATE_SCRIPT) if GENERATE_SCRIPT.is_file() else "none"
+    combined = f"{deck1.lower()}|{deck2.lower()}|{json_hash1}|{json_hash2}|gen:{generator_hash}"
     return hashlib.sha256(combined.encode("utf-8")).hexdigest()[:16]
 
 
@@ -379,7 +380,7 @@ def build_engine(engine_dir: Path, input_hash: str, pybind11_dir: str) -> None:
 
     print("  Compiling...")
     build = subprocess.run(
-        [cmake, "--build", "build", "--config", "Release"],
+        [cmake, "--build", "build", "--config", "Release", "--parallel"],
         cwd=str(engine_dir),
         check=False,
         text=True,
@@ -410,9 +411,13 @@ def verify_module(engine_dir: Path) -> None:
         f"sys.path.insert(0, '{engine_fwd}')\n"
         "import fab_engine\n"
         "gs = fab_engine.GameState()\n"
+        "gs.seed_rng(123)\n"
         "gs.register_all_cards()\n"
+        "gs.init_standard_decks()\n"
         "legal = gs.get_legal_actions()\n"
         "print(str(len(legal)) + ' legal actions on fresh state')\n"
+        "fast = gs.fast_step_index(0)\n"
+        "print('fast obs=' + str(len(fast.obs_vec)) + ' legal=' + str(fast.legal_count))\n"
     )
     with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False, encoding="utf-8") as handle:
         handle.write(py_code)

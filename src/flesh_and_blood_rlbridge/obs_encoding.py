@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import numpy as np
@@ -10,6 +11,14 @@ import numpy as np
 def _flat_obs(obs: Any) -> list[float]:
     """Flatten any observation type to floats (mirrors rl_agents._agent_base._flat_obs)."""
     if isinstance(obs, str):
+        try:
+            parsed = json.loads(obs)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            fast_vec = parsed.get("fastObservationVec")
+            if isinstance(fast_vec, list) and fast_vec:
+                return _flat_obs(fast_vec)
         h = 0
         for ch in obs.encode():
             h = (h * 31 + ch) & 0xFFFFFFFF

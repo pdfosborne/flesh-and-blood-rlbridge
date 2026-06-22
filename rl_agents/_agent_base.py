@@ -5,6 +5,7 @@ Shared base classes and helpers for rlbridge agents.
 from __future__ import annotations
 
 import abc
+import json
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -53,8 +54,16 @@ def _legal_actions_of(obs: Any) -> Optional[list]:
     in the current state under ``observation["legal_actions"]``. The list is
     index-aligned: selecting index ``i`` corresponds to ``legal_actions[i]``.
     """
+    if isinstance(obs, str):
+        try:
+            obs = json.loads(obs)
+        except json.JSONDecodeError:
+            return None
     if isinstance(obs, dict):
         legal = obs.get("legal_actions")
+        if isinstance(legal, (list, tuple)):
+            return list(legal)
+        legal = obs.get("legalActions")
         if isinstance(legal, (list, tuple)):
             return list(legal)
     return None
@@ -77,7 +86,10 @@ def _to_env_action(obs: Any, index: int, use_masking: bool) -> Any:
     if use_masking:
         legal = _legal_actions_of(obs)
         if legal and 0 <= index < len(legal):
-            return legal[index]
+            entry = legal[index]
+            if isinstance(entry, dict) and "action_code" not in entry:
+                return index
+            return entry
     return index
 
 
@@ -143,6 +155,14 @@ def _flat_obs(obs: Any) -> list[float]:
     Handles: str (hashed to a single float), list/tuple, numpy array.
     """
     if isinstance(obs, str):
+        try:
+            parsed = json.loads(obs)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            fast_vec = parsed.get("fastObservationVec")
+            if isinstance(fast_vec, list) and fast_vec:
+                return _flat_obs(fast_vec)
         # Deterministic hash → float in [0, 1) via simple FNV-style fold
         h = 0
         for ch in obs.encode():

@@ -64,6 +64,7 @@ from rlbridge.environments.base import rlbridgeEnvironment
 from rlbridge.protocol.messages import RenderResult, ResetResult, StepResult, TextSpace
 
 from .combat_log_tracker import CombatTurnTracker
+from .fast_observation import fast_observation_payload, fast_observation_vector
 from .legal_action_filter import align_filtered_actions, filter_legal_actions
 from .obs_encoding import observation_fingerprint
 from .talishar_default_policy import (
@@ -281,6 +282,23 @@ class CppEngineEnvironment(rlbridgeEnvironment):
 
     def _obs_vec_for_json(self, obs_json: str) -> np.ndarray:
         vec = observation_fingerprint(obs_json)
+        self._last_observation_vec = vec
+        return vec
+
+    def _obs_vec_for_state(self, obs: dict[str, Any], legal: list[Any]) -> np.ndarray:
+        winner = int(getattr(self._gs, "winner", -1) or -1) if self._gs is not None else -1
+        vec = fast_observation_vector(
+            obs,
+            self._legal_to_dicts(legal),
+            acting_player_id=int(obs.get("actingPlayerID", self._acting_player) or self._acting_player),
+            p1_health=int(getattr(self._gs, "p1_health", 0) or 0) if self._gs is not None else None,
+            p2_health=int(getattr(self._gs, "p2_health", 0) or 0) if self._gs is not None else None,
+            winner=winner,
+            game_over=self._is_game_over() if self._gs is not None else False,
+            consecutive_passes=int(getattr(self._gs, "consecutive_passes", 0) or 0)
+            if self._gs is not None
+            else 0,
+        )
         self._last_observation_vec = vec
         return vec
 
@@ -748,8 +766,14 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             self._gs.set_priority(defender - 1)
         self.clear_talishar_state()
 
-    def _new_gamestate(self, options: Optional[dict[str, Any]] = None) -> Any:
+    def _new_gamestate(
+        self,
+        options: Optional[dict[str, Any]] = None,
+        seed: Optional[int] = None,
+    ) -> Any:
         gs = self._fab.GameState()
+        if seed is not None and hasattr(gs, "seed_rng"):
+            gs.seed_rng(int(seed) & 0xFFFFFFFF)
         gs.register_all_cards()
         if hasattr(gs, "init_standard_decks"):
             gs.init_standard_decks()
@@ -768,6 +792,80 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         if flow_legal is not None:
             return flow_legal
         return self._gs.get_legal_actions()
+
+    @property
+    def supports_fast_training(self) -> bool:
+        if self._enable_combat_tracker:
+            return False
+        gs = self._gs
+        if gs is None:
+            try:
+                gs = self._fab.GameState()
+            except Exception:
+                return False
+        return hasattr(gs, "fast_step_index") and hasattr(gs, "fast_observation_vector")
+
+    def fast_action_capacity(self) -> int:
+        if self._gs is not None and hasattr(self._gs, "fast_action_capacity"):
+            return int(self._gs.fast_action_capacity())
+        return 32
+
+    def fast_reset(self, seed: Optional[int] = None) -> dict[str, Any]:
+        """Reset and return a compact numeric state for high-throughput training."""
+        self._reset_flow_state()
+        self._hand_playability = {}
+        self._gs = self._new_gamestate({}, seed=seed)
+        self._steps = 0
+        self._p1_hp = int(self._gs.p1_health)
+        self._p2_hp = int(self._gs.p2_health)
+        self._acting_player = int(self._gs.priority) + 1
+        self._repeat_tracker.reset(
+            turn_no=int(getattr(self._gs, "turn_no", 0) or 0),
+            acting_player_id=int(self._acting_player),
+        )
+        legal_count = int(self._gs.fast_legal_count())
+        obs_vec = np.asarray(self._gs.fast_observation_vector(legal_count), dtype=np.float64)
+        self._last_observation_vec = obs_vec
+        return {
+            "obs_vec": obs_vec,
+            "legal_count": legal_count,
+            "acting_player_id": self._acting_player,
+            "reward": 0.0,
+            "terminated": False,
+            "truncated": False,
+            "winner": -1,
+            "p1_health": self._p1_hp,
+            "p2_health": self._p2_hp,
+            "turn_no": int(getattr(self._gs, "turn_no", 0) or 0),
+        }
+
+    def fast_step_index(self, action_index: int) -> dict[str, Any]:
+        """Step by compact legal-action index without building JSON or pybind actions."""
+        assert self._gs is not None, "call fast_reset() first"
+        result = self._gs.fast_step_index(int(action_index))
+        self._steps += 1
+        terminated = bool(result.terminated)
+        truncated = not terminated and self._steps >= self._max_turns
+        reward = float(result.reward)
+        if truncated:
+            reward += float(_TRUNCATION_PENALTY)
+        self._acting_player = int(result.acting_player_id)
+        self._p1_hp = int(result.p1_health)
+        self._p2_hp = int(result.p2_health)
+        obs_vec = np.asarray(result.obs_vec, dtype=np.float64)
+        self._last_observation_vec = obs_vec
+        return {
+            "obs_vec": obs_vec,
+            "legal_count": int(result.legal_count),
+            "acting_player_id": self._acting_player,
+            "reward": reward,
+            "terminated": terminated,
+            "truncated": truncated,
+            "winner": int(result.winner),
+            "p1_health": self._p1_hp,
+            "p2_health": self._p2_hp,
+            "turn_no": int(result.turn_no),
+        }
 
     def _is_pass_like(self, action: Any) -> bool:
         code = int(getattr(action, "action_code", 0) or 0)
@@ -1054,9 +1152,11 @@ class CppEngineEnvironment(rlbridgeEnvironment):
                 "playerPitchCount": int(overlay.get("player_pitch_count", 0)),
                 "playerHand": player_hand,
                 "legalActions": legal_entries,
+                "legal_actions": self._legal_to_dicts(legal),
             }
+            obs_vec = self._obs_vec_for_state(obs, legal)
+            obs["fastObservationVec"] = fast_observation_payload(obs_vec)
             obs_json = json.dumps(obs, separators=(",", ":"))
-            self._obs_vec_for_json(obs_json)
             return obs_json
 
         player_hand_size = (
@@ -1079,9 +1179,11 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             "playerPitchCount": self._pitch_count(),
             "playerHand": player_hand,
             "legalActions": legal_entries,
+            "legal_actions": self._legal_to_dicts(legal),
         }
+        obs_vec = self._obs_vec_for_state(obs, legal)
+        obs["fastObservationVec"] = fast_observation_payload(obs_vec)
         obs_json = json.dumps(obs, separators=(",", ":"))
-        self._obs_vec_for_json(obs_json)
         return obs_json
 
     def _parse_action(self, action: Any, legal: list[Any]) -> tuple[int, Any]:
@@ -1309,7 +1411,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         self._hand_playability = self._normalize_hand_playability(
             opts.get("hand_playability")
         )
-        self._gs = self._new_gamestate(opts)
+        self._gs = self._new_gamestate(opts, seed=seed)
         self._steps = 0
         self._p1_hp = self._gs.p1_health
         self._p2_hp = self._gs.p2_health

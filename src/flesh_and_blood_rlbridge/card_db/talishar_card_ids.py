@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from difflib import SequenceMatcher
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
@@ -57,6 +58,45 @@ def _apostrophe_slug_variants(card_id: str) -> list[str]:
         if collapsed_base not in variants:
             variants.append(collapsed_base)
     return variants
+
+
+def _similarity_key(card_id: str) -> str:
+    """Normalise punctuation differences while preserving word order."""
+    return re.sub(r"_+", "_", card_id.strip().lower()).strip("_")
+
+
+def _best_talishar_id_match(card_id: str, candidates: frozenset[str]) -> Optional[str]:
+    """Return a high-confidence canonical Talishar ID for a near-miss slug."""
+    token = card_id.strip().lower()
+    if not token or not candidates:
+        return None
+
+    token_key = _similarity_key(token)
+    exact_key_matches = [cid for cid in candidates if _similarity_key(cid) == token_key]
+    if len(exact_key_matches) == 1:
+        return exact_key_matches[0]
+
+    token_parts = token_key.split("_")
+    first_part = token_parts[0] if token_parts else ""
+    pitch_suffix = _PITCH_SUFFIX.search(token)
+    suffix = pitch_suffix.group(0) if pitch_suffix else ""
+
+    scored: list[tuple[float, str]] = []
+    for candidate in candidates:
+        candidate_key = _similarity_key(candidate)
+        if first_part and not candidate_key.startswith(first_part):
+            continue
+        if suffix and not candidate.endswith(suffix):
+            continue
+        score = SequenceMatcher(None, token_key, candidate_key).ratio()
+        if score >= 0.94:
+            scored.append((score, candidate))
+    if not scored:
+        return None
+    scored.sort(key=lambda item: (item[0], -len(item[1])), reverse=True)
+    best_score = scored[0][0]
+    best = [candidate for score, candidate in scored if score == best_score]
+    return best[0] if len(best) == 1 else None
 
 
 @lru_cache(maxsize=1)
@@ -160,6 +200,9 @@ class TalisharCardIdResolver:
                         return cid
             if candidates:
                 return candidates[0]
+        best = _best_talishar_id_match(token, self._talishar_ids)
+        if best is not None:
+            return best
         return None
 
     def sanitize_deck(

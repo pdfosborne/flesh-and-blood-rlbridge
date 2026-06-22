@@ -201,10 +201,7 @@ The compiled output is a Python extension module (`fab_engine.cp312-win_amd64.py
 
 | | HTTP environments | C++ engine |
 |--|--|--|
-| Game call cost | One HTTP round-trip per step | In-process function call |
-| Thread safety | No (single PHP process) | Yes (independent state per env) |
-| Parallel workers | 1 | 4–8 |
-| Typical speed | 1× | 6–8× |
+| Typical speed | 0.05 games/s | 5-10 games/s  |
 
 
 ---
