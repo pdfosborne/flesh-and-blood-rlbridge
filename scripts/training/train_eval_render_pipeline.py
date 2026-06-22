@@ -36,6 +36,8 @@ from flesh_and_blood_rlbridge.talishar_engine_environment import (  # noqa: E402
 from rl_agents.ppo import PPOAgent  # noqa: E402
 
 from play_outcome_stats import (  # noqa: E402
+    absolute_p1_p2_deck_from_env,
+    absolute_p1_p2_deck_from_obs,
     absolute_p1_p2_hp_from_env,
     absolute_p1_p2_hp_from_obs,
     classify_p1_episode_outcome,
@@ -273,13 +275,18 @@ def _eval_agents(
                 obs_dict = obs if isinstance(obs, dict) else {}
 
             p1_hp, p2_hp = absolute_p1_p2_hp_from_env(env)
+            p1_deck, p2_deck = absolute_p1_p2_deck_from_env(env)
             if p1_hp is None or p2_hp is None:
                 p1_hp_f, p2_hp_f = absolute_p1_p2_hp_from_obs(obs_dict)
                 p1_hp = int(p1_hp_f) if p1_hp_f is not None else None
                 p2_hp = int(p2_hp_f) if p2_hp_f is not None else None
+            if p1_deck is None or p2_deck is None:
+                p1_deck, p2_deck = absolute_p1_p2_deck_from_obs(obs_dict)
             outcome = classify_p1_episode_outcome(
                 p1_hp=p1_hp,
                 p2_hp=p2_hp,
+                p1_deck=p1_deck,
+                p2_deck=p2_deck,
                 terminated=terminated,
                 truncated=truncated,
             )

@@ -17,6 +17,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+import numpy as np
+
 _SCRIPTS_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_SCRIPTS_ROOT))
 import _bootstrap  # noqa: E402
@@ -94,6 +96,8 @@ try:
         train_agents_from_both_perspectives,
         train_agents_from_both_perspectives_parallel,
         _evaluate_policy_pair,
+        _env_supports_fast_training,
+        _mask_logits_to_legal,
         _player_context,
         _save_warmup_handoff_checkpoint,
         DEFAULT_N_EPISODES,
@@ -1545,12 +1549,99 @@ def run_phase3_play(
     return p1_wr, p2_wr
 
 
-def _agent_action_for_eval(agent: Any, observation: Any) -> str:
+def _agent_action_for_eval(agent: Any, observation: Any) -> Any:
     if hasattr(agent, "act_greedy"):
-        return str(agent.act_greedy(observation))
+        return agent.act_greedy(observation)
     if hasattr(agent, "act"):
-        return str(agent.act(observation))
+        return agent.act(observation)
     raise TypeError("play agent missing act/act_greedy")
+
+
+def _fast_greedy_action_index(agent: Any, obs_vec: np.ndarray, n_legal: int) -> int:
+    if getattr(agent, "_actor", None) is None:
+        return 0
+    logits = agent._actor.predict(obs_vec[None, :])
+    logits = _mask_logits_to_legal(logits, max(1, int(n_legal)))
+    action = int(np.argmax(logits[0]))
+    if action >= n_legal:
+        action = max(0, n_legal - 1)
+    return action
+
+
+def _evaluate_fast_p1_vs_fixed_opponent(
+    env: Any,
+    p1_agent: Any,
+    *,
+    p2_agent: Any,
+    max_steps: int,
+    episodes: int,
+    seed: Optional[int] = None,
+) -> Optional[dict[str, Any]]:
+    if not _env_supports_fast_training(env):
+        return None
+
+    wins = losses = draws = timeouts = 0
+    for ep in range(episodes):
+        ep_seed = (seed + ep) if seed is not None else None
+        state = env.fast_reset(seed=ep_seed, starting_player_id=1 + (ep % 2))
+        terminated = truncated = False
+        steps = 0
+        p1_hp = int(state.get("p1_health", 0) or 0)
+        p2_hp = int(state.get("p2_health", 0) or 0)
+        p1_deck = int(state.get("p1_deck", 0) or 0)
+        p2_deck = int(state.get("p2_deck", 0) or 0)
+
+        while steps < max_steps:
+            acting = int(state.get("acting_player_id", 1) or 1)
+            agent = p1_agent if acting == 1 else p2_agent
+            obs_vec = np.asarray(state["obs_vec"], dtype=np.float64)
+            n_legal = max(1, int(state.get("legal_count", 1) or 1))
+            action = _fast_greedy_action_index(agent, obs_vec, n_legal)
+            state = env.fast_step_index(action)
+            terminated = bool(state.get("terminated", False))
+            truncated = bool(state.get("truncated", False))
+            steps += 1
+            p1_hp = int(state.get("p1_health", p1_hp))
+            p2_hp = int(state.get("p2_health", p2_hp))
+            p1_deck = int(state.get("p1_deck", p1_deck))
+            p2_deck = int(state.get("p2_deck", p2_deck))
+            if terminated or truncated:
+                break
+
+        if not terminated and not truncated and steps >= max_steps:
+            truncated = True
+
+        outcome = classify_p1_episode_outcome(
+            p1_hp=p1_hp,
+            p2_hp=p2_hp,
+            p1_deck=p1_deck,
+            p2_deck=p2_deck,
+            terminated=terminated,
+            truncated=truncated,
+        )
+        if outcome == "win":
+            wins += 1
+        elif outcome == "loss":
+            losses += 1
+        elif outcome == "draw":
+            draws += 1
+        else:
+            timeouts += 1
+
+    total = max(1, episodes)
+    return {
+        "episodes": episodes,
+        "p1_wins": wins,
+        "p2_wins": losses,
+        "draws": draws,
+        "timeouts": timeouts,
+        "losses": losses,
+        "p1_win_rate": wins / total,
+        "p2_win_rate": losses / total,
+        "draw_rate": draws / total,
+        "timeout_rate": timeouts / total,
+        "runtime_backend": "C++ engine fast eval",
+    }
 
 
 def _evaluate_p1_vs_fixed_opponent(
@@ -1586,6 +1677,19 @@ def _evaluate_p1_vs_fixed_opponent(
         game_format=game_format,
         max_turns=max_steps,
     )
+    fast_metrics = _evaluate_fast_p1_vs_fixed_opponent(
+        env,
+        p1_agent,
+        p2_agent=p2_agent,
+        max_steps=max_steps,
+        episodes=episodes,
+        seed=seed,
+    )
+    if fast_metrics is not None:
+        env.close()
+        print("  Checkpoint eval backend: C++ engine fast eval")
+        return fast_metrics
+
     wins = 0
     losses = 0
     draws = 0
@@ -1595,7 +1699,10 @@ def _evaluate_p1_vs_fixed_opponent(
     try:
         for ep in range(episodes):
             ep_seed = (seed + ep) if seed is not None else None
-            result = env.reset(seed=ep_seed)
+            result = env.reset(
+                seed=ep_seed,
+                options={"acting_player_id": 1 + (ep % 2)},
+            )
             obs = result.observation
             if not backend_printed:
                 runtime_backend = _runtime_backend_label(env)
@@ -1763,7 +1870,7 @@ def _run_phase3_fallback(
                 if not backend_printed:
                     print(f"  Runtime backend (fallback play): {_runtime_backend_label(env)}")
                     backend_printed = True
-                result = env.reset()
+                result = env.reset(options={"acting_player_id": 1 + ((ep - 1) % 2)})
                 done = False
                 while not done:
                     obs_data = json.loads(result.observation)
@@ -2845,7 +2952,7 @@ def run_final_evaluation(
                 if not backend_printed:
                     print(f"  [{player}] Runtime backend (final eval): {_runtime_backend_label(env)}")
                     backend_printed = True
-                result = env.reset()
+                result = env.reset(options={"acting_player_id": 1 + ((ep - 1) % 2)})
                 obs = result.observation
                 turn_hp: dict[int, tuple[int, int]] = {}
                 t0, p1_hp0, p2_hp0 = _parse_obs_hp(obs)
@@ -3386,4 +3493,30 @@ def main() -> None:
                 opponent_equipment_header=args.equipment_header,
                 game_format=args.format,
                 opponent_deck_name=args.opponent_deck,
-                opponent_hero_id=args.he
+                opponent_hero_id=args.hero_id,
+                opponent_mode=args.opponent_mode,
+                num_eval_episodes=args.final_eval_episodes,
+                max_steps=args.final_eval_max_steps,
+                assets_path=assets_path,
+                base_url=args.talishar_url,
+                fe_url=args.talishar_fe_url,
+                out_dir=final_eval_dir,
+                render_gif=not args.no_render_gif,
+                gif_fps=args.gif_fps,
+            )
+        _write_results_json(
+            results_json,
+            game_format=args.format,
+            opponent_mode=args.opponent_mode,
+            p1=p1,
+            p2=p2,
+            iterations=args.iterations,
+            p1_final_eval=p1_eval,
+            p2_final_eval=p2_eval,
+        )
+
+    print(f"\n  Play training complete → {out_dir}")
+
+
+if __name__ == "__main__":
+    main()

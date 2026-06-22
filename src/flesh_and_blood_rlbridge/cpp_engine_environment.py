@@ -810,11 +810,20 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             return int(self._gs.fast_action_capacity())
         return 32
 
-    def fast_reset(self, seed: Optional[int] = None) -> dict[str, Any]:
+    def fast_reset(
+        self,
+        seed: Optional[int] = None,
+        *,
+        starting_player_id: int = 1,
+    ) -> dict[str, Any]:
         """Reset and return a compact numeric state for high-throughput training."""
         self._reset_flow_state()
         self._hand_playability = {}
-        self._gs = self._new_gamestate({}, seed=seed)
+        starting_player_id = 2 if int(starting_player_id) == 2 else 1
+        self._gs = self._new_gamestate(
+            {"acting_player_id": starting_player_id},
+            seed=seed,
+        )
         self._steps = 0
         self._p1_hp = int(self._gs.p1_health)
         self._p2_hp = int(self._gs.p2_health)
@@ -836,6 +845,8 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             "winner": -1,
             "p1_health": self._p1_hp,
             "p2_health": self._p2_hp,
+            "p1_deck": int(getattr(self._gs, "p1_deck_size", 0) or 0),
+            "p2_deck": int(getattr(self._gs, "p2_deck_size", 0) or 0),
             "turn_no": int(getattr(self._gs, "turn_no", 0) or 0),
         }
 
@@ -864,6 +875,8 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             "winner": int(result.winner),
             "p1_health": self._p1_hp,
             "p2_health": self._p2_hp,
+            "p1_deck": int(getattr(self._gs, "p1_deck_size", 0) or 0),
+            "p2_deck": int(getattr(self._gs, "p2_deck_size", 0) or 0),
             "turn_no": int(result.turn_no),
         }
 

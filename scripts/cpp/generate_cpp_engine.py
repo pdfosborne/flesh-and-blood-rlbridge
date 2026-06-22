@@ -538,9 +538,8 @@ struct GameState {{
     int         priority  = 0;   // 0=P1, 1=P2
     bool        game_over = false;
     int         winner    = -1;  // -1=none, 0=P1, 1=P2
-    // Stalemate detection: if both players do nothing but pass this many
-    // times in a row without any card being played, declare a draw.
-    // Prevents infinite loops when card stubs are not yet implemented.
+    // Progress signal only; repeated passes are not a real game-ending draw.
+    // Python max-turn truncation handles no-progress loops.
     int         consecutive_passes     = 0;
     int         max_consecutive_passes = 20;
     std::mt19937 rng = std::mt19937(0xFAB123u);
@@ -669,11 +668,6 @@ std::vector<double> GameState::fast_observation_vector(int legal_count) const {{
 
 void GameState::_apply_pass() {{
     consecutive_passes += 1;
-    if (consecutive_passes >= max_consecutive_passes) {{
-        game_over = true;
-        winner    = -1;  // draw
-        return;
-    }}
     _advance_phase();
 }}
 
@@ -697,6 +691,16 @@ void GameState::_check_game_over() {{
             game_over = true;
             winner    = 1 - i;
         }}
+    }}
+    if (!game_over
+        && players[0].health > 0
+        && players[1].health > 0
+        && players[0].hand.empty()
+        && players[1].hand.empty()
+        && players[0].deck.empty()
+        && players[1].deck.empty()) {{
+        game_over = true;
+        winner    = -1;  // true draw: both players are alive and out of cards
     }}
 }}
 
@@ -766,17 +770,9 @@ FastStepResult GameState::fast_step_index(int action_index) {{
 void GameState::_draw_cards(int player_idx, int n) {{
     auto& p = players[player_idx];
     for (int d = 0; d < n; ++d) {{
-        if (p.deck.empty()) {{
-            // Recycle discard into deck and reshuffle
-            if (p.discard.empty()) break;
-            p.deck = p.discard;
-            p.discard.clear();
-            std::shuffle(p.deck.begin(), p.deck.end(), rng);
-        }}
-        if (!p.deck.empty()) {{
-            p.hand.push_back(p.deck.back());
-            p.deck.pop_back();
-        }}
+        if (p.deck.empty()) break;
+        p.hand.push_back(p.deck.back());
+        p.deck.pop_back();
     }}
 }}
 

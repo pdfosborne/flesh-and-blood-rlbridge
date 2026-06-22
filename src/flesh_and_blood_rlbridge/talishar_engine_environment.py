@@ -417,10 +417,18 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             return int(self._cpp_env.fast_action_capacity())  # type: ignore[union-attr]
         return 32
 
-    def fast_reset(self, seed: Optional[int] = None) -> dict[str, Any]:
+    def fast_reset(
+        self,
+        seed: Optional[int] = None,
+        *,
+        starting_player_id: int = 1,
+    ) -> dict[str, Any]:
         if not self._using_cpp or not hasattr(self._cpp_env, "fast_reset"):
             raise RuntimeError("fast_reset requires a C++ engine with fast training support")
-        result = self._cpp_env.fast_reset(seed=seed)  # type: ignore[union-attr]
+        result = self._cpp_env.fast_reset(  # type: ignore[union-attr]
+            seed=seed,
+            starting_player_id=starting_player_id,
+        )
         self._acting_player_id = int(result["acting_player_id"])
         self._player_hp = int(result["p1_health"])
         self._opp_hp = int(result["p2_health"])

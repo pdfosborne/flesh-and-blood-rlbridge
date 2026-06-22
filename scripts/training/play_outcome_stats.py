@@ -62,10 +62,47 @@ def absolute_p1_p2_hp_from_env(env: Any) -> tuple[Optional[int], Optional[int]]:
     return None, None
 
 
+def absolute_p1_p2_deck_from_obs(obs: Any) -> tuple[Optional[int], Optional[int]]:
+    """Return fixed-seat P1/P2 deck counts from a Talishar-shaped observation."""
+    obs_data = _observation_dict(obs)
+    player_deck = obs_data.get("playerDeckCount", obs_data.get("player_deck_count"))
+    opponent_deck = obs_data.get("opponentDeckCount", obs_data.get("opponent_deck_count"))
+    if player_deck is None or opponent_deck is None:
+        return None, None
+    p_player = int(player_deck or 0)
+    p_opponent = int(opponent_deck or 0)
+    acting = int(obs_data.get("actingPlayerID", 1) or 1)
+    if acting == 2:
+        return p_opponent, p_player
+    return p_player, p_opponent
+
+
+def absolute_p1_p2_deck_from_env(env: Any) -> tuple[Optional[int], Optional[int]]:
+    """Return absolute P1/P2 deck counts from a training or eval environment."""
+    cpp_env = getattr(env, "_cpp_env", None)
+    if cpp_env is not None:
+        gs = getattr(cpp_env, "_gs", None)
+        if gs is not None:
+            return int(gs.p1_deck_size), int(gs.p2_deck_size)
+
+    if getattr(env, "_using_cpp", False):
+        gs = getattr(env, "_gs", None)
+        if gs is not None:
+            return int(gs.p1_deck_size), int(gs.p2_deck_size)
+
+    last_state = getattr(env, "_last_state", None)
+    if isinstance(last_state, dict) and last_state:
+        return absolute_p1_p2_deck_from_obs(last_state)
+
+    return None, None
+
+
 def classify_p1_episode_outcome(
     *,
     p1_hp: Optional[float | int] = None,
     p2_hp: Optional[float | int] = None,
+    p1_deck: Optional[float | int] = None,
+    p2_deck: Optional[float | int] = None,
     terminated: bool = False,
     truncated: bool = False,
     skipped: bool = False,
@@ -91,8 +128,10 @@ def classify_p1_episode_outcome(
             return OUTCOME_LOSS
         if p1 <= 0 and p2 <= 0:
             return OUTCOME_DRAW
-        # Stalemate / deck-out without lethal: both still alive.
-        return OUTCOME_DRAW
+        if p1_deck is not None and p2_deck is not None:
+            if float(p1_deck) <= 0 and float(p2_deck) <= 0:
+                return OUTCOME_DRAW
+        return OUTCOME_TIMEOUT
     return OUTCOME_TIMEOUT
 
 

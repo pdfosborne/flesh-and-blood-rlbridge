@@ -30,6 +30,7 @@ for p in (FAB_SRC, REPO_ROOT, RL_SRC):
         sys.path.insert(0, s)
 
 from play_outcome_stats import (  # noqa: E402
+    absolute_p1_p2_deck_from_env,
     absolute_p1_p2_hp_from_env,
     classify_p1_episode_outcome,
     summarize_p1_outcomes,
@@ -709,18 +710,25 @@ def _run_one_fast_episode(
     warmup: bool,
     p1_rng: np.random.Generator,
     p2_rng: np.random.Generator,
+    starting_player_id: int = 1,
 ) -> dict[str, Any]:
     """Run one episode through the generated C++ numeric fast path."""
+    def _int_state(state_dict: dict[str, Any], key: str, default: int) -> int:
+        value = state_dict.get(key, default)
+        return default if value is None else int(value)
+
     p1_trans: list[dict[str, Any]] = []
     p2_trans: list[dict[str, Any]] = []
     cur_p1_r = cur_p2_r = 0.0
 
-    state = env.fast_reset(seed=seed)
+    state = env.fast_reset(seed=seed, starting_player_id=starting_player_id)
     terminated = truncated = False
     steps_taken = 0
-    final_p1_hp = int(state.get("p1_health", 0) or 0)
-    final_p2_hp = int(state.get("p2_health", 0) or 0)
-    final_turn_no = int(state.get("turn_no", 0) or 0)
+    final_p1_hp = _int_state(state, "p1_health", 0)
+    final_p2_hp = _int_state(state, "p2_health", 0)
+    final_p1_deck = _int_state(state, "p1_deck", 0)
+    final_p2_deck = _int_state(state, "p2_deck", 0)
+    final_turn_no = _int_state(state, "turn_no", 0)
 
     for _ in range(max_steps):
         acting = int(state["acting_player_id"])
@@ -770,9 +778,11 @@ def _run_one_fast_episode(
             p2_trans.append(trans)
             cur_p2_r += -env_reward
 
-        final_p1_hp = int(next_state.get("p1_health", final_p1_hp) or final_p1_hp)
-        final_p2_hp = int(next_state.get("p2_health", final_p2_hp) or final_p2_hp)
-        final_turn_no = int(next_state.get("turn_no", final_turn_no) or final_turn_no)
+        final_p1_hp = _int_state(next_state, "p1_health", final_p1_hp)
+        final_p2_hp = _int_state(next_state, "p2_health", final_p2_hp)
+        final_p1_deck = _int_state(next_state, "p1_deck", final_p1_deck)
+        final_p2_deck = _int_state(next_state, "p2_deck", final_p2_deck)
+        final_turn_no = _int_state(next_state, "turn_no", final_turn_no)
         state = next_state
         if done:
             break
@@ -820,8 +830,8 @@ def _run_one_fast_episode(
         "p1_hp": final_p1_hp,
         "p2_hp": final_p2_hp,
         "turn_no": final_turn_no,
-        "p1_deck": None,
-        "p2_deck": None,
+        "p1_deck": final_p1_deck,
+        "p2_deck": final_p2_deck,
     }
 
 
@@ -834,6 +844,7 @@ def _run_one_episode(
     warmup: bool,
     p1_rng: np.random.Generator,
     p2_rng: np.random.Generator,
+    starting_player_id: int = 1,
 ) -> dict[str, Any]:
     """Run one complete episode and return all transitions for both players.
 
@@ -844,7 +855,8 @@ def _run_one_episode(
     """
     if _env_supports_fast_training(env):
         return _run_one_fast_episode(
-            env, p1_policy, p2_policy, max_steps, seed, warmup, p1_rng, p2_rng
+            env, p1_policy, p2_policy, max_steps, seed, warmup, p1_rng, p2_rng,
+            starting_player_id=starting_player_id,
         )
 
     p1_trans: list[dict[str, Any]] = []
@@ -1105,10 +1117,14 @@ def _safe_run_one_episode(
     matchup: "Matchup",
     base_url: str,
     game_format: str,
+    starting_player_id: int = 1,
 ) -> dict[str, Any]:
     """Run one episode, recycling the env on any exception."""
     try:
-        return _run_one_episode(env, p1_policy, p2_policy, max_steps, seed, warmup, p1_rng, p2_rng)
+        return _run_one_episode(
+            env, p1_policy, p2_policy, max_steps, seed, warmup, p1_rng, p2_rng,
+            starting_player_id=starting_player_id,
+        )
     except Exception as exc:
         # Try to recycle the environment rather than leaving it in a bad state.
         try:
@@ -1261,6 +1277,8 @@ def train_agents_from_both_perspectives_parallel(
                 seed_base = (seed + completed) if seed is not None else None
                 futures = {}
                 for w in range(batch_size):
+                    episode_index = completed + w
+                    starting_player_id = 1 + (episode_index % 2)
                     ep_seed    = (seed_base + w) if seed_base is not None else None
                     p1_rng     = np.random.default_rng(
                         (ep_seed * 31 + 7)  if ep_seed is not None else None
@@ -1273,6 +1291,7 @@ def train_agents_from_both_perspectives_parallel(
                         envs[w], p1_policy, p2_policy,
                         max_steps, ep_seed, in_warmup, p1_rng, p2_rng,
                         matchup, base_url, game_format,
+                        starting_player_id,
                     )
                     futures[fut] = w
 
@@ -1336,6 +1355,8 @@ def train_agents_from_both_perspectives_parallel(
                         classify_p1_episode_outcome(
                             p1_hp=result.get("p1_hp"),
                             p2_hp=result.get("p2_hp"),
+                            p1_deck=result.get("p1_deck"),
+                            p2_deck=result.get("p2_deck"),
                             terminated=bool(result.get("terminated")),
                             truncated=bool(result.get("truncated")),
                         )
@@ -1644,8 +1665,10 @@ def train_agents_from_both_perspectives(
 
         if done:
             p1_hp = p2_hp = None
+            p1_deck = p2_deck = None
             try:
                 p1_hp, p2_hp = absolute_p1_p2_hp_from_env(env)
+                p1_deck, p2_deck = absolute_p1_p2_deck_from_env(env)
                 if p1_hp is not None:
                     p1_hp = int(p1_hp)
                 if p2_hp is not None:
@@ -1656,6 +1679,8 @@ def train_agents_from_both_perspectives(
                 classify_p1_episode_outcome(
                     p1_hp=p1_hp,
                     p2_hp=p2_hp,
+                    p1_deck=p1_deck,
+                    p2_deck=p2_deck,
                     terminated=terminated,
                     truncated=truncated,
                 )

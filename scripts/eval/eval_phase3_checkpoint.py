@@ -48,6 +48,8 @@ from scripts.training.train_play import (  # noqa: E402
     _save_state_image,
 )
 from scripts.training.play_outcome_stats import (  # noqa: E402
+    absolute_p1_p2_deck_from_env,
+    absolute_p1_p2_deck_from_obs,
     absolute_p1_p2_hp_from_env,
     absolute_p1_p2_hp_from_obs,
     classify_p1_episode_outcome,
@@ -953,16 +955,21 @@ def _run_eval_episode_batch(
 
             obs_data = json.loads(obs) if isinstance(obs, str) else (obs or {})
             p1_hp, p2_hp = absolute_p1_p2_hp_from_env(env)
+            p1_deck, p2_deck = absolute_p1_p2_deck_from_env(env)
             if p1_hp is None or p2_hp is None:
                 p1_hp_f, p2_hp_f = absolute_p1_p2_hp_from_obs(obs_data)
                 p1_hp = int(p1_hp_f) if p1_hp_f is not None else None
                 p2_hp = int(p2_hp_f) if p2_hp_f is not None else None
+            if p1_deck is None or p2_deck is None:
+                p1_deck, p2_deck = absolute_p1_p2_deck_from_obs(obs_data)
             if stall_triggered and not terminated:
                 outcome = "stall_timeout"
             else:
                 outcome = classify_p1_episode_outcome(
                     p1_hp=p1_hp,
                     p2_hp=p2_hp,
+                    p1_deck=p1_deck,
+                    p2_deck=p2_deck,
                     terminated=terminated,
                     truncated=truncated,
                 )

@@ -25,7 +25,7 @@ class MetaRuntime:
 
     # ── Parallelism ──────────────────────────────────────────────────────────
     workers: int | None = 16  # C++ env workers (None = auto-detect)
-    parallel_seeds: int = 5  # independent seeds; best model used for eval
+    parallel_seeds: int = 4  # independent seeds; best model used for eval
     parallel_seeds_until_first_checkpoint: bool = True
     sideboard_max_parallel: int = 0  # 0 = train all sideboard candidates at once
     eval_parallel_workers: int = 4
