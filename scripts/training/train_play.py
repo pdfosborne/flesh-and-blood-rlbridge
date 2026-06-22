@@ -10,6 +10,7 @@ import math
 import os
 import statistics
 import sys
+import threading
 import uuid
 from collections import defaultdict
 from datetime import datetime
@@ -58,10 +59,17 @@ from cpp_engine_matchup import (  # noqa: E402
 )
 from parallel_seed_training import (  # noqa: E402
     DEFAULT_PARALLEL_SEEDS,
+    derive_training_seed,
     merge_parallel_seed_checkpoint_history,
     run_parallel_seed_jobs,
     select_best_agents_by_win_rate,
     sync_parallel_seed_dashboard_artifacts,
+    workers_per_parallel_seed,
+)
+from checkpoint_eval_async import (  # noqa: E402
+    submit_checkpoint_eval,
+    shutdown_checkpoint_eval_executor,
+    wait_for_checkpoint_evals,
 )
 from play_outcome_stats import (  # noqa: E402
     absolute_p1_p2_hp_from_env,
@@ -347,6 +355,101 @@ def _clone_phase_agents_for_seed(
     return p1_copy, p2_copy
 
 
+def _serialize_phase_agent_for_process(
+    pa: PhaseAgents,
+    staging_dir: Path,
+    *,
+    role: str,
+) -> dict[str, Any]:
+    """Pickle-safe PhaseAgents payload for ProcessPoolExecutor workers."""
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    play_path: Optional[str] = None
+    if pa.play is not None:
+        play_path = str(staging_dir / f"{role}_play.json")
+        pa.play.save(play_path)
+    return {
+        "player": pa.player,
+        "equipment_header": pa.equipment_header,
+        "card_pool": dict(pa.card_pool),
+        "pool_by_id": dict(pa.pool_by_id),
+        "active_decks": {k: dict(v) for k, v in pa.active_decks.items()},
+        "deck_asset_name": pa.deck_asset_name,
+        "play_path": play_path,
+    }
+
+
+def _deserialize_phase_agent_from_process(
+    data: dict[str, Any],
+    *,
+    seed: Optional[int],
+) -> PhaseAgents:
+    play = None
+    play_path = data.get("play_path")
+    if play_path:
+        play = make_agent(seed=seed)
+        play.load(play_path)
+    return PhaseAgents(
+        player=str(data.get("player", "p1")),
+        equipment_header=str(data.get("equipment_header", "")),
+        card_pool=dict(data.get("card_pool") or {}),
+        pool_by_id=dict(data.get("pool_by_id") or {}),
+        active_decks={
+            str(k): dict(v) for k, v in (data.get("active_decks") or {}).items()
+        },
+        deck_asset_name=str(data.get("deck_asset_name", "")),
+        play=play,
+    )
+
+
+def _load_play_agent_from_path(
+    path: Optional[str],
+    *,
+    seed: Optional[int] = None,
+) -> Optional[Any]:
+    if not path:
+        return None
+    agent = make_agent(seed=seed)
+    agent.load(path)
+    return agent
+
+
+def execute_play_parallel_seed_job(payload: dict[str, Any]) -> dict[str, Any]:
+    """Process-pool entry: run one parallel play seed from a serialized payload."""
+    seed_index = int(payload["seed_index"])
+    seed_i = payload.get("seed")
+    seed_out = Path(str(payload["seed_out"]))
+    p1 = _deserialize_phase_agent_from_process(payload["p1"], seed=seed_i)
+    p2_data = payload.get("p2")
+    p2 = (
+        _deserialize_phase_agent_from_process(p2_data, seed=seed_i)
+        if isinstance(p2_data, dict)
+        else None
+    )
+    capture: dict[str, Any] = {}
+    run_kwargs = dict(payload.get("run_kwargs") or {})
+    sync_dir = payload.get("parallel_seed_sync_dir")
+    p1_wr, p2_wr = run_phase3_play(
+        p1,
+        p2,
+        out_dir=seed_out,
+        seed=seed_i,
+        _seed_run_capture=capture,
+        _retain_temp_decks=True,
+        _skip_cache_converge=True,
+        _force_train=True,
+        _parallel_seed_sync_dir=Path(sync_dir) if sync_dir else None,
+        **run_kwargs,
+    )
+    return {
+        **capture,
+        "seed_index": seed_index,
+        "seed": seed_i,
+        "out_dir": str(seed_out),
+        "p1_win_rate": p1_wr,
+        "p2_win_rate": p2_wr,
+    }
+
+
 def _run_phase3_play_parallel_seeds(
     p1: PhaseAgents,
     p2: Optional[PhaseAgents],
@@ -375,6 +478,13 @@ def _run_phase3_play_parallel_seeds(
     checkpoint_interval_pct: float,
     checkpoint_eval_episodes: int,
 ) -> tuple[float, float]:
+    workers_per_seed = workers_per_parallel_seed(n_workers, parallel_seeds)
+    if n_workers is not None and workers_per_seed != n_workers:
+        print(
+            f"  Parallel seeds: {parallel_seeds} × {workers_per_seed} worker(s)/seed "
+            f"(total rollout budget {n_workers})"
+        )
+
     shared_kwargs = dict(
         opponent_mode=opponent_mode,
         game_format=game_format,
@@ -388,7 +498,7 @@ def _run_phase3_play_parallel_seeds(
         max_play_steps=max_play_steps,
         warmup_episodes=warmup_episodes,
         warmup_baseline_eval_episodes=warmup_baseline_eval_episodes,
-        n_workers=n_workers,
+        n_workers=workers_per_seed,
         assets_path=assets_path,
         base_url=base_url,
         cache_dir=cache_dir,
@@ -402,42 +512,56 @@ def _run_phase3_play_parallel_seeds(
     def _sync_parent_dashboard() -> None:
         sync_parallel_seed_dashboard_artifacts(out_dir)
 
-    def _run_one_seed(
-        seed_index: int,
-        seed_i: Optional[int],
-        seed_out: Path,
-    ) -> dict[str, Any]:
-        capture: dict[str, Any] = {}
+    seeds_root = out_dir / "parallel_seeds"
+    staging_root = seeds_root / "_agent_staging"
+    process_jobs: list[dict[str, Any]] = []
+    for seed_index in range(parallel_seeds):
+        seed_i = derive_training_seed(seed, seed_index)
         p1_copy, p2_copy = _clone_phase_agents_for_seed(p1, p2, seed=seed_i)
-        p1_wr, p2_wr = run_phase3_play(
-            p1_copy,
-            p2_copy if opponent_mode == "dual" else None,
-            out_dir=seed_out,
-            seed=seed_i,
-            _seed_run_capture=capture,
-            _retain_temp_decks=True,
-            _skip_cache_converge=True,
-            _force_train=True,
-            _parallel_seed_sync_dir=out_dir,
-            **shared_kwargs,
-        )
-        return {
-            **capture,
+        seed_staging = staging_root / f"seed_{seed_index}"
+        job: dict[str, Any] = {
+            "handler": "play_parallel_seed",
             "seed_index": seed_index,
+            "n_seeds": parallel_seeds,
+            "workers_per_seed": workers_per_seed,
             "seed": seed_i,
-            "out_dir": str(seed_out),
-            "p1_win_rate": p1_wr,
-            "p2_win_rate": p2_wr,
+            "seed_out": str(seeds_root / f"seed_{seed_index}"),
+            "parallel_seed_sync_dir": str(out_dir),
+            "p1": _serialize_phase_agent_for_process(
+                p1_copy, seed_staging / "p1", role="p1"
+            ),
+            "run_kwargs": shared_kwargs,
         }
+        if opponent_mode == "dual" and p2_copy is not None:
+            job["p2"] = _serialize_phase_agent_for_process(
+                p2_copy, seed_staging / "p2", role="p2"
+            )
+        process_jobs.append(job)
 
-    summary = run_parallel_seed_jobs(
-        parallel_seeds,
-        seed,
-        out_dir,
-        _run_one_seed,
-        label="play training",
-        on_seed_complete=lambda _row: _sync_parent_dashboard(),
-    )
+    try:
+        summary = run_parallel_seed_jobs(
+            parallel_seeds,
+            seed,
+            out_dir,
+            process_jobs=process_jobs,
+            workers_per_seed=workers_per_seed,
+            label="play training",
+            on_seed_complete=lambda _row: _sync_parent_dashboard(),
+        )
+    finally:
+        shutdown_checkpoint_eval_executor(wait=True)
+
+    for row in summary.seed_rows:
+        if "p1_agent" not in row:
+            row["p1_agent"] = _load_play_agent_from_path(
+                row.get("p1_play_path"),
+                seed=row.get("seed"),
+            )
+        if "p2_agent" not in row:
+            row["p2_agent"] = _load_play_agent_from_path(
+                row.get("p2_play_path"),
+                seed=row.get("seed"),
+            )
     best_p1, best_p2, best_p1_idx, best_p2_idx = select_best_agents_by_win_rate(
         summary.seed_rows
     )
@@ -834,6 +958,14 @@ def run_phase3_play(
             f"({checkpoint_interval_pct:g}% of {n_episodes})"
         )
     checkpoint_eval_log: list[dict[str, Any]] = []
+    _ckpt_eval_lock = threading.Lock()
+
+    def _snapshot_play_agent(agent: Any) -> Any:
+        from agent_cache import clone_agent_weights  # noqa: PLC0415
+
+        snap = make_agent(seed=seed)
+        clone_agent_weights(agent, snap)
+        return snap
 
     def _record_checkpoint_eval(completed: int) -> None:
         if (
@@ -842,45 +974,54 @@ def run_phase3_play(
             or opponent_mode != "preset"
         ):
             return
-        eval_metrics = _evaluate_p1_vs_fixed_opponent(
-            matchup,
-            p1_agent,
-            p2_agent=p2_agent,
-            base_url=base_url,
-            game_format=game_format,
-            max_steps=max_play_steps,
-            episodes=checkpoint_eval_episodes,
-            seed=(seed + completed) if seed is not None else None,
-        )
+
+        eval_p1 = _snapshot_play_agent(p1_agent)
+        eval_p2 = _snapshot_play_agent(p2_agent) if p2_agent is not None else None
         ckpt_dir = out_dir / matchup.name / "p1" / f"episode_{completed:06d}"
-        eval_record = {
-            "episodes_completed": completed,
-            "target_episodes": n_episodes,
-            "eval_episodes": checkpoint_eval_episodes,
-            "opponent_policy": "opponent_agent_greedy",
-            **eval_metrics,
-        }
-        ckpt_dir.mkdir(parents=True, exist_ok=True)
-        (ckpt_dir / "checkpoint_eval.json").write_text(
-            json.dumps(eval_record, indent=2),
-            encoding="utf-8",
-        )
-        checkpoint_eval_log.append(eval_record)
-        history_path = out_dir / "checkpoint_eval_history.json"
-        history_path.write_text(
-            json.dumps(checkpoint_eval_log, indent=2),
-            encoding="utf-8",
-        )
-        if _parallel_seed_sync_dir is not None:
-            sync_parallel_seed_dashboard_artifacts(_parallel_seed_sync_dir)
-        print(
-            f"  [p1] Checkpoint eval @ ep {completed}: "
-            f"win%={eval_metrics['p1_win_rate']:.1%} "
-            f"({eval_metrics['p1_wins']}W/"
-            f"{eval_metrics['losses']}L/{eval_metrics['draws']}D/"
-            f"{eval_metrics['timeouts']}T "
-            f"over {checkpoint_eval_episodes} games, opponent agent greedy)"
-        )
+
+        def _run_eval() -> None:
+            eval_metrics = _evaluate_p1_vs_fixed_opponent(
+                matchup,
+                eval_p1,
+                p2_agent=eval_p2,
+                base_url=base_url,
+                game_format=game_format,
+                max_steps=max_play_steps,
+                episodes=checkpoint_eval_episodes,
+                seed=(seed + completed) if seed is not None else None,
+            )
+            eval_record = {
+                "episodes_completed": completed,
+                "target_episodes": n_episodes,
+                "eval_episodes": checkpoint_eval_episodes,
+                "opponent_policy": "opponent_agent_greedy",
+                **eval_metrics,
+            }
+            ckpt_dir.mkdir(parents=True, exist_ok=True)
+            (ckpt_dir / "checkpoint_eval.json").write_text(
+                json.dumps(eval_record, indent=2),
+                encoding="utf-8",
+            )
+            with _ckpt_eval_lock:
+                checkpoint_eval_log.append(eval_record)
+                history_path = out_dir / "checkpoint_eval_history.json"
+                history_path.write_text(
+                    json.dumps(checkpoint_eval_log, indent=2),
+                    encoding="utf-8",
+                )
+            if _parallel_seed_sync_dir is not None:
+                sync_parallel_seed_dashboard_artifacts(_parallel_seed_sync_dir)
+            print(
+                f"  [p1] Checkpoint eval @ ep {completed}: "
+                f"win%={eval_metrics['p1_win_rate']:.1%} "
+                f"({eval_metrics['p1_wins']}W/"
+                f"{eval_metrics['losses']}L/{eval_metrics['draws']}D/"
+                f"{eval_metrics['timeouts']}T "
+                f"over {checkpoint_eval_episodes} games, opponent agent greedy)"
+            )
+            _write_play_training_progress(completed)
+
+        submit_checkpoint_eval(_run_eval, label=f"ep {completed}")
 
     def _after_play_checkpoint(completed: int) -> None:
         _save_phase3_play_checkpoints(
@@ -1085,6 +1226,7 @@ def run_phase3_play(
                 _after_play_checkpoint(len(p1_rewards))
 
     finally:
+        wait_for_checkpoint_evals()
         # Clean up temp deck files (retained for parallel-seed eval orchestration)
         if not _retain_temp_decks:
             for f in [p1_deck_file] + ([p2_deck_file] if p2_deck_file else []):
@@ -1154,10 +1296,17 @@ def run_phase3_play(
         for f in [p1_deck_file] + ([p2_deck_file] if p2_deck_file else []):
             if f is not None:
                 temp_decks.append(str(f))
+        p1_play_path = out_dir / "result_p1_play.json"
+        p2_play_path = out_dir / "result_p2_play.json"
+        p1_agent.save(p1_play_path)
+        if p2_agent is not None:
+            p2_agent.save(p2_play_path)
         _seed_run_capture.update(
             {
                 "p1_agent": p1_agent,
                 "p2_agent": p2_agent,
+                "p1_play_path": str(p1_play_path),
+                "p2_play_path": str(p2_play_path) if p2_agent is not None else None,
                 "matchup": matchup,
                 "use_cpp_backend": use_cpp_backend,
                 "p1_deck_fingerprint": p1_deck_fp,

@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,8 +13,11 @@ from statistics import mean
 from typing import Any, Callable, Optional
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+_TRAINING_DIR = Path(__file__).resolve().parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
+if str(_TRAINING_DIR) not in sys.path:
+    sys.path.insert(0, str(_TRAINING_DIR))
 
 from runtime_defaults import DEFAULT_PARALLEL_SEEDS  # noqa: E402
 
@@ -24,6 +28,54 @@ def derive_training_seed(base_seed: Optional[int], seed_index: int) -> Optional[
     if base_seed is None:
         return None
     return base_seed + seed_index * SEED_STRIDE
+
+
+def workers_per_parallel_seed(
+    total_workers: Optional[int],
+    n_seeds: int,
+    *,
+    cpu_count: Optional[int] = None,
+) -> int:
+    """Divide rollout workers across parallel seeds to avoid CPU oversubscription."""
+    cores = cpu_count if cpu_count is not None else (os.cpu_count() or 4)
+    budget = max(1, int(total_workers)) if total_workers is not None else max(1, cores)
+    return max(1, budget // max(1, n_seeds))
+
+
+def apply_cpu_affinity_for_seed(
+    seed_index: int,
+    n_seeds: int,
+    workers_per_seed: int,
+) -> None:
+    """Pin a seed subprocess to a disjoint slice of CPU cores when psutil is available."""
+    try:
+        import psutil
+    except ImportError:
+        return
+
+    cpu_count = psutil.cpu_count(logical=True) or os.cpu_count() or 1
+    per_seed = max(1, workers_per_seed)
+    start = (seed_index * per_seed) % cpu_count
+    cores = [(start + i) % cpu_count for i in range(min(per_seed, cpu_count))]
+    try:
+        psutil.Process().cpu_affinity(cores)
+    except (AttributeError, NotImplementedError, OSError):
+        return
+
+
+def _process_pool_entry(payload: dict[str, Any]) -> dict[str, Any]:
+    """Top-level ProcessPoolExecutor entry (must be picklable)."""
+    apply_cpu_affinity_for_seed(
+        int(payload["seed_index"]),
+        int(payload["n_seeds"]),
+        int(payload["workers_per_seed"]),
+    )
+    handler = str(payload.get("handler", ""))
+    if handler == "play_parallel_seed":
+        from train_play import execute_play_parallel_seed_job  # noqa: PLC0415
+
+        return execute_play_parallel_seed_job(payload)
+    raise ValueError(f"unknown parallel seed handler: {handler!r}")
 
 
 def average_win_rates(rows: list[tuple[float, float]]) -> tuple[float, float]:
@@ -226,45 +278,77 @@ def run_parallel_seed_jobs(
     n_seeds: int,
     base_seed: Optional[int],
     out_dir: Path,
-    job_fn: Callable[[int, Optional[int], Path], dict[str, Any]],
+    job_fn: Optional[Callable[[int, Optional[int], Path], dict[str, Any]]] = None,
     *,
     label: str = "training",
     on_seed_complete: Optional[Callable[[dict[str, Any]], None]] = None,
+    process_jobs: Optional[list[dict[str, Any]]] = None,
+    workers_per_seed: int = 1,
+    use_processes: bool = True,
 ) -> ParallelSeedSummary:
-    """Run *n_seeds* independent training jobs and aggregate win rates."""
+    """Run *n_seeds* independent training jobs and aggregate win rates.
+
+    When *process_jobs* is provided and *use_processes* is True, each seed runs in
+    its own subprocess with optional CPU affinity.  Otherwise falls back to threads
+    via *job_fn*.
+    """
     if n_seeds <= 1:
         raise ValueError("run_parallel_seed_jobs requires n_seeds > 1")
 
     seeds_root = out_dir / "parallel_seeds"
     seeds_root.mkdir(parents=True, exist_ok=True)
+    mode = "process" if (use_processes and process_jobs) else "thread"
     print(
         f"  Parallel seeds: {n_seeds} independent {label} run(s) "
-        f"→ {seeds_root}"
+        f"({mode}, {workers_per_seed} worker(s)/seed) → {seeds_root}"
     )
 
     rows: list[dict[str, Any]] = []
-    with ThreadPoolExecutor(max_workers=n_seeds) as pool:
-        futures = {
-            pool.submit(
-                job_fn,
-                seed_index,
-                derive_training_seed(base_seed, seed_index),
-                seeds_root / f"seed_{seed_index}",
-            ): seed_index
-            for seed_index in range(n_seeds)
-        }
-        for fut in as_completed(futures):
-            seed_index = futures[fut]
-            try:
-                row = fut.result()
-            except Exception as exc:
-                raise RuntimeError(
-                    f"Parallel seed {seed_index} failed during {label}: {exc}"
-                ) from exc
-            row.setdefault("seed_index", seed_index)
-            rows.append(row)
-            if on_seed_complete is not None:
-                on_seed_complete(row)
+
+    if use_processes and process_jobs is not None:
+        executor_cls = ProcessPoolExecutor
+        with executor_cls(max_workers=n_seeds) as pool:
+            futures = {
+                pool.submit(_process_pool_entry, payload): int(payload["seed_index"])
+                for payload in process_jobs
+            }
+            for fut in as_completed(futures):
+                seed_index = futures[fut]
+                try:
+                    row = fut.result()
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"Parallel seed {seed_index} failed during {label}: {exc}"
+                    ) from exc
+                row.setdefault("seed_index", seed_index)
+                rows.append(row)
+                if on_seed_complete is not None:
+                    on_seed_complete(row)
+    else:
+        if job_fn is None:
+            raise ValueError("run_parallel_seed_jobs requires job_fn or process_jobs")
+        with ThreadPoolExecutor(max_workers=n_seeds) as pool:
+            futures = {
+                pool.submit(
+                    job_fn,
+                    seed_index,
+                    derive_training_seed(base_seed, seed_index),
+                    seeds_root / f"seed_{seed_index}",
+                ): seed_index
+                for seed_index in range(n_seeds)
+            }
+            for fut in as_completed(futures):
+                seed_index = futures[fut]
+                try:
+                    row = fut.result()
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"Parallel seed {seed_index} failed during {label}: {exc}"
+                    ) from exc
+                row.setdefault("seed_index", seed_index)
+                rows.append(row)
+                if on_seed_complete is not None:
+                    on_seed_complete(row)
 
     rows.sort(key=lambda row: int(row.get("seed_index", 0)))
     sync_parallel_seed_dashboard_artifacts(out_dir)

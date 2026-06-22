@@ -80,6 +80,7 @@ from runtime_defaults import (  # noqa: E402
 from parallel_seed_training import (  # noqa: E402
     run_parallel_seed_jobs,
     select_best_agents_by_win_rate,
+    workers_per_parallel_seed,
 )
 
 FORMAT_DECK_RULES: dict[str, dict[str, int]] = {
@@ -1803,6 +1804,13 @@ def _train_matchup_parallel_seeds(
     frontend_url: Optional[str],
     n_workers: int,
 ) -> dict:
+    workers_per_seed = workers_per_parallel_seed(n_workers, parallel_seeds)
+    if workers_per_seed != n_workers:
+        print(
+            f"  Parallel seeds: {parallel_seeds} × {workers_per_seed} worker(s)/seed "
+            f"(total rollout budget {n_workers})"
+        )
+
     shared_kwargs = dict(
         matchup=matchup,
         base_url=base_url,
@@ -1815,7 +1823,7 @@ def _train_matchup_parallel_seeds(
         warmup_baseline_eval_episodes=0,
         show_frontend=show_frontend,
         frontend_url=frontend_url,
-        n_workers=n_workers,
+        n_workers=workers_per_seed,
         parallel_seeds=1,
         _skip_cache_converge=True,
         _force_train=True,

@@ -18,6 +18,7 @@ from parallel_seed_training import (  # noqa: E402
     derive_training_seed,
     merge_parallel_seed_checkpoint_history,
     select_best_agents_by_win_rate,
+    workers_per_parallel_seed,
 )
 
 
@@ -99,3 +100,10 @@ def test_merge_parallel_seed_checkpoint_history(tmp_path: Path) -> None:
 
 def test_default_parallel_seeds() -> None:
     assert DEFAULT_PARALLEL_SEEDS == 3
+
+
+def test_workers_per_parallel_seed() -> None:
+    assert workers_per_parallel_seed(16, 5) == 3
+    assert workers_per_parallel_seed(16, 16) == 1
+    assert workers_per_parallel_seed(None, 4, cpu_count=8) == 2
+    assert workers_per_parallel_seed(0, 3) == 1
