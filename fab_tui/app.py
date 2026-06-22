@@ -28,9 +28,15 @@ from fab_tui.decks import (
     read_deck_hero_info,
     resolve_deck_link,
 )
+from fab_tui.saved_decks import (
+    default_saved_deck_label,
+    is_saved_user_deck,
+    list_saved_user_decks,
+    save_user_deck,
+)
 from fab_tui.sideboard_picker import (
     configure_manual_swap_variants,
-    load_deck_and_pool,
+    prompt_policy_baseline_deck,
     write_candidates_manifest,
 )
 from fab_tui.results import discover_evaluable_results, list_sideboard_candidate_ids
@@ -43,10 +49,23 @@ from fab_tui.runner import (
 
 console = Console()
 
-PLAYER_DECK_CHOICES = {
+PLAYER_DECK_CHOICES_BASE = {
     "1": ("precon", "Talishar SAGE precon"),
     "2": ("fabrary", "FaBrary URL or slug"),
 }
+
+
+def _player_deck_choices() -> dict[str, tuple[str, str]]:
+    saved_count = len(list_saved_user_decks())
+    saved_label = (
+        f"Saved sideboard lists ({saved_count})"
+        if saved_count
+        else "Saved sideboard lists"
+    )
+    return {
+        **PLAYER_DECK_CHOICES_BASE,
+        "3": ("saved", saved_label),
+    }
 
 EVAL_MODE_CHOICES = {
     "1": ("eval", "Run evaluation (win-rate episodes + GIF replay)"),
@@ -105,11 +124,38 @@ def _pick_precon_deck(env: EnvironmentSettings, *, label: str) -> Path | None:
     return out
 
 
+def _pick_saved_deck() -> Path | None:
+    """Pick a previously saved sideboard list."""
+    saved = list_saved_user_decks()
+    if not saved:
+        console.print("[yellow]No saved lists yet — refine a deck in Sideboard comparison first.[/yellow]")
+        return None
+
+    table = Table(title="Saved sideboard lists", box=box.SIMPLE)
+    table.add_column("#", style="cyan", justify="right")
+    table.add_column("List")
+    table.add_column("Hero", style="dim")
+    table.add_column("Saved", style="dim")
+    for index, entry in enumerate(saved, start=1):
+        saved_display = entry.saved_at[:10] if entry.saved_at else "—"
+        table.add_row(str(index), entry.label, entry.hero_id or "—", saved_display)
+    console.print(table)
+
+    choice = IntPrompt.ask("Select saved list", default=1)
+    if choice < 1 or choice > len(saved):
+        return None
+    path = saved[choice - 1].path
+    console.print(f"[green]Using saved list → {path}[/green]")
+    return path
+
+
 def _pick_player_deck(env: EnvironmentSettings) -> Path | None:
-    """Your deck — SAGE precon or FaBrary link."""
-    source = _choose_mapping(PLAYER_DECK_CHOICES, "Your deck")
+    """Your deck — SAGE precon, saved list, or FaBrary link."""
+    source = _choose_mapping(_player_deck_choices(), "Your deck")
     if source == "precon":
         return _pick_precon_deck(env, label="Your deck")
+    if source == "saved":
+        return _pick_saved_deck()
 
     raw = Prompt.ask("FaBrary URL, slug, or local JSON path").strip()
     if not raw:
@@ -250,7 +296,7 @@ def _show_sideboard_results(out_dir: Path) -> None:
 def wizard_sideboard_compare(env: EnvironmentSettings) -> None:
     _header(
         "Sideboard comparison",
-        "Default deck → manual swaps (card DB search) → parallel play training",
+        "Guide policy baseline → refine equipment → refine deck → manual swap variants → play training",
     )
 
     player_deck = _pick_player_deck(env)
@@ -296,23 +342,59 @@ def wizard_sideboard_compare(env: EnvironmentSettings) -> None:
         default=spec.final_eval_episodes,
     )
 
-    baseline_deck, _ = load_deck_and_pool(player_deck)
+    baseline_choice = prompt_policy_baseline_deck(
+        console,
+        player_deck,
+        opponent_hero_id=opponent_hero_id,
+        hero_id=spec.hero_id,
+        hero_class=spec.hero_class,
+        game_format=game_format,
+        saved_list=is_saved_user_deck(player_deck),
+    )
+
+    if Confirm.ask("Save this list for future runs?", default=True):
+        default_label = default_saved_deck_label(
+            hero_id=spec.hero_id,
+            opponent_hero_id=opponent_hero_id,
+            baseline_label=baseline_choice.baseline_label,
+        )
+        save_label = Prompt.ask("Saved list name", default=default_label).strip()
+        if save_label:
+            saved_path = save_user_deck(
+                baseline_deck=baseline_choice.baseline_deck,
+                card_pool=baseline_choice.card_pool,
+                equipment_header=baseline_choice.equipment_header,
+                hero_id=spec.hero_id,
+                hero_class=spec.hero_class,
+                game_format=game_format,
+                label=save_label,
+                opponent_hero_id=opponent_hero_id,
+                baseline_label=baseline_choice.baseline_label,
+            )
+            console.print(f"[green]Saved for reuse → {saved_path}[/green]")
+
     variants, expanded_pool = configure_manual_swap_variants(
         console,
         player_deck,
         game_format=game_format,
         max_variants=spec.max_swap_variants,
         max_swaps_per_variant=spec.max_swaps_per_variant,
+        baseline_deck=baseline_choice.baseline_deck,
+        card_pool=baseline_choice.card_pool,
     )
 
     out_dir = spec.resolved_out_dir()
     out_dir.mkdir(parents=True, exist_ok=True)
     candidates_path = write_candidates_manifest(
         out_dir / "candidates_manifest.json",
-        baseline_deck=baseline_deck,
+        baseline_deck=baseline_choice.baseline_deck,
         card_pool=expanded_pool,
         variants=variants,
+        baseline_label=baseline_choice.baseline_label,
+        equipment_header=baseline_choice.equipment_header,
     )
+    if baseline_choice.equipment_header:
+        spec.equipment_header = baseline_choice.equipment_header
     spec.candidates_json = str(candidates_path)
     spec.num_options = 1 + len(variants)
     spec.build_cpp_engine = Confirm.ask("Build/use C++ engine if available?", default=True)
@@ -323,8 +405,10 @@ def wizard_sideboard_compare(env: EnvironmentSettings) -> None:
     for key, value in [
         ("Your deck", str(player_deck)),
         ("Opponent", f"{opponent_hero_id} ({opponent_deck})"),
+        ("Baseline", baseline_choice.baseline_label),
+        ("Equipment", baseline_choice.equipment_header or spec.equipment_header or "—"),
         ("Lists to compare", str(spec.num_options)),
-        ("  default + alternates", f"1 + {len(variants)} manual"),
+        ("  baseline + alternates", f"1 + {len(variants)} manual"),
         ("Parallel", "all" if spec.max_parallel <= 0 else str(spec.max_parallel)),
         ("Play episodes", str(spec.play_episodes)),
         ("Final eval games", str(spec.final_eval_episodes)),
@@ -335,7 +419,7 @@ def wizard_sideboard_compare(env: EnvironmentSettings) -> None:
 
     if not variants:
         console.print(
-            "[yellow]No alternate lists configured — only the default deck will be tested.[/yellow]"
+            "[yellow]No alternate lists configured — only the baseline deck will be tested.[/yellow]"
         )
     if not Confirm.ask("\nStart sideboard comparison?", default=True):
         return

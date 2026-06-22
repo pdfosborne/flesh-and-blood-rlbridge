@@ -228,6 +228,21 @@ def discover_saved_decks() -> list[DeckOption]:
             episode = meta_path.parent.name
             add(f"[checkpoint] {matchup} / {role} / {episode}", exported)
 
+    saved_dir = DECK_CACHE / "saved"
+    if saved_dir.is_dir():
+        for path in sorted(saved_dir.glob("*.json")):
+            if path.name == "index.json":
+                continue
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(data.get("saved_meta"), dict):
+                continue
+            label = str(data.get("name") or data["saved_meta"].get("label") or path.stem)
+            fmt = str(data.get("format") or "silver_age")
+            add(f"[saved] {label}", path, fmt)
+
     options.sort(key=lambda item: item.label.lower())
     return options
 

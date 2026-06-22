@@ -30,16 +30,16 @@ class MetaRuntime:
     eval_parallel_workers: int = 4
 
     # ── Training budget (episodes) ───────────────────────────────────────────
-    play_episodes: int = 100_000  # Phase 3 play training (all workflows)
+    play_episodes: int = 10_000  # Phase 3 play training (all workflows)
 
     # ── Checkpoints during training ──────────────────────────────────────────
     checkpoint_interval_pct: float = 5.0
-    checkpoint_eval_episodes: int = 100
-    play_checkpoint_interval: int | None = None
+    checkpoint_eval_episodes: int = 1000
+    play_checkpoint_interval: int | None = int(play_episodes/10) # 10% of play episodes
 
     # ── Per-episode limits & warmup ──────────────────────────────────────────
     max_play_steps: int = 1_000  # max turns per play-training episode (all workflows)
-    warmup_episodes: int = 1_000  # heuristic-policy episodes before PPO
+    warmup_episodes: int = 100  # heuristic-policy episodes before PPO
     warmup_baseline_eval_episodes: int = 100
 
     # ── Training Checkpoint evaluation (uses cpp engine if possible)  ────────

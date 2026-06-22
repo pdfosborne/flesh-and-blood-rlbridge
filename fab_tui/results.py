@@ -108,20 +108,48 @@ def _is_sideboard_compare_dir(path: Path) -> bool:
 
 def _has_phase3_checkpoints(path: Path) -> bool:
     if _is_sideboard_compare_dir(path):
-        return any(path.glob("candidates/*/p3_*/p1/episode_*/metadata.json"))
-    return any(path.glob("p3_*/p1/episode_*/metadata.json"))
+        patterns = (
+            "candidates/*/p3_*/p1/episode_*/metadata.json",
+            "candidates/*/parallel_seeds/seed_*/p3_*/p1/episode_*/metadata.json",
+        )
+        return any(path.glob(pattern) for pattern in patterns)
+    patterns = (
+        "p3_*/p1/episode_*/metadata.json",
+        "parallel_seeds/seed_*/p3_*/p1/episode_*/metadata.json",
+    )
+    return any(path.glob(pattern) for pattern in patterns)
 
 
 def _checkpoint_summary(path: Path) -> tuple[int, str | None]:
     if _is_sideboard_compare_dir(path):
-        p3_dirs = [p for p in path.glob("candidates/*/p3_*") if p.is_dir()]
-        meta_glob = "candidates/*/p3_*/p1/episode_*/metadata.json"
+        p3_dirs = [
+            p
+            for pattern in (
+                "candidates/*/p3_*",
+                "candidates/*/parallel_seeds/seed_*/p3_*",
+            )
+            for p in path.glob(pattern)
+            if p.is_dir()
+        ]
+        meta_globs = (
+            "candidates/*/p3_*/p1/episode_*/metadata.json",
+            "candidates/*/parallel_seeds/seed_*/p3_*/p1/episode_*/metadata.json",
+        )
     else:
-        p3_dirs = [p for p in path.glob("p3_*") if p.is_dir()]
-        meta_glob = "p3_*/p1/episode_*/metadata.json"
+        p3_dirs = [
+            p
+            for pattern in ("p3_*", "parallel_seeds/seed_*/p3_*")
+            for p in path.glob(pattern)
+            if p.is_dir()
+        ]
+        meta_globs = (
+            "p3_*/p1/episode_*/metadata.json",
+            "parallel_seeds/seed_*/p3_*/p1/episode_*/metadata.json",
+        )
     latest_episode: str | None = None
+    meta_paths = [meta for glob in meta_globs for meta in path.glob(glob)]
     for meta in sorted(
-        path.glob(meta_glob),
+        meta_paths,
         key=lambda p: p.parent.name,
         reverse=True,
     ):

@@ -166,10 +166,11 @@ def _train_candidate(
     """Train play on one sideboard candidate; return result summary."""
     candidate_dir = out_dir / "candidates" / candidate.candidate_id
     candidate_dir.mkdir(parents=True, exist_ok=True)
+    equipment_header = candidate.equipment_header or args.equipment_header
 
     agents = PhaseAgents(
         player="p1",
-        equipment_header=args.equipment_header,
+        equipment_header=equipment_header,
         card_pool=dict(card_pool),
         active_decks={opponent_hero_id: dict(candidate.game_deck)},
     )
@@ -187,7 +188,7 @@ def _train_candidate(
         game_format=args.format,
         p1_hero_id=args.hero_id,
         p2_hero_id=args.p2_hero_id,
-        p1_equipment_header=args.equipment_header,
+        p1_equipment_header=equipment_header,
         p2_equipment_header=args.p2_equipment_header,
         p1_opponent_hero_id=opponent_hero_id,
         p1_opponent_deck_name=args.opponent_deck,

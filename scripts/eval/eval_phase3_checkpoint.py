@@ -4,9 +4,11 @@
 The script auto-discovers the latest checkpoint package produced by
 ``train_full_pipeline.py``, ``train_sideboard_compare.py``, or other phase-3
 play trainers.  For sideboard compare runs, checkpoints live under
-``candidates/<candidate_id>/p3_*/p1/episode_*/`` — pass ``--results-dir`` to
-the sideboard output folder and optionally ``--candidate-id`` to pin one
-variant (default: latest checkpoint across all candidates).
+``candidates/<candidate_id>/p3_*/p1/episode_*/`` (or under
+``candidates/<candidate_id>/parallel_seeds/seed_*/p3_*/`` when parallel seeds
+are enabled) — pass ``--results-dir`` to the sideboard output folder and
+optionally ``--candidate-id`` to pin one variant (default: latest checkpoint
+across all candidates).
 """
 
 from __future__ import annotations
@@ -156,6 +158,11 @@ def _iter_checkpoint_metadata_paths(
 
     def add_from_root(root: Path) -> None:
         paths.extend(root.glob(f"p3_*/{role}/episode_*/metadata.json"))
+        paths.extend(
+            root.glob(
+                f"parallel_seeds/seed_*/p3_*/{role}/episode_*/metadata.json"
+            )
+        )
 
     if is_sideboard_compare_dir(results_dir):
         candidates_root = results_dir / _SIDEBOARD_CANDIDATES_DIR

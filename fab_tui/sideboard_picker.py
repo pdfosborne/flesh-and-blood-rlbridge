@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,36 @@ from rich.table import Table
 
 from fab_tui.card_search import CardHit, CardSearchIndex
 from fab_tui.decks import read_deck_hero_info
+from fab_tui.equipment import (
+    EquipmentSearchIndex,
+    parse_equipment_header,
+    slot_display_name,
+    suggest_guide_equipment_header,
+)
+from flesh_and_blood_rlbridge.sideboard_guide_policy import simulate_guide_sideboard_deck
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_TRAINING_ROOT = _REPO_ROOT / "scripts" / "training"
+if str(_TRAINING_ROOT) not in sys.path:
+    sys.path.insert(0, str(_TRAINING_ROOT))
+
+from train_pipeline_common import (  # noqa: E402
+    PhaseAgents,
+    ensure_pool_metadata,
+    greedy_game_deck_cut,
+    min_deck_size_for_format,
+)
+
+
+@dataclass
+class PolicyBaselineChoice:
+    """Baseline game deck chosen before play training starts."""
+
+    baseline_deck: dict[str, int]
+    card_pool: dict[str, int]
+    baseline_label: str
+    source: str
+    equipment_header: str = ""
 
 
 @dataclass
@@ -36,6 +67,400 @@ def load_deck_and_pool(deck_path: Path) -> tuple[dict[str, int], dict[str, int]]
     for cid, count in sideboard.items():
         pool[cid] = pool.get(cid, 0) + count
     return game_deck, pool
+
+
+def _pool_by_id_for(
+    card_pool: dict[str, int],
+    *,
+    hero_id: str,
+    hero_class: str,
+    game_format: str,
+) -> dict[str, Any]:
+    agents = PhaseAgents(player="p1", card_pool=dict(card_pool))
+    ensure_pool_metadata(
+        agents,
+        hero_id=hero_id,
+        hero_class=hero_class,
+        game_format=game_format,
+    )
+    return agents.pool_by_id
+
+
+def compute_guide_policy_deck(
+    card_pool: dict[str, int],
+    *,
+    opponent_hero_id: str,
+    hero_id: str,
+    game_format: str,
+    hero_class: str,
+) -> dict[str, int]:
+    """Return the SideboardGuidePolicy game deck for a matchup."""
+    pool_by_id = _pool_by_id_for(
+        card_pool,
+        hero_id=hero_id,
+        hero_class=hero_class,
+        game_format=game_format,
+    )
+    guide_deck = simulate_guide_sideboard_deck(
+        card_pool,
+        opponent_hero_id,
+        hero_id=hero_id,
+        game_format=game_format,
+        pool_by_id=pool_by_id,
+    )
+    if guide_deck:
+        return guide_deck
+    min_size = min_deck_size_for_format(game_format)
+    return greedy_game_deck_cut(card_pool, min_size)
+
+
+def _show_equipment_loadout(
+    console: Console,
+    *,
+    equipment_header: str,
+    hero_id: str,
+    equip_index: EquipmentSearchIndex,
+    title: str = "Equipment loadout",
+) -> None:
+    entries = parse_equipment_header(
+        equipment_header,
+        hero_id=hero_id,
+        display_name=equip_index.display_name,
+    )
+    if not entries:
+        console.print(f"[dim]{title}: (none)[/dim]")
+        return
+
+    table = Table(title=title, box=box.ROUNDED)
+    table.add_column("#", style="cyan", justify="right")
+    table.add_column("Slot")
+    table.add_column("Card")
+    table.add_column("ID", style="dim")
+    for entry in entries:
+        table.add_row(
+            str(entry.index),
+            slot_display_name(entry.slot),
+            entry.label,
+            entry.card_id,
+        )
+    console.print(table)
+
+
+def _pick_equipment_replacement(
+    console: Console,
+    equip_index: EquipmentSearchIndex,
+    *,
+    slot: str,
+    slot_label: str,
+) -> str | None:
+    while True:
+        query = Prompt.ask(
+            f"Replacement for {slot_label} [name search, or Enter to list]",
+            default="",
+        ).strip()
+        if not query:
+            hits = equip_index.search("", slot=slot, limit=16)
+        else:
+            hits = equip_index.search(query, slot=slot, limit=12)
+        if not hits:
+            console.print("[yellow]No matching equipment.[/yellow]")
+            if not Confirm.ask("Try another search?", default=True):
+                return None
+            continue
+
+        table = Table(title=f"Equipment matches ({slot_label})", box=box.SIMPLE)
+        table.add_column("#", style="cyan", justify="right")
+        table.add_column("Name")
+        table.add_column("ID", style="dim")
+        for index, hit in enumerate(hits, start=1):
+            table.add_row(str(index), hit.name, hit.card_id)
+        console.print(table)
+
+        choice = Prompt.ask("Select # (or Enter to skip)", default="").strip()
+        if not choice:
+            return None
+        if choice.isdigit():
+            idx = int(choice)
+            if 1 <= idx <= len(hits):
+                return hits[idx - 1].card_id
+        console.print("[red]Invalid selection.[/red]")
+
+
+def _refine_equipment_until_happy(
+    console: Console,
+    equipment_header: str,
+    *,
+    hero_id: str,
+    equip_index: EquipmentSearchIndex,
+) -> tuple[str, list[tuple[str, str]]]:
+    """Let the user swap equipment until they confirm the loadout."""
+    working_header = equipment_header
+    changes: list[tuple[str, str]] = []
+
+    while True:
+        _header(console, "Equipment loadout")
+        _show_equipment_loadout(
+            console,
+            equipment_header=working_header,
+            hero_id=hero_id,
+            equip_index=equip_index,
+            title="Current equipment",
+        )
+        if Confirm.ask("Happy with this equipment loadout?", default=True):
+            return working_header, changes
+
+        entries = parse_equipment_header(
+            working_header,
+            hero_id=hero_id,
+            display_name=equip_index.display_name,
+        )
+        if not entries:
+            console.print("[yellow]No equipment to edit — continuing.[/yellow]")
+            return working_header, changes
+
+        choice = Prompt.ask(
+            "Slot # to replace (hero row cannot be changed)",
+            default="",
+        ).strip()
+        if not choice or not choice.isdigit():
+            console.print("[yellow]Enter a slot number from the table, or confirm when ready.[/yellow]")
+            continue
+        idx = int(choice)
+        entry = next((row for row in entries if row.index == idx), None)
+        if entry is None:
+            console.print("[red]Invalid slot number.[/red]")
+            continue
+        if entry.slot == "hero":
+            console.print("[yellow]The hero card cannot be swapped here.[/yellow]")
+            continue
+
+        replacement = _pick_equipment_replacement(
+            console,
+            equip_index,
+            slot=entry.slot,
+            slot_label=slot_display_name(entry.slot),
+        )
+        if not replacement:
+            continue
+
+        parts = working_header.split()
+        if 1 <= idx <= len(parts):
+            old_id = parts[idx - 1]
+            parts[idx - 1] = replacement
+            working_header = " ".join(parts)
+            changes.append((old_id, replacement))
+            console.print(
+                f"[green]Equipped[/green] {equip_index.display_name(replacement)} "
+                f"in {slot_display_name(entry.slot)}"
+            )
+
+
+def _refine_deck_until_happy(
+    console: Console,
+    baseline_deck: dict[str, int],
+    card_pool: dict[str, int],
+    card_index: CardSearchIndex,
+) -> tuple[dict[str, int], dict[str, int], list[tuple[str, str]]]:
+    """Let the user swap deck cards until they confirm the list."""
+    working_deck = dict(baseline_deck)
+    working_pool = dict(card_pool)
+    swaps: list[tuple[str, str]] = []
+
+    while True:
+        _header(console, "Baseline deck")
+        _show_default_deck(
+            console,
+            game_deck=working_deck,
+            card_pool=working_pool,
+            card_index=card_index,
+            title="Current deck",
+        )
+        if Confirm.ask("Happy with this deck?", default=True):
+            return working_deck, working_pool, swaps
+
+        console.print("[cyan]Swap one card out of the deck, then pick a replacement.[/cyan]")
+        out_card = _pick_card_out(console, working_deck, card_index)
+        if not out_card:
+            console.print("[yellow]Swap cancelled — review the deck and confirm when ready.[/yellow]")
+            continue
+
+        inventory = {
+            cid: working_pool.get(cid, 0) - working_deck.get(cid, 0)
+            for cid in set(working_pool) | set(working_deck)
+        }
+        inventory = {cid: c for cid, c in inventory.items() if c > 0}
+
+        in_card = _pick_card_in(
+            console,
+            card_index,
+            inventory=inventory,
+        )
+        if not in_card:
+            console.print("[yellow]Swap cancelled — review the deck and confirm when ready.[/yellow]")
+            continue
+
+        result = apply_manual_swap(working_deck, working_pool, out_card, in_card)
+        if result is None:
+            console.print("[red]Invalid swap — try again.[/red]")
+            continue
+        working_deck, working_pool = result
+        swaps.append((out_card, in_card))
+        console.print(
+            f"[green]Swapped[/green] {card_index.display_name(out_card)} "
+            f"→ {card_index.display_name(in_card)}"
+        )
+
+
+def prompt_policy_baseline_deck(
+    console: Console,
+    deck_path: Path,
+    *,
+    opponent_hero_id: str,
+    hero_id: str,
+    hero_class: str,
+    game_format: str,
+    saved_list: bool = False,
+) -> PolicyBaselineChoice:
+    """Show guide-policy recommendations, then refine equipment and deck."""
+    file_deck, card_pool = load_deck_and_pool(deck_path)
+    card_index = CardSearchIndex(game_format)
+    equip_index = EquipmentSearchIndex(game_format, hero_id=hero_id)
+    info = read_deck_hero_info(deck_path)
+    file_equipment = info.equipment_header if info else ""
+
+    if saved_list:
+        _header(console, "Saved sideboard list")
+        if info:
+            console.print(f"[bold]{info.name or info.hero_id}[/bold]  ({info.hero_id})")
+        console.print(f"Opponent matchup: [bold]{opponent_hero_id}[/bold]\n")
+        console.print(
+            "[dim]Adjust equipment first, then deck cards — confirm each when you are happy.[/dim]\n"
+        )
+        baseline_deck = dict(file_deck)
+        equipment_header = file_equipment
+        source = "saved"
+        baseline_label = (info.name if info else "") or "Saved list"
+    else:
+        pool_by_id = _pool_by_id_for(
+            card_pool,
+            hero_id=hero_id,
+            hero_class=hero_class,
+            game_format=game_format,
+        )
+        guide_deck = compute_guide_policy_deck(
+            card_pool,
+            opponent_hero_id=opponent_hero_id,
+            hero_id=hero_id,
+            game_format=game_format,
+            hero_class=hero_class,
+        )
+        guide_equipment = suggest_guide_equipment_header(
+            file_equipment,
+            hero_id=hero_id,
+            opponent_hero_id=opponent_hero_id,
+            game_format=game_format,
+            pool_by_id=pool_by_id,
+        )
+
+        _header(console, "Sideboard guide policy")
+        if info:
+            console.print(f"[bold]{info.name or info.hero_id}[/bold]  ({info.hero_id})")
+        console.print(f"Opponent matchup: [bold]{opponent_hero_id}[/bold]\n")
+        console.print(
+            "[dim]Review the starting list vs guide recommendations, then adjust "
+            "equipment first, then deck cards — confirm each when you are happy.[/dim]\n"
+        )
+        _show_default_deck(
+            console,
+            game_deck=file_deck,
+            card_pool=card_pool,
+            card_index=card_index,
+            title="Starting deck (from file)",
+        )
+        _show_equipment_loadout(
+            console,
+            equipment_header=file_equipment,
+            hero_id=hero_id,
+            equip_index=equip_index,
+            title="Starting equipment (from file)",
+        )
+        _show_default_deck(
+            console,
+            game_deck=guide_deck,
+            card_pool=card_pool,
+            card_index=card_index,
+            title="Guide policy deck (recommended)",
+        )
+        _show_equipment_loadout(
+            console,
+            equipment_header=guide_equipment,
+            hero_id=hero_id,
+            equip_index=equip_index,
+            title="Guide policy equipment (recommended)",
+        )
+
+        use_guide = Confirm.ask(
+            "Start from guide policy recommendations?",
+            default=True,
+        )
+        if use_guide:
+            baseline_deck = dict(guide_deck)
+            equipment_header = guide_equipment
+            source = "guide_policy"
+            baseline_label = "Guide policy deck"
+        else:
+            baseline_deck = dict(file_deck)
+            equipment_header = file_equipment
+            source = "deck_file"
+            baseline_label = "Starting deck"
+
+    console.print(
+        "\n[bold]Step 1 — Equipment[/bold]  "
+        "[dim]Swap slots until you are happy with the loadout.[/dim]"
+    )
+    equipment_header, equip_changes = _refine_equipment_until_happy(
+        console,
+        equipment_header,
+        hero_id=hero_id,
+        equip_index=equip_index,
+    )
+
+    console.print(
+        "\n[bold]Step 2 — Deck cards[/bold]  "
+        "[dim]Swap cards until you are happy with the list.[/dim]"
+    )
+    baseline_deck, card_pool, swaps = _refine_deck_until_happy(
+        console,
+        baseline_deck,
+        card_pool,
+        card_index,
+    )
+
+    if equip_changes:
+        source = f"{source}_equip_edited"
+        equip_label = ", ".join(
+            f"{equip_index.display_name(o)}→{equip_index.display_name(i)}"
+            for o, i in equip_changes
+        )
+        baseline_label = f"{baseline_label} (equip {equip_label})"
+    if swaps:
+        source = f"{source}_edited"
+        swap_label = ", ".join(
+            f"{card_index.display_name(o)}→{card_index.display_name(i)}"
+            for o, i in swaps
+        )
+        if equip_changes:
+            baseline_label = f"{baseline_label}; {swap_label}"
+        else:
+            baseline_label = f"{baseline_label} ({swap_label})"
+
+    return PolicyBaselineChoice(
+        baseline_deck=baseline_deck,
+        card_pool=card_pool,
+        baseline_label=baseline_label,
+        source=source,
+        equipment_header=equipment_header,
+    )
 
 
 def apply_manual_swap(
@@ -235,21 +660,27 @@ def configure_manual_swap_variants(
     game_format: str,
     max_variants: int = 2,
     max_swaps_per_variant: int = 1,
+    baseline_deck: dict[str, int] | None = None,
+    card_pool: dict[str, int] | None = None,
 ) -> tuple[list[ManualSwapVariant], dict[str, int]]:
-    """Build baseline + user-defined swap variants from the default deck."""
-    baseline_deck, card_pool = load_deck_and_pool(deck_path)
-    card_index = CardSearchIndex(game_format)
-
-    _header(console, "Default deck")
-    info = read_deck_hero_info(deck_path)
-    if info:
-        console.print(f"[bold]{info.name or info.hero_id}[/bold]  ({info.hero_id})")
-    _show_default_deck(
-        console,
-        game_deck=baseline_deck,
-        card_pool=card_pool,
-        card_index=card_index,
-    )
+    """Build alternate swap variants from the chosen baseline deck."""
+    if baseline_deck is None or card_pool is None:
+        baseline_deck, card_pool = load_deck_and_pool(deck_path)
+        card_index = CardSearchIndex(game_format)
+        _header(console, "Default deck")
+        info = read_deck_hero_info(deck_path)
+        if info:
+            console.print(f"[bold]{info.name or info.hero_id}[/bold]  ({info.hero_id})")
+        _show_default_deck(
+            console,
+            game_deck=baseline_deck,
+            card_pool=card_pool,
+            card_index=card_index,
+        )
+    else:
+        baseline_deck = dict(baseline_deck)
+        card_pool = dict(card_pool)
+        card_index = CardSearchIndex(game_format)
 
     max_variants = max(0, min(max_variants, 10))
     max_swaps = max(1, min(max_swaps_per_variant, 5))
@@ -258,7 +689,7 @@ def configure_manual_swap_variants(
 
     console.print(
         f"\nConfigure up to [bold]{max_variants}[/bold] alternate list(s) "
-        f"([bold]{max_swaps}[/bold] swap(s) each)."
+        f"([bold]{max_swaps}[/bold] swap(s) each), starting from the baseline above."
     )
 
     variants: list[ManualSwapVariant] = []
@@ -336,17 +767,20 @@ def variants_to_candidate_payload(
     variants: list[ManualSwapVariant],
     *,
     include_baseline: bool = True,
+    baseline_label: str = "Default deck",
+    equipment_header: str = "",
 ) -> dict[str, Any]:
     candidates: list[dict[str, Any]] = []
     if include_baseline:
-        candidates.append(
-            {
-                "candidate_id": "baseline",
-                "label": "Default deck",
-                "game_deck": dict(baseline_deck),
-                "swaps": [],
-            }
-        )
+        baseline_entry: dict[str, Any] = {
+            "candidate_id": "baseline",
+            "label": baseline_label,
+            "game_deck": dict(baseline_deck),
+            "swaps": [],
+        }
+        if equipment_header:
+            baseline_entry["equipment_header"] = equipment_header
+        candidates.append(baseline_entry)
     for variant in variants:
         candidates.append(
             {
@@ -365,9 +799,18 @@ def write_candidates_manifest(
     baseline_deck: dict[str, int],
     card_pool: dict[str, int],
     variants: list[ManualSwapVariant],
+    baseline_label: str = "Default deck",
+    equipment_header: str = "",
 ) -> Path:
-    payload = variants_to_candidate_payload(baseline_deck, variants)
+    payload = variants_to_candidate_payload(
+        baseline_deck,
+        variants,
+        baseline_label=baseline_label,
+        equipment_header=equipment_header,
+    )
     payload["card_pool"] = dict(card_pool)
+    if equipment_header:
+        payload["equipment_header"] = equipment_header
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return path

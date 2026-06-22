@@ -887,6 +887,7 @@ class SideboardCandidate:
     game_deck: dict[str, int]
     swaps: tuple[tuple[str, str], ...] = ()
     guide_margin: Optional[float] = None
+    equipment_header: Optional[str] = None
 
 
 def _deck_signature(deck: dict[str, int]) -> tuple[tuple[str, int], ...]:
@@ -1045,6 +1046,7 @@ def load_sideboard_candidates_from_json(
     if data.get("card_pool"):
         for cid, count in data["card_pool"].items():
             pool[str(cid)] = int(count)
+    default_equipment_header = str(data.get("equipment_header") or "").strip() or None
 
     candidates: list[SideboardCandidate] = []
     for raw in data.get("candidates") or []:
@@ -1059,6 +1061,8 @@ def load_sideboard_candidates_from_json(
             for pair in swaps_raw
             if isinstance(pair, (list, tuple)) and len(pair) == 2
         )
+        raw_equipment = str(raw.get("equipment_header") or "").strip()
+        equipment_header = raw_equipment or default_equipment_header
         candidates.append(
             SideboardCandidate(
                 candidate_id=str(raw.get("candidate_id") or f"candidate_{len(candidates)}"),
@@ -1070,6 +1074,7 @@ def load_sideboard_candidates_from_json(
                     if raw.get("guide_margin") is not None
                     else None
                 ),
+                equipment_header=equipment_header,
             )
         )
     return candidates, pool

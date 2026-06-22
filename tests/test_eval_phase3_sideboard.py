@@ -92,6 +92,51 @@ def test_latest_checkpoint_finds_sideboard_candidate(tmp_path: Path) -> None:
     assert list_sideboard_candidate_ids(out_dir) == ["baseline", "swap_01"]
 
 
+def test_latest_checkpoint_finds_parallel_seed_sideboard_candidate(
+    tmp_path: Path,
+) -> None:
+    out_dir = tmp_path / "sideboard_run"
+    candidate_dir = out_dir / "candidates" / "manual_01"
+    candidate_dir.mkdir(parents=True)
+    (out_dir / "candidates_manifest.json").write_text(
+        json.dumps({
+            "hero_id": "briar",
+            "opponent_hero_id": "briar",
+            "candidates": [{"candidate_id": "manual_01", "label": "Manual"}],
+        }),
+        encoding="utf-8",
+    )
+
+    seed_dir = candidate_dir / "parallel_seeds" / "seed_0"
+    ckpt_dir = seed_dir / "p3_abc-vs-GEPrecon" / "p1" / "episode_000050"
+    ckpt_dir.mkdir(parents=True)
+    (ckpt_dir / "weights").mkdir(parents=True, exist_ok=True)
+    (ckpt_dir / "weights" / "agent_weights.json").write_text("{}", encoding="utf-8")
+    (ckpt_dir / "metadata.json").write_text(
+        json.dumps({
+            "matchup": "p3_abc-vs-GEPrecon",
+            "episodes_completed": 50,
+            "target_episodes": 100,
+            "game_format": "silver_age",
+            "p1_hero": "briar",
+            "p2_hero": "briar",
+            "opponent_mode": "preset",
+            "opponent_deck_name": "GEPrecon",
+            "deck_spec": {
+                "equipment_header": "briar",
+                "cards": {"a_red": 40},
+            },
+            "win_rate": 0.55,
+        }),
+        encoding="utf-8",
+    )
+
+    bundle = _latest_checkpoint(out_dir, "p1", candidate_id="manual_01")
+    assert bundle is not None
+    assert bundle.episodes_completed == 50
+    assert "parallel_seeds" in str(bundle.checkpoint_dir)
+
+
 def test_resolve_parity_deck_names_prefers_eval_decks() -> None:
     from eval_phase3_checkpoint import (  # noqa: PLC0415
         CheckpointBundle,
