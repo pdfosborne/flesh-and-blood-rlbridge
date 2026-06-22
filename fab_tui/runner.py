@@ -9,6 +9,9 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from fab_tui.config import (
+    CARDS_DB_PATH,
+    CARDS_DB_UPDATE_SCRIPT,
+    FABRARY_DECKS_PATH,
     REPO_ROOT,
     RESULTS_ROOT,
     RUNSCRIPTS_ROOT,
@@ -19,6 +22,7 @@ from fab_tui.config import (
     EnvironmentSettings,
     EvalSpec,
     ExperimentSpec,
+    LivePlaySpec,
     MatchupSimSpec,
     SideboardCompareSpec,
     normalize_pipeline_format,
@@ -43,11 +47,17 @@ def _cwd_repo() -> Iterator[None]:
         os.chdir(previous)
 
 
-def run_streaming(cmd: list[str], *, cwd: Path | None = None) -> int:
+def run_streaming(cmd: list[str], *, cwd: Path | None = None, extra_env: dict[str, str] | None = None) -> int:
     """Run a command forwarding stdout/stderr to the terminal."""
+    import os
+
+    env = os.environ.copy()
+    if extra_env:
+        env.update(extra_env)
     with subprocess.Popen(
         cmd,
         cwd=str(cwd or REPO_ROOT),
+        env=env,
     ) as proc:
         return int(proc.wait())
 
@@ -161,6 +171,96 @@ def run_full_pipeline(
     if cpp_engine_dir:
         cmd.extend(["--cpp-engine-dir", cpp_engine_dir])
     return run_streaming(cmd)
+
+
+def run_live_talishar_play(spec: LivePlaySpec, env: EnvironmentSettings) -> int:
+    env.apply_to_environ()
+    cmd = [
+        _python(),
+        str(SCRIPTS_EVAL / "talishar_live_play.py"),
+        "--results-dir",
+        spec.results_dir,
+        "--games",
+        str(spec.games),
+        "--max-steps",
+        str(spec.max_steps),
+        "--step-delay-ms",
+        str(spec.step_delay_ms),
+        "--talishar-url",
+        env.talishar_url,
+        "--talishar-fe-url",
+        env.talishar_fe_url,
+        "--assets-path",
+        env.assets_path,
+    ]
+    if spec.candidate_id:
+        cmd.extend(["--candidate-id", spec.candidate_id])
+    if spec.seed is not None:
+        cmd.extend(["--seed", str(spec.seed)])
+    if spec.human_vs_agent:
+        cmd.append("--human-vs-agent")
+        cmd.extend(["--human-deck", spec.human_deck])
+        if not spec.enable_action_coach:
+            cmd.append("--no-action-coach")
+        cmd.extend(["--coach-rollouts-per-action", str(spec.coach_rollouts_per_action)])
+    return run_streaming(cmd)
+
+
+def run_card_db_rescan(*, legality_scope: str = "all", dry_run: bool = False) -> int:
+    """Refresh ``cards.json`` from the official FAB Card Vault API."""
+    import os
+
+    if not CARDS_DB_UPDATE_SCRIPT.is_file():
+        raise FileNotFoundError(f"Card DB updater not found: {CARDS_DB_UPDATE_SCRIPT}")
+    if not CARDS_DB_PATH.is_file():
+        raise FileNotFoundError(f"cards.json not found: {CARDS_DB_PATH}")
+    if not FABRARY_DECKS_PATH.is_file():
+        raise FileNotFoundError(f"fabrary_decks.json not found: {FABRARY_DECKS_PATH}")
+
+    src_path = str(REPO_ROOT / "src")
+    existing_py_path = os.environ.get("PYTHONPATH", "")
+    pythonpath = f"{src_path}{os.pathsep}{existing_py_path}" if existing_py_path else src_path
+
+    cmd = [
+        _python(),
+        "-m",
+        "flesh_and_blood_rlbridge.card_db.update_cards_db_from_fabtcg",
+        "--cards",
+        str(CARDS_DB_PATH),
+        "--decks",
+        str(FABRARY_DECKS_PATH),
+        "--legality-scope",
+        legality_scope,
+    ]
+    if dry_run:
+        cmd.append("--dry-run")
+    rc = run_streaming(cmd, extra_env={"PYTHONPATH": pythonpath})
+    if rc == 0 and not dry_run:
+        norm_rc, _summary = normalize_card_db_for_talishar()
+        if norm_rc != 0:
+            return norm_rc
+    return rc
+
+
+def normalize_card_db_for_talishar(*, dry_run: bool = False) -> tuple[int, dict[str, Any]]:
+    """Rewrite ``cards.json`` IDs to match Talishar's generated card dictionary."""
+    import os
+
+    src_path = str(REPO_ROOT / "src")
+    if src_path not in sys.path:
+        sys.path.insert(0, src_path)
+
+    from flesh_and_blood_rlbridge.card_db.talishar_card_ids import (  # noqa: PLC0415
+        normalize_cards_json_file,
+    )
+
+    summary = normalize_cards_json_file(CARDS_DB_PATH, dry_run=dry_run)
+    print(
+        "  Card ID normalization: "
+        f"{summary['before']} -> {summary['after']} cards "
+        f"({summary['remapped']} remapped, {summary['dropped']} dropped)"
+    )
+    return 0, summary
 
 
 def run_eval_dashboard(spec: EvalSpec, env: EnvironmentSettings) -> int:

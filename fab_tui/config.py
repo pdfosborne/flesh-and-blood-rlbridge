@@ -20,6 +20,10 @@ SCRIPTS_DECK = SCRIPTS_ROOT / "deck"
 RUNSCRIPTS_ROOT = REPO_ROOT / "runscripts"
 RESULTS_ROOT = REPO_ROOT / "results"
 AGENT_CACHE_DIR = RESULTS_ROOT / "agent_cache"
+CARDS_DB_DIR = REPO_ROOT / "src" / "flesh_and_blood_rlbridge" / "card_db"
+CARDS_DB_PATH = CARDS_DB_DIR / "cards.json"
+FABRARY_DECKS_PATH = CARDS_DB_DIR / "fabrary_decks.json"
+CARDS_DB_UPDATE_SCRIPT = CARDS_DB_DIR / "update_cards_db_from_fabtcg.py"
 
 OpponentMode = Literal["preset", "mirror", "dual"]
 FormatChoice = Literal["silver_age", "classic_constructed", "blitz", "upf", "sage"]
@@ -195,6 +199,22 @@ class EvalSpec:
     poll_seconds: int = RUNTIME.tui.eval_poll_seconds
     candidate_id: str | None = None
     render_only: bool = False
+
+
+@dataclass
+class LivePlaySpec:
+    """Real-time Talishar play with the live frontend."""
+
+    results_dir: str
+    candidate_id: str | None = None
+    games: int = 1
+    max_steps: int = RUNTIME.tui.eval_max_steps
+    step_delay_ms: int = 0
+    seed: int | None = None
+    human_vs_agent: bool = False
+    human_deck: str = "opponent"  # trained | opponent
+    enable_action_coach: bool = True
+    coach_rollouts_per_action: int = 4
 
 
 @dataclass

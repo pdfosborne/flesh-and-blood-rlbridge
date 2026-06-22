@@ -5,7 +5,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from fab_tui.results import _run_time_labels, discover_evaluable_results
+from fab_tui.results import (
+    _run_time_labels,
+    discover_completed_training_runs,
+    discover_evaluable_results,
+)
 
 
 def test_run_time_labels_from_folder_stamp(tmp_path: Path) -> None:
@@ -50,3 +54,41 @@ def test_discover_includes_run_started(tmp_path: Path, monkeypatch) -> None:
     assert len(entries) == 1
     assert entries[0].run_started == "2026-06-21 12:00"
     assert entries[0].run_stamp == "20260621_120000"
+
+
+def test_discover_completed_training_requires_completion_marker(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from fab_tui import results as results_mod
+
+    root = tmp_path / "sideboard_compare"
+    run_dir = root / "briar_vs_briar_20260621_120000"
+    candidate_dir = run_dir / "candidates" / "manual_01"
+    ckpt = candidate_dir / "p3_ab-vs-cd" / "p1" / "episode_000100"
+    ckpt.mkdir(parents=True)
+    (ckpt / "metadata.json").write_text("{}", encoding="utf-8")
+    (run_dir / "candidates_manifest.json").write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(
+        results_mod,
+        "RESULT_CATEGORY_ROOTS",
+        (("sideboard_compare", root),),
+    )
+
+    assert discover_evaluable_results(limit=5)
+    assert not discover_completed_training_runs(limit=5)
+
+    (candidate_dir / "candidate_result.json").write_text(
+        json.dumps(
+            {
+                "candidate_id": "manual_01",
+                "play_win_rate": 0.58,
+                "label": "Manual",
+            }
+        ),
+        encoding="utf-8",
+    )
+    completed = discover_completed_training_runs(limit=5)
+    assert len(completed) == 1
+    assert completed[0].status_summary.startswith("trained")
+    assert "manual_01" in completed[0].status_summary

@@ -16,7 +16,9 @@ from fab_tui.config import (
     RESULTS_ROOT,
     EnvironmentSettings,
     EvalSpec,
+    LivePlaySpec,
     MatchupSimSpec,
+    RUNTIME,
     SideboardCompareSpec,
     slugify,
 )
@@ -39,13 +41,23 @@ from fab_tui.sideboard_picker import (
     prompt_policy_baseline_deck,
     write_candidates_manifest,
 )
-from fab_tui.results import discover_evaluable_results, list_sideboard_candidate_ids
+from fab_tui.results import (
+    CompletedTrainingEntry,
+    EvaluableResultsEntry,
+    discover_completed_training_runs,
+    discover_evaluable_results,
+    list_sideboard_candidate_ids,
+)
 from fab_tui.runner import (
     fetch_fabrary_deck,
+    normalize_card_db_for_talishar,
+    run_card_db_rescan,
     run_eval_dashboard,
+    run_live_talishar_play,
     run_matchup_simulation,
     run_sideboard_compare,
 )
+from fab_tui.card_search import CARDS_DB_PATH, clear_card_db_caches
 
 console = Console()
 
@@ -83,6 +95,38 @@ def _header(title: str, subtitle: str = "") -> None:
 
 def _pause() -> None:
     Prompt.ask("\n[dim]Press Enter to continue[/dim]", default="")
+
+
+def _live_play_deck_labels(
+    results_dir: str,
+    candidate_id: str | None,
+) -> tuple[str, str]:
+    """Resolve trained/opponent deck display names for the live-play wizard."""
+    repo = Path(__file__).resolve().parents[1]
+    scripts_dir = repo / "scripts"
+    for path in (repo / "src", scripts_dir):
+        token = str(path)
+        if token not in sys.path:
+            sys.path.insert(0, token)
+    import _bootstrap  # noqa: WPS433
+
+    _bootstrap.configure_paths()
+    eval_dir = str(scripts_dir / "eval")
+    if eval_dir not in sys.path:
+        sys.path.insert(0, eval_dir)
+    from talishar_live_play import (  # noqa: WPS433
+        deck_labels_from_bundle,
+        resolve_checkpoint_bundles,
+    )
+
+    try:
+        p1_bundle, _ = resolve_checkpoint_bundles(
+            Path(results_dir).expanduser().resolve(),
+            candidate_id=candidate_id,
+        )
+        return deck_labels_from_bundle(p1_bundle)
+    except Exception:
+        return "Trained deck", "Opponent deck"
 
 
 def _choose_mapping(mapping: dict[str, tuple[str, str]], prompt: str) -> str:
@@ -529,16 +573,15 @@ def _show_results_summary(results_path: Path) -> None:
     console.print(f"[dim]Full JSON: {results_path}[/dim]")
 
 
-def _choose_results_dir(
+def _choose_results_entry(
+    entries: list[EvaluableResultsEntry] | list[CompletedTrainingEntry],
     *,
-    title: str = "Select results",
-    manual_hint: str = "Enter results directory path",
+    title: str,
+    manual_hint: str,
+    status_column: bool = False,
 ) -> str:
-    entries = discover_evaluable_results()
     if not entries:
-        console.print(
-            "[yellow]No results with phase-3 checkpoints found under results/.[/yellow]"
-        )
+        console.print("[yellow]No matching runs found under results/.[/yellow]")
         return Prompt.ask(manual_hint, default=str(RESULTS_ROOT))
 
     table = Table(title=title, box=box.SIMPLE)
@@ -546,17 +589,24 @@ def _choose_results_dir(
     table.add_column("Category")
     table.add_column("Matchup")
     table.add_column("Run started")
-    table.add_column("Checkpoints")
+    if status_column:
+        table.add_column("Status")
+    else:
+        table.add_column("Checkpoints")
     table.add_column("Folder")
     for index, entry in enumerate(entries, start=1):
-        table.add_row(
+        row = [
             str(index),
             entry.category,
             entry.label,
             entry.run_started,
-            entry.checkpoints_summary,
-            entry.path.name,
-        )
+        ]
+        if status_column and isinstance(entry, CompletedTrainingEntry):
+            row.append(entry.summary)
+        else:
+            row.append(entry.checkpoints_summary)
+        row.append(entry.path.name)
+        table.add_row(*row)
     console.print(table)
     console.print("[dim]m = enter path manually[/dim]")
 
@@ -571,6 +621,61 @@ def _choose_results_dir(
         console.print("[red]Invalid selection — enter a number or m.[/red]")
 
 
+def _choose_results_dir(
+    *,
+    title: str = "Select results",
+    manual_hint: str = "Enter results directory path",
+) -> str:
+    entries = discover_evaluable_results()
+    return _choose_results_entry(
+        entries,
+        title=title,
+        manual_hint=manual_hint,
+    )
+
+
+def _choose_completed_training_dir(
+    *,
+    title: str = "Completed training runs",
+    manual_hint: str = "Enter results directory path",
+) -> str:
+    entries = discover_completed_training_runs()
+    return _choose_results_entry(
+        entries,
+        title=title,
+        manual_hint=manual_hint,
+        status_column=True,
+    )
+
+
+def _pick_sideboard_candidate_id(results_dir: str) -> str | None:
+    sideboard_candidates = list_sideboard_candidate_ids(Path(results_dir))
+    if not sideboard_candidates:
+        return None
+
+    console.print(
+        "\n[dim]Sideboard compare run — pick the trained candidate to evaluate, "
+        "or leave blank for the latest checkpoint across all candidates.[/dim]"
+    )
+    table = Table(title="Candidates", box=box.SIMPLE)
+    table.add_column("#", style="cyan", justify="right")
+    table.add_column("Candidate ID")
+    for index, cid in enumerate(sideboard_candidates, start=1):
+        table.add_row(str(index), cid)
+    console.print(table)
+    choice = Prompt.ask(
+        "Candidate (number, id, or blank for latest)",
+        default="",
+    ).strip()
+    if choice.isdigit():
+        idx = int(choice)
+        if 1 <= idx <= len(sideboard_candidates):
+            return sideboard_candidates[idx - 1]
+    if choice:
+        return choice
+    return None
+
+
 def wizard_evaluate(env: EnvironmentSettings) -> None:
     _header(
         "Evaluate checkpoints",
@@ -583,29 +688,7 @@ def wizard_evaluate(env: EnvironmentSettings) -> None:
         title="Results with phase-3 checkpoints",
         manual_hint="Results directory",
     )
-    candidate_id: str | None = None
-    sideboard_candidates = list_sideboard_candidate_ids(Path(results_dir))
-    if sideboard_candidates:
-        console.print(
-            "\n[dim]Sideboard compare run — pick a candidate to watch, "
-            "or leave blank for the latest checkpoint across all candidates.[/dim]"
-        )
-        table = Table(title="Candidates", box=box.SIMPLE)
-        table.add_column("#", style="cyan", justify="right")
-        table.add_column("Candidate ID")
-        for index, cid in enumerate(sideboard_candidates, start=1):
-            table.add_row(str(index), cid)
-        console.print(table)
-        choice = Prompt.ask(
-            "Candidate (number, id, or blank for all)",
-            default="",
-        ).strip()
-        if choice.isdigit():
-            idx = int(choice)
-            if 1 <= idx <= len(sideboard_candidates):
-                candidate_id = sideboard_candidates[idx - 1]
-        elif choice:
-            candidate_id = choice
+    candidate_id = _pick_sideboard_candidate_id(results_dir)
 
     if render_only:
         spec = EvalSpec(
@@ -637,8 +720,128 @@ def wizard_evaluate(env: EnvironmentSettings) -> None:
     _pause()
 
 
+def wizard_evaluate_trained_agent(env: EnvironmentSettings) -> None:
+    _header(
+        "Evaluate trained agent",
+        "Run more Talishar evaluation games on a finished training run",
+    )
+    results_dir = _choose_completed_training_dir(
+        title="Completed training runs",
+        manual_hint="Results directory",
+    )
+    candidate_id = _pick_sideboard_candidate_id(results_dir)
+
+    default_episodes = (
+        RUNTIME.play.checkpoint_eval_episodes
+        or RUNTIME.meta.final_eval_episodes
+        or RUNTIME.meta.eval_episodes
+    )
+    default_workers = RUNTIME.meta.eval_parallel_workers or RUNTIME.play.workers or 4
+    default_max_steps = RUNTIME.meta.eval_max_steps or RUNTIME.meta.max_play_steps
+
+    spec = EvalSpec(
+        results_dir=results_dir,
+        candidate_id=candidate_id,
+        episodes=IntPrompt.ask("Evaluation episodes on Talishar", default=default_episodes),
+        parallel_workers=IntPrompt.ask("Parallel workers", default=default_workers),
+        max_steps=IntPrompt.ask("Max steps per game", default=default_max_steps),
+        watch=False,
+    )
+    console.print("\n[bold]Running Talishar evaluation on latest checkpoint…[/bold]\n")
+    rc = run_eval_dashboard(spec, env)
+    console.print(f"\n[bold]Evaluation finished (exit {rc}).[/bold]")
+    _pause()
+
+
+def wizard_realtime_talishar_play(env: EnvironmentSettings) -> None:
+    _header(
+        "Real-time Talishar play",
+        "Watch the agent or play against it on the live Talishar frontend",
+    )
+    results_dir = _choose_completed_training_dir(
+        title="Completed training runs",
+        manual_hint="Results directory",
+    )
+    candidate_id = _pick_sideboard_candidate_id(results_dir)
+
+    human_vs_agent = Confirm.ask(
+        "Play against the agent? (You play on the board; the agent acts automatically)",
+        default=False,
+    )
+
+    human_deck = "opponent"
+    if human_vs_agent:
+        trained_label, opponent_label = _live_play_deck_labels(
+            results_dir,
+            candidate_id,
+        )
+        console.print(
+            f"\n  [1] Trained deck — [cyan]{trained_label}[/cyan]"
+        )
+        console.print(
+            f"  [2] Opponent deck — [cyan]{opponent_label}[/cyan]"
+        )
+        choice = Prompt.ask(
+            "Which deck do you want to play?",
+            choices=["1", "2"],
+            default="2",
+        )
+        human_deck = "trained" if choice == "1" else "opponent"
+
+    default_max_steps = RUNTIME.meta.eval_max_steps or RUNTIME.meta.max_play_steps
+    spec = LivePlaySpec(
+        results_dir=results_dir,
+        candidate_id=candidate_id,
+        games=IntPrompt.ask("Number of games", default=1),
+        max_steps=IntPrompt.ask("Max steps per game", default=default_max_steps),
+        step_delay_ms=IntPrompt.ask(
+            "Step delay (ms, 0 = fastest)",
+            default=0,
+        ),
+        human_vs_agent=human_vs_agent,
+        human_deck=human_deck,
+        enable_action_coach=Confirm.ask(
+            "Show agent coach overlay on the board?",
+            default=True,
+        ) if human_vs_agent else True,
+    )
+    if human_vs_agent and spec.enable_action_coach:
+        spec.coach_rollouts_per_action = IntPrompt.ask(
+            "C++ rollout games per action (win % estimate)",
+            default=spec.coach_rollouts_per_action,
+        )
+    if human_vs_agent:
+        trained_label, opponent_label = _live_play_deck_labels(
+            results_dir,
+            candidate_id,
+        )
+        your_deck = trained_label if spec.human_deck == "trained" else opponent_label
+        agent_deck = opponent_label if spec.human_deck == "trained" else trained_label
+        console.print(
+            "\n[bold]Starting human vs agent session…[/bold]\n"
+            f"[dim]You play [cyan]{your_deck}[/cyan] — "
+            "click your actions in the Talishar window.[/dim]\n"
+            f"[dim]The trained agent plays [cyan]{agent_deck}[/cyan] automatically.[/dim]\n"
+            + (
+                "[dim]Agent coach overlay shows policy % and C++ win estimates on your turns.[/dim]\n"
+                if spec.enable_action_coach
+                else ""
+            )
+            + f"[dim]Frontend: {env.talishar_fe_url}[/dim]\n"
+        )
+    else:
+        console.print(
+            "\n[bold]Starting live Talishar session…[/bold]\n"
+            "[dim]A Chromium window will open with the Talishar board (GDPR consent auto-handled).[/dim]\n"
+            f"[dim]Frontend: {env.talishar_fe_url}[/dim]\n"
+        )
+    rc = run_live_talishar_play(spec, env)
+    console.print(f"\n[bold]Live play finished (exit {rc}).[/bold]")
+    _pause()
+
+
 def wizard_settings(env: EnvironmentSettings) -> EnvironmentSettings:
-    _header("Settings", "Talishar and FaBrary connection defaults")
+    _header("Settings", "Talishar, FaBrary, and card database maintenance")
 
     env.talishar_url = Prompt.ask("Talishar URL", default=env.talishar_url)
     env.talishar_fe_url = Prompt.ask("Talishar frontend URL", default=env.talishar_fe_url)
@@ -649,7 +852,57 @@ def wizard_settings(env: EnvironmentSettings) -> EnvironmentSettings:
         password=True,
     )
     env.apply_to_environ()
-    console.print("[green]Settings saved for this session.[/green]")
+    console.print("[green]Connection settings saved for this session.[/green]")
+
+    card_count = "?"
+    if CARDS_DB_PATH.is_file():
+        try:
+            card_count = str(len(json.loads(CARDS_DB_PATH.read_text(encoding="utf-8"))))
+        except (json.JSONDecodeError, OSError):
+            pass
+    console.print(f"\n[dim]Local card DB: {CARDS_DB_PATH} ({card_count} cards)[/dim]")
+    console.print(
+        "[dim]Rescan downloads missing deck cards and refreshes metadata/legality "
+        "from the official FAB Card Vault API, then normalizes card IDs for Talishar.[/dim]"
+    )
+
+    if Confirm.ask("Run full card database rescan now?", default=False):
+        console.print(
+            "\n[bold]Rescanning card database…[/bold]\n"
+            "[dim]This may take several minutes and requires internet access.[/dim]\n"
+        )
+        try:
+            rc = run_card_db_rescan(legality_scope="all")
+        except FileNotFoundError as exc:
+            console.print(f"[red]{exc}[/red]")
+            _pause()
+            return env
+        if rc == 0:
+            clear_card_db_caches()
+            console.print(
+                "[green]Card database rescan and Talishar ID normalization complete.[/green]"
+            )
+        else:
+            console.print(f"[red]Card database rescan failed (exit {rc}).[/red]")
+    elif Confirm.ask(
+        "Normalize local card IDs for Talishar only? (fixes blank/missing cards in play)",
+        default=True,
+    ):
+        try:
+            norm_rc, summary = normalize_card_db_for_talishar()
+        except FileNotFoundError as exc:
+            console.print(f"[red]{exc}[/red]")
+            _pause()
+            return env
+        if norm_rc == 0:
+            clear_card_db_caches()
+            console.print(
+                "[green]Card ID normalization complete "
+                f"({summary.get('remapped', 0)} remapped).[/green]"
+            )
+        else:
+            console.print(f"[red]Card ID normalization failed (exit {norm_rc}).[/red]")
+
     _pause()
     return env
 
@@ -662,14 +915,16 @@ def run_tui() -> int:
         "1": ("Sideboard comparison", wizard_sideboard_compare),
         "2": ("Fixed deck simulation", wizard_simulate_decks),
         "3": ("Evaluate checkpoints", wizard_evaluate),
-        "4": ("Settings", wizard_settings),
+        "4": ("Evaluate trained agent", wizard_evaluate_trained_agent),
+        "5": ("Real-time Talishar play", wizard_realtime_talishar_play),
+        "6": ("Settings", wizard_settings),
         "q": ("Quit", None),
     }
 
     while True:
         _header(
             "Flesh and Blood RL Bridge",
-            "Sideboard tuning, fixed-deck matchups, and checkpoint eval",
+            "Sideboard tuning, eval, live Talishar play, and settings",
         )
         table = Table(box=box.SIMPLE, show_header=False)
         table.add_column("Key", style="bold cyan", justify="center")

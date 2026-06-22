@@ -91,6 +91,15 @@ def _load_index(game_format: str) -> tuple[CardHit, ...]:
             continue
         if not _format_legal(rec, game_format):
             continue
+        try:
+            from flesh_and_blood_rlbridge.card_db.talishar_card_ids import (  # noqa: PLC0415
+                load_talishar_card_ids,
+            )
+
+            if cid not in load_talishar_card_ids():
+                continue
+        except ImportError:
+            pass
         name = str(rec.get("name") or cid.replace("_", " ").title())
         pitch = rec.get("pitch")
         pitch_key = int(pitch) if pitch is not None else None
@@ -144,3 +153,16 @@ class CardSearchIndex:
             if hit.card_id == card_id or hit.card_id.lower() == token:
                 return hit
         return None
+
+
+def clear_card_db_caches() -> None:
+    """Drop in-process caches after ``cards.json`` is updated on disk."""
+    _load_index.cache_clear()
+    try:
+        from flesh_and_blood_rlbridge.card_db.talishar_card_ids import (  # noqa: PLC0415
+            clear_talishar_card_id_caches,
+        )
+
+        clear_talishar_card_id_caches()
+    except ImportError:
+        pass

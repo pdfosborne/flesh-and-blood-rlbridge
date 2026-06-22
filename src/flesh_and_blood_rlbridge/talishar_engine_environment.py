@@ -82,6 +82,11 @@ from rlbridge.environments.base import rlbridgeEnvironment
 from rlbridge.protocol.messages import RenderResult, ResetResult, StepResult, TextSpace
 
 from .combat_log_tracker import CombatTurnTracker, extract_talishar_chat_log_lines
+from .frontend_action_overlay import (
+    ActionCoachHint,
+    overlay_hints_payload,
+    playwright_update_overlay_script,
+)
 from .legal_action_filter import filter_legal_actions
 from .talishar_default_policy import (
     choose_talishar_action_index,
@@ -240,6 +245,14 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         verbose: bool = False,
         # Record per-step combat/turn traces and board-state action stats.
         enable_combat_tracker: bool = False,
+        # When ``render_mode="rgb_array"``, launch Playwright headless (default) or
+        # visible for live viewing.
+        playwright_headless: bool = True,
+        # Pin Talishar-FE to a fixed player view (e.g. 1 for human-vs-agent).
+        frontend_player_id: Optional[int] = None,
+        # Keep card hover previews in the Talishar FE (human play).  Disabled by
+        # default for rgb_array capture / spectator live view.
+        enable_frontend_card_hover: bool = False,
     ) -> None:
         self._base_url = (
             base_url or os.environ.get("TALISHAR_URL", "http://localhost")
@@ -261,6 +274,11 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         self._block_max_pitch_value = block_max_pitch_value
         self._block_min_resource_cost = block_min_resource_cost
         self._render_mode = render_mode
+        self._playwright_headless = bool(playwright_headless)
+        self._frontend_player_id = (
+            int(frontend_player_id) if frontend_player_id is not None else None
+        )
+        self._enable_frontend_card_hover = bool(enable_frontend_card_hover)
         self._render_width = int(
             render_width
             or os.environ.get("TALISHAR_RENDER_WIDTH", _DEFAULT_RENDER_WIDTH)
@@ -319,6 +337,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         self._pw_playwright: Any = None
         self._pw_cmd_queue: Any = None
         self._pw_worker_thread: Any = None
+        self._last_action_overlay_key: Optional[str] = None
 
         # ── C++ engine fast-path ──────────────────────────────────────────────
         # If a compiled fab_engine module exists for this matchup in the cache,
@@ -773,6 +792,72 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                 self._apply_last_update(probe)
                 return probe
         return self._fetch_state(player_id=self._acting_player_id, last_update=0)
+
+    def _adopt_server_state(self, state: dict[str, Any], acting_player_id: int) -> str:
+        """Sync wrapper state from a GetNextTurn snapshot and return observation."""
+        self._acting_player_id = acting_player_id
+        self._auth_key = self._auth_key_for(acting_player_id)
+        self._apply_last_update(state)
+        self._player_hp = int(state.get("playerHealth", self._player_hp))
+        self._opp_hp = int(state.get("opponentHealth", self._opp_hp))
+        self._last_state = state
+        legal_actions = self._legal_actions(state)
+        return self._encode_observation(state, legal_actions)
+
+    def wait_for_human_player(
+        self,
+        player_id: int = 1,
+        *,
+        poll_interval: float = 0.3,
+        max_wait_s: float = 3600.0,
+        on_waiting: Optional[Any] = None,
+    ) -> str:
+        """Block until *player_id* yields priority via the Talishar frontend.
+
+        The human submits actions through Talishar-FE (ProcessInput).  This
+        method polls until another player gains priority or the game ends.
+
+        *on_waiting* is called on each poll while *player_id* still has
+        priority.  Use it to refresh frontend coaching overlays.
+        """
+        deadline = time.time() + max_wait_s
+        last_overlay_poll = 0.0
+        while time.time() < deadline:
+            for pid in (1, 2):
+                probe = self._fetch_state(player_id=pid, last_update=0)
+                if self._is_game_over(probe):
+                    return self._adopt_server_state(probe, pid)
+
+            acting_pid: Optional[int] = None
+            acting_state: Optional[dict[str, Any]] = None
+            for pid in (1, 2):
+                probe = self._fetch_state(player_id=pid, last_update=0)
+                if probe.get("havePriority", False):
+                    acting_pid = pid
+                    acting_state = probe
+                    break
+
+            if acting_pid is None:
+                time.sleep(poll_interval)
+                continue
+            if acting_pid != player_id:
+                self.clear_frontend_action_overlay()
+                return self._adopt_server_state(acting_state, acting_pid)
+
+            now = time.time()
+            if on_waiting is not None and (now - last_overlay_poll) >= poll_interval:
+                try:
+                    on_waiting(acting_state)
+                except Exception:
+                    pass
+                last_overlay_poll = now
+
+            time.sleep(poll_interval)
+
+        raise TimeoutError(
+            f"Timed out after {max_wait_s:.0f}s waiting for player {player_id} "
+            "to act in the Talishar frontend."
+        )
 
     def _poll_until_priority(
         self,
@@ -1242,6 +1327,8 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
 
     def _render_player_id(self) -> int:
         """Player ID used for Talishar-FE rendering."""
+        if self._frontend_player_id is not None:
+            return self._frontend_player_id
         if self._self_play:
             return self._acting_player_id
         return 1
@@ -1255,7 +1342,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             "gameName": self._game_name,
             "playerID": str(player_id),
         }
-        if self._render_mode == "rgb_array":
+        if self._render_mode == "rgb_array" and not self._enable_frontend_card_hover:
             params["disableCardHover"] = "1"
         auth_key = self._auth_key_for(player_id)
         if auth_key:
@@ -1272,11 +1359,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                 # Fall back to built-in URL conventions.
                 pass
 
-        parsed = urllib.parse.urlsplit(self._frontend_url)
-        is_vite_dev = parsed.port == 5173
-        if is_vite_dev:
-            # Vite FE dev server generally serves from root and expects router/query handling client-side.
-            return f"{self._frontend_url}/?{query}"
+        # Talishar-FE routes live games through /game/play (dev + production).
         return f"{self._frontend_url}/game/play?{query}"
 
     def _open_frontend(self) -> Optional[str]:
@@ -1816,14 +1899,18 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         def _worker() -> None:
             try:
                 pw = _sync_playwright().start()
-                browser = pw.chromium.launch(headless=True)
+                browser = pw.chromium.launch(headless=self._playwright_headless)
                 ctx = browser.new_context(
                     viewport={"width": self._render_width, "height": self._render_height}
                 )
                 page = ctx.new_page()
                 init_script = _PLAYWRIGHT_GDPR_INIT_SCRIPT
-                if self._render_mode == "rgb_array":
+                if self._render_mode == "rgb_array" and not self._enable_frontend_card_hover:
                     init_script += _PLAYWRIGHT_DISABLE_CARD_HOVER_INIT_SCRIPT
+                elif self._enable_frontend_card_hover:
+                    init_script += (
+                        f"localStorage.removeItem('{_DISABLE_CARD_HOVER_STORAGE_KEY}');"
+                    )
                 page.add_init_script(init_script)
                 page.goto(url, timeout=20000)
                 page.wait_for_load_state("domcontentloaded", timeout=15000)
@@ -1886,6 +1973,45 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         self._pw_worker_thread = None
         self._pw_browser = None
         self._pw_playwright = None
+        self._last_action_overlay_key = None
+
+    def _run_playwright(self, fn: Any, *, timeout: float = 12.0) -> Any:
+        q = getattr(self, "_pw_cmd_queue", None)
+        if q is None or self._pw_page is None:
+            return None
+        import threading
+
+        result_box: list[Any] = []
+        done = threading.Event()
+        q.put((fn, done, result_box))
+        done.wait(timeout=timeout)
+        return result_box[0] if result_box else None
+
+    def update_frontend_action_overlay(
+        self,
+        hints: list[ActionCoachHint],
+        *,
+        state_key: Optional[str] = None,
+    ) -> None:
+        """Paint action coaching hints on the live Talishar frontend."""
+        if self._render_mode != "rgb_array":
+            return
+        if state_key is not None and state_key == self._last_action_overlay_key:
+            return
+        payload = overlay_hints_payload(hints)
+        script = playwright_update_overlay_script()
+
+        def _apply(page: Any, payload_json: str) -> None:
+            page.evaluate(f"({script})", json.loads(payload_json))
+
+        self._run_playwright(lambda page: _apply(page, payload), timeout=8.0)
+        self._last_action_overlay_key = state_key
+
+    def clear_frontend_action_overlay(self) -> None:
+        """Remove coaching highlights from the Talishar frontend."""
+        self._last_action_overlay_key = None
+        script = playwright_update_overlay_script()
+        self._run_playwright(lambda page: page.evaluate(f"({script})", []), timeout=5.0)
 
     def close(self) -> None:
         if self._using_cpp:
@@ -1906,6 +2032,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         self._last_state = {}
         self._initialized = False
         self._opened_frontend_url = None
+        self._last_action_overlay_key = None
         self._combat_tracker.clear()
 
     @property

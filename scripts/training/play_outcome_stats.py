@@ -130,8 +130,8 @@ def summarize_p1_outcomes(
 
 
 DEFAULT_EVAL_STABILITY_WINDOW = 3
-DEFAULT_EVAL_STABILITY_MAX_STD = 0.01
-DEFAULT_EVAL_STABILITY_MIN_POINTS = 5
+DEFAULT_EVAL_STABILITY_MAX_STD = 0.001
+DEFAULT_EVAL_STABILITY_MIN_POINTS = 3
 
 
 def rolling_std(values: list[float], window: int) -> Optional[float]:

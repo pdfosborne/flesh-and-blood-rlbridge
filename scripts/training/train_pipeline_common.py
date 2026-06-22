@@ -748,6 +748,33 @@ def _write_deck_file(
                 f"into header: {found}"
             )
 
+    if str(REPO_ROOT / "src") not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT / "src"))
+    from flesh_and_blood_rlbridge.card_db.talishar_card_ids import (  # noqa: PLC0415
+        sanitize_deck_for_talishar,
+    )
+
+    deck, deck_warnings = sanitize_deck_for_talishar(deck)
+    for warning in deck_warnings:
+        print(f"  [deck] {warning}")
+
+    if equipment_header:
+        from flesh_and_blood_rlbridge.card_db.talishar_card_ids import (  # noqa: PLC0415
+            TalisharCardIdResolver,
+        )
+
+        resolver = TalisharCardIdResolver()
+        header_parts = equipment_header.split()
+        if header_parts:
+            fixed_header: list[str] = []
+            for idx, part in enumerate(header_parts):
+                resolved = resolver.resolve(part) if idx > 0 else part
+                if idx > 0 and resolved is None:
+                    print(f"  [deck] Dropped unknown equipment id from header: {part}")
+                    continue
+                fixed_header.append(resolved if resolved is not None else part)
+            equipment_header = " ".join(fixed_header)
+
     card_ids: list[str] = []
     for card_id, count in sorted(deck.items()):
         card_ids.extend([card_id] * count)

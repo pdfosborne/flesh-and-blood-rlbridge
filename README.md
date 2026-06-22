@@ -19,6 +19,35 @@ This package wraps the [Talishar](https://talishar.net/) server into Gym-compati
 
 ---
 
+## Interactive launcher (`main.py`)
+
+The default entry point is a Rich-based terminal UI for running experiments without memorizing script paths:
+
+```bash
+python main.py          # launch the TUI (default)
+```
+
+
+### Main menu
+
+| # | Option | What it does |
+|---|--------|----------------|
+| **1** | Sideboard comparison | Full sideboard-tuning pipeline: pick your deck and a SAGE precon opponent, generate swap variants, train play agents in parallel, and compare candidates. |
+| **2** | Fixed deck simulation | Train play agents on two fixed decks (FaBrary URL/slug or local JSON) with optional C++ engine acceleration. |
+| **3** | Evaluate checkpoints | Win-rate evaluation or GIF render-only replay from saved phase-3 checkpoints; can watch for new checkpoints. |
+| **4** | Evaluate trained agent | Run additional Talishar eval games against a **completed** training run (latest checkpoint). |
+| **5** | Real-time Talishar play | Open the live Talishar frontend in Chromium to **watch** the agent or **play against it**. In human mode, choose trained vs opponent deck; optional agent-coach overlay shows policy % and C++ win estimates on your turns. |
+| **6** | Settings | Talishar backend/FE URLs, Assets path, FaBrary API key; rescan `cards.json` from the FAB Card Vault; normalize card IDs for Talishar. |
+
+Deck sources throughout the TUI include Talishar SAGE precons, FaBrary links/slugs, and saved sideboard lists.
+
+**Talishar requirements by menu option:**
+
+- Options **3–5** need the Talishar backend running (`.\start_talishar.ps1` or `-BackendOnly`).
+- Option **5** also needs Talishar-FE (`.\start_talishar.ps1` without `-BackendOnly`, or `-FeOnly` if the backend is already up).
+
+---
+
 ## Prerequisites
 
 | Dependency | Minimum version | Notes |
