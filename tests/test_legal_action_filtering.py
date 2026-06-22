@@ -793,8 +793,8 @@ def test_yesno_strips_yes_when_only_pool_resources_are_insufficient() -> None:
     assert filtered[0]["button_input"] == "NO"
 
 
-def test_filter_strips_undo_and_equip_outside_main_phase() -> None:
-    """Equipment activate + undo stall loops must not be offered to agents."""
+def test_filter_strips_undo_but_keeps_equipment_outside_main_phase() -> None:
+    """Undo/cancel stall loops must not be offered; equipment plays are allowed."""
     state = {"turnPhase": {"turnPhase": "INSTANT"}}
     legal = [
         {
@@ -821,9 +821,41 @@ def test_filter_strips_undo_and_equip_outside_main_phase() -> None:
     filtered = filter_legal_actions(state, legal)
     codes = {_a["action_code"] for _a in filtered}
 
-    assert 3 not in codes
+    assert 3 in codes
     assert 10000 not in codes
     assert 99 in codes
+
+
+def test_filter_strips_all_talishar_undo_modes() -> None:
+    """Every Talishar undo/revert mode must be removed from agent legal actions."""
+    state = {"turnPhase": {"turnPhase": "M"}, "playerHand": []}
+    undo_modes = (10000, 10001, 10003, 100016, 100017, 100018, 100019)
+    for mode in undo_modes:
+        legal = [
+            {
+                "action_code": 3,
+                "button_input": "0",
+                "zone": "equipment",
+                "card_id": "blossom_of_spring",
+                "label": "Blossom of Spring",
+            },
+            {
+                "action_code": mode,
+                "button_input": "",
+                "zone": "button",
+                "label": f"Undo mode {mode}",
+            },
+            {
+                "action_code": 99,
+                "button_input": "",
+                "zone": "button",
+                "label": "Pass",
+            },
+        ]
+        filtered = filter_legal_actions(state, legal)
+        codes = {_a["action_code"] for _a in filtered}
+        assert mode not in codes, f"mode {mode} should be stripped"
+        assert 3 in codes
 
 
 def test_filter_strips_revert_to_prior_turn() -> None:

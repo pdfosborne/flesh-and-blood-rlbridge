@@ -242,9 +242,11 @@ def filter_legal_actions(
         floated resources) to pay the card's cost; the arsenal card itself
         cannot be pitched for that payment.
 
-    **Rule 2 — equip removal** (all phases):
-        Remove mode-3 (Equip) actions entirely.  Equipment activation plus undo
-        is a common agent stall vector.
+    **Rule 2 — undo / cancel removal** (all phases, applied first and last):
+        Strip every undo, cancel, and revert action (modes 10000, 10001, 10003,
+        100016–100019, and button labels containing undo/cancel/revert).
+        Equipment plays (mode 3) are allowed; undo after equip is what caused
+        agent stall loops.
 
     **Rule 3 — pitch-phase Pass removal** (phase ``p``):
         Remove Pass (mode=99) from pitch-phase choices.
@@ -265,10 +267,6 @@ def filter_legal_actions(
         When no viable blockers remain, strip hand block plays so only pass
         remains.
 
-    **Rule 7 — undo / cancel removal** (all phases):
-        Handled by :func:`_strip_revert_actions`.  Agents never see undo,
-        cancel, or revert actions.
-
     **Rule 9 — per-turn play blacklist**:
         Drop hand/arsenal plays blacklisted after an unaffordable pitch abort.
 
@@ -280,15 +278,12 @@ def filter_legal_actions(
         Talishar revert loop.
     """
     phase = _get_phase(state)
-    filtered = list(legal_actions)
+    filtered = _strip_revert_actions(phase, list(legal_actions))
 
-    # ── Rules 1 & 2: main-phase ───────────────────────────────────────────
+    # ── Rule 1: main-phase affordability ───────────────────────────────────
     if phase == "m":
         affordable: list[dict[str, Any]] = []
         for action in filtered:
-            code = _to_int(action.get("action_code", 0))
-            if code == 3:
-                continue
             if not _is_affordable_hand_play(action, state):
                 continue
             if not _is_affordable_arsenal_play(action, state):
@@ -334,21 +329,13 @@ def filter_legal_actions(
         if no_pass:
             filtered = no_pass
 
-    # ── Rules 6 & 7: block / defense phases ───────────────────────────────
+    # ── Rule 6: block / defense phases ─────────────────────────────────────
     if phase in _BLOCK_PHASES | _DEFENSE_PHASES:
         filtered = _apply_block_phase_filter(
             state,
             filtered,
             block_blacklist=frozenset(block_blacklist),
         )
-
-    # ── Rule 2 (global): strip equipment activation in every phase ─────────
-    no_equip = [
-        a for a in filtered
-        if _to_int(a.get("action_code", 0)) != 3
-    ]
-    if no_equip:
-        filtered = no_equip
 
     filtered = _strip_revert_actions(phase, filtered)
     filtered = _strip_unaffordable_pay_yes_actions(state, filtered)

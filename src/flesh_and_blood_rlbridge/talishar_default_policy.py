@@ -160,7 +160,15 @@ def _is_revert_action(action: dict[str, Any]) -> bool:
     if code in _REVERT_MODE_CODES:
         return True
     label = _normalize(action.get("label", ""))
-    return "undo" in label or label == "cancel" or "revert" in label
+    if "undo" in label or "revert" in label:
+        return True
+    zone = _normalize(action.get("zone", ""))
+    # Talishar pitch/equipment follow-ups expose mode=10000 as "Cancel".
+    if zone in {"button", "popup"} and (
+        label == "cancel" or label.startswith("cancel ")
+    ):
+        return True
+    return False
 
 
 _REPEAT_ACTION_THRESHOLD = 3
@@ -537,13 +545,13 @@ def _apply_block_phase_filter(
     block_blacklist: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     """During block/defense phases, only offer viable blocks or pass."""
+    filtered = [a for a in filtered if not _is_revert_action(a)]
     pass_actions = [a for a in filtered if _is_pass_action(a)]
     auxiliary = [
         a for a in filtered
         if not _is_pass_action(a)
         and not _is_hand_block_action(a)
         and not _is_revert_action(a)
-        and _to_int(a.get("action_code", 0)) != 3
     ]
     viable_blocks = [
         a for a in filtered

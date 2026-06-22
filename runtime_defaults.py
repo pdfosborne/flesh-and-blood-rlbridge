@@ -24,7 +24,7 @@ class MetaRuntime:
     """Shared runtime knobs — edit this block for your machine and training budget."""
 
     # ── Parallelism ──────────────────────────────────────────────────────────
-    workers: int | None = 16*16  # C++ env workers (None = auto-detect)
+    workers: int | None = 16  # C++ env workers (None = auto-detect)
     parallel_seeds: int = 5  # independent seeds; best model used for eval
     sideboard_max_parallel: int = 0  # 0 = train all sideboard candidates at once
     eval_parallel_workers: int = 4
@@ -34,13 +34,13 @@ class MetaRuntime:
 
     # ── Checkpoints during training ──────────────────────────────────────────
     checkpoint_interval_pct: float = 5.0
-    checkpoint_eval_episodes: int = 1000
-    play_checkpoint_interval: int | None = int(play_episodes/20) # 10% of play episodes
+    checkpoint_eval_episodes: int = int(play_episodes/100) # 1% of play episodes
+    play_checkpoint_interval: int | None = int(play_episodes/10) # 10% of play episodes
 
     # ── Per-episode limits & warmup ──────────────────────────────────────────
     max_play_steps: int = 1_000  # max turns per play-training episode (all workflows)
     warmup_episodes: int = 100  # heuristic-policy episodes before PPO
-    warmup_baseline_eval_episodes: int = 100
+    warmup_baseline_eval_episodes: int = 0
 
     # ── Training Checkpoint evaluation (uses cpp engine if possible)  ────────
     eval_episodes: int = 100  # checkpoint / phase-3 eval watcher
