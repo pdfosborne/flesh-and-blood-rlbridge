@@ -5,7 +5,13 @@ from __future__ import annotations
 import json
 import os
 import sys
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+import threading
+from concurrent.futures import (
+    FIRST_COMPLETED,
+    ProcessPoolExecutor,
+    ThreadPoolExecutor,
+    wait,
+)
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -219,6 +225,127 @@ def merge_parallel_seed_training_live(
     return merged
 
 
+def _read_seed_training_lives(seed_dirs: list[Path]) -> list[dict[str, Any]]:
+    lives: list[dict[str, Any]] = []
+    for seed_dir in seed_dirs:
+        path = seed_dir / "play_training_live.json"
+        if not path.is_file():
+            continue
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if isinstance(raw, dict):
+            row = dict(raw)
+            row["seed_index"] = _seed_index_from_dir(seed_dir)
+            lives.append(row)
+    return lives
+
+
+def _format_parallel_seed_progress_line(
+    *,
+    label: str,
+    n_seeds: int,
+    seed_dirs: list[Path],
+) -> str:
+    lives = _read_seed_training_lives(seed_dirs)
+    title = label.replace(" · ", " / ")
+    width = 28
+    if not lives:
+        bar = "░" * width
+        return (
+            f"  ▕{bar}▏       "
+            f"{title:<48} waiting for {n_seeds} seed(s)..."
+        )
+    fastest = max(
+        lives,
+        key=lambda row: (
+            int(row.get("episodes_completed", 0) or 0),
+            float(row.get("episode_rate", 0.0) or 0.0),
+        ),
+    )
+    completed = int(fastest.get("episodes_completed", 0) or 0)
+    target = int(fastest.get("target_episodes", 0) or 0)
+    pct = (completed / max(1, target)) * 100.0 if target else 0.0
+    filled = max(0, min(width, int(round(width * pct / 100.0))))
+    bar = "█" * filled + "░" * (width - filled)
+    elapsed = float(fastest.get("elapsed_seconds", 0.0) or 0.0)
+    rate = float(fastest.get("episode_rate", 0.0) or 0.0)
+    eta = float(fastest.get("eta_seconds", 0.0) or 0.0)
+    if not (eta < float("inf")):
+        eta = 0.0
+    timeouts = int(fastest.get("timeouts", 0) or 0)
+    timeout_rate = float(fastest.get("timeout_rate", 0.0) or 0.0) * 100.0
+    p1_avg = float(fastest.get("p1_avg", 0.0) or 0.0)
+    p2_avg = float(fastest.get("p2_avg", 0.0) or 0.0)
+    seed_idx = int(fastest.get("seed_index", 0) or 0)
+    phase = "warmup" if bool(fastest.get("warmup", False)) else "train "
+    return (
+        f"  ▕{bar}▏ {pct:6.2f}%  {title:<48} "
+        f"ep {completed:>5}/{target:<5}  "
+        f"seed {seed_idx:<2}  {phase}  "
+        f"{rate:5.2f} ep/s  eta {eta / 60:5.1f}m  "
+        f"T {timeouts} ({timeout_rate:.1f}%)  "
+        f"r {p1_avg:+.2f}/{p2_avg:+.2f}  "
+        f"{elapsed:.0f}s"
+    )
+
+
+class _TerminalProgressRenderer:
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._lines: dict[str, str] = {}
+        self._order: list[str] = []
+        self._rendered_lines = 0
+
+    def _clear_rendered_locked(self) -> None:
+        if self._rendered_lines <= 0:
+            return
+        sys.stdout.write(f"\x1b[{self._rendered_lines}F")
+        for _ in range(self._rendered_lines):
+            sys.stdout.write("\x1b[2K\n")
+        sys.stdout.write(f"\x1b[{self._rendered_lines}F")
+        self._rendered_lines = 0
+
+    def _render_locked(self) -> None:
+        self._clear_rendered_locked()
+        active = [key for key in self._order if key in self._lines]
+        if not active:
+            sys.stdout.flush()
+            return
+        for key in active:
+            sys.stdout.write("\x1b[2K" + self._lines[key] + "\n")
+        self._rendered_lines = len(active)
+        sys.stdout.flush()
+
+    def update(self, key: str, line: str) -> None:
+        with self._lock:
+            if key not in self._order:
+                self._order.append(key)
+            self._lines[key] = line
+            self._render_locked()
+
+    def finish(self, key: str) -> None:
+        with self._lock:
+            self._lines.pop(key, None)
+            self._render_locked()
+
+    def clear(self) -> None:
+        with self._lock:
+            self._clear_rendered_locked()
+            sys.stdout.flush()
+
+    def print_lines(self, lines: list[str]) -> None:
+        with self._lock:
+            self._clear_rendered_locked()
+            for line in lines:
+                print(line)
+            sys.stdout.flush()
+
+
+_PROGRESS_RENDERER = _TerminalProgressRenderer()
+
+
 def sync_parallel_seed_dashboard_artifacts(out_dir: Path) -> None:
     """Write merged checkpoint eval + training live files for the HTML dashboard."""
     merge_parallel_seed_checkpoint_history(out_dir, write=True)
@@ -298,10 +425,13 @@ def run_parallel_seed_jobs(
     seeds_root = out_dir / "parallel_seeds"
     seeds_root.mkdir(parents=True, exist_ok=True)
     mode = "process" if (use_processes and process_jobs) else "thread"
-    print(
-        f"  Parallel seeds: {n_seeds} independent {label} run(s) "
-        f"({mode}, {workers_per_seed} worker(s)/seed) → {seeds_root}"
-    )
+    progress_key = f"{out_dir.resolve()}::{label}"
+    _PROGRESS_RENDERER.print_lines([
+        (
+            f"  Parallel seeds: {n_seeds} independent {label} run(s) "
+            f"({mode}, {workers_per_seed} worker(s)/seed) → {seeds_root}"
+        )
+    ])
 
     rows: list[dict[str, Any]] = []
 
@@ -312,22 +442,50 @@ def run_parallel_seed_jobs(
                 pool.submit(_process_pool_entry, payload): int(payload["seed_index"])
                 for payload in process_jobs
             }
-            for fut in as_completed(futures):
-                seed_index = futures[fut]
-                try:
-                    row = fut.result()
-                except Exception as exc:
-                    raise RuntimeError(
-                        f"Parallel seed {seed_index} failed during {label}: {exc}"
-                    ) from exc
-                row.setdefault("seed_index", seed_index)
-                rows.append(row)
-                if on_seed_complete is not None:
-                    on_seed_complete(row)
+            seed_dirs = [
+                Path(str(payload["seed_out"]))
+                for payload in process_jobs
+                if payload.get("seed_out")
+            ]
+            pending = set(futures)
+            failed = False
+            try:
+                while pending:
+                    done, pending = wait(
+                        pending,
+                        timeout=1.0,
+                        return_when=FIRST_COMPLETED,
+                    )
+                    _PROGRESS_RENDERER.update(
+                        progress_key,
+                        _format_parallel_seed_progress_line(
+                            label=label,
+                            n_seeds=n_seeds,
+                            seed_dirs=seed_dirs,
+                        )
+                    )
+                    for fut in done:
+                        seed_index = futures[fut]
+                        try:
+                            row = fut.result()
+                        except Exception as exc:
+                            failed = True
+                            _PROGRESS_RENDERER.finish(progress_key)
+                            raise RuntimeError(
+                                f"Parallel seed {seed_index} failed during {label}: {exc}"
+                            ) from exc
+                        row.setdefault("seed_index", seed_index)
+                        rows.append(row)
+                        if on_seed_complete is not None:
+                            on_seed_complete(row)
+            finally:
+                if not failed:
+                    _PROGRESS_RENDERER.finish(progress_key)
     else:
         if job_fn is None:
             raise ValueError("run_parallel_seed_jobs requires job_fn or process_jobs")
         with ThreadPoolExecutor(max_workers=n_seeds) as pool:
+            seed_dirs = [seeds_root / f"seed_{seed_index}" for seed_index in range(n_seeds)]
             futures = {
                 pool.submit(
                     job_fn,
@@ -337,18 +495,40 @@ def run_parallel_seed_jobs(
                 ): seed_index
                 for seed_index in range(n_seeds)
             }
-            for fut in as_completed(futures):
-                seed_index = futures[fut]
-                try:
-                    row = fut.result()
-                except Exception as exc:
-                    raise RuntimeError(
-                        f"Parallel seed {seed_index} failed during {label}: {exc}"
-                    ) from exc
-                row.setdefault("seed_index", seed_index)
-                rows.append(row)
-                if on_seed_complete is not None:
-                    on_seed_complete(row)
+            pending = set(futures)
+            failed = False
+            try:
+                while pending:
+                    done, pending = wait(
+                        pending,
+                        timeout=1.0,
+                        return_when=FIRST_COMPLETED,
+                    )
+                    _PROGRESS_RENDERER.update(
+                        progress_key,
+                        _format_parallel_seed_progress_line(
+                            label=label,
+                            n_seeds=n_seeds,
+                            seed_dirs=seed_dirs,
+                        )
+                    )
+                    for fut in done:
+                        seed_index = futures[fut]
+                        try:
+                            row = fut.result()
+                        except Exception as exc:
+                            failed = True
+                            _PROGRESS_RENDERER.finish(progress_key)
+                            raise RuntimeError(
+                                f"Parallel seed {seed_index} failed during {label}: {exc}"
+                            ) from exc
+                        row.setdefault("seed_index", seed_index)
+                        rows.append(row)
+                        if on_seed_complete is not None:
+                            on_seed_complete(row)
+            finally:
+                if not failed:
+                    _PROGRESS_RENDERER.finish(progress_key)
 
     rows.sort(key=lambda row: int(row.get("seed_index", 0)))
     sync_parallel_seed_dashboard_artifacts(out_dir)
@@ -360,20 +540,21 @@ def run_parallel_seed_jobs(
     else:
         _, _, best_p1_idx, best_p2_idx = select_best_agents_by_win_rate(rows)
 
-    print(f"\n  Seed training win rates ({n_seeds} seeds, avg shown):")
+    summary_lines = [f"\n  Seed training win rates ({n_seeds} seeds, avg shown):"]
     for row in rows:
-        print(
+        summary_lines.append(
             f"    seed {row.get('seed_index')}: "
             f"p1={float(row['p1_win_rate']):.1%}  "
             f"p2={float(row['p2_win_rate']):.1%}"
         )
-    print(
+    summary_lines.append(
         f"  Average train win%: p1={avg_p1:.1%}  p2={avg_p2:.1%}"
     )
-    print(
+    summary_lines.append(
         f"  Selected for eval: best P1 from seed {best_p1_idx}, "
         f"best P2 from seed {best_p2_idx}"
     )
+    _PROGRESS_RENDERER.print_lines(summary_lines)
 
     summary = ParallelSeedSummary(
         n_seeds=n_seeds,

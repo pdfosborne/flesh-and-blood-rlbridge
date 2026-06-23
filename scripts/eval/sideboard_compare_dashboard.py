@@ -154,6 +154,142 @@ def _live_training_progress(candidate_dir: Path) -> Optional[dict[str, Any]]:
     return None
 
 
+def _seed_live_rows(candidate_dir: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seeds_root = candidate_dir / "parallel_seeds"
+    if not seeds_root.is_dir():
+        return rows
+    for seed_dir in sorted(seeds_root.glob("seed_*")):
+        if not seed_dir.is_dir():
+            continue
+        live_path = seed_dir / "play_training_live.json"
+        if not live_path.is_file():
+            continue
+        data = _read_json(live_path)
+        if isinstance(data, dict):
+            rows.append(data)
+    return rows
+
+
+def _bool_manifest(manifest: dict[str, Any], key: str, default: bool) -> bool:
+    if key not in manifest:
+        return default
+    value = manifest.get(key)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _training_plan(
+    manifest: dict[str, Any],
+    *,
+    play_episodes: int,
+    parallel_seeds: int,
+) -> dict[str, Any]:
+    checkpoint = int(manifest.get("checkpoint_interval", 0) or 0)
+    checkpoint = max(0, min(int(play_episodes), checkpoint))
+    warmup = int(manifest.get("warmup_episodes", 0) or 0)
+    warmup = max(0, min(int(play_episodes), warmup))
+    staged = _bool_manifest(
+        manifest,
+        "parallel_seeds_until_first_checkpoint",
+        True,
+    )
+    seeds = max(1, int(parallel_seeds or 1))
+    return {
+        "checkpoint": checkpoint,
+        "warmup": warmup,
+        "parallel_seeds": seeds,
+        "staged": staged,
+        "total": int(max(0, play_episodes)),
+    }
+
+
+def _staged_training_progress(
+    candidate_dir: Optional[Path],
+    *,
+    manifest: dict[str, Any],
+    play_episodes: int,
+    parallel_seeds: int,
+    live_training: Optional[dict[str, Any]],
+    training_meta: Optional[dict[str, Any]],
+    result: Optional[dict[str, Any]],
+) -> dict[str, Any]:
+    plan = _training_plan(
+        manifest,
+        play_episodes=play_episodes,
+        parallel_seeds=parallel_seeds,
+    )
+    target = int(plan["total"])
+    checkpoint = int(plan["checkpoint"])
+    seeds = int(plan["parallel_seeds"])
+    staged = bool(plan["staged"])
+
+    done = 0
+    seed_rows = _seed_live_rows(candidate_dir) if candidate_dir is not None else []
+    if seed_rows and seeds > 1 and play_episodes > 0:
+        if staged and 0 < checkpoint < play_episodes:
+            remaining = play_episodes - checkpoint
+            continuation_done: list[int] = []
+            first_stage_done: list[int] = []
+            for row in seed_rows:
+                ep = int(row.get("episodes_completed", 0) or 0)
+                row_target = int(row.get("target_episodes", 0) or 0)
+                if row_target == remaining or row_target > checkpoint:
+                    continuation_done.append(checkpoint + min(ep, remaining))
+                else:
+                    first_stage_done.append(min(ep, checkpoint))
+            done = (
+                max(continuation_done)
+                if continuation_done
+                else max(first_stage_done, default=0)
+            )
+        else:
+            done = max(
+                (
+                    min(
+                        int(row.get("episodes_completed", 0) or 0),
+                        play_episodes,
+                    )
+                    for row in seed_rows
+                ),
+                default=0,
+            )
+    elif live_training:
+        done = int(live_training.get("episodes_completed", 0) or 0)
+    elif training_meta:
+        done = int(training_meta.get("episodes_completed", 0) or 0)
+    elif result is not None:
+        done = target
+
+    done = max(0, min(int(done), target if target else int(done)))
+    warmup = int(plan["warmup"])
+    if target <= 0:
+        stage = "Queued"
+    elif warmup > 0 and done < warmup:
+        stage = "Logic-policy warmup"
+    elif seeds > 1 and staged and 0 < checkpoint < play_episodes:
+        stage = (
+            "Parallel seeds to first checkpoint"
+            if done < checkpoint
+            else "Best-seed continuation"
+        )
+    elif seeds > 1:
+        stage = "Parallel seed training"
+    else:
+        stage = "Training"
+
+    return {
+        "done": done,
+        "target": target or play_episodes,
+        "pct": (done / target * 100.0) if target else 0.0,
+        "stage": stage,
+        "plan": plan,
+    }
+
+
 def _checkpoint_eval_series(candidate_dir: Path) -> list[dict[str, Any]]:
     if (candidate_dir / "parallel_seeds").is_dir():
         _training_root = _SCRIPTS_ROOT / "training"
@@ -282,6 +418,11 @@ def collect_sideboard_compare_state(out_dir: Path) -> dict[str, Any]:
         manifest.get("checkpoint_eval_episodes", 0) or 0
     )
     parallel_seeds = int(manifest.get("parallel_seeds", 1) or 1)
+    progress_plan = _training_plan(
+        manifest,
+        play_episodes=play_episodes,
+        parallel_seeds=parallel_seeds,
+    )
     skip_final_eval = bool(manifest.get("skip_final_eval", False))
     started_at = _parse_started_at(manifest, out_dir)
 
@@ -317,29 +458,31 @@ def collect_sideboard_compare_state(out_dir: Path) -> dict[str, Any]:
             eval_series = _checkpoint_eval_series(candidate_dir)
             train_series = _training_win_series(candidate_dir)
 
+        training_progress = _staged_training_progress(
+            candidate_dir,
+            manifest=manifest,
+            play_episodes=play_episodes,
+            parallel_seeds=parallel_seeds,
+            live_training=live_training,
+            training_meta=training_meta,
+            result=result,
+        )
+        train_done = int(training_progress["done"])
+        train_target = int(training_progress["target"])
         status = _candidate_status(
             result=result,
             training_meta=training_meta,
             skip_final_eval=skip_final_eval,
         )
+        if train_target > 0 and 0 < train_done < train_target:
+            status = "training"
 
-        train_done = 0
-        train_target = play_episodes
-        if live_training:
-            train_done = int(live_training.get("episodes_completed", 0) or 0)
-            train_target = int(live_training.get("target_episodes", play_episodes) or play_episodes)
-        elif training_meta:
-            train_done = int(training_meta.get("episodes_completed", 0) or 0)
-            train_target = int(training_meta.get("target_episodes", play_episodes) or play_episodes)
-        elif result is not None:
-            train_done = play_episodes
-
-        candidate_units = play_episodes
+        candidate_units = train_target
         if not skip_final_eval:
             candidate_units += final_eval_episodes
         total_units += candidate_units
 
-        done_units = min(train_done, play_episodes)
+        done_units = min(train_done, train_target)
         if not skip_final_eval and result and result.get("final_eval_win_rate") is not None:
             done_units += final_eval_episodes
         elif not skip_final_eval and status == "final_eval":
@@ -448,7 +591,9 @@ def collect_sideboard_compare_state(out_dir: Path) -> dict[str, Any]:
             "guide_margin": raw.get("guide_margin"),
             "train_done": train_done,
             "train_target": train_target,
-            "train_pct": (train_done / train_target * 100.0) if train_target else 0.0,
+            "train_pct": float(training_progress["pct"]),
+            "training_stage": training_progress["stage"],
+            "training_plan": training_progress["plan"],
             "play_win_rate": play_win_rate,
             "train_wins": train_wins,
             "train_losses": train_losses,
@@ -522,6 +667,9 @@ def collect_sideboard_compare_state(out_dir: Path) -> dict[str, Any]:
         "checkpoint_interval": manifest.get("checkpoint_interval"),
         "checkpoint_eval_episodes": manifest.get("checkpoint_eval_episodes"),
         "parallel_seeds": parallel_seeds,
+        "parallel_seeds_until_first_checkpoint": progress_plan["staged"],
+        "effective_training_episodes": progress_plan["total"],
+        "warmup_episodes": progress_plan["warmup"],
         "cpp_engine_dir": manifest.get("cpp_engine_dir"),
         "complete": summary is not None,
         "winner_id": winner,
@@ -874,7 +1022,7 @@ def _render_candidate_card(row: dict[str, Any], *, play_episodes: int) -> str:
   </section>
   <section class="progress-block">
     <div class="progress-label">
-      <span>Training</span>
+      <span>Training · {html.escape(str(row.get("training_stage", "Training")))}</span>
       <span>{int(row.get("train_done", 0))}/{int(row.get("train_target", 0))} episodes</span>
     </div>
     <div class="progress-bar"><div class="progress-fill" style="width:{float(row.get("train_pct", 0)):.1f}%"></div></div>
@@ -938,6 +1086,11 @@ def render_sideboard_compare_html(
             f"Checkpoints every {int(state['checkpoint_interval'])} ep · "
             f"{int(state.get('checkpoint_eval_episodes') or 0)} eval games"
         )
+    staged_parallel = (
+        int(state.get("parallel_seeds", 1) or 1) > 1
+        and bool(state.get("parallel_seeds_until_first_checkpoint"))
+    )
+    staged_info = " · best seed continues after first checkpoint" if staged_parallel else ""
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -1183,7 +1336,7 @@ def render_sideboard_compare_html(
     <section class="overall">
       <div class="progress-label"><span>Run progress</span><span>{float(state.get("overall_pct", 0)):.1f}%</span></div>
       <div class="progress-bar"><div class="progress-fill" style="width:{float(state.get("overall_pct", 0)):.1f}%"></div></div>
-      <p class="sub" style="margin:10px 0 0">{play_episodes} training episodes/candidate · {html.escape(ckpt_info)}</p>
+      <p class="sub" style="margin:10px 0 0">{play_episodes} policy episodes/candidate{html.escape(staged_info)} · {html.escape(ckpt_info)}</p>
     </section>
 
     <div class="grid">
@@ -1249,15 +1402,6 @@ def main() -> None:
         )
         state = collect_sideboard_compare_state(out_dir)
         complete = bool(state.get("complete"))
-        n_done = sum(1 for c in state.get("candidates", []) if c.get("status") == "complete")
-        n_total = len(state.get("candidates", []))
-        print(
-            f"  [poll {poll}] {html_path.name} updated — "
-            f"{state.get('overall_pct', 0):.1f}% overall, "
-            f"{n_done}/{n_total} candidates done, "
-            f"ETA {state.get('eta_label', '—')}",
-            flush=True,
-        )
 
         if args.open_browser and not opened:
             webbrowser.open(html_path.resolve().as_uri())

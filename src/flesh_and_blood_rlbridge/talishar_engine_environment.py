@@ -1331,6 +1331,41 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         """Return filtered legal actions for *state* (single call-site helper)."""
         return self._filter_legal_actions(state, self._extract_legal_actions(state))
 
+    def _fast_compatible_legal_actions(
+        self,
+        state: dict[str, Any],
+        legal_actions: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Return legal actions ordered like generated C++ ``fast_step_index``.
+
+        Fast C++ training indexes playable hand cards by hand slot, then maps
+        any remaining index to Pass.  Talishar exposes a richer, engine-native
+        action list, so final eval must publish a compatible ordered subset for
+        agents trained on the fast C++ action space.
+        """
+        by_button: dict[str, dict[str, Any]] = {
+            str(action.get("button_input", "") or ""): action
+            for action in legal_actions
+            if str(action.get("zone", "") or "").lower() == "hand"
+            and _dp_to_int(action.get("action_code", 0)) == 27
+        }
+        ordered: list[dict[str, Any]] = []
+        for i, card in enumerate(state.get("playerHand", [])):
+            if not isinstance(card, dict):
+                continue
+            button = str(card.get("actionDataOverride", str(i)))
+            action = by_button.get(button)
+            if action is not None:
+                ordered.append(action)
+
+        pass_actions = [action for action in legal_actions if _is_pass_action(action)]
+        if pass_actions:
+            ordered.append(pass_actions[0])
+
+        if ordered:
+            return ordered
+        return legal_actions
+
     def _encode_observation(
         self,
         state: dict[str, Any],
@@ -1347,6 +1382,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             for c in state.get("playerHand", [])
             if isinstance(c, dict)
         ]
+        fast_legal_actions = self._fast_compatible_legal_actions(state, legal_actions)
         obs: dict[str, Any] = {
             "actingPlayerID": self._acting_player_id,
             "selfPlay": self._self_play,
@@ -1363,13 +1399,13 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             "playerHand": hand,
             "legalActions": [
                 {"index": i, "label": a["label"], "zone": a["zone"]}
-                for i, a in enumerate(legal_actions)
+                for i, a in enumerate(fast_legal_actions)
             ],
-            "legal_actions": legal_actions,
+            "legal_actions": fast_legal_actions,
         }
         self._last_observation_vec = fast_observation_vector(
             obs,
-            legal_actions,
+            fast_legal_actions,
             acting_player_id=self._acting_player_id,
             p1_health=(
                 _dp_to_int(obs["playerHealth"])

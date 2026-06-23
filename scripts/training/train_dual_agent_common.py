@@ -1156,6 +1156,7 @@ def train_agents_from_both_perspectives_parallel(
     on_episodes_progress: Optional[
         Callable[..., None]
     ] = None,
+    suppress_train_progress: bool = False,
 ) -> tuple[list[float], list[float], dict[str, Any]]:
     """Parallel rollout version of ``train_agents_from_both_perspectives``.
 
@@ -1448,10 +1449,13 @@ def train_agents_from_both_perspectives_parallel(
 
                 # Progress logging.
                 if (
+                    not suppress_train_progress
+                    and (
                     completed <= max(10, batch_parallelism)
                     or completed % batch_progress == 0
                     or completed % progress_every == 0
                     or completed == n_episodes
+                    )
                 ):
                     elapsed  = time.time() - progress_t0
                     pct      = (completed / max(1, n_episodes)) * 100.0
@@ -1507,6 +1511,7 @@ def train_agents_from_both_perspectives(
     episode_cache: Optional[EpisodeCache] = None,
     p1_deck: str = "",
     p2_deck: str = "",
+    suppress_train_progress: bool = False,
 ) -> tuple[list[float], list[float], dict[str, Any]]:
     p1_policy = p1_tiers[0]
     p2_policy = p2_tiers[0]
@@ -1722,9 +1727,12 @@ def train_agents_from_both_perspectives(
             _ep_p2_trans = []
 
             if (
+                not suppress_train_progress
+                and (
                 completed <= 10  # dense startup visibility
                 or completed == n_episodes
                 or completed % progress_every == 0
+                )
             ):
                 elapsed = time.time() - progress_t0
                 pct = (completed / max(1, n_episodes)) * 100.0

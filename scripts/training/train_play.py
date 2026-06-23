@@ -443,6 +443,7 @@ def execute_play_parallel_seed_job(payload: dict[str, Any]) -> dict[str, Any]:
         _retain_temp_decks=True,
         _skip_cache_converge=True,
         _force_train=True,
+        _suppress_train_progress=bool(payload.get("suppress_train_progress", False)),
         _parallel_seed_sync_dir=Path(sync_dir) if sync_dir else None,
         **run_kwargs,
     )
@@ -484,6 +485,7 @@ def _run_phase3_play_parallel_seeds(
     checkpoint_interval_pct: float,
     checkpoint_eval_episodes: int,
     parallel_seeds_until_first_checkpoint: bool,
+    parallel_progress_label: Optional[str],
 ) -> tuple[float, float]:
     workers_per_seed = workers_per_parallel_seed(n_workers, parallel_seeds)
     if n_workers is not None and workers_per_seed != n_workers:
@@ -542,6 +544,7 @@ def _run_phase3_play_parallel_seeds(
                 "seed": seed_i,
                 "seed_out": str(seeds_root / f"seed_{seed_index}"),
                 "parallel_seed_sync_dir": str(out_dir),
+                "suppress_train_progress": True,
                 "p1": _serialize_phase_agent_for_process(
                     p1_copy, seed_staging / "p1", role="p1"
                 ),
@@ -598,7 +601,11 @@ def _run_phase3_play_parallel_seeds(
                     out_dir,
                     process_jobs=first_jobs,
                     workers_per_seed=workers_per_seed,
-                    label="play training first checkpoint",
+                    label=(
+                        f"{parallel_progress_label} · first checkpoint"
+                        if parallel_progress_label
+                        else "play training first checkpoint"
+                    ),
                     on_seed_complete=lambda _row: _sync_parent_dashboard(),
                 )
             finally:
@@ -697,7 +704,11 @@ def _run_phase3_play_parallel_seeds(
                     out_dir,
                     process_jobs=continuation_jobs,
                     workers_per_seed=workers_per_seed,
-                    label="play training best-seed continuation",
+                    label=(
+                        f"{parallel_progress_label} · best-seed continuation"
+                        if parallel_progress_label
+                        else "play training best-seed continuation"
+                    ),
                     on_seed_complete=lambda _row: _sync_parent_dashboard(),
                 )
             finally:
@@ -753,7 +764,7 @@ def _run_phase3_play_parallel_seeds(
                     out_dir,
                     process_jobs=process_jobs,
                     workers_per_seed=workers_per_seed,
-                    label="play training",
+                    label=parallel_progress_label or "play training",
                     on_seed_complete=lambda _row: _sync_parent_dashboard(),
                 )
             finally:
@@ -768,7 +779,7 @@ def _run_phase3_play_parallel_seeds(
                 out_dir,
                 process_jobs=process_jobs,
                 workers_per_seed=workers_per_seed,
-                label="play training",
+                label=parallel_progress_label or "play training",
                 on_seed_complete=lambda _row: _sync_parent_dashboard(),
             )
         finally:
@@ -878,10 +889,12 @@ def run_phase3_play(
     checkpoint_eval_episodes: int = DEFAULT_CHECKPOINT_EVAL_EPISODES,
     parallel_seeds: int = 1,
     parallel_seeds_until_first_checkpoint: bool = RUNTIME.play.parallel_seeds_until_first_checkpoint,
+    parallel_progress_label: Optional[str] = None,
     _seed_run_capture: Optional[dict[str, Any]] = None,
     _retain_temp_decks: bool = False,
     _skip_cache_converge: bool = False,
     _force_train: bool = False,
+    _suppress_train_progress: bool = False,
     _parallel_seed_sync_dir: Optional[Path] = None,
 ) -> tuple[float, float]:
     """Co-evolution play using train_dual_agent_common warmup + episode-cache infrastructure.
@@ -923,6 +936,7 @@ def run_phase3_play(
             checkpoint_interval_pct=checkpoint_interval_pct,
             checkpoint_eval_episodes=checkpoint_eval_episodes,
             parallel_seeds_until_first_checkpoint=parallel_seeds_until_first_checkpoint,
+            parallel_progress_label=parallel_progress_label,
         )
     print(
         f"\n{'='*62}\n"
@@ -1323,6 +1337,45 @@ def run_phase3_play(
     p1_outcomes: list[str] = []
     baseline_saved = False
     last_checkpoint_at = 0
+    progress_t0 = datetime.now()
+
+    def _write_play_training_live(
+        completed: int,
+        p1_r: list[float],
+        p2_r: list[float],
+        outcomes: Optional[list[str]] = None,
+    ) -> None:
+        nonlocal p1_outcomes
+        if outcomes is not None:
+            p1_outcomes = outcomes
+        summary = summarize_p1_outcomes(
+            p1_outcomes[:completed],
+            episodes=completed,
+        )
+        elapsed = max((datetime.now() - progress_t0).total_seconds(), 1e-9)
+        ep_rate = completed / elapsed
+        eta_seconds = (
+            (n_episodes - completed) / ep_rate
+            if ep_rate > 0
+            else float("inf")
+        )
+        point = {
+            "episodes_completed": completed,
+            "target_episodes": n_episodes,
+            "updated_at": datetime.now().isoformat(),
+            "runtime_backend": train_runtime_backend,
+            "elapsed_seconds": elapsed,
+            "episode_rate": ep_rate,
+            "eta_seconds": eta_seconds,
+            "warmup": completed < warmup_episodes,
+            "p1_avg": float(np.mean(p1_r)) if p1_r else 0.0,
+            "p2_avg": float(np.mean(p2_r)) if p2_r else 0.0,
+            **summary,
+        }
+        live_path = out_dir / "play_training_live.json"
+        live_path.write_text(json.dumps(point, indent=2), encoding="utf-8")
+        if _parallel_seed_sync_dir is not None:
+            sync_parallel_seed_dashboard_artifacts(_parallel_seed_sync_dir)
 
     def _on_episodes_progress(
         completed: int,
@@ -1333,8 +1386,7 @@ def run_phase3_play(
         nonlocal baseline_saved, last_checkpoint_at, p1_rewards, p2_rewards, p1_outcomes
         p1_rewards = p1_r
         p2_rewards = p2_r
-        if outcomes is not None:
-            p1_outcomes = outcomes
+        _write_play_training_live(completed, p1_r, p2_r, outcomes)
         if (
             not baseline_saved
             and warmup_episodes > 0
@@ -1370,6 +1422,7 @@ def run_phase3_play(
                 live_state_image_path=live_path,
                 episode_cache=episode_cache,
                 on_episodes_progress=_on_episodes_progress,
+                suppress_train_progress=_suppress_train_progress,
             )
             p1_outcomes = list(train_stats.get("p1_outcomes") or p1_outcomes)
             if (
@@ -1428,6 +1481,7 @@ def run_phase3_play(
                         episode_cache=episode_cache,
                         p1_deck=p1_deck_name,
                         p2_deck=p2_deck_name,
+                        suppress_train_progress=_suppress_train_progress,
                     )
                     p1_rewards.extend(c_p1)
                     p2_rewards.extend(c_p2)
@@ -2885,7 +2939,7 @@ def run_final_evaluation(
     -----
     1. Select the best sidebaorded game deck (or fall back to card pool).
     2. Write a temporary deck file to Talishar Assets.
-    3. Run ``num_eval_episodes`` games with the trained play agent (greedy),
+    3. Run ``num_eval_episodes`` games with the trained sampled play policy,
        recording win / loss / draw for each episode.
     4. Render one full rollout by screenshotting the live Talishar frontend
        (Playwright + Chromium headless) after every game step, saving
@@ -2978,10 +3032,10 @@ def run_final_evaluation(
                 terminated = False
                 truncated = False
                 while not done:
-                    if agents.play is not None and hasattr(agents.play, "act_greedy"):
-                        action = agents.play.act_greedy(obs)
-                    elif agents.play is not None and hasattr(agents.play, "act"):
+                    if agents.play is not None and hasattr(agents.play, "act"):
                         action = agents.play.act(obs)
+                    elif agents.play is not None and hasattr(agents.play, "act_greedy"):
+                        action = agents.play.act_greedy(obs)
                     else:
                         action = env.sample_action()
                     step = env.step(action)

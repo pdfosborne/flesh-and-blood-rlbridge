@@ -35,12 +35,12 @@ class MetaRuntime:
 
     # ── Checkpoints during training ──────────────────────────────────────────
     checkpoint_interval_pct: float = 5.0
-    checkpoint_eval_episodes: int = int(play_episodes/100) # 1% of play episodes
-    play_checkpoint_interval: int | None = int(play_episodes/10) # 10% of play episodes
+    checkpoint_eval_episodes: int = min(500, int(play_episodes/100)) # 1% of play episodes
+    play_checkpoint_interval: int | None = int(play_episodes/20) # 5% of play episodes
 
     # ── Per-episode limits & warmup ──────────────────────────────────────────
     max_play_steps: int = 1_000  # max turns per play-training episode (all workflows)
-    warmup_episodes: int = 100  # heuristic-policy episodes before PPO
+    warmup_episodes: int = 500  # heuristic-policy episodes before PPO
     warmup_baseline_eval_episodes: int = 0
 
     # ── Training Checkpoint evaluation (uses cpp engine if possible)  ────────

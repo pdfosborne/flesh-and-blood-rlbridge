@@ -204,6 +204,48 @@ def test_collect_and_render_dashboard(tmp_path: Path) -> None:
     assert parallel_row["latest_checkpoint_win_rate"] == pytest.approx(0.61)
     assert parallel_row["latest_checkpoint_best_seed"] == 1
 
+    staged_dir = candidates_dir / "staged_swap"
+    for seed_idx in range(4):
+        seed_dir = staged_dir / "parallel_seeds" / f"seed_{seed_idx}"
+        seed_dir.mkdir(parents=True)
+        if seed_idx < 3:
+            live = {"episodes_completed": 20, "target_episodes": 20}
+        else:
+            live = {"episodes_completed": 30, "target_episodes": 80}
+        (seed_dir / "play_training_live.json").write_text(
+            json.dumps(live),
+            encoding="utf-8",
+        )
+    (staged_dir / "candidate_result.json").write_text(
+        json.dumps({
+            "candidate_id": "staged_swap",
+            "play_win_rate": 0.57,
+        }),
+        encoding="utf-8",
+    )
+    manifest["candidates"].append({
+        "candidate_id": "staged_swap",
+        "label": "Staged seeds",
+        "game_deck": {"a_red": 40},
+        "swaps": [],
+    })
+    manifest["parallel_seeds"] = 4
+    manifest["parallel_seeds_until_first_checkpoint"] = True
+    manifest["checkpoint_interval"] = 20
+    (out_dir / "candidates_manifest.json").write_text(
+        json.dumps(manifest),
+        encoding="utf-8",
+    )
+    state_staged = collect_sideboard_compare_state(out_dir)
+    staged_row = next(
+        c for c in state_staged["candidates"] if c["candidate_id"] == "staged_swap"
+    )
+    assert staged_row["train_done"] == 50
+    assert staged_row["train_target"] == 100
+    assert staged_row["train_pct"] == pytest.approx(50.0)
+    assert staged_row["training_stage"] == "Best-seed continuation"
+    assert staged_row["status"] == "training"
+
     html = render_sideboard_compare_html(state, auto_refresh_seconds=5.0)
     assert "Sideboard comparison dashboard" in html
     assert "Eval stability" in html

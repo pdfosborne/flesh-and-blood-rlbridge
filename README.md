@@ -166,6 +166,7 @@ Deck sources throughout the TUI include Talishar SAGE precons, FaBrary links/slu
 - **Equip during default play policy** - `mode=3` is skipped to avoid pitch-window infinite loops (`talishar_default_policy.py`).
 - **Arbitrary-deck C++ engine without build step** - each matchup needs generation + compile under `results/cpp_engines/`.
 - **Cloud / remote Talishar** - workflows assume a local backend; no intergration into actual Talishar website.
+- **LLM Agent** - would be slower interaction but powerful method for guided actions for user.
 
 ---
 

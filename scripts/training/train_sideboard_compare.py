@@ -211,6 +211,8 @@ def _train_candidate(
         checkpoint_interval_pct=args.checkpoint_interval_pct,
         checkpoint_eval_episodes=args.checkpoint_eval_episodes,
         parallel_seeds=args.parallel_seeds,
+        parallel_seeds_until_first_checkpoint=args.parallel_seeds_until_first_checkpoint,
+        parallel_progress_label=f"{candidate.candidate_id}: {candidate.label}",
     )
 
     checkpoint_history_path = candidate_dir / "checkpoint_eval_history.json"
@@ -412,6 +414,15 @@ def main() -> None:
             f"{DEFAULT_PARALLEL_SEEDS}; use 1 to disable)"
         ),
     )
+    parser.add_argument(
+        "--parallel-seeds-until-first-checkpoint",
+        action=argparse.BooleanOptionalAction,
+        default=RUNTIME.play.parallel_seeds_until_first_checkpoint,
+        help=(
+            "Run all parallel seeds only through the first checkpoint, then "
+            "continue training the best seed"
+        ),
+    )
 
     parser.add_argument("--out-dir", default=str(OUT_DIR / "sideboard_compare"))
     parser.add_argument("--talishar-url",
@@ -525,6 +536,7 @@ def main() -> None:
         f"  Candidates: {len(candidates)}  |  parallel={max_parallel}  "
         f"|  workers/candidate={workers_per_candidate}\n"
         f"  Play episodes/candidate: {args.play_episodes}\n"
+        f"  Seed staging: {bool(args.parallel_seeds_until_first_checkpoint)}\n"
         f"  Checkpoints: every {resolved_ckpt_interval} ep  |  "
         f"eval {args.checkpoint_eval_episodes} games @ fixed sampled policies\n"
         f"  Agent cache : {args.cache_dir}\n"
@@ -547,6 +559,14 @@ def main() -> None:
         "checkpoint_interval": resolved_ckpt_interval,
         "checkpoint_eval_episodes": args.checkpoint_eval_episodes,
         "parallel_seeds": args.parallel_seeds,
+        "parallel_seeds_until_first_checkpoint": bool(
+            args.parallel_seeds_until_first_checkpoint
+        ),
+        "warmup_episodes": min(
+            args.warmup_episodes,
+            max(1, math.ceil(args.play_episodes / 10)),
+            args.play_episodes,
+        ),
         "cpp_engine_dir": args.cpp_engine_dir,
         "candidates": [asdict(c) for c in candidates],
     }

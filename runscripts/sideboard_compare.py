@@ -74,6 +74,10 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         help="C++ eval games with fixed opponent at each checkpoint (0=off)")
     parser.add_argument("--parallel-seeds", type=int, default=_PLAY.parallel_seeds,
         help="Independent RNG seeds per candidate (use 1 to disable)")
+    parser.add_argument("--parallel-seeds-until-first-checkpoint",
+        action=argparse.BooleanOptionalAction,
+        default=_PLAY.parallel_seeds_until_first_checkpoint,
+        help="Run all seeds to the first checkpoint, then continue only the best seed")
     parser.add_argument("--out-dir", default=None)
     parser.add_argument("--workers", type=int, default=_PLAY.workers,
         help="Total C++ workers split across parallel candidates (auto-detected when omitted)")
@@ -125,6 +129,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  Max parallel  : {parallel_label}")
     print(f"  Play episodes : {args.play_episodes}")
     print(f"  Parallel seeds: {args.parallel_seeds}")
+    print(f"  Seed staging  : {args.parallel_seeds_until_first_checkpoint}")
     print(f"  Checkpoints   : every {args.checkpoint_interval_pct:g}%  "
           f"| eval {args.checkpoint_eval_episodes} games @ fixed opponent")
     print(f"  Output        : {out_dir}")
@@ -180,6 +185,11 @@ def main(argv: list[str] | None = None) -> int:
         "--checkpoint-interval-pct", str(args.checkpoint_interval_pct),
         "--checkpoint-eval-episodes", str(args.checkpoint_eval_episodes),
         "--parallel-seeds", str(args.parallel_seeds),
+        (
+            "--parallel-seeds-until-first-checkpoint"
+            if args.parallel_seeds_until_first_checkpoint
+            else "--no-parallel-seeds-until-first-checkpoint"
+        ),
         "--out-dir", str(out_dir),
         "--cache-dir", str(REPO_ROOT / "results" / "agent_cache"),
         "--talishar-url", talishar_url_value,
