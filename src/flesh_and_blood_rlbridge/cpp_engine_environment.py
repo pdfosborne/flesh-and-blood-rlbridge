@@ -236,8 +236,10 @@ class CppEngineEnvironment(rlbridgeEnvironment):
     deck1, deck2:
         Deck names recorded in info dicts (cosmetic only).
     enable_combat_tracker:
-        When ``True`` (default), capture per-step combat traces and board-state
+        When ``True``, capture per-step combat traces and board-state
         action statistics for parity checks against Talishar HTTP outcomes.
+        Combat tracking applies to :meth:`step` only; the numeric fast training
+        path (:meth:`fast_reset` / :meth:`fast_step_index`) remains available.
     """
 
     def __init__(
@@ -795,15 +797,28 @@ class CppEngineEnvironment(rlbridgeEnvironment):
 
     @property
     def supports_fast_training(self) -> bool:
-        if self._enable_combat_tracker:
-            return False
+        return not self.fast_training_unavailable_reasons()
+
+    def fast_training_unavailable_reasons(self) -> list[str]:
+        """Return why the numeric fast path cannot be used (empty if available)."""
         gs = self._gs
         if gs is None:
             try:
                 gs = self._fab.GameState()
-            except Exception:
-                return False
-        return hasattr(gs, "fast_step_index") and hasattr(gs, "fast_observation_vector")
+            except Exception as exc:
+                return [f"cannot load GameState: {exc}"]
+        reasons: list[str] = []
+        if not hasattr(gs, "fast_step_index"):
+            reasons.append(
+                "engine module missing fast_step_index (rebuild with "
+                "scripts/cpp/build_cpp_engine_for_matchup.py)"
+            )
+        if not hasattr(gs, "fast_observation_vector"):
+            reasons.append(
+                "engine module missing fast_observation_vector (rebuild with "
+                "scripts/cpp/build_cpp_engine_for_matchup.py)"
+            )
+        return reasons
 
     def fast_action_capacity(self) -> int:
         if self._gs is not None and hasattr(self._gs, "fast_action_capacity"):

@@ -5,10 +5,13 @@ A from-scratch NumPy implementation of PPO-Clip for discrete action spaces.
 
 Network architecture
 --------------------
-Actor and critic share no weights.  Both are two-hidden-layer MLPs::
+Actor and critic share two hidden layers; separate output heads::
 
-    obs_dim → hidden_size → hidden_size → n_actions   (actor, softmax output)
-    obs_dim → hidden_size → hidden_size → 1            (critic, scalar value)
+    obs_dim → hidden_size → hidden_size → n_actions   (actor head)
+    obs_dim → hidden_size → hidden_size → 1            (critic head)
+
+Rollout inference uses one shared feature pass via
+:meth:`PPOAgent.predict_policy_value`.
 
 Algorithm  (PPO-Clip, Schulman et al. 2017)
 -------------------------------------------
@@ -101,32 +104,130 @@ class PPOTrainResult(TrainResult):
         )
 
 
-# ── PyTorch MLP (GPU-accelerated when available; shared structure for actor/critic) ──
+# ── Shared-trunk policy / value network (one feature pass at rollout time) ───
 
-class _MLP:
+def _linear_to_legacy(
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    *,
+    layer: str,
+) -> dict[str, list[list[float]]]:
+    w = weight.detach().cpu().numpy().T
+    b = bias.detach().cpu().numpy()
+    return {f"W{layer}": w.tolist(), f"b{layer}": b.tolist()}
+
+
+def _legacy_to_linear(
+    d: dict[str, Any],
+    *,
+    layer: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    w = np.array(d[f"W{layer}"], dtype=np.float64).T
+    b = np.array(d[f"b{layer}"], dtype=np.float64)
+    return w, b
+
+
+class _SharedPolicyValue(nn.Module):
+    """Two hidden layers shared by actor and critic output heads."""
+
     def __init__(
         self,
         in_dim: int,
         hidden: int,
-        out_dim: int,
-        lr: float,
+        n_actions: int,
         seed: Optional[int] = None,
     ) -> None:
+        super().__init__()
         if seed is not None:
             torch.manual_seed(seed)
-        self._net = nn.Sequential(
-            nn.Linear(in_dim, hidden, dtype=_TORCH_DTYPE),
-            nn.ReLU(),
-            nn.Linear(hidden, hidden, dtype=_TORCH_DTYPE),
-            nn.ReLU(),
-            nn.Linear(hidden, out_dim, dtype=_TORCH_DTYPE),
-        ).to(_DEVICE)
-        for m in self._net:
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
-                nn.init.zeros_(m.bias)
+        self.fc1 = nn.Linear(in_dim, hidden, dtype=_TORCH_DTYPE)
+        self.fc2 = nn.Linear(hidden, hidden, dtype=_TORCH_DTYPE)
+        self.actor_head = nn.Linear(hidden, n_actions, dtype=_TORCH_DTYPE)
+        self.critic_head = nn.Linear(hidden, 1, dtype=_TORCH_DTYPE)
+        for module in (self.fc1, self.fc2, self.actor_head, self.critic_head):
+            nn.init.xavier_uniform_(module.weight)
+            nn.init.zeros_(module.bias)
+
+    def features(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.relu(self.fc2(torch.relu(self.fc1(x))))
+
+    def predict_policy_value(self, x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Single feature pass; returns logits ``(B, A)`` and values ``(B, 1)``."""
+        with torch.no_grad():
+            t = torch.as_tensor(x, dtype=_TORCH_DTYPE, device=_DEVICE)
+            if t.ndim == 1:
+                t = t.unsqueeze(0)
+            hidden = self.features(t)
+            logits = self.actor_head(hidden).cpu().numpy()
+            values = self.critic_head(hidden).cpu().numpy()
+        return logits, values
+
+    def actor_dict(self) -> dict[str, Any]:
+        out = {}
+        out.update(_linear_to_legacy(self.fc1.weight, self.fc1.bias, layer="1"))
+        out.update(_linear_to_legacy(self.fc2.weight, self.fc2.bias, layer="2"))
+        out.update(_linear_to_legacy(self.actor_head.weight, self.actor_head.bias, layer="3"))
+        return out
+
+    def critic_dict(self) -> dict[str, Any]:
+        out = {}
+        out.update(_linear_to_legacy(self.fc1.weight, self.fc1.bias, layer="1"))
+        out.update(_linear_to_legacy(self.fc2.weight, self.fc2.bias, layer="2"))
+        out.update(_linear_to_legacy(self.critic_head.weight, self.critic_head.bias, layer="3"))
+        return out
+
+    def load_actor_dict(self, d: dict[str, Any]) -> None:
+        for layer, attr in ((1, "fc1"), (2, "fc2")):
+            w, b = _legacy_to_linear(d, layer=layer)
+            linear = getattr(self, attr)
+            linear.weight.data = torch.tensor(w, dtype=_TORCH_DTYPE, device=_DEVICE)
+            linear.bias.data = torch.tensor(b, dtype=_TORCH_DTYPE, device=_DEVICE)
+        w, b = _legacy_to_linear(d, layer=3)
+        self.actor_head.weight.data = torch.tensor(w, dtype=_TORCH_DTYPE, device=_DEVICE)
+        self.actor_head.bias.data = torch.tensor(b, dtype=_TORCH_DTYPE, device=_DEVICE)
+
+    def load_critic_head_dict(self, d: dict[str, Any]) -> None:
+        w, b = _legacy_to_linear(d, layer=3)
+        self.critic_head.weight.data = torch.tensor(w, dtype=_TORCH_DTYPE, device=_DEVICE)
+        self.critic_head.bias.data = torch.tensor(b, dtype=_TORCH_DTYPE, device=_DEVICE)
+
+
+class _ActorForward(nn.Module):
+    def __init__(self, shared: _SharedPolicyValue) -> None:
+        super().__init__()
+        self._shared = shared
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self._shared.actor_head(self._shared.features(x))
+
+
+class _CriticForward(nn.Module):
+    def __init__(self, shared: _SharedPolicyValue) -> None:
+        super().__init__()
+        self._shared = shared
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self._shared.critic_head(self._shared.features(x))
+
+
+class _MLPShim:
+    """Actor/critic view over :class:`_SharedPolicyValue` for optimisers and legacy APIs."""
+
+    def __init__(self, shared: _SharedPolicyValue, role: str, lr: float) -> None:
+        if role not in ("actor", "critic"):
+            raise ValueError(f"unknown role: {role!r}")
+        self._shared = shared
+        self._role = role
         self.lr = lr
-        self._opt = torch.optim.SGD(self._net.parameters(), lr=lr)
+        if role == "actor":
+            self._net = _ActorForward(shared).to(_DEVICE)
+            params = list(shared.fc1.parameters()) + list(shared.fc2.parameters())
+            params += list(shared.actor_head.parameters())
+        else:
+            self._net = _CriticForward(shared).to(_DEVICE)
+            params = list(shared.fc1.parameters()) + list(shared.fc2.parameters())
+            params += list(shared.critic_head.parameters())
+        self._opt = torch.optim.SGD(params, lr=lr)
         self._out_t: Optional[torch.Tensor] = None
         self._out: Optional[np.ndarray] = None
 
@@ -142,7 +243,6 @@ class _MLP:
             return self._net(t).cpu().numpy()
 
     def predict_batch(self, x: np.ndarray) -> np.ndarray:
-        """Batched forward pass; *x* shape ``(batch, in_dim)``."""
         with torch.no_grad():
             t = torch.as_tensor(x, dtype=_TORCH_DTYPE, device=_DEVICE)
             return self._net(t).cpu().numpy()
@@ -155,33 +255,15 @@ class _MLP:
         self._opt.step()
 
     def to_dict(self) -> dict[str, Any]:
-        sd = self._net.state_dict()
-        _keys = [
-            ("0.weight", "W1"), ("0.bias", "b1"),
-            ("2.weight", "W2"), ("2.bias", "b2"),
-            ("4.weight", "W3"), ("4.bias", "b3"),
-        ]
-        result: dict[str, Any] = {}
-        for pt_k, np_k in _keys:
-            arr = sd[pt_k].cpu().numpy()
-            if pt_k.endswith(".weight"):
-                arr = arr.T  # (out, in) → (in, out) for backward compatibility
-            result[np_k] = arr.tolist()
-        return result
+        if self._role == "actor":
+            return self._shared.actor_dict()
+        return self._shared.critic_dict()
 
     def from_dict(self, d: dict[str, Any]) -> None:
-        _keys = [
-            ("W1", "0.weight"), ("b1", "0.bias"),
-            ("W2", "2.weight"), ("b2", "2.bias"),
-            ("W3", "4.weight"), ("b3", "4.bias"),
-        ]
-        sd: dict[str, torch.Tensor] = {}
-        for np_k, pt_k in _keys:
-            arr = np.array(d[np_k], dtype=np.float64)
-            if pt_k.endswith(".weight"):
-                arr = arr.T  # (in, out) → (out, in)
-            sd[pt_k] = torch.tensor(arr, dtype=_TORCH_DTYPE, device=_DEVICE)
-        self._net.load_state_dict(sd)
+        if self._role == "actor":
+            self._shared.load_actor_dict(d)
+        else:
+            self._shared.load_critic_head_dict(d)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -304,18 +386,24 @@ class PPOAgent(AgentBase):
         # variable / text action spaces; disabled for fixed Discrete spaces).
         self._mask_actions  = False
 
-        self._actor:  Optional[_MLP] = None
-        self._critic: Optional[_MLP] = None
+        self._actor:  Optional[_MLPShim] = None
+        self._critic: Optional[_MLPShim] = None
+        self._shared: Optional[_SharedPolicyValue] = None
 
     # ── Lazy init ─────────────────────────────────────────────────────────────
 
     def _init_nets(self, obs_dim: int) -> None:
-        if self._actor is not None:
+        if self._shared is not None:
             return
         self.obs_dim = obs_dim
-        s = self._seed
-        self._actor  = _MLP(obs_dim, self.hidden_size, self.n_actions, self.lr_actor,  s)
-        self._critic = _MLP(obs_dim, self.hidden_size, 1,              self.lr_critic, s)
+        self._shared = _SharedPolicyValue(
+            obs_dim,
+            self.hidden_size,
+            self.n_actions,
+            self._seed,
+        ).to(_DEVICE)
+        self._actor = _MLPShim(self._shared, "actor", self.lr_actor)
+        self._critic = _MLPShim(self._shared, "critic", self.lr_critic)
 
     def _obs_to_vec(self, obs: Any) -> np.ndarray:
         """Flatten and coerce *obs* to a fixed-size vector.
@@ -350,13 +438,25 @@ class PPOAgent(AgentBase):
 
     def predict_batch(self, obs_vecs: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Batched actor logits and critic values for rollout buffers."""
-        if self._actor is None or self._critic is None:
+        if self._shared is None:
             n = len(obs_vecs)
             return np.zeros((n, self.n_actions)), np.zeros(n)
         batch = np.asarray(obs_vecs, dtype=np.float64)
-        logits = self._actor.predict_batch(batch)
-        values = self._critic.predict_batch(batch).reshape(-1)
-        return logits, values
+        logits, values = self._shared.predict_policy_value(batch)
+        return logits, values.reshape(-1)
+
+    def predict_policy_value(
+        self,
+        obs_vec: np.ndarray,
+    ) -> tuple[np.ndarray, float]:
+        """Fused actor logits and critic value for one observation vector."""
+        if self._shared is None:
+            return np.zeros(self.n_actions or 1, dtype=np.float64), 0.0
+        x = np.asarray(obs_vec, dtype=np.float64)
+        if x.ndim == 1:
+            x = x[None, :]
+        logits, values = self._shared.predict_policy_value(x)
+        return logits, float(values.reshape(-1)[0])
 
     def act(self, obs: Any) -> Any:
         """Sample an action from the current policy (stochastic).
@@ -449,13 +549,12 @@ class PPOAgent(AgentBase):
             rollout_n_legal:   list[int]        = []
 
             for _ in range(self.n_steps):
-                logits = self._masked_logits(self._actor.forward(obs_vec[None, :]), obs)  # type: ignore[union-attr]
+                logits, value = self.predict_policy_value(obs_vec)
+                logits = self._masked_logits(logits, obs)
                 log_probs_all = _log_softmax(logits)[0]
                 probs = _softmax(logits)[0]
                 action = int(self._rng_np.choice(self.n_actions, p=probs))
                 log_prob = float(log_probs_all[action])
-
-                value = float(self._critic.predict(obs_vec[None, :]).flatten()[0])  # type: ignore[union-attr]
 
                 n_legal = _n_legal_of(obs)
                 env_action = _to_env_action(obs, action, self._mask_actions)

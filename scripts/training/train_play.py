@@ -97,6 +97,7 @@ try:
         train_agents_from_both_perspectives_parallel,
         _evaluate_policy_pair,
         _env_supports_fast_training,
+        _announce_training_backend,
         _mask_logits_to_legal,
         _player_context,
         _save_warmup_handoff_checkpoint,
@@ -1081,6 +1082,7 @@ def run_phase3_play(
     )
     try:
         print(f"  Runtime backend (Phase 3): {_runtime_backend_label(probe_env)}")
+        _announce_training_backend(probe_env, label="Phase 3 training")
         use_cpp_backend = bool(getattr(probe_env, "_using_cpp", False))
         train_runtime_backend = (
             "C++ engine" if use_cpp_backend else "HTTP Talishar"

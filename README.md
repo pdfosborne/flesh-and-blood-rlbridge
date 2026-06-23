@@ -19,7 +19,7 @@ This package wraps the [Talishar](https://talishar.net/) server into Gym-compati
 - **Three-phase workflow** - tune decks via targeted swaps (Phase 1), auto sideboard per matchup with manual override (Phase 2), train play agents (Phase 3)
 - **Format-rule enforcement** - deck-size caps (e.g. Silver Age = 40), hero + full equipment required, token cards excluded from counts
 - **FaBrary integration** - fetch real decks by URL or slug; auto-sideboard to meet format rules
-- **C++ fast simulation** - compiled pybind11 engine replaces the HTTP game server for training (up to 8× faster, fully thread-safe)
+- **C++ fast simulation** - compiled pybind11 engine replaces the HTTP game server for training (up to 50× faster, fully thread-safe)
 - **MCP tools** - expose training and simulation tasks to AI assistants via the rlbridge MCP plugin
 
 

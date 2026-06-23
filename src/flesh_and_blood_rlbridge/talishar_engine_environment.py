@@ -208,8 +208,9 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         Playwright viewport size for ``rgb_array`` screenshots (default 1920×1080).
         Override via ``TALISHAR_RENDER_WIDTH`` / ``TALISHAR_RENDER_HEIGHT``.
     enable_combat_tracker:
-        When ``True`` (default), capture per-step combat traces and board-state
-        action statistics for debugging and parity checks.
+        When ``True``, capture per-step combat traces and board-state
+        action statistics for debugging and parity checks.  Tracking applies
+        to :meth:`step` only; C++ fast training remains available when enabled.
     """
 
     def __init__(

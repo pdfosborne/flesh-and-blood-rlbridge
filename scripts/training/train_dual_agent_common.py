@@ -122,6 +122,7 @@ def make_env(
     use_cpp_engine: bool = True,
     cpp_engine_cache_dir: Optional[str] = None,
     enable_combat_tracker: bool = False,
+    require_fast_training: Optional[bool] = None,
 ) -> TalisharEngineEnvironment:
     """Create a :class:`TalisharEngineEnvironment` for *matchup*.
 
@@ -138,6 +139,11 @@ def make_env(
 
     Then implement the stubs in ``results/cpp_engines/<matchup>/cards.h`` and
     build with ``cmake``.
+
+    When ``require_fast_training`` is omitted, it defaults to ``use_cpp_engine``.
+    If a C++ engine is active but lacks the fast training API, a
+    :class:`RuntimeError` is raised instead of silently using the slow
+    ``step()`` + JSON path.
     """
     resolved_frontend_url = frontend_url
     if show_frontend and not resolved_frontend_url:
@@ -153,7 +159,7 @@ def make_env(
     if effective_cache_dir is None:
         effective_cache_dir = str(REPO_ROOT / "results" / "cpp_engines")
 
-    return TalisharEngineEnvironment(
+    env = TalisharEngineEnvironment(
         base_url=base_url,
         frontend_url=resolved_frontend_url,
         local_deck_name=matchup.p1_deck,
@@ -170,6 +176,19 @@ def make_env(
         cpp_engine_dir=matchup.cpp_engine_dir,
         enable_combat_tracker=enable_combat_tracker,
     )
+    if require_fast_training is None:
+        require_fast_training = use_cpp_engine
+    if (
+        require_fast_training
+        and getattr(env, "_using_cpp", False)
+        and not _env_supports_fast_training(env)
+    ):
+        reasons = "; ".join(_fast_training_unavailable_reasons(env)) or "unknown"
+        raise RuntimeError(
+            "C++ engine is loaded but fast training is unavailable: "
+            f"{reasons}"
+        )
+    return env
 
 
 def make_agent(seed: Optional[int] = None) -> PPOAgent:
@@ -629,10 +648,10 @@ def _policy_forward(
     obs_vec: np.ndarray,
 ) -> tuple[np.ndarray, float, np.ndarray]:
     """Actor logits, critic value, and softmax probs for one observation."""
-    logits = policy._masked_logits(policy._actor.predict(obs_vec[None, :]), obs)
+    logits, value = policy.predict_policy_value(obs_vec)
+    logits = policy._masked_logits(logits, obs)
     lp_all = _log_softmax(logits)[0]
     probs = _softmax(logits)[0]
-    value = float(policy._critic.predict(obs_vec[None, :]).flatten()[0])
     return logits, value, probs
 
 
@@ -648,6 +667,55 @@ def _env_supports_fast_training(env: Any) -> bool:
         getattr(env, "supports_fast_training", False)
         and hasattr(env, "fast_reset")
         and hasattr(env, "fast_step_index")
+    )
+
+
+def _fast_training_unavailable_reasons(env: Any) -> list[str]:
+    """Collect blockers for the C++ numeric training path."""
+    inner = getattr(env, "_cpp_env", None)
+    if inner is not None and hasattr(inner, "fast_training_unavailable_reasons"):
+        return list(inner.fast_training_unavailable_reasons())
+    if hasattr(env, "fast_training_unavailable_reasons"):
+        return list(env.fast_training_unavailable_reasons())
+    if not getattr(env, "_using_cpp", False):
+        return ["not using C++ engine"]
+    return ["fast training API not exposed on environment wrapper"]
+
+
+def _announce_training_backend(
+    env: Any,
+    *,
+    require_fast_training: bool = False,
+    label: str = "training",
+) -> None:
+    """Log which rollout path is active and optionally require the fast path."""
+    using_cpp = bool(getattr(env, "_using_cpp", False))
+    fast = _env_supports_fast_training(env)
+    if fast:
+        print(
+            f"  [fast] {label}: C++ numeric path "
+            "(fast_reset / fast_step_index)",
+            flush=True,
+        )
+        return
+
+    if using_cpp:
+        reasons = "; ".join(_fast_training_unavailable_reasons(env)) or "unknown"
+        msg = (
+            f"C++ engine is loaded but fast {label} is unavailable: {reasons}"
+        )
+        if require_fast_training:
+            raise RuntimeError(msg)
+        print(f"  [WARN] {msg}", flush=True)
+        print(
+            f"  [slow] {label}: falling back to step() + JSON observations",
+            flush=True,
+        )
+        return
+
+    print(
+        f"  [slow] {label}: HTTP Talishar path (no compiled C++ engine)",
+        flush=True,
     )
 
 
@@ -742,11 +810,10 @@ def _run_one_fast_episode(
             value = 0.0
             lp_all_action = 0.0
         else:
-            logits = policy._actor.predict(obs_vec[None, :])
+            logits, value = policy.predict_policy_value(obs_vec)
             logits = _mask_logits_to_legal(logits, n_legal)
             lp_all = _log_softmax(logits)[0]
             probs = _softmax(logits)[0]
-            value = float(policy._critic.predict(obs_vec[None, :]).flatten()[0])
             action = int(rng.choice(policy.n_actions, p=probs))
             if action >= n_legal:
                 action = n_legal - 1
@@ -1182,6 +1249,7 @@ def train_agents_from_both_perspectives_parallel(
 
     # ── bootstrap: infer dims and init nets on a throw-away env ──────────────
     probe_env = make_env(matchup, base_url=base_url, game_format=game_format, max_turns=max_steps)
+    _announce_training_backend(probe_env, label="parallel training bootstrap")
     if _env_supports_fast_training(probe_env):
         probe_state = probe_env.fast_reset(seed=seed)
         n_actions_p1 = n_actions_p2 = int(probe_env.fast_action_capacity())
