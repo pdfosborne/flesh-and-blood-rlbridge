@@ -2,7 +2,12 @@
 
 Reinforcement-learning simulation for [Flesh and Blood](https://fabtcg.com/) TCG, built on [Talishar](https://talishar.net/) as the game engine.
 
-This package is **not** bundled with rlbridge. Install it separately when you want FaB training, evaluation, or MCP tooling.
+
+![FrontEnd-with-AgentGuide](./fab_tui/_images/fab-FE-demo-agentguide.gif)
+
+*Example usage: play against AI agents with guidance for optimal play based on millions of simulated matches.*
+
+
 
 ---
 
@@ -16,6 +21,8 @@ This package wraps the [Talishar](https://talishar.net/) server into Gym-compati
 - **FaBrary integration** - fetch real decks by URL or slug; auto-sideboard to meet format rules
 - **C++ fast simulation** - compiled pybind11 engine replaces the HTTP game server for training (up to 8× faster, fully thread-safe)
 - **MCP tools** - expose training and simulation tasks to AI assistants via the rlbridge MCP plugin
+
+
 
 ---
 
