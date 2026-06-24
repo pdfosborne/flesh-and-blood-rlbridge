@@ -16,6 +16,7 @@ COPY fab_gui ./fab_gui
 COPY scripts ./scripts
 COPY runscripts ./runscripts
 COPY Talishar/Assets ./Talishar/Assets
+COPY Talishar/GeneratedCode ./Talishar/GeneratedCode
 
 RUN pip install --no-cache-dir -e ".[gui,cpp]"
 

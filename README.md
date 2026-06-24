@@ -77,22 +77,6 @@ This package wraps the [Talishar](https://talishar.net/) server into Gym-compati
 - **C++ fast simulation** - compiled pybind11 engine replaces the HTTP game server for training (up to 50× faster, fully thread-safe)
 - **MCP tools** - expose training and simulation tasks to AI assistants via the rlbridge MCP plugin
 
----
-
-## Installation (library / RL Bridge plugin)
-
-```bash
-pip install rlbridge
-pip install -e ".[gui]"   # from a git clone — includes TUI/GUI launchers
-```
-
-rlbridge discovers environments via the `rlbridge.environments` entry-point and MCP tools via `rlbridge.environment_mcp_tools`.
-
-### Update Talishar source subtree
-
-```bash
-git subtree pull --prefix=Talishar talishar-upstream main --squash
-```
 
 ---
 
@@ -106,6 +90,26 @@ The RL pipeline requires the Talishar game server running locally.
 | Talishar-FE (Vite, optional) | `Talishar-FE/` | `http://localhost:5173` |
 
 > **The FE is only needed for GIF rendering and live browser play.** Training and the web GUI work with the backend alone.
+
+### Installing Talishar-FE
+
+Talishar-FE is a separate repository and is **not** included when you clone this project. Clone it as a sibling of `Talishar/` (repo root):
+
+```bash
+git clone https://github.com/Talishar/Talishar-FE
+cd Talishar-FE
+npm install
+```
+
+Then start the Vite dev server (with the Talishar backend already running):
+
+```bash
+npm run dev
+# or from the rlbridge repo root:
+python start_talishar.py --fe-only
+```
+
+Open **http://localhost:5173** for live play. Option **5** in the TUI also requires this frontend.
 
 ### Starting and stopping
 

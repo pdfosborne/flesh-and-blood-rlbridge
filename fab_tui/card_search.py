@@ -147,7 +147,8 @@ def _load_index(game_format: str) -> tuple[CardHit, ...]:
                 load_talishar_card_ids,
             )
 
-            if cid not in load_talishar_card_ids():
+            talishar_ids = load_talishar_card_ids()
+            if talishar_ids and cid not in talishar_ids:
                 continue
         except ImportError:
             pass
