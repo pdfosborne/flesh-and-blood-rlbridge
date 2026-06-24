@@ -30,6 +30,7 @@ dependencies = [
     "playwright>=1.46.0",
     "matplotlib>=3.7.0",
     "rich>=13.7.0",
+    "requests>=2.31.0",
 ]
 
 [project.optional-dependencies]

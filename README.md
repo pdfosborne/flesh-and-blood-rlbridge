@@ -12,7 +12,7 @@ Reinforcement-learning simulation for [Flesh and Blood](https://fabtcg.com/) TCG
 
 **Prerequisites:** [Docker Desktop](https://www.docker.com/products/docker-desktop/) and **Python 3.10+**.
 
-### Option A — Docker (simplest: Talishar + GUI together)
+### Option A - Docker (simplest: Talishar + GUI together)
 
 ```bash
 git clone https://github.com/pdfosborne/flesh-and-blood-rlbridge.git
@@ -28,7 +28,7 @@ Stop everything with `Ctrl+C`, then:
 docker compose down
 ```
 
-### Option B — Local Python (recommended for development)
+### Option B - Local Python (recommended for development)
 
 **Windows (PowerShell):**
 

@@ -246,7 +246,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def gui_main() -> int:
-    return main(["gui"])
+    return main(["gui", *sys.argv[1:]])
 
 
 def tui_main_entry() -> int:

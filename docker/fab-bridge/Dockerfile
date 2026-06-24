@@ -21,4 +21,4 @@ RUN pip install --no-cache-dir -e ".[gui,cpp]"
 
 EXPOSE 8765
 
-CMD ["fab-gui", "--host", "0.0.0.0", "--no-browser"]
+CMD ["fab-bridge", "gui", "--host", "0.0.0.0", "--no-browser"]

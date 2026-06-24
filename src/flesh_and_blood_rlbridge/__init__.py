@@ -8,17 +8,11 @@ from typing import TYPE_CHECKING, Any
 __all__ = [
     "ALL_FAB_FACTORIES",
     "CppEngineEnvironment",
-    "FLESH_AND_BLOOD_DECKBUILD_V0",
     "FLESH_AND_BLOOD_DECKBUILD_TALISHAR_V0",
-    "FLESH_AND_BLOOD_SELFPLAY_V0",
     "FLESH_AND_BLOOD_SIDEBOARD_TALISHAR_V0",
     "FLESH_AND_BLOOD_TALISHAR_V0",
     "FLESH_AND_BLOOD_TALISHAR_SELFPLAY_V0",
     "FLESH_AND_BLOOD_TALISHAR_VS_AI_V0",
-    "FleshAndBloodDeckBuilderEnvironment",
-    "FleshAndBloodEnvironment",
-    "FleshAndBloodFactory",
-    "FleshAndBloodGameplayEnvironment",
     "TalisharDeckBuilderEnvironment",
     "TalisharDeckBuilderFactory",
     "TalisharEngineEnvironment",
@@ -32,9 +26,6 @@ __all__ = [
 
 def register_environments(registry: Any = None) -> int:
     """Register FaB environment factories with an rlbridge registry."""
-    # Import the environment module first so the internal environment <-> factory
-    # import cycle is fully resolved before ALL_FAB_FACTORIES is accessed.
-    from .simulator import environment as _environment  # noqa: F401
     from .environment_factory import ALL_FAB_FACTORIES
 
     if registry is None:
@@ -56,10 +47,7 @@ def register_mcp_tools(**kwargs: Any) -> int:
 
 # Submodule attribute → (module, attribute) used for lazy access below.
 _LAZY_ATTRS: dict[str, tuple[str, str]] = {
-    "FleshAndBloodEnvironment": ("simulator.environment", "FleshAndBloodEnvironment"),
     "ALL_FAB_FACTORIES": ("environment_factory", "ALL_FAB_FACTORIES"),
-    "FLESH_AND_BLOOD_DECKBUILD_V0": ("environment_factory", "FLESH_AND_BLOOD_DECKBUILD_V0"),
-    "FLESH_AND_BLOOD_SELFPLAY_V0": ("environment_factory", "FLESH_AND_BLOOD_SELFPLAY_V0"),
     "FLESH_AND_BLOOD_DECKBUILD_TALISHAR_V0": (
         "environment_factory",
         "FLESH_AND_BLOOD_DECKBUILD_TALISHAR_V0",
@@ -73,7 +61,6 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
         "environment_factory",
         "FLESH_AND_BLOOD_TALISHAR_VS_AI_V0",
     ),
-    "FleshAndBloodFactory": ("environment_factory", "FleshAndBloodFactory"),
     "TalisharEngineEnvironment": (
         "talishar_engine_environment",
         "TalisharEngineEnvironment",
@@ -103,14 +90,6 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
         "environment_factory",
         "TalisharSideboardFactory",
     ),
-    "FleshAndBloodDeckBuilderEnvironment": (
-        "simulator.deck_builder_environment",
-        "FleshAndBloodDeckBuilderEnvironment",
-    ),
-    "FleshAndBloodGameplayEnvironment": (
-        "simulator.gameplay_environment",
-        "FleshAndBloodGameplayEnvironment",
-    ),
 }
 
 
@@ -130,22 +109,16 @@ def __getattr__(name: str) -> Any:
 
 
 if TYPE_CHECKING:  # Static type-checkers and IDEs still see the real symbols.
-    from .simulator.deck_builder_environment import FleshAndBloodDeckBuilderEnvironment
-    from .simulator.environment import FleshAndBloodEnvironment
     from .environment_factory import (
         ALL_FAB_FACTORIES,
-        FLESH_AND_BLOOD_DECKBUILD_V0,
         FLESH_AND_BLOOD_DECKBUILD_TALISHAR_V0,
-        FLESH_AND_BLOOD_SELFPLAY_V0,
         FLESH_AND_BLOOD_SIDEBOARD_TALISHAR_V0,
         FLESH_AND_BLOOD_TALISHAR_V0,
         FLESH_AND_BLOOD_TALISHAR_SELFPLAY_V0,
         FLESH_AND_BLOOD_TALISHAR_VS_AI_V0,
-        FleshAndBloodFactory,
         TalisharDeckBuilderFactory,
         TalisharSideboardFactory,
     )
-    from .simulator.gameplay_environment import FleshAndBloodGameplayEnvironment
     from .talishar_deckbuilder_environment import TalisharDeckBuilderEnvironment
     from .talishar_sideboard_environment import TalisharSideboardEnvironment
     from .cpp_engine_environment import CppEngineEnvironment
