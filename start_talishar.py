@@ -57,6 +57,28 @@ def _run(cmd: list[str], *, cwd: Path) -> None:
     subprocess.run(cmd, cwd=cwd, check=True)  # noqa: S603
 
 
+def _prepare_talishar_runtime_files(talishar_dir: Path) -> None:
+    """Create gitignored HostFiles Talishar needs before the PHP server starts."""
+    host_files = talishar_dir / "HostFiles"
+    host_files.mkdir(parents=True, exist_ok=True)
+
+    redirector = host_files / "Redirector.php"
+    template = host_files / "RedirectorTemplate.php"
+    if template.is_file() and not redirector.is_file():
+        redirector.write_bytes(template.read_bytes())
+
+    counter = host_files / "GameIDCounter.txt"
+    if not counter.is_file():
+        counter.write_text("1\n", encoding="utf-8")
+    if sys.platform != "win32":
+        counter.chmod(0o666)
+
+    games = talishar_dir / "Games"
+    games.mkdir(parents=True, exist_ok=True)
+    if sys.platform != "win32":
+        games.chmod(0o777)
+
+
 def _start_vite_detached(fe_dir: Path) -> None:
     if sys.platform == "win32":
         subprocess.Popen(  # noqa: S603
@@ -91,6 +113,8 @@ def run(
         if not TALISHAR_DIR.is_dir():
             print(f"ERROR: Talishar directory not found: {TALISHAR_DIR}", file=sys.stderr)
             return 1
+
+        _prepare_talishar_runtime_files(TALISHAR_DIR)
 
         try:
             _run(["docker", "compose", "up", "-d", "--build"], cwd=TALISHAR_DIR)
