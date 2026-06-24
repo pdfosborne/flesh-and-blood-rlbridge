@@ -585,6 +585,13 @@ RUNS = RunRegistry()
 
 
 def resolve_run_out_dir(run_id: str) -> Path | None:
+    return _run_out_dir(run_id)
+
+
+def _run_out_dir(run_id: str) -> Path | None:
+    run = RUNS.get(run_id)
+    if run is not None:
+        return run.out_dir
     return _resolve_run_dir(run_id)
 
 
@@ -615,7 +622,7 @@ def replay_gif_path(out_dir: Path) -> Path | None:
 
 
 def replay_render_status(run_id: str) -> dict[str, Any] | None:
-    out_dir = _resolve_run_dir(run_id)
+    out_dir = _run_out_dir(run_id)
     if out_dir is None:
         return None
     job = RUNS.get_replay_job(run_id)
@@ -635,7 +642,7 @@ def replay_render_status(run_id: str) -> dict[str, Any] | None:
 
 
 def start_replay_render(run_id: str, env: EnvironmentSettings) -> dict[str, Any]:
-    out_dir = _resolve_run_dir(run_id)
+    out_dir = _run_out_dir(run_id)
     if out_dir is None:
         raise ValueError("Run not found")
     existing = replay_gif_path(out_dir)
@@ -739,6 +746,10 @@ def start_training(
         spec.equipment_header = equipment_header
 
     run_id = uuid.uuid4().hex[:12]
+    manifest = json.loads(candidates_path.read_text(encoding="utf-8"))
+    manifest["gui_run_id"] = run_id
+    candidates_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
     run = TrainingRun(run_id=run_id, out_dir=out_dir)
     RUNS.add(run)
 
@@ -754,7 +765,17 @@ def start_training(
             run.exit_code = rc
             run.status = "completed" if rc == 0 else "failed"
             if rc == 0 and render_replay_gif:
-                start_replay_render(run.run_id, env)
+                try:
+                    start_replay_render(run.run_id, env)
+                except Exception:
+                    RUNS.set_replay_job(
+                        run.run_id,
+                        {
+                            "run_id": run.run_id,
+                            "status": "failed",
+                            "error": "Failed to start replay render",
+                        },
+                    )
         except Exception:
             run.exit_code = 1
             run.status = "failed"

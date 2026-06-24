@@ -689,6 +689,15 @@ def main() -> None:
     for candidate in candidates:
         print(f"    • {candidate.candidate_id}: {candidate.label}")
 
+    manifest_path = out_dir / "candidates_manifest.json"
+    existing_gui_run_id: str | None = None
+    if manifest_path.is_file():
+        try:
+            prior = json.loads(manifest_path.read_text(encoding="utf-8"))
+            existing_gui_run_id = prior.get("gui_run_id")
+        except (OSError, json.JSONDecodeError):
+            pass
+
     manifest = {
         "started_at": datetime.now(timezone.utc).isoformat(),
         "format": args.format,
@@ -717,7 +726,9 @@ def main() -> None:
         "cpp_engine_dir": args.cpp_engine_dir,
         "candidates": [asdict(c) for c in candidates],
     }
-    (out_dir / "candidates_manifest.json").write_text(
+    if existing_gui_run_id:
+        manifest["gui_run_id"] = existing_gui_run_id
+    manifest_path.write_text(
         json.dumps(manifest, indent=2),
         encoding="utf-8",
     )
