@@ -17,14 +17,23 @@ Reinforcement-learning simulation for [Flesh and Blood](https://fabtcg.com/) TCG
 ```bash
 git clone https://github.com/pdfosborne/flesh-and-blood-rlbridge.git
 cd flesh-and-blood-rlbridge
-docker compose up --build
+./scripts/docker-setup.sh --foreground
 ```
 
-Open **http://localhost:8765** in your browser. The Talishar game server is started automatically on port **8080**.
+Or run detached: `./scripts/docker-setup.sh` (same as `docker compose up --build -d` plus CLI setup).
 
-For **winner replay GIFs** on the Results tab, run [Talishar-FE](#installing-talishar-fe) on port **5173** (`npm run dev` in `Talishar-FE/`). Docker sets `TALISHAR_FE_URL=http://host.docker.internal:5173` so the bridge container can screenshot the frontend.
+Open **http://localhost:8765** in your browser. The Talishar game server starts on port **8080** and **Talishar-FE** on **http://localhost:5173** (cloned and started automatically on first run).
 
-Training output and saved sideboard lists are written to **`results/`** in the repo (e.g. `results/sideboard_compare/`, `results/tui_decks/saved/`). Generated deck files for final evaluation are written to **`Talishar/Assets/`** (shared with the Talishar container).
+**CLI commands** (`fab-tui`, `fab-gui`, `fab-bridge`) are installed in the Docker image and exposed on the host via wrappers in `bin/` — no separate Python venv required:
+
+```bash
+source scripts/docker-env.sh   # once per shell
+fab-tui                        # terminal UI (second terminal while compose is up)
+fab-gui                        # open web GUI in browser
+fab-bridge init                # other subcommands
+```
+
+Training output and saved sideboard lists are written to **`results/`** in the repo (e.g. `results/sideboard_compare/`, `results/tui_decks/saved/`). Generated deck files for final evaluation are written to **`Talishar/Assets/`** (shared with the Talishar container). Winner replay GIFs on the Results tab use the bundled Talishar-FE container.
 
 If you also run Talishar separately (e.g. `cd Talishar && docker compose up`), stop that stack first so port **8080** and **`Talishar/Assets`** are not split across two instances. The compose stack auto-creates **`Talishar/HostFiles/Redirector.php`**, **`GameIDCounter.txt`**, and **`Talishar/APIKeys/APIKeys.php`** (stub with empty secrets — required by Talishar but not in git).
 
@@ -34,22 +43,9 @@ Stop everything with `Ctrl+C`, then:
 docker compose down
 ```
 
-**Terminal UI (`fab-tui`) with Docker:** the compose stack runs the **web GUI** only. `fab-tui` runs on your **host** in a second terminal (same repo checkout). One-time install, then launch:
+If `fab-tui: command not found`, run `source scripts/docker-env.sh` (or add `bin/` to your `PATH`). You can also invoke directly: `./bin/fab-tui` or `docker compose exec -it fab-bridge fab-tui`.
 
-```bash
-cd flesh-and-blood-rlbridge   # your clone path
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[gui,train,cpp]"
-
-export TALISHAR_URL="http://localhost:8080/game"
-export TALISHAR_ASSETS_PATH="$(pwd)/Talishar/Assets"
-export TALISHAR_FE_URL="http://localhost:5173"   # optional; for live play / GIFs
-
-fab-tui
-```
-
-If `fab-tui: command not found`, the package is not installed in the active environment — run the `pip install -e` line again (or `./scripts/setup.sh` and `source .venv/bin/activate`). You can also use `fab-bridge tui` or `python -m fab_bridge.cli tui`.
+For **local Python development** without Docker wrappers, use [Option B](#option-b---local-python-recommended-for-development) below.
 
 ### Option B - Local Python (recommended for development)
 
@@ -110,52 +106,39 @@ The RL pipeline requires the Talishar game server running locally.
 | Component | Directory | Default URL |
 |-----------|-----------|-------------|
 | Talishar backend (PHP + Docker) | `Talishar/` | `http://localhost:8080` |
-| Talishar-FE (Vite, optional) | `Talishar-FE/` | `http://localhost:5173` |
+| Talishar-FE (Vite) | `Talishar-FE/` (auto-cloned) | `http://localhost:5173` |
 
-> **The FE is only needed for GIF rendering and live browser play.** Training and the web GUI work with the backend alone.
+With **Docker** (`./scripts/docker-setup.sh`), Talishar-FE is cloned on first start and run as a compose service. Use **http://localhost:5173** for live play (TUI option 5) and Results-tab replay GIFs.
 
-### Installing Talishar-FE
+### Talishar-FE (local Python only)
 
-Talishar-FE is a separate repository and is **not** included when you clone this project. Clone it as a sibling of `Talishar/` (repo root):
+If you use [Option B](#option-b---local-python-recommended-for-development) without the root Docker stack, clone and start Talishar-FE from your `flesh-and-blood-rlbridge` checkout:
 
 ```bash
 git clone https://github.com/Talishar/Talishar-FE
-cd Talishar-FE
-npm install
-```
-
-Then start the Vite dev server (with the Talishar backend already running):
-
-```bash
-npm run dev
-# or from the rlbridge repo root:
 python start_talishar.py --fe-only
 ```
-
-Open **http://localhost:5173** for live play. Option **5** in the TUI also requires this frontend.
 
 ### Starting and stopping
 
 ```bash
-# Start backend + FE
-python start_talishar.py
-
 # Backend only (recommended for training)
 python start_talishar.py --backend-only
 fab-bridge talishar --backend-only
 
-# FE only (backend already running)
-python start_talishar.py --fe-only
+# Backend + FE together
+python start_talishar.py
 
 # Stop backend containers
 python start_talishar.py --down
 fab-bridge talishar --down
 ```
 
-Or use Docker Compose from the repo root (starts backend + GUI):
+Or use Docker Compose from the repo root (starts backend + GUI + host CLI wrappers):
 
 ```bash
-docker compose up --build
+./scripts/docker-setup.sh --foreground
+source scripts/docker-env.sh   # once per shell; then fab-tui / fab-gui / fab-bridge
 ```
 
 ---
@@ -183,7 +166,7 @@ docker compose up --build
 **Talishar requirements by menu option:**
 
 - Options **3–5** need the Talishar backend (`fab-bridge init` or `python start_talishar.py --backend-only`).
-- Option **5** also needs Talishar-FE (`python start_talishar.py` without `--backend-only`).
+- Option **5** also needs Talishar-FE (`http://localhost:5173`; started automatically with Docker).
 
 ---
 

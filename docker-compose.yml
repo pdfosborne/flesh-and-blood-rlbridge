@@ -24,6 +24,40 @@ services:
         fi
         chmod 644 /var/www/html/game/APIKeys/APIKeys.php
         exec apache2-foreground
+
+  # Clone Talishar-FE into the repo checkout on first compose up
+  talishar-fe-clone:
+    image: alpine/git:2.49.0
+    volumes:
+      - ./:/repo
+    working_dir: /repo
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        if [ ! -f Talishar-FE/package.json ]; then
+          echo "Cloning Talishar-FE..."
+          git clone --depth 1 https://github.com/Talishar/Talishar-FE Talishar-FE
+        fi
+    restart: "no"
+
+  talishar-fe:
+    build:
+      context: .
+      dockerfile: docker/talishar-fe/Dockerfile
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./Talishar-FE:/app
+      - talishar_fe_node_modules:/app/node_modules
+      - ./docker/talishar-fe/talishar-fe.env:/config/talishar-fe.env:ro
+    depends_on:
+      talishar-fe-clone:
+        condition: service_completed_successfully
+      web-server:
+        condition: service_started
+    restart: unless-stopped
+
   fab-bridge:
     build:
       context: .
@@ -34,14 +68,32 @@ services:
       FAB_BRIDGE_HOME: /app
       # Same compose stack as web-server so deck files in Talishar/Assets are visible to PHP
       TALISHAR_URL: http://web-server/game
-      TALISHAR_FE_URL: http://host.docker.internal:5173
+      TALISHAR_FE_URL: http://talishar-fe:5173
       TALISHAR_ASSETS_PATH: /app/Talishar/Assets
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     volumes:
       - ./results:/app/results
       - ./Talishar:/app/Talishar
     depends_on:
       web-server:
         condition: service_started
+      talishar-fe:
+        condition: service_healthy
     restart: unless-stopped
+
+  # Ensure host fab-* wrappers in bin/ are executable after compose up --build
+  fab-cli-setup:
+    image: busybox:1.36
+    volumes:
+      - ./:/repo
+    working_dir: /repo
+    entrypoint:
+      - /bin/sh
+      - -c
+      - chmod +x bin/fab-* 2>/dev/null; exit 0
+    depends_on:
+      fab-bridge:
+        condition: service_started
+    restart: "no"
+
+volumes:
+  talishar_fe_node_modules:

@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Run fab-tui inside the fab-bridge Docker container (no host venv required).
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+SERVICE=fab-bridge
+
+if docker compose ps "$SERVICE" --status running -q 2>/dev/null | grep -q .; then
+  exec docker compose exec -it "$SERVICE" fab-tui "$@"
+fi
+
+exec docker compose run --rm -it "$SERVICE" fab-tui "$@"
