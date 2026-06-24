@@ -25,7 +25,7 @@ _wait_for_service() {
   local url="$2"
   local label="$3"
   local max_secs="${4:-120}"
-  echo -n "Waiting for ${label}..."
+  echo -n "  ${label}..."
   for _ in $(seq 1 "$max_secs"); do
     if docker compose ps "$service" --status running -q 2>/dev/null | grep -q .; then
       if [[ -z "$url" ]] || curl -fsS --max-time 2 "$url" >/dev/null 2>&1; then
@@ -40,28 +40,14 @@ _wait_for_service() {
   return 1
 }
 
-_print_startup_banner() {
-  cat <<'EOF'
-
-================================================================
-  FAB RL Bridge — starting Docker stack
-================================================================
-
-  When containers are healthy, open:
-
-    Web GUI:     http://localhost:8765   ← start here (sideboard compare)
-    Talishar-FE: http://localhost:5173   (live play + replay GIFs)
-
-  Terminal UI (open a second terminal in this repo):
-
-    source scripts/docker-env.sh
-    fab-tui
-
-  Press Ctrl+C to stop all services.
-
-================================================================
-
-EOF
+_wait_for_stack() {
+  echo ""
+  echo "Waiting for services (Talishar-FE may take a few minutes on first run)..."
+  docker compose wait talishar-fe-clone 2>/dev/null || true
+  _wait_for_service web-server "http://localhost:8080/" "Talishar backend" 120 || true
+  _wait_for_service talishar-fe "http://localhost:5173/" "Talishar-FE" 300 || true
+  _wait_for_service fab-bridge "http://localhost:8765/" "web GUI" 120 || true
+  docker compose wait fab-cli-setup 2>/dev/null || true
 }
 
 _print_ready_banner() {
@@ -122,15 +108,14 @@ EOF
 
 _ensure_talishar_fe
 
-if $FOREGROUND; then
-  _print_startup_banner
-  exec docker compose up --build "$@"
-fi
-
 echo "Building and starting Docker stack..."
 docker compose up --build -d "$@"
 
-_wait_for_service fab-bridge "http://localhost:8765/" "web GUI" 90 || true
-_wait_for_service talishar-fe "http://localhost:5173/" "Talishar-FE" 180 || true
-
+_wait_for_stack
 _print_ready_banner
+
+if $FOREGROUND; then
+  echo "Following container logs (Ctrl+C exits log view; run 'docker compose down' to stop)."
+  echo ""
+  exec docker compose logs -f --tail=100
+fi

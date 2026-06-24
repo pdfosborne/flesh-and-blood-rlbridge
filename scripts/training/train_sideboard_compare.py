@@ -90,6 +90,7 @@ from train_play import (  # noqa: E402
     _render_game_with_talishar_frontend,
 )
 from agent_cache import AgentCacheStore  # noqa: E402
+from train_dual_agent_common import Matchup  # noqa: E402
 from runtime_defaults import RUNTIME  # noqa: E402
 
 
@@ -111,7 +112,6 @@ def _load_play_agent_for_candidate(
         return play
 
     from agent_cache import deck_content_fingerprint, talishar_asset_deck_fingerprint  # noqa: PLC0415
-    from train_pipeline_common import Matchup  # noqa: PLC0415
 
     p1_fp = ""
     p2_fp = ""
