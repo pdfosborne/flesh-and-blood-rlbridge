@@ -67,8 +67,75 @@ function deckCardCount(deck = state.deck?.deck) {
   return Object.values(deck || {}).reduce((sum, n) => sum + Number(n), 0);
 }
 
+const CARD_IMAGE_CDN = "https://images.talishar.net/public/cardimages/english";
+
+function cardImageCandidates(cardId) {
+  const token = String(cardId || "").trim();
+  if (!token) return [];
+  const variants = [token];
+  const hyphen = token.replace(/_/g, "-");
+  const underscore = token.replace(/-/g, "_");
+  if (hyphen && !variants.includes(hyphen)) variants.push(hyphen);
+  if (underscore && !variants.includes(underscore)) variants.push(underscore);
+  return variants.map((id) => `${CARD_IMAGE_CDN}/${encodeURIComponent(id)}.webp`);
+}
+
 function imageUrlFor(cardId) {
-  return `/api/card-image/${encodeURIComponent(cardId)}`;
+  const urls = cardImageCandidates(cardId);
+  return urls[0] || "";
+}
+
+function bindCardTileImages(root = document) {
+  const scope = root instanceof Element ? root : document;
+  scope.querySelectorAll(".card-tile").forEach((tile) => {
+    const img = tile.querySelector(".card-tile__img");
+    if (!img || img.dataset.bound === "1") return;
+    img.dataset.bound = "1";
+
+    const cardId = tile.dataset.cardId || tile.getAttribute("data-card-id") || "";
+    const urls = cardImageCandidates(cardId);
+    let urlIndex = 0;
+
+    const showFallback = () => {
+      tile.classList.add("card-tile--no-img");
+      if (img.isConnected) img.remove();
+    };
+
+    const markLoaded = () => {
+      if (img.naturalWidth > 0) {
+        tile.classList.remove("card-tile--no-img");
+      } else {
+        tryNextUrl();
+      }
+    };
+
+    const tryNextUrl = () => {
+      if (urlIndex >= urls.length) {
+        showFallback();
+        return;
+      }
+      const next = urls[urlIndex++];
+      if (img.getAttribute("src") !== next) {
+        img.src = next;
+      } else if (urlIndex < urls.length) {
+        tryNextUrl();
+      } else {
+        showFallback();
+      }
+    };
+
+    img.addEventListener("load", markLoaded);
+    img.addEventListener("error", tryNextUrl);
+
+    const existing = img.getAttribute("src") || "";
+    if (existing.startsWith("/api/card-image/") || !existing) {
+      tryNextUrl();
+    } else {
+      const at = urls.indexOf(existing);
+      if (at >= 0) urlIndex = at + 1;
+      if (img.complete) markLoaded();
+    }
+  });
 }
 
 function escapeHtml(text) {
@@ -89,7 +156,7 @@ function pitchColorName(card) {
 }
 
 window.markCardImageLoaded = (img) => {
-  img?.closest(".card-tile")?.classList.add("card-tile--has-img");
+  img?.closest(".card-tile")?.classList.remove("card-tile--no-img");
 };
 
 window.markCardImageFailed = (img) => {
@@ -130,7 +197,7 @@ function cardTileHtml(card, { action = "", extraClass = "", title = "", disabled
     .join(" ");
   return `<div class="${classes}" data-card-id="${card.card_id}" ${action ? `data-action="${action}"` : ""} title="${resolvedTitle}">
     <div class="card-tile__art">
-      <img class="card-tile__img" src="${imgUrl}" alt="" loading="lazy" decoding="async" onload="markCardImageLoaded(this)" onerror="markCardImageFailed(this)" />
+      <img class="card-tile__img" src="${imgUrl}" alt="" loading="lazy" decoding="async" />
       <div class="card-tile__fallback">
         <div class="card-tile__name">${name}</div>
         ${typeHtml}
@@ -138,6 +205,109 @@ function cardTileHtml(card, { action = "", extraClass = "", title = "", disabled
       </div>
     </div>
   </div>`;
+}
+
+let cardPreviewTile = null;
+
+function initCardPreviewHover() {
+  const preview = document.getElementById("card-preview");
+  if (!preview) return;
+  const previewImg = preview.querySelector(".card-preview__img");
+  const previewFallback = preview.querySelector(".card-preview__fallback");
+  const previewCaption = preview.querySelector(".card-preview__caption");
+  const pad = 18;
+
+  const hideCardPreview = () => {
+    cardPreviewTile = null;
+    preview.hidden = true;
+    preview.setAttribute("aria-hidden", "true");
+    preview.classList.remove("card-preview--visible");
+  };
+
+  const positionCardPreview = (event) => {
+    const width = preview.offsetWidth || Math.min(320, window.innerWidth * 0.46);
+    const height = preview.offsetHeight || width * (7 / 5) + 48;
+    let x = event.clientX + pad;
+    let y = event.clientY + pad;
+    if (x + width > window.innerWidth - pad) {
+      x = event.clientX - width - pad;
+    }
+    if (y + height > window.innerHeight - pad) {
+      y = event.clientY - height - pad;
+    }
+    preview.style.left = `${Math.max(pad, x)}px`;
+    preview.style.top = `${Math.max(pad, y)}px`;
+  };
+
+  const showCardPreview = (tile, event) => {
+    const cardId = tile.dataset.cardId || tile.getAttribute("data-card-id") || "";
+    const tileImg = tile.querySelector(".card-tile__img");
+    const name =
+      tile.querySelector(".card-tile__name")?.textContent?.trim() ||
+      cardMetaFor(cardId).name ||
+      cardId.replace(/_/g, " ");
+    const classification =
+      tile.querySelector(".card-tile__type")?.textContent?.trim() ||
+      cardClassification(cardMetaFor(cardId));
+
+    previewCaption.textContent = name;
+    preview.hidden = false;
+    preview.setAttribute("aria-hidden", "false");
+    preview.classList.add("card-preview--visible");
+    requestAnimationFrame(() => positionCardPreview(event));
+
+    if (tile.classList.contains("card-tile--no-img") || !tileImg?.src) {
+      previewImg.hidden = true;
+      previewFallback.classList.add("card-preview__fallback--visible");
+      previewFallback.innerHTML = `
+        <div class="card-preview__fallback-name">${escapeHtml(name)}</div>
+        ${classification ? `<div class="card-preview__fallback-type">${escapeHtml(classification)}</div>` : ""}
+      `;
+      return;
+    }
+
+    previewImg.hidden = false;
+    previewFallback.classList.remove("card-preview__fallback--visible");
+    previewFallback.innerHTML = "";
+    if (previewImg.src !== tileImg.src) {
+      previewImg.src = tileImg.src;
+    }
+  };
+
+  document.body.addEventListener(
+    "mouseover",
+    (event) => {
+      const tile = event.target.closest(".card-tile:not(.card-tile--disabled)");
+      if (!tile) {
+        if (cardPreviewTile) hideCardPreview();
+        return;
+      }
+      if (tile === cardPreviewTile) return;
+      cardPreviewTile = tile;
+      showCardPreview(tile, event);
+    },
+    true
+  );
+
+  document.body.addEventListener("mousemove", (event) => {
+    if (!cardPreviewTile) return;
+    positionCardPreview(event);
+  });
+
+  document.body.addEventListener(
+    "mouseout",
+    (event) => {
+      if (!cardPreviewTile) return;
+      const leftTile = event.target.closest(".card-tile") === cardPreviewTile;
+      if (!leftTile) return;
+      const related = event.relatedTarget;
+      if (related && cardPreviewTile.contains(related)) return;
+      hideCardPreview();
+    },
+    true
+  );
+
+  document.addEventListener("scroll", hideCardPreview, true);
 }
 
 function rememberCardMeta(card) {
@@ -268,7 +438,9 @@ function searchHitHtml(c, { canAdd = true } = {}) {
 
 function renderDeck() {
   if (!state.deck) return;
-  document.getElementById("deck-grid").innerHTML = deckSlotsHtml(deckSlots());
+  const deckGrid = document.getElementById("deck-grid");
+  deckGrid.innerHTML = deckSlotsHtml(deckSlots());
+  bindCardTileImages(deckGrid);
   bindDeckSlotClicks();
   renderDeckStatus();
   refreshSearchResults();
@@ -296,6 +468,7 @@ function refreshSearchResults() {
     state.deck && deckCardCount() < requiredDeckSize(state.deck.game_format)
   );
   el.innerHTML = state.lastSearchCards.map((c) => searchHitHtml(c, { canAdd })).join("");
+  bindCardTileImages(el);
   bindSearchClicks();
 }
 
@@ -590,6 +763,7 @@ async function renderEquipment() {
     </div>`;
     })
     .join("");
+  bindCardTileImages(container);
   container.querySelectorAll(".equipment-slot--selectable").forEach((el) => {
     const pick = () => selectEquipmentSlot(+el.dataset.index);
     el.onclick = pick;
@@ -668,6 +842,7 @@ function renderEquipmentAlternatives() {
       equipmentPickHtml(c, { current: c.card_id === state.selectedEquip.card_id })
     )
     .join("");
+  bindCardTileImages(el);
   el.querySelectorAll("#equipment-results .card-tile").forEach((hit) => {
     hit.onclick = async () => {
       if (hit.classList.contains("equipment-pick--current")) return;
@@ -954,6 +1129,7 @@ async function loadResults(runId) {
 }
 
 async function init() {
+  initCardPreviewHover();
   await loadConfig();
   await loadPrecons();
   await loadSavedDecks();

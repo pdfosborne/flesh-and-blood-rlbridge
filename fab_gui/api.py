@@ -59,9 +59,30 @@ def _write_dashboard_once(out_dir: Path) -> None:
         pass
 
 
+TALISHAR_CARD_IMAGES_CDN = "https://images.talishar.net/public/cardimages/english"
+_HTTP_FETCH_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (compatible; flesh-and-blood-rlbridge/1.0; +fab-gui)"
+    ),
+    "Accept": "image/webp,image/*,*/*;q=0.8",
+}
+
+
 def card_image_url(talishar_url: str, card_id: str) -> str:
     base = talishar_url.rstrip("/")
     return f"{base}/WebpImages/{card_id}.webp"
+
+
+def card_image_cdn_url(card_id: str) -> str:
+    from urllib.parse import quote
+
+    token = str(card_id or "").strip()
+    return f"{TALISHAR_CARD_IMAGES_CDN}/{quote(token, safe='')}.webp"
+
+
+def card_image_display_url(card_id: str) -> str:
+    """Browser-facing card art URL (Talishar public CDN)."""
+    return card_image_cdn_url(card_id)
 
 
 def card_image_proxy_path(card_id: str) -> str:
@@ -72,32 +93,61 @@ def card_image_proxy_path(card_id: str) -> str:
     return f"/api/card-image/{quote(token, safe='')}"
 
 
-def fetch_card_image(env: EnvironmentSettings, card_id: str) -> tuple[bytes, str] | None:
-    """Fetch WebP bytes from Talishar, trying underscore and hyphen ids."""
+def _card_image_id_variants(card_id: str) -> list[str]:
+    token = str(card_id or "").strip()
+    if not token:
+        return []
+    variants = [token]
+    hyphen = token.replace("_", "-")
+    if hyphen not in variants:
+        variants.append(hyphen)
+    underscore = token.replace("-", "_")
+    if underscore not in variants:
+        variants.append(underscore)
+    return variants
+
+
+def _card_image_fetch_urls(env: EnvironmentSettings, card_id: str) -> list[str]:
+    """Ordered image sources: public CDN first, then local Talishar WebpImages."""
+    base = env.talishar_url.rstrip("/")
+    urls: list[str] = []
+    seen: set[str] = set()
+
+    def add(url: str) -> None:
+        if url not in seen:
+            seen.add(url)
+            urls.append(url)
+
+    for cid in _card_image_id_variants(card_id):
+        add(card_image_cdn_url(cid))
+        add(f"{base}/WebpImages/{cid}.webp")
+        add(f"{base}/WebpImages/en/{cid}.webp")
+    return urls
+
+
+def _fetch_webp_url(url: str) -> tuple[bytes, str] | None:
     import urllib.error
     import urllib.request
 
-    base = env.talishar_url.rstrip("/")
-    token = str(card_id or "").strip()
-    if not token:
+    req = urllib.request.Request(url, headers=_HTTP_FETCH_HEADERS)
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = resp.read()
+            if data:
+                return data, "image/webp"
+    except (OSError, urllib.error.URLError, ValueError):
         return None
-    candidates = [token]
-    hyphen = token.replace("_", "-")
-    if hyphen not in candidates:
-        candidates.append(hyphen)
-    underscore = token.replace("-", "_")
-    if underscore not in candidates:
-        candidates.append(underscore)
+    return None
 
-    for cid in candidates:
-        url = f"{base}/WebpImages/{cid}.webp"
-        try:
-            with urllib.request.urlopen(url, timeout=8) as resp:
-                data = resp.read()
-                if data:
-                    return data, "image/webp"
-        except (OSError, urllib.error.URLError, ValueError):
-            continue
+
+def fetch_card_image(env: EnvironmentSettings, card_id: str) -> tuple[bytes, str] | None:
+    """Fetch WebP bytes from local Talishar or the Talishar public CDN."""
+    if not str(card_id or "").strip():
+        return None
+    for url in _card_image_fetch_urls(env, card_id):
+        payload = _fetch_webp_url(url)
+        if payload is not None:
+            return payload
     return None
 
 
@@ -113,7 +163,7 @@ def card_hit_to_dict(hit: CardHit, *, talishar_url: str) -> dict[str, Any]:
         "card_class": hit.card_class,
         "type_line": hit.type_line,
         "classification": classification,
-        "image_url": card_image_proxy_path(hit.card_id),
+        "image_url": card_image_display_url(hit.card_id),
     }
 
 
@@ -137,7 +187,7 @@ def deck_counts_to_entries(
                 "pitch": hit.pitch if hit else None,
                 "type_line": hit.type_line if hit else "",
                 "classification": hit.classification if hit else "",
-                "image_url": card_image_proxy_path(card_id),
+                "image_url": card_image_display_url(card_id),
             }
         )
     return entries
@@ -326,7 +376,7 @@ def equipment_loadout(
             "classification": (
                 hit.classification if (hit := equip_index.lookup(entry.card_id)) else ""
             ),
-            "image_url": card_image_proxy_path(entry.card_id),
+            "image_url": card_image_display_url(entry.card_id),
         }
         for entry in entries
     ]

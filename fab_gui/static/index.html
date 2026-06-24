@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>FAB RL Bridge — Sideboard Compare</title>
-  <link rel="stylesheet" href="/static/styles.css" />
+  <link rel="stylesheet" href="/static/styles.css?v=3" />
 </head>
 <body>
   <header>
@@ -138,6 +138,13 @@
   </main>
 
   <div id="toast" class="toast" role="status"></div>
-  <script src="/static/app.js"></script>
+  <div id="card-preview" class="card-preview" hidden aria-hidden="true">
+    <div class="card-preview__art">
+      <img class="card-preview__img" alt="" />
+      <div class="card-preview__fallback"></div>
+    </div>
+    <div class="card-preview__caption"></div>
+  </div>
+  <script src="/static/app.js?v=3"></script>
 </body>
 </html>

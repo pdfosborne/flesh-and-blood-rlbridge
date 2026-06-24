@@ -16,11 +16,72 @@ def test_card_image_proxy_path() -> None:
     assert path == "/api/card-image/lightning_press_red"
 
 
+def test_card_image_cdn_url() -> None:
+    url = gui_api.card_image_cdn_url("lightning_press_red")
+    assert url == (
+        "https://images.talishar.net/public/cardimages/english/lightning_press_red.webp"
+    )
+
+
+def test_fetch_card_image_falls_back_to_cdn(monkeypatch: pytest.MonkeyPatch) -> None:
+    env = EnvironmentSettings()
+    calls: list[str] = []
+
+    def fake_fetch(url: str) -> tuple[bytes, str] | None:
+        calls.append(url)
+        if "images.talishar.net" in url:
+            return b"webp", "image/webp"
+        return None
+
+    monkeypatch.setattr(gui_api, "_fetch_webp_url", fake_fetch)
+    payload = gui_api.fetch_card_image(env, "lightning_press_red")
+    assert payload == (b"webp", "image/webp")
+    assert any("images.talishar.net" in url for url in calls)
+
+
+def test_card_image_fetch_urls_prioritize_cdn() -> None:
+    env = EnvironmentSettings()
+    urls = gui_api._card_image_fetch_urls(env, "a_red")
+    assert urls[0].startswith(gui_api.TALISHAR_CARD_IMAGES_CDN)
+
+
+def test_fetch_webp_url_sends_user_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    import urllib.request
+
+    captured: dict[str, urllib.request.Request] = {}
+
+    class FakeResp:
+        def read(self) -> bytes:
+            return b"RIFFwebp"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+    def fake_urlopen(req, timeout=8):  # noqa: ARG001
+        captured["req"] = req
+        return FakeResp()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    payload = gui_api._fetch_webp_url("https://images.talishar.net/public/cardimages/english/x.webp")
+    assert payload == (b"RIFFwebp", "image/webp")
+    assert captured["req"].get_header("User-agent")
+
+
 def test_search_cards_returns_image_urls() -> None:
     env = EnvironmentSettings()
     hits = gui_api.search_cards("lightning", game_format="silver_age", talishar_url=env.talishar_url, limit=3)
     assert hits
-    assert all(hit["image_url"].startswith("/api/card-image/") for hit in hits)
+    assert all(hit["image_url"].startswith(gui_api.TALISHAR_CARD_IMAGES_CDN) for hit in hits)
+
+
+def test_card_image_display_url() -> None:
+    url = gui_api.card_image_display_url("lightning_press_red")
+    assert url == (
+        "https://images.talishar.net/public/cardimages/english/lightning_press_red.webp"
+    )
 
 
 def test_search_cards_include_classification() -> None:
