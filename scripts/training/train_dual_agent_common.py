@@ -662,6 +662,391 @@ def _mask_logits_to_legal(logits: np.ndarray, n_legal: int) -> np.ndarray:
     return masked
 
 
+def _mask_logits_batch(logits: np.ndarray, n_legal: np.ndarray) -> np.ndarray:
+    """Mask illegal action columns for each row of batched logits."""
+    masked = np.asarray(logits, dtype=np.float64).copy()
+    if masked.ndim == 1:
+        masked = masked[None, :]
+    n_actions = masked.shape[-1]
+    n_legal_arr = np.asarray(n_legal, dtype=np.int64).reshape(-1)
+    cols = np.arange(n_actions, dtype=np.int64)
+    illegal = (n_legal_arr[:, None] > 0) & (n_legal_arr[:, None] < n_actions) & (
+        cols[None, :] >= n_legal_arr[:, None]
+    )
+    masked[illegal] = -1e9
+    return masked
+
+
+def _sample_actions_from_logits_batch(
+    logits: np.ndarray,
+    n_legal: np.ndarray,
+    rngs: list[np.random.Generator],
+    n_actions: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return sampled action indices and log-probs for a batch of masked logits."""
+    masked = _mask_logits_batch(logits, n_legal)
+    lp_all = _log_softmax(masked)
+    probs = _softmax(masked)
+    actions = np.empty(masked.shape[0], dtype=np.int64)
+    log_probs = np.empty(masked.shape[0], dtype=np.float64)
+    for row, rng in enumerate(rngs):
+        nl = max(1, int(n_legal[row]))
+        action = int(rng.choice(n_actions, p=probs[row]))
+        if action >= nl:
+            action = nl - 1
+        actions[row] = action
+        log_probs[row] = float(lp_all[row, action])
+    return actions, log_probs
+
+
+def _int_fast_state(state_dict: dict[str, Any], key: str, default: int) -> int:
+    value = state_dict.get(key, default)
+    return default if value is None else int(value)
+
+
+def _finalize_fast_episode_transitions(
+    slot: "_FastRolloutSlot",
+    *,
+    max_steps: int,
+) -> None:
+    """Apply terminal-reward transitions and truncation flags after an episode ends."""
+    if not slot.truncated and slot.steps >= max_steps:
+        slot.truncated = True
+    if not slot.terminated:
+        return
+    if slot.final_p1_hp > slot.final_p2_hp and slot.p2_trans:
+        last = slot.p2_trans[-1]
+        slot.p2_trans.append({
+            "obs_vec": last["next_obs_vec"],
+            "action": last["action"],
+            "reward": -1.0,
+            "value": 0.0,
+            "log_prob": last["log_prob"],
+            "done": 1.0,
+            "n_legal": last["n_legal"],
+            "next_obs_vec": np.zeros_like(last["next_obs_vec"]),
+        })
+        slot.cur_p2_r -= 1.0
+    elif slot.final_p2_hp > slot.final_p1_hp and slot.p1_trans:
+        last = slot.p1_trans[-1]
+        slot.p1_trans.append({
+            "obs_vec": last["next_obs_vec"],
+            "action": last["action"],
+            "reward": -1.0,
+            "value": 0.0,
+            "log_prob": last["log_prob"],
+            "done": 1.0,
+            "n_legal": last["n_legal"],
+            "next_obs_vec": np.zeros_like(last["next_obs_vec"]),
+        })
+        slot.cur_p1_r -= 1.0
+
+
+def _fast_episode_result_from_slot(
+    slot: "_FastRolloutSlot",
+    *,
+    warmup: bool,
+    max_steps: int,
+) -> dict[str, Any]:
+    _finalize_fast_episode_transitions(slot, max_steps=max_steps)
+    return {
+        "p1_transitions": slot.p1_trans,
+        "p2_transitions": slot.p2_trans,
+        "p1_reward": slot.cur_p1_r,
+        "p2_reward": slot.cur_p2_r,
+        "terminated": slot.terminated,
+        "truncated": slot.truncated,
+        "warmup": warmup,
+        "steps": slot.steps,
+        "p1_hp": slot.final_p1_hp,
+        "p2_hp": slot.final_p2_hp,
+        "turn_no": slot.final_turn_no,
+        "p1_deck": slot.final_p1_deck,
+        "p2_deck": slot.final_p2_deck,
+    }
+
+
+@dataclass
+class _FastRolloutSlot:
+    env: TalisharEngineEnvironment
+    state: dict[str, Any]
+    p1_rng: np.random.Generator
+    p2_rng: np.random.Generator
+    p1_trans: list[dict[str, Any]] = field(default_factory=list)
+    p2_trans: list[dict[str, Any]] = field(default_factory=list)
+    cur_p1_r: float = 0.0
+    cur_p2_r: float = 0.0
+    steps: int = 0
+    active: bool = True
+    terminated: bool = False
+    truncated: bool = False
+    final_p1_hp: int = 0
+    final_p2_hp: int = 0
+    final_p1_deck: int = 0
+    final_p2_deck: int = 0
+    final_turn_no: int = 0
+
+
+def _reset_fast_rollout_slot(
+    slot: _FastRolloutSlot,
+    *,
+    seed: Optional[int],
+    starting_player_id: int,
+) -> None:
+    slot.state = slot.env.fast_reset(seed=seed, starting_player_id=starting_player_id)
+    slot.p1_trans = []
+    slot.p2_trans = []
+    slot.cur_p1_r = 0.0
+    slot.cur_p2_r = 0.0
+    slot.steps = 0
+    slot.active = True
+    slot.terminated = False
+    slot.truncated = False
+    slot.final_p1_hp = _int_fast_state(slot.state, "p1_health", 0)
+    slot.final_p2_hp = _int_fast_state(slot.state, "p2_health", 0)
+    slot.final_p1_deck = _int_fast_state(slot.state, "p1_deck", 0)
+    slot.final_p2_deck = _int_fast_state(slot.state, "p2_deck", 0)
+    slot.final_turn_no = _int_fast_state(slot.state, "turn_no", 0)
+
+
+def _batched_fast_rollout_step(
+    slots: list[_FastRolloutSlot],
+    p1_policy: PPOAgent,
+    p2_policy: PPOAgent,
+    *,
+    warmup: bool,
+    max_steps: int,
+) -> None:
+    """Advance all active fast-path rollout slots by one env step with batched policy inference."""
+    active_indices = [index for index, slot in enumerate(slots) if slot.active]
+    if not active_indices:
+        return
+
+    if warmup:
+        for index in active_indices:
+            slot = slots[index]
+            state = slot.state
+            n_legal = max(
+                1,
+                int(state.get("legal_count", p1_policy.n_actions) or 1),
+            )
+            acting = int(state["acting_player_id"])
+            rng = slot.p1_rng if acting == 1 else slot.p2_rng
+            action = int(rng.integers(n_legal))
+            value = 0.0
+            log_prob = 0.0
+            _apply_fast_rollout_action(
+                slot,
+                action=action,
+                value=value,
+                log_prob=log_prob,
+                acting=acting,
+                max_steps=max_steps,
+            )
+        return
+
+    p1_indices: list[int] = []
+    p2_indices: list[int] = []
+    for index in active_indices:
+        acting = int(slots[index].state["acting_player_id"])
+        if acting == 1:
+            p1_indices.append(index)
+        else:
+            p2_indices.append(index)
+
+    p1_logits = p1_values = p2_logits = p2_values = None
+    if p1_indices:
+        p1_obs = np.stack([
+            np.asarray(slots[index].state["obs_vec"], dtype=np.float64)
+            for index in p1_indices
+        ])
+        p1_logits, p1_values = p1_policy.predict_batch(p1_obs)
+    if p2_indices:
+        p2_obs = np.stack([
+            np.asarray(slots[index].state["obs_vec"], dtype=np.float64)
+            for index in p2_indices
+        ])
+        p2_logits, p2_values = p2_policy.predict_batch(p2_obs)
+
+    if p1_indices:
+        p1_nlegal = np.array([
+            max(1, int(slots[index].state.get("legal_count", p1_policy.n_actions) or 1))
+            for index in p1_indices
+        ], dtype=np.int64)
+        p1_actions, p1_log_probs = _sample_actions_from_logits_batch(
+            np.asarray(p1_logits, dtype=np.float64),
+            p1_nlegal,
+            [slots[index].p1_rng for index in p1_indices],
+            p1_policy.n_actions,
+        )
+    if p2_indices:
+        p2_nlegal = np.array([
+            max(1, int(slots[index].state.get("legal_count", p2_policy.n_actions) or 1))
+            for index in p2_indices
+        ], dtype=np.int64)
+        p2_actions, p2_log_probs = _sample_actions_from_logits_batch(
+            np.asarray(p2_logits, dtype=np.float64),
+            p2_nlegal,
+            [slots[index].p2_rng for index in p2_indices],
+            p2_policy.n_actions,
+        )
+
+    p1_cursor = 0
+    p2_cursor = 0
+    for index in active_indices:
+        slot = slots[index]
+        acting = int(slot.state["acting_player_id"])
+        if acting == 1:
+            action = int(p1_actions[p1_cursor])
+            log_prob = float(p1_log_probs[p1_cursor])
+            value = float(p1_values[p1_cursor])
+            p1_cursor += 1
+        else:
+            action = int(p2_actions[p2_cursor])
+            log_prob = float(p2_log_probs[p2_cursor])
+            value = float(p2_values[p2_cursor])
+            p2_cursor += 1
+        _apply_fast_rollout_action(
+            slot,
+            action=action,
+            value=value,
+            log_prob=log_prob,
+            acting=acting,
+            max_steps=max_steps,
+        )
+
+
+def _apply_fast_rollout_action(
+    slot: _FastRolloutSlot,
+    *,
+    action: int,
+    value: float,
+    log_prob: float,
+    acting: int,
+    max_steps: int,
+) -> None:
+    obs_vec = np.asarray(slot.state["obs_vec"], dtype=np.float64)
+    n_legal = max(
+        1,
+        int(slot.state.get("legal_count", 32) or 1),
+    )
+    next_state = slot.env.fast_step_index(action)
+    env_reward = float(next_state.get("reward", 0.0) or 0.0)
+    slot.terminated = bool(next_state.get("terminated", False))
+    slot.truncated = bool(next_state.get("truncated", False))
+    done = slot.terminated or slot.truncated
+    slot.steps += 1
+
+    next_obs_vec = np.asarray(next_state["obs_vec"], dtype=np.float64)
+    agent_reward = env_reward if acting == 1 else -env_reward
+    trans = {
+        "obs_vec": obs_vec,
+        "action": action,
+        "reward": agent_reward,
+        "value": value,
+        "log_prob": log_prob,
+        "done": float(done),
+        "n_legal": n_legal,
+        "next_obs_vec": next_obs_vec,
+    }
+    if acting == 1:
+        slot.p1_trans.append(trans)
+        slot.cur_p1_r += env_reward
+    else:
+        slot.p2_trans.append(trans)
+        slot.cur_p2_r += -env_reward
+
+    slot.final_p1_hp = _int_fast_state(next_state, "p1_health", slot.final_p1_hp)
+    slot.final_p2_hp = _int_fast_state(next_state, "p2_health", slot.final_p2_hp)
+    slot.final_p1_deck = _int_fast_state(next_state, "p1_deck", slot.final_p1_deck)
+    slot.final_p2_deck = _int_fast_state(next_state, "p2_deck", slot.final_p2_deck)
+    slot.final_turn_no = _int_fast_state(next_state, "turn_no", slot.final_turn_no)
+    slot.state = next_state
+    if done or slot.steps >= max_steps:
+        slot.active = False
+
+
+def _run_parallel_batched_fast_episodes(
+    envs: list[TalisharEngineEnvironment],
+    p1_policy: PPOAgent,
+    p2_policy: PPOAgent,
+    *,
+    max_steps: int,
+    warmup: bool,
+    episode_indices: list[int],
+    seed_base: Optional[int],
+) -> list[dict[str, Any]]:
+    """Run one episode per env slot with batched PPO inference across active slots."""
+    slots: list[_FastRolloutSlot] = []
+    for worker, env in enumerate(envs):
+        ep_index = episode_indices[worker]
+        ep_seed = (seed_base + worker) if seed_base is not None else None
+        slot = _FastRolloutSlot(
+            env=env,
+            state={},
+            p1_rng=np.random.default_rng((ep_seed * 31 + 7) if ep_seed is not None else None),
+            p2_rng=np.random.default_rng((ep_seed * 31 + 13) if ep_seed is not None else None),
+        )
+        _reset_fast_rollout_slot(
+            slot,
+            seed=ep_seed,
+            starting_player_id=1 + (ep_index % 2),
+        )
+        slots.append(slot)
+
+    for _ in range(max_steps):
+        if not any(slot.active for slot in slots):
+            break
+        _batched_fast_rollout_step(
+            slots,
+            p1_policy,
+            p2_policy,
+            warmup=warmup,
+            max_steps=max_steps,
+        )
+
+    return [
+        _fast_episode_result_from_slot(slot, warmup=warmup, max_steps=max_steps)
+        for slot in slots
+    ]
+
+
+def _run_parallel_fast_episodes_threaded(
+    envs: list[TalisharEngineEnvironment],
+    p1_policy: PPOAgent,
+    p2_policy: PPOAgent,
+    *,
+    max_steps: int,
+    warmup: bool,
+    episode_indices: list[int],
+    seed_base: Optional[int],
+    max_workers: int,
+) -> list[dict[str, Any]]:
+    """Run one episode per env using threads and per-step policy inference."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _run_worker(worker: int) -> dict[str, Any]:
+        ep_index = episode_indices[worker]
+        ep_seed = (seed_base + worker) if seed_base is not None else None
+        p1_rng = np.random.default_rng((ep_seed * 31 + 7) if ep_seed is not None else None)
+        p2_rng = np.random.default_rng((ep_seed * 31 + 13) if ep_seed is not None else None)
+        return _run_one_fast_episode(
+            envs[worker],
+            p1_policy,
+            p2_policy,
+            max_steps,
+            ep_seed,
+            warmup,
+            p1_rng,
+            p2_rng,
+            starting_player_id=1 + (ep_index % 2),
+        )
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = [pool.submit(_run_worker, worker) for worker in range(len(envs))]
+        return [future.result() for future in futures]
+
+
 def _env_supports_fast_training(env: Any) -> bool:
     return bool(
         getattr(env, "supports_fast_training", False)
@@ -1308,6 +1693,13 @@ def train_agents_from_both_perspectives_parallel(
             make_env(matchup, base_url=base_url, game_format=game_format, max_turns=max_steps)
         )
     print(f"  [parallel] {batch_parallelism} sessions ready", flush=True)
+    use_batched_fast_rollout = _env_supports_fast_training(envs[0])
+    if use_batched_fast_rollout:
+        print(
+            f"  [parallel] batched PPO inference enabled across "
+            f"{batch_parallelism} rollout slot(s)",
+            flush=True,
+        )
 
     p1_ep_rewards:  list[float] = []
     p2_ep_rewards:  list[float] = []
@@ -1344,78 +1736,99 @@ def train_agents_from_both_perspectives_parallel(
 
                 # Submit one episode per worker in this batch.
                 seed_base = (seed + completed) if seed is not None else None
-                futures = {}
-                for w in range(batch_size):
-                    episode_index = completed + w
-                    starting_player_id = 1 + (episode_index % 2)
-                    ep_seed    = (seed_base + w) if seed_base is not None else None
-                    p1_rng     = np.random.default_rng(
-                        (ep_seed * 31 + 7)  if ep_seed is not None else None
+                batch_results: list[dict[str, Any]] = []
+                if use_batched_fast_rollout:
+                    batch_results = _run_parallel_batched_fast_episodes(
+                        envs[:batch_size],
+                        p1_policy,
+                        p2_policy,
+                        max_steps=max_steps,
+                        warmup=in_warmup,
+                        episode_indices=[completed + w for w in range(batch_size)],
+                        seed_base=seed_base,
                     )
-                    p2_rng     = np.random.default_rng(
-                        (ep_seed * 31 + 13) if ep_seed is not None else None
-                    )
-                    fut = pool.submit(
-                        _safe_run_one_episode,
-                        envs[w], p1_policy, p2_policy,
-                        max_steps, ep_seed, in_warmup, p1_rng, p2_rng,
-                        matchup, base_url, game_format,
-                        starting_player_id,
-                    )
-                    futures[fut] = w
+                else:
+                    futures = {}
+                    for w in range(batch_size):
+                        episode_index = completed + w
+                        starting_player_id = 1 + (episode_index % 2)
+                        ep_seed    = (seed_base + w) if seed_base is not None else None
+                        p1_rng     = np.random.default_rng(
+                            (ep_seed * 31 + 7)  if ep_seed is not None else None
+                        )
+                        p2_rng     = np.random.default_rng(
+                            (ep_seed * 31 + 13) if ep_seed is not None else None
+                        )
+                        fut = pool.submit(
+                            _safe_run_one_episode,
+                            envs[w], p1_policy, p2_policy,
+                            max_steps, ep_seed, in_warmup, p1_rng, p2_rng,
+                            matchup, base_url, game_format,
+                            starting_player_id,
+                        )
+                        futures[fut] = w
 
                 # Collect results and merge buffers.
                 batch_p1_trans: list[dict] = []
                 batch_p2_trans: list[dict] = []
                 from concurrent.futures import TimeoutError as FutureTimeoutError
-                for fut in as_completed(futures, timeout=episode_timeout_secs + 30):
-                    try:
-                        result = fut.result(timeout=episode_timeout_secs)
-                    except FutureTimeoutError:
-                        print(f"  [parallel] episode timed out after {episode_timeout_secs}s — skipping")
-                        skipped_episodes += 1
-                        p1_ep_rewards.append(0.0)
-                        p2_ep_rewards.append(0.0)
-                        p1_outcomes.append(
-                            classify_p1_episode_outcome(skipped=True)
-                        )
-                        completed += 1
-                        if on_episodes_progress is not None:
-                            try:
-                                on_episodes_progress(
-                                    completed, p1_ep_rewards, p2_ep_rewards, p1_outcomes
-                                )
-                            except TypeError:
-                                on_episodes_progress(
-                                    completed, p1_ep_rewards, p2_ep_rewards
-                                )
-                            except Exception as exc:
-                                print(f"  [parallel] progress callback failed ({exc!r})")
-                        continue
-                    except KeyboardInterrupt:
-                        shutdown_flag = True
+                result_iter: list[dict[str, Any]]
+                if use_batched_fast_rollout:
+                    result_iter = batch_results
+                else:
+                    result_iter = []
+                    for fut in as_completed(futures, timeout=episode_timeout_secs + 30):
+                        try:
+                            result_iter.append(fut.result(timeout=episode_timeout_secs))
+                        except FutureTimeoutError:
+                            print(f"  [parallel] episode timed out after {episode_timeout_secs}s — skipping")
+                            skipped_episodes += 1
+                            p1_ep_rewards.append(0.0)
+                            p2_ep_rewards.append(0.0)
+                            p1_outcomes.append(
+                                classify_p1_episode_outcome(skipped=True)
+                            )
+                            completed += 1
+                            if on_episodes_progress is not None:
+                                try:
+                                    on_episodes_progress(
+                                        completed, p1_ep_rewards, p2_ep_rewards, p1_outcomes
+                                    )
+                                except TypeError:
+                                    on_episodes_progress(
+                                        completed, p1_ep_rewards, p2_ep_rewards
+                                    )
+                                except Exception as exc:
+                                    print(f"  [parallel] progress callback failed ({exc!r})")
+                            continue
+                        except KeyboardInterrupt:
+                            shutdown_flag = True
+                            break
+                        except Exception as exc:
+                            print(f"  [parallel] episode failed ({exc!r}) — skipping")
+                            skipped_episodes += 1
+                            p1_ep_rewards.append(0.0)
+                            p2_ep_rewards.append(0.0)
+                            p1_outcomes.append(
+                                classify_p1_episode_outcome(skipped=True)
+                            )
+                            completed += 1
+                            if on_episodes_progress is not None:
+                                try:
+                                    on_episodes_progress(
+                                        completed, p1_ep_rewards, p2_ep_rewards, p1_outcomes
+                                    )
+                                except TypeError:
+                                    on_episodes_progress(
+                                        completed, p1_ep_rewards, p2_ep_rewards
+                                    )
+                                except Exception as exc_cb:
+                                    print(f"  [parallel] progress callback failed ({exc_cb!r})")
+                            continue
+                    if shutdown_flag:
                         break
-                    except Exception as exc:
-                        print(f"  [parallel] episode failed ({exc!r}) — skipping")
-                        skipped_episodes += 1
-                        p1_ep_rewards.append(0.0)
-                        p2_ep_rewards.append(0.0)
-                        p1_outcomes.append(
-                            classify_p1_episode_outcome(skipped=True)
-                        )
-                        completed += 1
-                        if on_episodes_progress is not None:
-                            try:
-                                on_episodes_progress(
-                                    completed, p1_ep_rewards, p2_ep_rewards, p1_outcomes
-                                )
-                            except TypeError:
-                                on_episodes_progress(
-                                    completed, p1_ep_rewards, p2_ep_rewards
-                                )
-                            except Exception as exc_cb:
-                                print(f"  [parallel] progress callback failed ({exc_cb!r})")
-                        continue
+
+                for result in result_iter:
                     batch_p1_trans.extend(result["p1_transitions"])
                     batch_p2_trans.extend(result["p2_transitions"])
                     p1_ep_rewards.append(result["p1_reward"])

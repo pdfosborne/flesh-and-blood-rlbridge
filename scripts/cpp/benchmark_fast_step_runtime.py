@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -19,7 +20,12 @@ from flesh_and_blood_rlbridge.cpp_engine_environment import CppEngineEnvironment
 from flesh_and_blood_rlbridge.fast_observation import FAST_OBS_DIM
 from rl_agents.ppo import PPOAgent
 from runtime_defaults import DEFAULT_HIDDEN_SIZE
-from train_dual_agent_common import _mask_logits_to_legal, _run_one_fast_episode
+from train_dual_agent_common import (
+    _mask_logits_to_legal,
+    _run_one_fast_episode,
+    _run_parallel_batched_fast_episodes,
+    _run_parallel_fast_episodes_threaded,
+)
 
 ENGINE_DIR = REPO_ROOT / "results" / "cpp_engines" / "Ira_vs_Ira-8386dab645e583fc"
 WARMUP = 200
@@ -248,6 +254,89 @@ def main() -> None:
     ep_elapsed = time.perf_counter() - t0
     print(f"  {ep_count} episodes × up to {EPISODE_STEPS} steps: {total_steps} total steps")
     print(f"  {total_steps / ep_elapsed:,.0f} steps/s  |  {ep_count / ep_elapsed:.1f} episodes/s")
+
+    # ── Parallel workers: threaded vs batched inference ───────────────────────
+    print("\n[Parallel rollout — threaded vs batched PPO inference]")
+    parallel_workers = min(8, max(2, (os.cpu_count() or 4)))
+    parallel_episodes = parallel_workers * 4
+    parallel_max_steps = 500
+    parallel_envs = [
+        CppEngineEnvironment(engine_dir=ENGINE_DIR, max_turns=parallel_max_steps)
+        for _ in range(parallel_workers)
+    ]
+    parallel_p1 = PPOAgent(
+        hidden_size=DEFAULT_HIDDEN_SIZE, n_actions=32, obs_dim=FAST_OBS_DIM
+    )
+    parallel_p2 = PPOAgent(
+        hidden_size=DEFAULT_HIDDEN_SIZE, n_actions=32, obs_dim=FAST_OBS_DIM
+    )
+    parallel_p1._init_nets(FAST_OBS_DIM)
+    parallel_p2._init_nets(FAST_OBS_DIM)
+
+    def _run_threaded_rollouts() -> int:
+        total_steps_local = 0
+        for batch_start in range(0, parallel_episodes, parallel_workers):
+            batch_n = min(parallel_workers, parallel_episodes - batch_start)
+            seed_base = batch_start
+            results = _run_parallel_fast_episodes_threaded(
+                parallel_envs[:batch_n],
+                parallel_p1,
+                parallel_p2,
+                max_steps=parallel_max_steps,
+                warmup=False,
+                episode_indices=[batch_start + worker for worker in range(batch_n)],
+                seed_base=seed_base,
+                max_workers=batch_n,
+            )
+            total_steps_local += sum(int(result.get("steps", 0) or 0) for result in results)
+        return total_steps_local
+
+    def _run_batched_rollouts() -> int:
+        total_steps_local = 0
+        for batch_start in range(0, parallel_episodes, parallel_workers):
+            batch_n = min(parallel_workers, parallel_episodes - batch_start)
+            seed_base = batch_start
+            results = _run_parallel_batched_fast_episodes(
+                parallel_envs[:batch_n],
+                parallel_p1,
+                parallel_p2,
+                max_steps=parallel_max_steps,
+                warmup=False,
+                episode_indices=[batch_start + worker for worker in range(batch_n)],
+                seed_base=seed_base,
+            )
+            total_steps_local += sum(int(result.get("steps", 0) or 0) for result in results)
+        return total_steps_local
+
+    for _ in range(3):
+        _run_threaded_rollouts()
+        _run_batched_rollouts()
+
+    t0 = time.perf_counter()
+    threaded_steps = _run_threaded_rollouts()
+    threaded_elapsed = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    batched_steps = _run_batched_rollouts()
+    batched_elapsed = time.perf_counter() - t0
+
+    print(
+        f"  workers={parallel_workers}  episodes={parallel_episodes}  "
+        f"max_steps={parallel_max_steps}"
+    )
+    print(
+        f"  threaded (per-step inference): "
+        f"{threaded_steps / threaded_elapsed:,.0f} steps/s  "
+        f"({threaded_elapsed:.2f}s total)"
+    )
+    print(
+        f"  batched (cross-worker inference): "
+        f"{batched_steps / batched_elapsed:,.0f} steps/s  "
+        f"({batched_elapsed:.2f}s total)"
+    )
+    if batched_elapsed > 0:
+        speedup = threaded_elapsed / batched_elapsed
+        print(f"  batched speedup vs threaded: {speedup:.2f}x")
 
     # ── Summary ranking ───────────────────────────────────────────────────────
     overhead_py = t_py_fast - t_cpp_step
