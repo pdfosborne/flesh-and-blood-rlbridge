@@ -3,7 +3,7 @@ set -e
 
 cp -f /config/talishar-fe.env /app/.env
 
-if [ ! -d node_modules ]; then
+if [ ! -x node_modules/.bin/vite ]; then
   echo "Installing Talishar-FE dependencies..."
   npm install
 fi
