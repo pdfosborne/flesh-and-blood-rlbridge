@@ -227,41 +227,49 @@ def cmake_generator_args(engine_dir: Path, pybind11_dir: str) -> list[str]:
     if shutil.which("ninja"):
         _ok("Generator: Ninja")
         return ["-G", "Ninja"]
-    if shutil.which("cl"):
-        _ok("Generator: auto (cl.exe found)")
-        return []
-    vswhere_candidates = [
-        Path(os.environ.get("ProgramFiles(x86)", "")) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe",
-        Path(os.environ.get("ProgramFiles", "")) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe",
-    ]
-    for vswhere in vswhere_candidates:
-        if not vswhere.is_file():
-            continue
-        completed = subprocess.run(
-            [str(vswhere), "-latest", "-property", "installationVersion"],
-            check=False,
-            text=True,
-            capture_output=True,
-        )
-        version = (completed.stdout or "").strip().split(".")[0]
-        generator = {
-            "17": "Visual Studio 17 2022",
-            "16": "Visual Studio 16 2019",
-            "15": "Visual Studio 15 2017",
-        }.get(version, "Visual Studio 17 2022")
-        _ok(f"Generator: {generator} (via vswhere)")
-        return ["-G", generator, "-A", "x64"]
-    if shutil.which("g++"):
-        _ok("Generator: MinGW Makefiles")
-        return ["-G", "MinGW Makefiles"]
+    if sys.platform == "win32":
+        if shutil.which("cl"):
+            _ok("Generator: auto (cl.exe found)")
+            return []
+        vswhere_candidates = [
+            Path(os.environ.get("ProgramFiles(x86)", "")) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe",
+            Path(os.environ.get("ProgramFiles", "")) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe",
+        ]
+        for vswhere in vswhere_candidates:
+            if not vswhere.is_file():
+                continue
+            completed = subprocess.run(
+                [str(vswhere), "-latest", "-property", "installationVersion"],
+                check=False,
+                text=True,
+                capture_output=True,
+            )
+            version = (completed.stdout or "").strip().split(".")[0]
+            generator = {
+                "17": "Visual Studio 17 2022",
+                "16": "Visual Studio 16 2019",
+                "15": "Visual Studio 15 2017",
+            }.get(version, "Visual Studio 17 2022")
+            _ok(f"Generator: {generator} (via vswhere)")
+            return ["-G", generator, "-A", "x64"]
+        if shutil.which("g++"):
+            _ok("Generator: MinGW Makefiles")
+            return ["-G", "MinGW Makefiles"]
+    elif shutil.which("g++") or shutil.which("gcc"):
+        _ok("Generator: Unix Makefiles")
+        return ["-G", "Unix Makefiles"]
 
     _warn("No compiler found in PATH.")
     print()
     print("  Options:")
-    print("  1. Run this script from a VS Developer PowerShell:")
-    print("     Start > Visual Studio > Developer PowerShell for VS")
-    print("  2. Install Ninja + MSVC Build Tools, then re-run")
-    print("  3. Install MinGW (g++) and re-run")
+    if sys.platform == "win32":
+        print("  1. Run this script from a VS Developer PowerShell:")
+        print("     Start > Visual Studio > Developer PowerShell for VS")
+        print("  2. Install Ninja + MSVC Build Tools, then re-run")
+        print("  3. Install MinGW (g++) and re-run")
+    else:
+        print("  1. Install build-essential (g++) and cmake, then re-run")
+        print("  2. Install ninja-build for faster builds, then re-run")
     print()
     print("  Build manually once a compiler is available:")
     print(f'    cd "{engine_dir}"')
