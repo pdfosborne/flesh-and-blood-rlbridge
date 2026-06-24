@@ -242,6 +242,15 @@ class GuiRequestHandler(BaseHTTPRequestHandler):
                 return _json_response(self, {"error": "deck_name required"}, status=400)
             return _json_response(self, gui_api.opponent_from_precon(deck_name, self.env))
 
+        if path == "/api/opponent/fabrary":
+            source = str(body.get("url_or_slug") or "").strip()
+            if not source:
+                return _json_response(self, {"error": "url_or_slug required"}, status=400)
+            try:
+                return _json_response(self, gui_api.opponent_from_fabrary(source, self.env))
+            except Exception as exc:  # noqa: BLE001
+                return _json_response(self, {"error": str(exc)}, status=400)
+
         if path == "/api/guide-baseline":
             try:
                 result = gui_api.compute_guide_baseline(
@@ -256,6 +265,13 @@ class GuiRequestHandler(BaseHTTPRequestHandler):
                 result["deck_entries"] = gui_api.deck_counts_to_entries(
                     result["baseline_deck"], game_format=fmt, talishar_url=self.env.talishar_url
                 )
+                opponent = body.get("opponent")
+                if isinstance(opponent, dict) and opponent.get("opponent_deck"):
+                    result["opponent_guide"] = gui_api.apply_opponent_guide_sideboard(
+                        self.env,
+                        opponent,
+                        player_hero_id=str(body.get("hero_id") or ""),
+                    )
                 return _json_response(self, result)
             except Exception as exc:  # noqa: BLE001
                 return _json_response(self, {"error": str(exc)}, status=400)

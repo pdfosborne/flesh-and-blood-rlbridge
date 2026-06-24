@@ -18,6 +18,7 @@ services:
       TALISHAR_ASSETS_PATH: /app/Talishar/Assets
     volumes:
       - ./results:/app/results
+      - ./Talishar/Assets:/app/Talishar/Assets
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:

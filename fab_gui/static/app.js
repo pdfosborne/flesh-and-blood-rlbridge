@@ -322,6 +322,8 @@ function cardMetaFor(cardId) {
   if (fromDeck) return fromDeck;
   const fromPool = (state.deck?.pool_entries || []).find((e) => e.card_id === cardId);
   if (fromPool) return fromPool;
+  const fromOpp = (state.opponent?.deck_entries || []).find((e) => e.card_id === cardId);
+  if (fromOpp) return fromOpp;
   const pitchMatch = cardId.match(/_(red|yellow|blue)$/i);
   const pitchMap = { red: 1, yellow: 2, blue: 3 };
   return {
@@ -539,6 +541,66 @@ function setDecksStatus(text) {
   if (el) el.textContent = text || "";
 }
 
+function updateOpponentSummary() {
+  const el = document.getElementById("opponent-summary");
+  if (!el) return;
+  if (!state.opponent) {
+    el.textContent = "";
+    renderOpponentDeck();
+    return;
+  }
+  const parts = [];
+  if (state.opponent.source === "fabrary") {
+    parts.push(`FaBrary: ${state.opponent.label || state.opponent.opponent_deck}`);
+  } else {
+    parts.push(state.opponent.opponent_deck);
+  }
+  parts.push(state.opponent.opponent_hero_id);
+  if (state.opponent.deck_size) {
+    parts.push(`${state.opponent.deck_size} cards (guide sideboard)`);
+  }
+  el.textContent = parts.join(" · ");
+  renderOpponentDeck();
+}
+
+function opponentDeckSlots() {
+  const slots = [];
+  const entries = [...(state.opponent?.deck_entries || [])].sort((a, b) =>
+    String(a.name || a.card_id).localeCompare(String(b.name || b.card_id))
+  );
+  for (const entry of entries) {
+    rememberCardMeta(entry);
+    for (let i = 0; i < Number(entry.count || 0); i++) {
+      slots.push({ ...entry, slotIndex: slots.length });
+    }
+  }
+  return slots;
+}
+
+function renderOpponentDeck() {
+  const panel = document.getElementById("opponent-deck-panel");
+  const grid = document.getElementById("opponent-deck-grid");
+  const label = document.getElementById("opponent-deck-label");
+  if (!panel || !grid || !label) return;
+
+  const entries = state.opponent?.deck_entries || [];
+  if (!entries.length) {
+    panel.hidden = true;
+    grid.innerHTML = "";
+    label.textContent = "";
+    return;
+  }
+
+  panel.hidden = false;
+  label.textContent =
+    state.opponent.baseline_label ||
+    `Guide policy sideboard vs ${state.deck?.hero_id || "your hero"}`;
+  grid.innerHTML = opponentDeckSlots()
+    .map((slot) => cardTileHtml(slot, { title: cardDisplayName(slot) }))
+    .join("");
+  bindCardTileImages(grid);
+}
+
 let guideApplyToken = 0;
 
 async function applyGuideBaseline({ navigate = true } = {}) {
@@ -555,12 +617,26 @@ async function applyGuideBaseline({ navigate = true } = {}) {
         hero_class: state.deck.hero_class,
         game_format: state.deck.game_format,
         equipment_header: state.deck.equipment_header,
+        opponent: {
+          opponent_deck: state.opponent.opponent_deck,
+          opponent_deck_path: state.opponent.opponent_deck_path,
+          opponent_hero_id: state.opponent.opponent_hero_id,
+          source: state.opponent.source,
+          label: state.opponent.label,
+        },
       }),
     });
     if (token !== guideApplyToken) return false;
     state.deck.deck = result.baseline_deck;
     state.deck.deck_entries = result.deck_entries;
     for (const entry of result.deck_entries || []) rememberCardMeta(entry);
+    if (result.opponent_guide) {
+      state.opponent.deck = result.opponent_guide.deck;
+      state.opponent.deck_entries = result.opponent_guide.deck_entries;
+      state.opponent.deck_size = result.opponent_guide.deck_size;
+      state.opponent.baseline_label = result.opponent_guide.baseline_label;
+      for (const entry of result.opponent_guide.deck_entries || []) rememberCardMeta(entry);
+    }
     syncDeckEntries();
     state.deck.baseline_label = result.baseline_label;
     state.evalCandidates = [];
@@ -568,6 +644,7 @@ async function applyGuideBaseline({ navigate = true } = {}) {
     renderDeck();
     renderEquipment();
     renderEvalCandidates();
+    updateOpponentSummary();
     setDecksStatus("Guide policy applied — opening editor…");
     if (navigate) switchTab("editor");
     toast("Guide policy baseline applied");
@@ -658,18 +735,39 @@ document.getElementById("opponent-select").onchange = async () => {
   const deck_name = document.getElementById("opponent-select").value;
   if (!deck_name) {
     state.opponent = null;
-    document.getElementById("opponent-summary").textContent = "";
+    updateOpponentSummary();
     setDecksStatus(state.deck ? "Select an opponent to run guide policy sideboarding." : "");
     return;
   }
+  document.getElementById("opponent-fabrary-input").value = "";
   try {
     state.opponent = await api("/api/opponent/precon", {
       method: "POST",
       body: JSON.stringify({ deck_name }),
     });
-    document.getElementById("opponent-summary").textContent =
-      `${state.opponent.opponent_hero_id} (${state.opponent.opponent_deck})`;
+    state.opponent.deck_entries = null;
+    state.opponent.deck_size = null;
+    updateOpponentSummary();
     await maybeAutoGuideAndContinue();
+  } catch (e) {
+    toast(e.message, true);
+  }
+};
+
+document.getElementById("btn-opponent-fabrary").onclick = async () => {
+  const url_or_slug = document.getElementById("opponent-fabrary-input").value.trim();
+  if (!url_or_slug) return toast("Enter a FaBrary URL or slug for the opponent", true);
+  try {
+    state.opponent = await api("/api/opponent/fabrary", {
+      method: "POST",
+      body: JSON.stringify({ url_or_slug }),
+    });
+    document.getElementById("opponent-select").value = "";
+    state.opponent.deck_entries = null;
+    state.opponent.deck_size = null;
+    updateOpponentSummary();
+    await maybeAutoGuideAndContinue();
+    toast("Opponent imported from FaBrary");
   } catch (e) {
     toast(e.message, true);
   }
@@ -991,9 +1089,13 @@ function renderTrainReview() {
   const required = requiredDeckSize(state.deck.game_format);
   const count = deckCardCount();
   const deckOk = count === required;
+  const oppDisplay =
+    state.opponent.source === "fabrary"
+      ? `${state.opponent.label || state.opponent.opponent_deck} (FaBrary)`
+      : state.opponent.opponent_deck;
   el.innerHTML = `
     <div><strong>Hero:</strong> ${state.deck.hero_id}</div>
-    <div><strong>Opponent:</strong> ${state.opponent.opponent_hero_id} (${state.opponent.opponent_deck})</div>
+    <div><strong>Opponent:</strong> ${state.opponent.opponent_hero_id} (${oppDisplay})</div>
     <div><strong>Baseline:</strong> ${state.deck.baseline_label || "Baseline"}</div>
     <div><strong>Lists:</strong> 1 baseline + ${state.evalCandidates.length} saved alternate(s)</div>
     <div><strong>Deck:</strong> ${count} / ${required} cards${deckOk ? "" : " — complete the deck in the editor"}</div>

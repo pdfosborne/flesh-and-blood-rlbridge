@@ -274,8 +274,53 @@ def opponent_from_precon(deck_name: str, env: EnvironmentSettings) -> dict[str, 
     info = read_talishar_asset_hero_info(env.assets_path, deck_name)
     if info is None:
         hero_id = deck_name.split("SAGE")[0].lower()
-        return {"opponent_hero_id": hero_id, "opponent_deck": deck_name}
-    return {"opponent_hero_id": info.hero_id, "opponent_deck": info.asset_stem}
+        return {
+            "opponent_hero_id": hero_id,
+            "opponent_deck": deck_name,
+            "source": "precon",
+            "label": deck_name,
+        }
+    return {
+        "opponent_hero_id": info.hero_id,
+        "opponent_deck": info.asset_stem,
+        "source": "precon",
+        "label": deck_name,
+    }
+
+
+def opponent_from_fabrary(url_or_slug: str, env: EnvironmentSettings) -> dict[str, str]:
+    """Import a FaBrary deck and register it as a Talishar Assets opponent list."""
+    deck_path = import_fabrary(url_or_slug)
+    payload = load_deck_payload(deck_path, env)
+    deck = payload.get("deck") or {}
+    if not deck:
+        raise ValueError("FaBrary deck has no main-deck cards")
+
+    hero_id = str(payload.get("hero_id") or "").strip()
+    equipment_header = str(payload.get("equipment_header") or hero_id).strip()
+    if not hero_id:
+        raise ValueError("Could not determine opponent hero from FaBrary deck")
+
+    training_root = REPO_ROOT / "scripts" / "training"
+    if str(training_root) not in sys.path:
+        sys.path.insert(0, str(training_root))
+    from train_pipeline_common import _write_deck_file  # noqa: PLC0415
+
+    stem = f"rl_gui_{uuid.uuid4().hex[:10]}"
+    _write_deck_file(
+        {str(k): int(v) for k, v in deck.items() if int(v) > 0},
+        equipment_header,
+        stem,
+        env.assets_path,
+    )
+    label = str(payload.get("name") or url_or_slug).strip()
+    return {
+        "opponent_hero_id": hero_id,
+        "opponent_deck": stem,
+        "opponent_deck_path": str(deck_path.resolve()),
+        "source": "fabrary",
+        "label": label,
+    }
 
 
 def search_cards(
@@ -402,6 +447,73 @@ def compute_guide_baseline(
         "baseline_deck": guide_deck,
         "equipment_header": equipment_header,
         "baseline_label": "Guide policy baseline",
+    }
+
+
+def _load_opponent_pool(env: EnvironmentSettings, opponent: dict[str, Any]) -> dict[str, Any]:
+    deck_path = str(opponent.get("opponent_deck_path") or "").strip()
+    if deck_path:
+        return load_deck_payload(Path(deck_path), env)
+
+    deck_name = str(opponent.get("opponent_deck") or opponent.get("label") or "").strip()
+    if not deck_name:
+        raise ValueError("Opponent deck is not configured")
+
+    cache_dir = TUI_DECK_CACHE
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    out = cache_dir / f"precon_{slugify(deck_name)}.json"
+    if not out.is_file():
+        export_precon_deck_json(deck_name, Path(env.assets_path), out, game_format="sage")
+    return load_deck_payload(out, env)
+
+
+def apply_opponent_guide_sideboard(
+    env: EnvironmentSettings,
+    opponent: dict[str, Any],
+    *,
+    player_hero_id: str,
+) -> dict[str, Any]:
+    """Sideboard the opponent list vs the player hero and sync Talishar Assets."""
+    opp_payload = _load_opponent_pool(env, opponent)
+    guide_deck = compute_guide_policy_deck(
+        {str(k): int(v) for k, v in (opp_payload.get("card_pool") or {}).items()},
+        opponent_hero_id=player_hero_id,
+        hero_id=str(opp_payload.get("hero_id") or opponent.get("opponent_hero_id") or ""),
+        game_format=str(opp_payload.get("game_format") or "silver_age"),
+        hero_class=str(opp_payload.get("hero_class") or ""),
+    )
+    asset_stem = str(opponent.get("opponent_deck") or "").strip()
+    if not asset_stem:
+        raise ValueError("Opponent Talishar asset name is missing")
+
+    training_root = REPO_ROOT / "scripts" / "training"
+    if str(training_root) not in sys.path:
+        sys.path.insert(0, str(training_root))
+    from train_pipeline_common import _write_deck_file  # noqa: PLC0415
+
+    equipment_header = str(
+        opp_payload.get("equipment_header") or opponent.get("opponent_hero_id") or ""
+    ).strip()
+    _write_deck_file(
+        {str(k): int(v) for k, v in guide_deck.items() if int(v) > 0},
+        equipment_header,
+        asset_stem,
+        env.assets_path,
+    )
+    game_format = str(opp_payload.get("game_format") or "silver_age")
+    deck_entries = deck_counts_to_entries(
+        guide_deck,
+        game_format=game_format,
+        talishar_url=env.talishar_url,
+    )
+    return {
+        "deck": guide_deck,
+        "deck_entries": deck_entries,
+        "deck_size": sum(int(v) for v in guide_deck.values()),
+        "baseline_label": "Guide policy sideboard",
+        "equipment_header": equipment_header,
+        "hero_id": opp_payload.get("hero_id"),
+        "game_format": game_format,
     }
 
 

@@ -45,7 +45,14 @@
           <h3>Opponent</h3>
           <label for="opponent-select">Talishar precon</label>
           <select id="opponent-select"><option value="">— select opponent —</option></select>
+          <label for="opponent-fabrary-input">FaBrary URL or slug</label>
+          <input id="opponent-fabrary-input" type="text" placeholder="https://fabrary.net/decks/… or slug" />
+          <button type="button" id="btn-opponent-fabrary">Import opponent from FaBrary</button>
           <div id="opponent-summary" class="hint" style="margin-top:0.75rem"></div>
+          <div id="opponent-deck-panel" hidden>
+            <div id="opponent-deck-label" class="hint" style="margin-top:0.75rem"></div>
+            <div id="opponent-deck-grid" class="deck-grid deck-grid--opponent"></div>
+          </div>
           <div id="decks-status" class="hint" style="margin-top:1rem"></div>
         </div>
       </div>
@@ -145,6 +152,6 @@
     </div>
     <div class="card-preview__caption"></div>
   </div>
-  <script src="/static/app.js?v=3"></script>
+  <script src="/static/app.js?v=5"></script>
 </body>
 </html>
