@@ -291,7 +291,7 @@ def _final_eval_candidate(
         base_url=args.talishar_url,
         fe_url=args.talishar_fe_url,
         out_dir=eval_dir,
-        render_gif=not args.no_render_gif,
+        render_gif=args.render_gif,
         gif_fps=args.gif_fps,
     )
     if summary.get("skipped"):
@@ -440,8 +440,11 @@ def main() -> None:
     parser.add_argument("--skip-final-eval", action="store_true")
     parser.add_argument("--talishar-fe-url",
         default=os.environ.get("TALISHAR_FE_URL", "http://localhost:5173"))
-    parser.add_argument("--no-render-gif", action="store_true",
-        help="Skip GIF render during final eval")
+    parser.add_argument(
+        "--render-gif",
+        action="store_true",
+        help="After final eval, render a Talishar FE rollout GIF (slow; off by default)",
+    )
     parser.add_argument("--gif-fps", type=float, default=RUNTIME.play.gif_fps)
 
     args = parser.parse_args()

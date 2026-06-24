@@ -1105,7 +1105,7 @@ def _evaluate_checkpoint(
         raise RuntimeError(
             f"\n  Cannot reach Talishar at {base_url}\n"
             f"  Error: {_conn_exc}\n"
-            "  Start the server first:  ./start_talishar.ps1\n"
+            "  Start the server first:  python start_talishar.py\n"
             "  Or set TALISHAR_URL / --talishar-url to the correct address."
         ) from _conn_exc
 

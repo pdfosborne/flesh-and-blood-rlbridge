@@ -9,9 +9,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
+from fab_bridge.paths import configure_import_paths, repo_root
 from runtime_defaults import RUNTIME
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+configure_import_paths()
+REPO_ROOT = repo_root()
 SCRIPTS_ROOT = REPO_ROOT / "scripts"
 SCRIPTS_TRAINING = SCRIPTS_ROOT / "training"
 SCRIPTS_EVAL = SCRIPTS_ROOT / "eval"

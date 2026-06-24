@@ -559,8 +559,8 @@ def run_sideboard_compare(
         ])
     if spec.skip_final_eval:
         cmd.append("--skip-final-eval")
-    if spec.no_render_gif:
-        cmd.append("--no-render-gif")
+    if not spec.no_render_gif:
+        cmd.append("--render-gif")
     if candidates_json is not None:
         cmd.extend(["--candidates-json", str(candidates_json)])
     if cpp_dir:

@@ -33,13 +33,21 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+gui = []
+train = ["torch"]
+cpp = ["pybind11"]
 dev = [
     "pytest>=8.0.0",
     "ruff>=0.4.0",
 ]
+all = [
+    "flesh-and-blood-rlbridge[gui,train,cpp]",
+]
 
 [project.scripts]
-fab-play = "flesh_and_blood_rlbridge.cli:main"
+fab-bridge = "fab_bridge.cli:main"
+fab-gui = "fab_bridge.cli:gui_main"
+fab-tui = "fab_bridge.cli:tui_main_entry"
 
 [project.entry-points."rlbridge.environments"]
 flesh-and-blood = "flesh_and_blood_rlbridge:register_environments"
@@ -53,10 +61,34 @@ Repository = "https://github.com/pdfosborne/flesh-and-blood-rlbridge"
 Issues = "https://github.com/pdfosborne/flesh-and-blood-rlbridge/issues"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/flesh_and_blood_rlbridge"]
+packages = [
+    "src/flesh_and_blood_rlbridge",
+    "fab_bridge",
+    "fab_tui",
+    "fab_gui",
+]
+
+[tool.hatch.build.targets.wheel.force-include]
+"runtime_defaults.py" = "runtime_defaults.py"
+"scripts" = "scripts"
+"runscripts" = "runscripts"
+"start_talishar.py" = "start_talishar.py"
 
 [tool.hatch.build.targets.sdist]
-include = ["src/", "README.md", "pyproject.toml"]
+include = [
+    "src/",
+    "fab_bridge/",
+    "fab_tui/",
+    "fab_gui/",
+    "scripts/",
+    "runscripts/",
+    "runtime_defaults.py",
+    "start_talishar.py",
+    "docker/",
+    "docker-compose.yml",
+    "README.md",
+    "pyproject.toml",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -2932,7 +2932,7 @@ def run_final_evaluation(
     base_url: str,
     fe_url: str,
     out_dir: Path,
-    render_gif: bool = True,
+    render_gif: bool = False,
     gif_fps: float = 3.0,
 ) -> dict[str, Any]:
     """Full final evaluation for one player's pipeline.
@@ -2943,9 +2943,8 @@ def run_final_evaluation(
     2. Write a temporary deck file to Talishar Assets.
     3. Run ``num_eval_episodes`` games with the trained sampled play policy,
        recording win / loss / draw for each episode.
-    4. Render one full rollout by screenshotting the live Talishar frontend
-       (Playwright + Chromium headless) after every game step, saving
-       per-step PNGs and assembling them into an animated GIF.
+    4. Optionally render one full rollout via the Talishar frontend
+       (Playwright screenshots + GIF) when ``render_gif=True``.
     5. Write ``final_eval.json`` to ``out_dir``.
 
     Returns the summary dict.
@@ -3178,29 +3177,37 @@ def run_final_evaluation(
         matchup_deck=matchup_deck_artifacts,
     )
 
-    # ── render rollout (Playwright + Talishar frontend) ──────────────────────
+    # ── optional render rollout (Playwright + Talishar frontend) ─────────────
     render_dir = out_dir / f"{player}_final_render"
     gif_path = out_dir / f"{player}_optimal_policy.gif"
+    frame_paths: list[Path] = []
+    render_outcome = "skipped"
+    render_steps = 0
 
-    print(f"\n  [{player}] Rendering optimal-policy rollout via Talishar FE → {render_dir}")
-    _write_final_eval_live(completed=num_eval_episodes, phase="render")
-    frame_paths, render_outcome = _render_game_with_talishar_frontend(
-        agents=agents,
-        opponent_agents=opponent_agents,
-        opponent_mode=opponent_mode,
-        base_url=base_url,
-        fe_url=fe_url,
-        game_format=game_format,
-        deck_name=deck_name,
-        opp_name=opp_name,
-        max_steps=max_steps,
-        render_dir=render_dir,
-        player_label=player,
-    )
-    render_steps = max(0, len(frame_paths) - 1)
-
-    if render_gif and frame_paths:
-        _frames_to_gif(frame_paths, gif_path, fps=gif_fps)
+    if render_gif:
+        print(f"\n  [{player}] Rendering optimal-policy rollout via Talishar FE → {render_dir}")
+        _write_final_eval_live(completed=num_eval_episodes, phase="render")
+        frame_paths, render_outcome = _render_game_with_talishar_frontend(
+            agents=agents,
+            opponent_agents=opponent_agents,
+            opponent_mode=opponent_mode,
+            base_url=base_url,
+            fe_url=fe_url,
+            game_format=game_format,
+            deck_name=deck_name,
+            opp_name=opp_name,
+            max_steps=max_steps,
+            render_dir=render_dir,
+            player_label=player,
+        )
+        render_steps = max(0, len(frame_paths) - 1)
+        if frame_paths:
+            _frames_to_gif(frame_paths, gif_path, fps=gif_fps)
+    else:
+        print(
+            f"\n  [{player}] Skipping rollout GIF render "
+            f"(use --render-gif or eval_phase3_checkpoint.py --render-only to generate later)"
+        )
 
     # ── write final_eval.json ─────────────────────────────────────────────────
     summary: dict[str, Any] = {
@@ -3434,7 +3441,11 @@ def main() -> None:
         help="Path to deck_state.json (default: <out-dir>/deck_state.json)")
     parser.add_argument("--final-eval-episodes", type=int, default=RUNTIME.full_pipeline.final_eval_episodes)
     parser.add_argument("--final-eval-max-steps", type=int, default=RUNTIME.full_pipeline.final_eval_max_steps)
-    parser.add_argument("--no-render-gif", action="store_true")
+    parser.add_argument(
+        "--render-gif",
+        action="store_true",
+        help="After final eval, render a Talishar FE rollout GIF (slow; off by default)",
+    )
     parser.add_argument("--gif-fps", type=float, default=RUNTIME.play.gif_fps)
     parser.add_argument("--skip-final-eval", action="store_true")
 
@@ -3589,7 +3600,7 @@ def main() -> None:
             base_url=args.talishar_url,
             fe_url=args.talishar_fe_url,
             out_dir=final_eval_dir,
-            render_gif=not args.no_render_gif,
+            render_gif=args.render_gif,
             gif_fps=args.gif_fps,
         )
         p2_eval = None
@@ -3609,7 +3620,7 @@ def main() -> None:
                 base_url=args.talishar_url,
                 fe_url=args.talishar_fe_url,
                 out_dir=final_eval_dir,
-                render_gif=not args.no_render_gif,
+                render_gif=args.render_gif,
                 gif_fps=args.gif_fps,
             )
         _write_results_json(

@@ -266,7 +266,7 @@ def _verify_talishar_reachable(base_url: str) -> None:
         raise RuntimeError(
             f"\n  Cannot reach Talishar at {base_url}\n"
             f"  Error: {exc}\n"
-            "  Start the server first:  ./start_talishar.ps1\n"
+            "  Start the server first:  python start_talishar.py\n"
             "  Or set TALISHAR_URL / --talishar-url to the correct address."
         ) from exc
 
@@ -280,7 +280,7 @@ def _verify_frontend_reachable(fe_url: str) -> None:
         raise RuntimeError(
             f"\n  Cannot reach Talishar frontend at {fe_url}\n"
             f"  Error: {exc}\n"
-            "  Start the FE dev server:  .\\start_talishar.ps1\n"
+            "  Start the FE dev server:  python start_talishar.py --fe-only\n"
             "  (or run `npm run dev` in Talishar-FE)"
         ) from exc
 

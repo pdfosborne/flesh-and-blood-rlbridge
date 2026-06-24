@@ -177,7 +177,11 @@ def main() -> None:
     )
     parser.add_argument("--final-eval-episodes", type=int, default=RUNTIME.full_pipeline.final_eval_episodes)
     parser.add_argument("--final-eval-max-steps", type=int, default=RUNTIME.full_pipeline.final_eval_max_steps)
-    parser.add_argument("--no-render-gif", action="store_true")
+    parser.add_argument(
+        "--render-gif",
+        action="store_true",
+        help="After final eval, render a Talishar FE rollout GIF (slow; off by default)",
+    )
     parser.add_argument("--gif-fps", type=float, default=RUNTIME.play.gif_fps)
 
     args = parser.parse_args()
@@ -487,7 +491,7 @@ def main() -> None:
         base_url=args.talishar_url,
         fe_url=args.talishar_fe_url,
         out_dir=final_eval_dir,
-        render_gif=not args.no_render_gif,
+        render_gif=args.render_gif,
         gif_fps=args.gif_fps,
     )
     p2_eval: Optional[dict[str, Any]] = None
@@ -507,7 +511,7 @@ def main() -> None:
             base_url=args.talishar_url,
             fe_url=args.talishar_fe_url,
             out_dir=final_eval_dir,
-            render_gif=not args.no_render_gif,
+            render_gif=args.render_gif,
             gif_fps=args.gif_fps,
         )
 

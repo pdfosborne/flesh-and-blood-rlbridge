@@ -1,0 +1,29 @@
+# Talishar game server + FAB RL Bridge web GUI
+name: fab-rl-bridge
+
+include:
+  - path: ./Talishar/docker-compose.yml
+
+services:
+  fab-bridge:
+    build:
+      context: .
+      dockerfile: docker/fab-bridge/Dockerfile
+    ports:
+      - "8765:8765"
+    environment:
+      FAB_BRIDGE_HOME: /app
+      # Reach Talishar published on the host (works on Docker Desktop + Linux with extra_hosts)
+      TALISHAR_URL: http://host.docker.internal:8080/game
+      TALISHAR_ASSETS_PATH: /app/Talishar/Assets
+    volumes:
+      - fab-results:/app/results
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      web-server:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  fab-results:

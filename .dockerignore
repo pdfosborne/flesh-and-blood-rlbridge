@@ -1,0 +1,13 @@
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+.git
+.github
+results
+Talishar/Games
+Talishar/mysql-data
+Talishar-FE/node_modules
+*.md
+!README.md

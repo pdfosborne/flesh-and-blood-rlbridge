@@ -22,13 +22,37 @@ _RESULTS  = _REPO / "results"
 _SIMULATE_SCRIPT       = _REPO / "simulate_deck_matchup.ps1"
 _FIXED_OPP_SCRIPT      = _REPO / "run_aurora_vs_briar_fixed_opponent.ps1"
 _FULL_PIPE_SCRIPT       = _REPO / "run_sage_aurora_vs_briar_deckbuild.ps1"
-_START_TALISHAR_SCRIPT = _REPO / "start_talishar.ps1"
+_START_TALISHAR_SCRIPT = _REPO / "start_talishar.py"
 
 _FAB_CUSTOM_TOOLS_REGISTERED = False
 
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
+
+
+def _run_python(script: Path, args: list[str], timeout: Optional[int] = None) -> dict[str, Any]:
+    """Invoke a Python script with the current interpreter."""
+    cmd = [sys.executable, str(script)] + args
+    try:
+        proc = subprocess.run(  # noqa: S603
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=str(_REPO),
+        )
+        return {
+            "returncode": proc.returncode,
+            "stdout":     proc.stdout[-8000:],
+            "stderr":     proc.stderr[-2000:],
+        }
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "returncode": -1,
+            "stdout":     (getattr(exc, "stdout", None) or "")[-8000:],
+            "stderr":     f"Timed out after {timeout}s.",
+        }
 
 
 def _run_ps(script: Path, args: list[str], timeout: Optional[int] = None) -> dict[str, Any]:
@@ -115,7 +139,7 @@ def _ensure_talishar_running(
 ) -> dict[str, Any]:
     """Ensure the Talishar backend (and optionally FE) are reachable.
 
-    If either required service is down, ``start_talishar.ps1`` is invoked
+    If either required service is down, ``start_talishar.py`` is invoked
     automatically with the appropriate flags so callers never need to start
     Talishar by hand.  Returns a status dict that tools can surface to the
     caller.
@@ -132,15 +156,15 @@ def _ensure_talishar_running(
             "start_result":        None,
         }
 
-    # Determine which flags to pass to start_talishar.ps1
-    ps_args: list[str] = []
+    # Determine which flags to pass to start_talishar.py
+    start_args: list[str] = []
     if backend_up and need_fe and not fe_up:
-        ps_args = ["-FeOnly"]          # backend fine; only start FE
+        start_args = ["--fe-only"]          # backend fine; only start FE
     elif fe_up is not None and fe_up and not backend_up:
-        ps_args = ["-BackendOnly"]     # FE fine; only start backend
+        start_args = ["--backend-only"]     # FE fine; only start backend
     # else: start everything (no flags = default)
 
-    result = _run_ps(_START_TALISHAR_SCRIPT, ps_args, timeout=120)
+    result = _run_python(_START_TALISHAR_SCRIPT, start_args, timeout=120)
     return {
         "backend_was_running": backend_up,
         "fe_was_running":      fe_up,
@@ -264,7 +288,6 @@ def register_mcp_tools(
             "--iterations",                    str(iterations),
             "--final-eval-episodes",           str(final_eval_episodes),
             "--final-eval-max-steps",          str(max_steps),
-            "--no-render-gif",
             "--talishar-url",                  talishar_url or os.environ.get("TALISHAR_URL", "http://localhost:8080/game"),
             "--out-dir",                       str(effective_out),
             "--results-json",                  str(effective_out / "results.json"),
@@ -495,7 +518,7 @@ def register_mcp_tools(
 
         Talishar must be running before any simulation or training tool can
         function.  This tool manages the Docker Compose backend and the Vite
-        frontend dev server via ``start_talishar.ps1``.
+        frontend dev server via ``start_talishar.py``.
 
         Parameters
         ----------
@@ -514,7 +537,7 @@ def register_mcp_tools(
         fe_url:
             Frontend URL to probe (default ``http://localhost:5173``).
         timeout_seconds:
-            Wall-clock timeout for the PowerShell script (default 120 s).
+            Wall-clock timeout for the launcher script (default 120 s).
         """
         action = action.lower().strip()
 
@@ -537,16 +560,16 @@ def register_mcp_tools(
             return json.dumps(status, indent=2)
 
         if action == "stop":
-            result = _run_ps(_START_TALISHAR_SCRIPT, ["-Down"], timeout=timeout_seconds)
+            result = _run_python(_START_TALISHAR_SCRIPT, ["--down"], timeout=timeout_seconds)
             return _format_output(result)
 
         if action == "start":
-            ps_args: list[str] = []
+            start_args: list[str] = []
             if backend_only:
-                ps_args = ["-BackendOnly"]
+                start_args = ["--backend-only"]
             elif fe_only:
-                ps_args = ["-FeOnly"]
-            result = _run_ps(_START_TALISHAR_SCRIPT, ps_args, timeout=timeout_seconds)
+                start_args = ["--fe-only"]
+            result = _run_python(_START_TALISHAR_SCRIPT, start_args, timeout=timeout_seconds)
             return _format_output(result)
 
         return f"ERROR: unknown action {action!r}. Use 'start', 'stop', or 'status'."
