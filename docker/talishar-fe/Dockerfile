@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl \
 WORKDIR /app
 
 COPY docker/talishar-fe/entrypoint.sh /entrypoint.sh
+COPY docker/talishar-fe/patch-vite-config.cjs /patch-vite-config.cjs
 RUN chmod +x /entrypoint.sh
 
 EXPOSE 5173
