@@ -24,6 +24,8 @@ def test_equipment_slot_detects_weapon_and_armor() -> None:
     assert equipment_slot("romping_club", hero_id="briar") == "weapon"
     assert equipment_slot("blossom_of_spring", hero_id="briar") == "chest"
     assert equipment_slot("snapdragon_scalers", hero_id="briar") == "legs"
+    assert equipment_slot("blade_beckoner_plating", hero_id="briar") == "chest"
+    assert equipment_slot("captains_coat", hero_id="briar") == "chest"
 
 
 def test_parse_and_rebuild_equipment_header() -> None:
@@ -40,6 +42,37 @@ def test_parse_and_rebuild_equipment_header() -> None:
         [entry.card_id for entry in entries],
     )
     assert rebuilt == header
+
+
+def test_briar_weapon_alternatives_are_slot_filtered_only() -> None:
+    from fab_tui.equipment import EquipmentSearchIndex, equipment_slot
+
+    idx = EquipmentSearchIndex("silver_age", hero_id="briar")
+    weapons = [h.card_id for h in idx.all_hits() if equipment_slot(h.card_id, hero_id="briar") == "weapon"]
+    assert "talishar_the_lost_prince" in weapons
+    assert "nebula_blade" in weapons
+    assert "rosetta_thorn" in weapons
+    assert not any(equipment_slot(cid, hero_id="briar") != "weapon" for cid in weapons)
+
+
+def test_hero_class_for_id_reads_cards_db() -> None:
+    from fab_tui.equipment import hero_class_for_id, hero_talent_for_id
+
+    assert hero_class_for_id("briar") == "Runeblade"
+    assert hero_talent_for_id("briar") == "Elemental"
+
+
+def test_suggest_guide_equipment_header_keeps_briar_weapon() -> None:
+    header = "briar rosetta_thorn blossom_of_spring mage_master_boots aether_crackers"
+    suggested = suggest_guide_equipment_header(
+        header,
+        hero_id="briar",
+        opponent_hero_id="azalea",
+        game_format="silver_age",
+        pool_by_id={},
+    )
+    assert "rosetta_thorn" in suggested.split()
+    assert "driftwood_quiver" not in suggested.split()
 
 
 def test_suggest_guide_equipment_header_keeps_shape() -> None:

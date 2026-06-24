@@ -11,9 +11,12 @@ import pytest
 _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO / "scripts" / "eval"))
 
+from datetime import datetime, timedelta, timezone
+
 from sideboard_compare_dashboard import (  # noqa: E402
     _chart_engine_label,
     _chart_title,
+    _estimate_sideboard_compare_eta,
     _slug_to_display_name,
     collect_sideboard_compare_state,
     render_sideboard_compare_html,
@@ -261,3 +264,87 @@ def test_collect_and_render_dashboard(tmp_path: Path) -> None:
     html_path = write_sideboard_compare_dashboard(out_dir, auto_refresh_seconds=None)
     assert html_path.is_file()
     assert "sideboard_compare_dashboard.html" in html_path.name
+
+
+def test_training_phase_eta_accounts_for_slow_final_eval() -> None:
+    started = datetime.now(timezone.utc) - timedelta(minutes=30)
+    eta_seconds, _ = _estimate_sideboard_compare_eta(
+        started_at=started,
+        train_done=50,
+        train_total=100,
+        final_done_episodes=0,
+        final_total_episodes=20,
+        final_eval_weight=25,
+        active_final_lives=[],
+        in_final_eval_phase=False,
+    )
+    assert eta_seconds is not None
+    # Weighted remaining work is much larger than unfinished training alone.
+    assert eta_seconds > 3600
+
+
+def test_final_eval_phase_eta_uses_observed_talishar_rate() -> None:
+    started = datetime.now(timezone.utc) - timedelta(hours=2)
+    eta_seconds, _ = _estimate_sideboard_compare_eta(
+        started_at=started,
+        train_done=200,
+        train_total=200,
+        final_done_episodes=5,
+        final_total_episodes=40,
+        final_eval_weight=25,
+        active_final_lives=[{
+            "episodes_completed": 5,
+            "target_episodes": 20,
+            "phase": "episodes",
+            "episode_rate": 0.001,
+        }],
+        in_final_eval_phase=True,
+    )
+    assert eta_seconds is not None
+    assert eta_seconds > 10_000
+
+
+def test_collect_final_eval_eta_from_live_progress(tmp_path: Path) -> None:
+    out_dir = tmp_path / "run"
+    candidate_dir = out_dir / "candidates" / "swap_01"
+    candidate_dir.mkdir(parents=True)
+    (candidate_dir / "final_eval").mkdir()
+    (out_dir / "candidates_manifest.json").write_text(
+        json.dumps({
+            "started_at": (
+                datetime.now(timezone.utc) - timedelta(hours=1)
+            ).isoformat(),
+            "play_episodes": 100,
+            "final_eval_episodes": 20,
+            "skip_final_eval": False,
+            "candidates": [{
+                "candidate_id": "swap_01",
+                "label": "Swap",
+                "game_deck": {"a_red": 40},
+                "swaps": [],
+            }],
+        }),
+        encoding="utf-8",
+    )
+    (candidate_dir / "candidate_result.json").write_text(
+        json.dumps({
+            "candidate_id": "swap_01",
+            "play_win_rate": 0.55,
+        }),
+        encoding="utf-8",
+    )
+    (candidate_dir / "final_eval" / "final_eval_live.json").write_text(
+        json.dumps({
+            "episodes_completed": 4,
+            "target_episodes": 20,
+            "phase": "episodes",
+            "episode_rate": 0.002,
+            "runtime_backend": "HTTP Talishar",
+        }),
+        encoding="utf-8",
+    )
+
+    state = collect_sideboard_compare_state(out_dir)
+    assert state["candidates"][0]["status"] == "final_eval"
+    assert state["eta_seconds"] is not None
+    assert state["eta_seconds"] > 3600

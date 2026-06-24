@@ -33,6 +33,11 @@ REPO_ROOT = _bootstrap.configure_paths()
 
 _PITCH_SUFFIX = re.compile(r"_(red|blue|yellow|purple)$")
 _DASHBOARD_NAME = "sideboard_compare_dashboard.html"
+# Talishar HTTP final eval is far slower than C++ training episodes; weight for ETA/progress.
+_DEFAULT_FINAL_EVAL_ETA_WEIGHT = 25.0
+# Conservative fallback when no live final-eval rate is available (~2 min / episode).
+_DEFAULT_FINAL_EVAL_SECONDS_PER_EPISODE = 120.0
+_DEFAULT_FINAL_EVAL_RENDER_SECONDS = 180.0
 
 
 def _slug_to_display_name(card_id: str) -> str:
@@ -131,6 +136,27 @@ def _training_win_series(candidate_dir: Path) -> list[dict[str, Any]]:
             })
     points.sort(key=lambda row: int(row.get("episode", 0) or 0))
     return points
+
+
+def _live_final_eval_progress(candidate_dir: Path) -> Optional[dict[str, Any]]:
+    live_path = candidate_dir / "final_eval" / "final_eval_live.json"
+    if live_path.is_file():
+        data = _read_json(live_path)
+        if isinstance(data, dict):
+            return data
+    return None
+
+
+def _resolve_final_eval_eta_weight(manifest: dict[str, Any]) -> float:
+    raw = manifest.get("final_eval_eta_weight")
+    if raw is not None:
+        try:
+            weight = float(raw)
+            if weight > 0:
+                return weight
+        except (TypeError, ValueError):
+            pass
+    return _DEFAULT_FINAL_EVAL_ETA_WEIGHT
 
 
 def _live_training_progress(candidate_dir: Path) -> Optional[dict[str, Any]]:
@@ -379,23 +405,83 @@ def _parse_started_at(manifest: dict[str, Any], out_dir: Path) -> Optional[datet
     return None
 
 
-def _estimate_eta(
+def _estimate_sideboard_compare_eta(
     *,
     started_at: Optional[datetime],
-    completed_units: float,
-    total_units: float,
+    train_done: float,
+    train_total: float,
+    final_done_episodes: float,
+    final_total_episodes: float,
+    final_eval_weight: float,
+    active_final_lives: list[dict[str, Any]],
+    in_final_eval_phase: bool,
 ) -> tuple[Optional[float], str]:
-    if started_at is None or completed_units <= 0 or total_units <= 0:
+    """Estimate remaining runtime with slower Talishar final-eval episodes."""
+    if started_at is None:
         return None, "—"
+
+    weighted_done = train_done + final_done_episodes * final_eval_weight
+    weighted_total = train_total + final_total_episodes * final_eval_weight
+    if weighted_done <= 0 or weighted_total <= 0:
+        return None, "—"
+
     now = datetime.now(timezone.utc)
     elapsed = (now - started_at).total_seconds()
     if elapsed <= 0:
         return None, "—"
-    rate = completed_units / elapsed
-    remaining = max(0.0, total_units - completed_units)
-    if rate <= 0:
+
+    train_remaining = max(0.0, train_total - train_done)
+    final_remaining_eps = max(0.0, final_total_episodes - final_done_episodes)
+
+    train_episode_rate: Optional[float] = None
+    if train_done > 0:
+        train_episode_rate = train_done / elapsed
+
+    final_rates = [
+        float(live["episode_rate"])
+        for live in active_final_lives
+        if str(live.get("phase", "episodes")) == "episodes"
+        and float(live.get("episode_rate") or 0) > 0
+    ]
+    final_episode_rate = (
+        sum(final_rates) / len(final_rates) if final_rates else None
+    )
+    if final_episode_rate is None and train_episode_rate is not None:
+        final_episode_rate = train_episode_rate / final_eval_weight
+    if final_episode_rate is None or final_episode_rate <= 0:
+        final_episode_rate = 1.0 / _DEFAULT_FINAL_EVAL_SECONDS_PER_EPISODE
+
+    if in_final_eval_phase:
+        train_eta = (
+            train_remaining / train_episode_rate
+            if train_episode_rate and train_episode_rate > 0
+            else 0.0
+        )
+        final_eta = (
+            final_remaining_eps / final_episode_rate
+            if final_remaining_eps > 0
+            else 0.0
+        )
+        for live in active_final_lives:
+            if str(live.get("phase", "")) == "render":
+                live_eta = live.get("render_eta_seconds")
+                if live_eta is not None:
+                    try:
+                        final_eta += max(0.0, float(live_eta))
+                    except (TypeError, ValueError):
+                        final_eta += _DEFAULT_FINAL_EVAL_RENDER_SECONDS
+                else:
+                    final_eta += _DEFAULT_FINAL_EVAL_RENDER_SECONDS
+        eta_seconds = train_eta + final_eta
+    else:
+        weighted_remaining = max(0.0, weighted_total - weighted_done)
+        weighted_rate = weighted_done / elapsed
+        if weighted_rate <= 0:
+            return None, "—"
+        eta_seconds = weighted_remaining / weighted_rate
+
+    if eta_seconds < 0 or not (eta_seconds < float("inf")):
         return None, "—"
-    eta_seconds = remaining / rate
     return eta_seconds, _format_duration(eta_seconds)
 
 
@@ -424,6 +510,7 @@ def collect_sideboard_compare_state(out_dir: Path) -> dict[str, Any]:
         parallel_seeds=parallel_seeds,
     )
     skip_final_eval = bool(manifest.get("skip_final_eval", False))
+    final_eval_weight = _resolve_final_eval_eta_weight(manifest)
     started_at = _parse_started_at(manifest, out_dir)
 
     raw_candidates = manifest.get("candidates") or []
@@ -434,6 +521,12 @@ def collect_sideboard_compare_state(out_dir: Path) -> dict[str, Any]:
     candidate_rows: list[dict[str, Any]] = []
     completed_units = 0.0
     total_units = 0.0
+    train_done_total = 0.0
+    train_total_total = 0.0
+    final_done_episodes = 0.0
+    final_total_episodes = 0.0
+    active_final_lives: list[dict[str, Any]] = []
+    in_final_eval_phase = False
 
     for raw in raw_candidates:
         if not isinstance(raw, dict):
@@ -477,16 +570,32 @@ def collect_sideboard_compare_state(out_dir: Path) -> dict[str, Any]:
         if train_target > 0 and 0 < train_done < train_target:
             status = "training"
 
+        train_done_clamped = min(train_done, train_target)
+        train_done_total += train_done_clamped
+        train_total_total += train_target
+
+        candidate_final_done = 0.0
+        live_final: Optional[dict[str, Any]] = None
+        if not skip_final_eval:
+            final_total_episodes += final_eval_episodes
+            if result and result.get("final_eval_win_rate") is not None:
+                candidate_final_done = float(final_eval_episodes)
+            elif status == "final_eval" and candidate_dir:
+                in_final_eval_phase = True
+                live_final = _live_final_eval_progress(candidate_dir)
+                if live_final:
+                    active_final_lives.append(live_final)
+                    candidate_final_done = float(
+                        int(live_final.get("episodes_completed", 0) or 0)
+                    )
+            final_done_episodes += candidate_final_done
+
         candidate_units = train_target
         if not skip_final_eval:
-            candidate_units += final_eval_episodes
+            candidate_units += final_eval_episodes * final_eval_weight
         total_units += candidate_units
 
-        done_units = min(train_done, train_target)
-        if not skip_final_eval and result and result.get("final_eval_win_rate") is not None:
-            done_units += final_eval_episodes
-        elif not skip_final_eval and status == "final_eval":
-            done_units += final_eval_episodes * 0.35
+        done_units = train_done_clamped + candidate_final_done * final_eval_weight
         completed_units += done_units
 
         swaps_raw = raw.get("swaps") or []
@@ -624,10 +733,15 @@ def collect_sideboard_compare_state(out_dir: Path) -> dict[str, Any]:
             "parallel_seeds": parallel_seeds,
         })
 
-    eta_seconds, eta_label = _estimate_eta(
+    eta_seconds, eta_label = _estimate_sideboard_compare_eta(
         started_at=started_at,
-        completed_units=completed_units,
-        total_units=total_units,
+        train_done=train_done_total,
+        train_total=train_total_total,
+        final_done_episodes=final_done_episodes,
+        final_total_episodes=final_total_episodes,
+        final_eval_weight=final_eval_weight,
+        active_final_lives=active_final_lives,
+        in_final_eval_phase=in_final_eval_phase,
     )
     overall_pct = (completed_units / total_units * 100.0) if total_units else 0.0
 
@@ -1091,6 +1205,9 @@ def render_sideboard_compare_html(
         and bool(state.get("parallel_seeds_until_first_checkpoint"))
     )
     staged_info = " · best seed continues after first checkpoint" if staged_parallel else ""
+    run_config = f"{play_episodes} policy episodes/candidate{staged_info}"
+    if ckpt_info:
+        run_config = f"{run_config} · {ckpt_info}"
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -1171,13 +1288,6 @@ def render_sideboard_compare_html(
       letter-spacing: 0.06em;
     }}
     .stat-value {{ font-size: 1.25rem; font-weight: 600; margin-top: 6px; }}
-    .overall {{
-      background: var(--surface);
-      border-radius: var(--radius);
-      padding: 16px 18px;
-      margin-bottom: 20px;
-      box-shadow: var(--shadow-1);
-    }}
     .progress-bar {{
       height: 4px;
       background: var(--surface-variant);
@@ -1324,7 +1434,7 @@ def render_sideboard_compare_html(
 <body>
   <div class="wrap">
     <h1>Sideboard comparison dashboard</h1>
-    <p class="sub">{hero} vs {opponent} ({opp_deck}) · {game_format} · {html.escape(status_banner)}</p>
+    <p class="sub">{hero} vs {opponent} ({opp_deck}) · {game_format} · {html.escape(status_banner)}<br>{html.escape(run_config)}</p>
 
     <div class="summary">
       <div class="stat"><span class="stat-label">Overall progress</span><span class="stat-value">{float(state.get("overall_pct", 0)):.1f}%</span></div>
@@ -1332,12 +1442,6 @@ def render_sideboard_compare_html(
       <div class="stat"><span class="stat-label">Candidates</span><span class="stat-value">{len(candidates)}</span></div>
       <div class="stat"><span class="stat-label">Parallel</span><span class="stat-value">{int(state.get("max_parallel", 1))}</span></div>
     </div>
-
-    <section class="overall">
-      <div class="progress-label"><span>Run progress</span><span>{float(state.get("overall_pct", 0)):.1f}%</span></div>
-      <div class="progress-bar"><div class="progress-fill" style="width:{float(state.get("overall_pct", 0)):.1f}%"></div></div>
-      <p class="sub" style="margin:10px 0 0">{play_episodes} policy episodes/candidate{html.escape(staged_info)} · {html.escape(ckpt_info)}</p>
-    </section>
 
     <div class="grid">
       {cards_html}

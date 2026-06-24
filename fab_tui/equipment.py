@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Optional
 
 from fab_tui.card_search import CARDS_DB_PATH, CardHit, _format_legal, _score_query
+from fab_tui.card_classification import classification_from_record
 from flesh_and_blood_rlbridge.sideboard_guide_policy import (
     _card_meta,
     classify_opponent_archetype,
@@ -24,18 +24,59 @@ _SLOT_SUFFIX_MAP: tuple[tuple[str, str], ...] = (
     ("Quiver", "off_hand"),
 )
 
-_EQUIP_HEAD_PAT = frozenset(
-    ["helm", "hood", "crown", "cap", "headband", "goggles", "mask", "hat", "visor", "tiara", "circlet"]
+_KNOWN_EQUIPMENT_SLOTS: dict[str, str] = {
+    "star_fall": "weapon",
+    "nebula_blade": "weapon",
+    "talishar_the_lost_prince": "weapon",
+    "aether_ironweave": "chest",
+    "garland_of_spring": "chest",
+    "blossom_of_spring": "chest",
+    "ironhide_plate": "chest",
+    "spellbound_creepers": "legs",
+    "snapdragon_scalers": "legs",
+    "aether_crackers": "arms",
+    "nullrune_gloves": "arms",
+    "blade_beckoner_gauntlets": "arms",
+    "blade_beckoner_helm": "head",
+    "blade_beckoner_boots": "legs",
+    "blade_beckoner_plating": "chest",
+    "flail_of_agony": "weapon",
+    "quiver_of_a_thousand_arrows": "weapon",
+    "nullrune_robe": "chest",
+    "nullrune_hood": "head",
+}
+
+_HEAD_TOKENS = frozenset(
+    {"helm", "hood", "crown", "cap", "headband", "goggles", "mask", "hat", "visor", "tiara", "circlet"}
 )
-_EQUIP_CHEST_PAT = frozenset(
-    ["coat", "robe", "vest", "chestplate", "chest", "jacket", "tunic", "cuirass", "cloak", "cape", "mantle", "doublet"]
+_CHEST_TOKENS = frozenset(
+    {"plating", "robe", "vest", "tunic", "cloak", "cape", "mantle", "doublet", "jacket", "coat", "cuirass"}
 )
-_EQUIP_ARMS_PAT = frozenset(["gauntlet", "glove", "bracer", "vambrace", "bangle", "shuko", "sleeve", "handwrap"])
-_EQUIP_LEGS_PAT = frozenset(
-    ["boots", "greaves", "pants", "leggings", "sabaton", "sabatons", "footwrap", "shin", "paws"]
+_CHEST_SUBSTRINGS = ("chestplate",)
+_ARMS_TOKENS = frozenset(
+    {"gauntlet", "gauntlets", "glove", "gloves", "bracer", "bracers", "vambrace", "bangle", "shuko", "sleeve", "handwrap", "cuff"}
 )
-_EQUIP_WEAPON_PAT = frozenset(
-    ["kodachi", "dawnblade", "rosetta", "galaxia", "pistol", "sword", "axe", "staff", "bow", "harpoon", "blade", "katana", "scimitar", "bauble"]
+_LEGS_TOKENS = frozenset(
+    {"boots", "greaves", "pants", "leggings", "sabaton", "sabatons", "footwrap", "paws"}
+)
+_LEGS_SUBSTRINGS = ("shin_guards",)
+_WEAPON_FRAGMENTS = (
+    "rosetta_thorn",
+    "death_dealer",
+    "driftwood_quiver",
+    "cracked_bauble",
+    "kodachi",
+    "dawnblade",
+    "galaxia",
+    "pistol",
+    "harpoon",
+    "flail_of_agony",
+    "star_fall",
+    "nebula_blade",
+    "quiver_of_a_thousand_arrows",
+)
+_WEAPON_TOKENS = frozenset(
+    {"club", "thorn", "bow", "staff", "axe", "sword", "katana", "scimitar", "bauble", "quiver", "wand", "dagger", "mace", "hammer", "lance", "saber", "sabre"}
 )
 
 _SLOT_LABELS = {
@@ -87,6 +128,32 @@ def _type_line(card_id: str) -> str:
     ).strip()
 
 
+def _card_id_tokens(card_id: str) -> frozenset[str]:
+    return frozenset(card_id.lower().split("_"))
+
+
+def _slot_from_card_id(card_id: str) -> str | None:
+    """Infer equipment slot from card id tokens when type_line is missing."""
+    cid = card_id.lower()
+    tokens = _card_id_tokens(card_id)
+
+    known = _KNOWN_EQUIPMENT_SLOTS.get(cid)
+    if known:
+        return known
+
+    if tokens & _HEAD_TOKENS:
+        return "head"
+    if tokens & _CHEST_TOKENS or any(part in cid for part in _CHEST_SUBSTRINGS):
+        return "chest"
+    if tokens & _ARMS_TOKENS:
+        return "arms"
+    if tokens & _LEGS_TOKENS or any(part in cid for part in _LEGS_SUBSTRINGS):
+        return "legs"
+    if any(frag in cid for frag in _WEAPON_FRAGMENTS) or tokens & _WEAPON_TOKENS:
+        return "weapon"
+    return None
+
+
 def equipment_slot(card_id: str, *, hero_id: str = "") -> str:
     """Classify an equipment / weapon card id into a loadout slot."""
     cid = card_id.lower()
@@ -107,16 +174,10 @@ def equipment_slot(card_id: str, *, hero_id: str = "") -> str:
 
     if hero_id and hero_id.split("_")[0].lower() in cid:
         return "hero"
-    if any(p in cid for p in _EQUIP_HEAD_PAT):
-        return "head"
-    if any(p in cid for p in _EQUIP_CHEST_PAT):
-        return "chest"
-    if any(p in cid for p in _EQUIP_ARMS_PAT):
-        return "arms"
-    if any(p in cid for p in _EQUIP_LEGS_PAT):
-        return "legs"
-    if any(p in cid for p in _EQUIP_WEAPON_PAT):
-        return "weapon"
+
+    inferred = _slot_from_card_id(card_id)
+    if inferred:
+        return inferred
     return "other"
 
 
@@ -168,6 +229,63 @@ def _equipment_pieces_from_header(equipment_header: str, *, hero_id: str) -> lis
     return parts
 
 
+def hero_profile_for_id(hero_id: str) -> tuple[str, str]:
+    """Return ``(hero_class, hero_talent)`` for a hero id."""
+    rec = _hero_record(hero_id)
+    if not rec:
+        return "", ""
+    hero_class = str(rec.get("class") or "").strip()
+    hero_talent = str(rec.get("talent") or "").strip()
+    return hero_class, hero_talent
+
+
+def _equipment_matches_hero(
+    rec: dict[str, Any],
+    *,
+    hero_class: str,
+    hero_talent: str = "",
+) -> bool:
+    """True when equipment matches the hero's class and talent restrictions."""
+    card_class = str(rec.get("class") or "").strip().lower()
+    card_talent = str(rec.get("talent") or "").strip().lower()
+    hero_cls = str(hero_class or "").strip().lower()
+    hero_tal = str(hero_talent or "").strip().lower()
+
+    if card_class and card_class != "generic":
+        if not hero_cls or card_class != hero_cls:
+            return False
+
+    if card_talent:
+        if not hero_tal or card_talent != hero_tal:
+            return False
+
+    return True
+
+
+def _pool_equipment_by_slot(
+    pool_by_id: dict[str, dict[str, Any]],
+    *,
+    hero_id: str,
+    hero_class: str,
+    hero_talent: str,
+) -> dict[str, list[str]]:
+    """Equipment cards from the sideboard pool, grouped by loadout slot."""
+    by_slot: dict[str, list[str]] = {}
+    for card_id, meta in pool_by_id.items():
+        record = meta if _is_equipment_record(meta) else _full_card_db().get(card_id) or {}
+        if not record or not _is_equipment_record(record):
+            continue
+        if not _equipment_matches_hero(record, hero_class=hero_class, hero_talent=hero_talent):
+            continue
+        slot = equipment_slot(card_id, hero_id=hero_id)
+        if slot in {"hero", "other"}:
+            continue
+        by_slot.setdefault(slot, []).append(card_id)
+    for slot in by_slot:
+        by_slot[slot] = sorted(dict.fromkeys(by_slot[slot]))
+    return by_slot
+
+
 def suggest_guide_equipment_header(
     equipment_header: str,
     *,
@@ -175,28 +293,39 @@ def suggest_guide_equipment_header(
     opponent_hero_id: str,
     game_format: str,
     pool_by_id: Optional[dict[str, dict[str, Any]]] = None,
+    hero_class: str = "",
+    hero_talent: str = "",
 ) -> str:
     """Recommend equipment swaps using guide-policy archetype scoring."""
     pieces = _equipment_pieces_from_header(equipment_header, hero_id=hero_id)
     if not pieces:
         return equipment_header
 
+    resolved_class, resolved_talent = hero_profile_for_id(hero_id)
+    hero_cls = str(hero_class or resolved_class).strip()
+    hero_tal = str(hero_talent or resolved_talent).strip()
+
     archetype = classify_opponent_archetype(opponent_hero_id)
     pool_meta = pool_by_id or {}
-    catalog = EquipmentSearchIndex(game_format, hero_id=hero_id).all_hits()
-    by_slot: dict[str, list[str]] = {}
-    for hit in catalog:
-        slot = equipment_slot(hit.card_id, hero_id=hero_id)
-        by_slot.setdefault(slot, []).append(hit.card_id)
+    by_slot = _pool_equipment_by_slot(
+        pool_meta,
+        hero_id=hero_id,
+        hero_class=hero_cls,
+        hero_talent=hero_tal,
+    )
 
     upgraded: list[str] = []
     for piece in pieces:
         slot = equipment_slot(piece, hero_id=hero_id)
+        candidates = [piece]
+        for alt_id in by_slot.get(slot, []):
+            if alt_id not in candidates:
+                candidates.append(alt_id)
         current_meta = _card_meta(piece, pool_meta)
         current_score = score_card_for_archetype(piece, current_meta, archetype)
         best_id = piece
         best_score = current_score
-        for alt_id in by_slot.get(slot, []):
+        for alt_id in candidates:
             alt_meta = _card_meta(alt_id, pool_meta)
             alt_score = score_card_for_archetype(alt_id, alt_meta, archetype)
             if alt_score > best_score:
@@ -210,10 +339,52 @@ def suggest_guide_equipment_header(
     return rebuild_equipment_header(hero_id, upgraded)
 
 
+def _is_equipment_record(rec: dict[str, Any]) -> bool:
+    """True for weapons, armor, and other equippable items in ``cards.json``."""
+    card_types = {str(t).lower() for t in (rec.get("card_types") or [])}
+    if "hero" in card_types:
+        return False
+    if "utility_item" in card_types:
+        return True
+    tl_lower = str(rec.get("type_line") or "").lower()
+    return "equipment" in tl_lower or "weapon" in tl_lower
+
+
+def hero_class_for_id(hero_id: str) -> str:
+    """Look up a hero card's class from ``cards.json``."""
+    hero_class, _ = hero_profile_for_id(hero_id)
+    return hero_class
+
+
+def hero_talent_for_id(hero_id: str) -> str:
+    """Look up a hero card's talent from ``cards.json``."""
+    _, hero_talent = hero_profile_for_id(hero_id)
+    return hero_talent
+
+
+def _hero_record(hero_id: str) -> dict[str, Any] | None:
+    token = hero_id.replace("-", "_").strip().lower()
+    if not token:
+        return None
+    db = _full_card_db()
+    for key in (hero_id, token, hero_id.replace("_", "-")):
+        rec = db.get(key) or db.get(str(key).lower())
+        if rec:
+            return rec
+    return None
+
+
 class EquipmentSearchIndex:
     """Search equipment and weapon cards for a format / hero."""
 
-    def __init__(self, game_format: str = "silver_age", *, hero_id: str = "") -> None:
+    def __init__(
+        self,
+        game_format: str = "silver_age",
+        *,
+        hero_id: str = "",
+        hero_class: str = "",
+        hero_talent: str = "",
+    ) -> None:
         self.game_format = game_format
         self.hero_id = hero_id.replace("-", "_").lower()
         self._hits = self._load_hits()
@@ -226,7 +397,6 @@ class EquipmentSearchIndex:
         except OSError:
             return ()
 
-        hero_token = self.hero_id.split("_")[0] if self.hero_id else ""
         hits: list[CardHit] = []
         seen: set[str] = set()
         for rec in records:
@@ -234,22 +404,18 @@ class EquipmentSearchIndex:
             if not cid or cid in seen:
                 continue
             type_line = str(rec.get("type_line") or "")
-            tl_lower = type_line.lower()
-            if not any(token in tl_lower for token in ("equipment", "weapon")):
+            if not _is_equipment_record(rec):
                 continue
-            if not _format_legal(rec, self.game_format):
-                continue
-            card_class = str(rec.get("class") or "").lower()
-            if card_class and card_class not in {"generic", ""}:
-                if hero_token and hero_token not in card_class.replace(" ", "_"):
-                    if self.hero_id and self.hero_id.split("_")[0] not in card_class:
-                        continue
             seen.add(cid)
             hits.append(
                 CardHit(
                     card_id=cid,
                     name=str(rec.get("name") or cid.replace("_", " ").title()),
+                    card_class=str(rec.get("class") or ""),
+                    talent=str(rec.get("talent") or ""),
+                    card_types=tuple(str(t) for t in (rec.get("card_types") or [])),
                     type_line=type_line,
+                    classification=classification_from_record(rec),
                 )
             )
         hits.sort(key=lambda hit: (hit.name.lower(), hit.card_id))
@@ -292,7 +458,11 @@ class EquipmentSearchIndex:
         return CardHit(
             card_id=card_id,
             name=str(meta.get("name") or card_id.replace("_", " ").title()),
+            card_class=str(meta.get("class") or ""),
+            talent=str(meta.get("talent") or ""),
+            card_types=tuple(str(t) for t in (meta.get("card_types") or [])),
             type_line=str(meta.get("type_line") or ""),
+            classification=classification_from_record(meta),
         )
 
 

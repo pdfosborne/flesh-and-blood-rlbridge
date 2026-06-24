@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FAB RL Bridge — Sideboard Compare</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header>
+    <div>
+      <h1>FAB RL Bridge</h1>
+      <div class="subtitle">Sideboard comparison — deck import, edit, train &amp; evaluate</div>
+    </div>
+    <div id="run-status"></div>
+  </header>
+
+  <nav class="tabs" role="tablist">
+    <button class="tab active" data-tab="decks" role="tab">1. Decks</button>
+    <button class="tab" data-tab="editor" role="tab">2. Editor</button>
+    <button class="tab" data-tab="dashboard" role="tab">3. Dashboard</button>
+    <button class="tab" data-tab="results" role="tab">4. Results</button>
+  </nav>
+
+  <main>
+    <!-- Deck selection -->
+    <section id="panel-decks" class="panel active" role="tabpanel">
+      <h2>Select decks</h2>
+      <p class="hint">Import your deck and pick an opponent. Guide policy sideboarding runs automatically, then you land in the editor.</p>
+      <div class="grid-2">
+        <div class="card">
+          <h3>Your deck</h3>
+          <label for="precon-select">Talishar SAGE precon</label>
+          <select id="precon-select"><option value="">— select precon —</option></select>
+          <button type="button" id="btn-import-precon">Import precon</button>
+          <label for="fabrary-input">FaBrary URL or slug</label>
+          <input id="fabrary-input" type="text" placeholder="https://fabrary.net/decks/… or slug" />
+          <button type="button" id="btn-import-fabrary">Import from FaBrary</button>
+          <label for="saved-select">Saved sideboard lists</label>
+          <select id="saved-select"><option value="">— select saved list —</option></select>
+          <button type="button" id="btn-load-saved" class="secondary">Load saved list</button>
+          <div id="player-deck-summary" class="hint" style="margin-top:0.75rem"></div>
+        </div>
+        <div class="card">
+          <h3>Opponent</h3>
+          <label for="opponent-select">Talishar precon</label>
+          <select id="opponent-select"><option value="">— select opponent —</option></select>
+          <div id="opponent-summary" class="hint" style="margin-top:0.75rem"></div>
+          <div id="decks-status" class="hint" style="margin-top:1rem"></div>
+        </div>
+      </div>
+      <div id="equipment-section" class="card" style="margin-top:1rem" hidden>
+        <h3>Equipment loadout</h3>
+        <p class="hint">Click a slot to browse equippable alternatives for that slot. Adjust loadout before selecting an opponent.</p>
+        <div id="equipment-loadout" class="equipment-loadout-grid"></div>
+        <div id="equipment-picker" hidden>
+          <h4 id="equipment-picker-title"></h4>
+          <input id="equipment-filter" type="search" placeholder="Filter alternatives…" autocomplete="off" />
+          <div id="equipment-results" class="search-results equipment-results"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Deck editor -->
+    <section id="panel-editor" class="panel" role="tabpanel">
+      <h2>Deck editor</h2>
+      <p class="hint">Click a card in your deck to remove it. Search and click cards to add until the deck reaches the required size.</p>
+      <div id="deck-status" class="deck-status"></div>
+      <div class="grid-2">
+        <div class="card">
+          <h3>Main deck</h3>
+          <div id="deck-grid" class="deck-grid deck-grid--slots"></div>
+        </div>
+        <div class="card">
+          <h3>Add cards</h3>
+          <input id="card-search" type="search" placeholder="Search cards by name…" autocomplete="off" />
+          <div id="search-results" class="search-results"></div>
+          <div class="row" style="margin-top:0.75rem">
+            <button type="button" id="btn-save-deck" class="secondary">Save list</button>
+          </div>
+        </div>
+      </div>
+      <div class="card" style="margin-top:1rem">
+        <h3>Evaluation &amp; training</h3>
+        <p class="hint">Edit your deck, save alternates to compare, then start training. The current editor deck is the baseline.</p>
+        <div class="row">
+          <button type="button" id="btn-save-eval">Save for evaluation</button>
+        </div>
+        <div id="eval-candidates-list" class="eval-candidates-list"></div>
+        <div class="training-params grid-2" style="margin-top:1rem">
+          <div>
+            <label for="play-episodes">Play episodes per list</label>
+            <input id="play-episodes" type="number" min="100" step="100" value="5000" />
+          </div>
+          <div>
+            <label for="final-eval-episodes">Final eval games per list</label>
+            <input id="final-eval-episodes" type="number" min="10" step="10" value="50" />
+          </div>
+        </div>
+        <div id="train-review" class="hint" style="margin-top:0.75rem"></div>
+        <button type="button" id="btn-start-training" style="margin-top:0.75rem">Start sideboard comparison</button>
+      </div>
+    </section>
+
+    <!-- Dashboard -->
+    <section id="panel-dashboard" class="panel" role="tabpanel">
+      <h2>Training dashboard</h2>
+      <p class="hint">Live training progress from the sideboard compare dashboard. Refreshes automatically while training runs.</p>
+      <div id="dashboard-empty" class="empty-state">Start a training run to see live progress here.</div>
+      <iframe id="dashboard-frame" title="Sideboard compare dashboard" hidden></iframe>
+    </section>
+
+    <!-- Results -->
+    <section id="panel-results" class="panel" role="tabpanel">
+      <h2>Final results</h2>
+      <p class="hint">Ranked comparison after training and final Talishar evaluation completes.</p>
+      <div id="results-empty" class="empty-state">Results appear when training finishes.</div>
+      <div id="results-content" hidden>
+        <div class="card">
+          <div id="winner-banner" style="margin-bottom:1rem;font-size:1.05rem"></div>
+          <table class="results-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Candidate</th>
+                <th>Train WR</th>
+                <th>Final eval</th>
+                <th>Δ vs baseline</th>
+                <th>Label</th>
+              </tr>
+            </thead>
+            <tbody id="results-tbody"></tbody>
+          </table>
+          <p id="results-meta" class="hint" style="margin-top:1rem"></p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" role="status"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

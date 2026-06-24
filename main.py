@@ -5,6 +5,10 @@ Launch the terminal UI (default):
 
     python main.py
 
+Launch the web GUI:
+
+    python main.py gui
+
 Or run SAGE pipelines non-interactively:
 
     python main.py sage
@@ -21,6 +25,7 @@ _SRC = Path(__file__).resolve().parent / "src"
 if _SRC.is_dir() and str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from fab_gui.server import run_gui  # noqa: E402
 from fab_tui.app import main as tui_main, run_tui  # noqa: E402
 from fab_tui.runner import run_runscript  # noqa: E402
 from fab_tui.sage_picker import (  # noqa: E402
@@ -45,6 +50,11 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command")
 
     sub.add_parser("tui", help="Launch the interactive menu (default)")
+
+    gui = sub.add_parser("gui", help="Launch the web GUI for sideboard comparison")
+    gui.add_argument("--host", default="127.0.0.1")
+    gui.add_argument("--port", type=int, default=8765)
+    gui.add_argument("--no-browser", action="store_true", help="Do not open a browser tab")
 
     preset = sub.add_parser("preset", help="Run a named preset runscript")
     preset.add_argument(
@@ -210,6 +220,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_sage(args, argv)
     if args.command == "tui":
         return tui_main()
+    if args.command == "gui":
+        return run_gui(host=args.host, port=args.port, open_browser=not args.no_browser)
     return tui_main()
 
 

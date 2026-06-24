@@ -3007,6 +3007,40 @@ def run_final_evaluation(
     episode_log: list[dict[str, Any]] = []
     turn_trajectories: list[dict[int, tuple[int, int]]] = []
 
+    progress_t0 = datetime.now()
+
+    def _write_final_eval_live(
+        *,
+        completed: int,
+        phase: str = "episodes",
+    ) -> None:
+        elapsed = max((datetime.now() - progress_t0).total_seconds(), 1e-9)
+        episode_rate = completed / elapsed if completed > 0 else 0.0
+        remaining_eps = max(0, num_eval_episodes - completed)
+        eta_seconds: Optional[float] = None
+        render_eta_seconds: Optional[float] = None
+        if phase == "episodes" and episode_rate > 0:
+            eta_seconds = remaining_eps / episode_rate
+        elif phase == "render":
+            render_eta_seconds = 180.0
+        payload = {
+            "episodes_completed": completed,
+            "target_episodes": num_eval_episodes,
+            "phase": phase,
+            "updated_at": datetime.now().isoformat(),
+            "elapsed_seconds": elapsed,
+            "episode_rate": episode_rate,
+            "eta_seconds": eta_seconds,
+            "render_eta_seconds": render_eta_seconds,
+            "wins": wins,
+            "losses": losses,
+            "draws": draws,
+            "timeouts": timeouts,
+            "runtime_backend": "HTTP Talishar",
+        }
+        live_path = out_dir / "final_eval_live.json"
+        live_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
     backend_printed = False
     try:
         for ep in range(1, num_eval_episodes + 1):
@@ -3089,6 +3123,7 @@ def run_final_evaluation(
                     f"  [{player}] Ep {ep:>3}/{num_eval_episodes}  "
                     f"{outcome:<4}  steps={steps:3d}  win_rate={wr:.1%}"
                 )
+                _write_final_eval_live(completed=ep, phase="episodes")
             finally:
                 env.close()
 
@@ -3148,6 +3183,7 @@ def run_final_evaluation(
     gif_path = out_dir / f"{player}_optimal_policy.gif"
 
     print(f"\n  [{player}] Rendering optimal-policy rollout via Talishar FE → {render_dir}")
+    _write_final_eval_live(completed=num_eval_episodes, phase="render")
     frame_paths, render_outcome = _render_game_with_talishar_frontend(
         agents=agents,
         opponent_agents=opponent_agents,
