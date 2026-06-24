@@ -78,6 +78,13 @@ def _prepare_talishar_runtime_files(talishar_dir: Path) -> None:
     if sys.platform != "win32":
         games.chmod(0o777)
 
+    api_keys_dir = talishar_dir / "APIKeys"
+    api_keys_dir.mkdir(parents=True, exist_ok=True)
+    api_keys = api_keys_dir / "APIKeys.php"
+    stub = REPO_ROOT / "docker" / "talishar" / "APIKeys.local.php"
+    if stub.is_file() and not api_keys.is_file():
+        api_keys.write_bytes(stub.read_bytes())
+
 
 def _start_vite_detached(fe_dir: Path) -> None:
     if sys.platform == "win32":

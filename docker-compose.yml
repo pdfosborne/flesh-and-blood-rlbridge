@@ -6,17 +6,23 @@ include:
 
 services:
   web-server:
+    volumes:
+      - ./docker/talishar:/fab-bridge-stubs:ro
     entrypoint:
       - /bin/sh
       - -c
       - |
-        mkdir -p /var/www/html/game/Games /var/www/html/game/HostFiles
+        mkdir -p /var/www/html/game/Games /var/www/html/game/HostFiles /var/www/html/game/APIKeys
         cp -n /var/www/html/game/HostFiles/RedirectorTemplate.php /var/www/html/game/HostFiles/Redirector.php
         if [ ! -f /var/www/html/game/HostFiles/GameIDCounter.txt ]; then
           echo "1" > /var/www/html/game/HostFiles/GameIDCounter.txt
         fi
         chmod 666 /var/www/html/game/HostFiles/GameIDCounter.txt
         chmod 1777 /var/www/html/game/Games
+        if [ ! -f /var/www/html/game/APIKeys/APIKeys.php ]; then
+          cp /fab-bridge-stubs/APIKeys.local.php /var/www/html/game/APIKeys/APIKeys.php
+        fi
+        chmod 644 /var/www/html/game/APIKeys/APIKeys.php
         exec apache2-foreground
   fab-bridge:
     build:
