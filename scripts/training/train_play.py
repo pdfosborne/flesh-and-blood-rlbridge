@@ -2972,6 +2972,9 @@ def run_final_evaluation(
     # ── write deck file ───────────────────────────────────────────────────────
     deck_name = f"rl_final_{player}_{uuid.uuid4().hex[:8]}"
     deck_file = _write_deck_file(game_deck, equipment_header, deck_name, assets_path)
+    if not deck_file.is_file():
+        raise RuntimeError(f"Deck file was not written: {deck_file}")
+    print(f"  [{player}] Deck file: {deck_file}")
 
     # For dual mode, use the opponent's sidebaorded deck; otherwise use preset.
     if opponent_mode == "dual" and opponent_agents is not None:

@@ -53,16 +53,23 @@ if ($selfPlayEnabled) {
 $deckName         = preg_replace('/[^a-zA-Z0-9_\-]/', '', $deckName);
 $opponentDeckName = preg_replace('/[^a-zA-Z0-9_\-]/', '', $opponentDeckName);
 
-$deckFile = "../Assets/" . $deckName . ".txt";
+$assetsDir = realpath(__DIR__ . "/../Assets");
+if ($assetsDir === false) {
+    $response->error = "Assets directory not found";
+    echo json_encode($response);
+    exit;
+}
+
+$deckFile = $assetsDir . "/" . $deckName . ".txt";
 if (!file_exists($deckFile)) {
     $response->error = "Deck file not found: Assets/" . $deckName . ".txt";
     echo json_encode($response);
     exit;
 }
 
-$opponentDeckFile = "../Assets/" . $opponentDeckName . ".txt";
+$opponentDeckFile = $assetsDir . "/" . $opponentDeckName . ".txt";
 if (!file_exists($opponentDeckFile)) {
-    $opponentDeckFile = "../Assets/Dummy.txt";
+    $opponentDeckFile = $assetsDir . "/Dummy.txt";
     $opponentDeckName = "Dummy";
 }
 
@@ -83,11 +90,17 @@ if ($character === "") {
 session_start();
 session_write_close();
 
+$gamesRoot = __DIR__ . "/../Games";
+if (!is_dir($gamesRoot) && !mkdir($gamesRoot, 0777, true) && !is_dir($gamesRoot)) {
+    $response->error = "Games directory could not be created.";
+    echo json_encode($response);
+    exit;
+}
+
 $gameName = GetGameCounter("../");
 
-if ((!file_exists("../Games/$gameName")) && (mkdir("../Games/$gameName", 0700, true))) {
-    // created successfully
-} else {
+$gameDir = $gamesRoot . "/" . $gameName;
+if (!is_dir($gameDir) && !mkdir($gameDir, 0700, true) && !is_dir($gameDir)) {
     $response->error = "Game file could not be created.";
     echo json_encode($response);
     exit;

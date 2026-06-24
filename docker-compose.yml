@@ -5,6 +5,14 @@ include:
   - path: ./Talishar/docker-compose.yml
 
 services:
+  web-server:
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        mkdir -p /var/www/html/game/Games
+        chmod 1777 /var/www/html/game/Games
+        exec apache2-foreground
   fab-bridge:
     build:
       context: .
@@ -13,14 +21,12 @@ services:
       - "8765:8765"
     environment:
       FAB_BRIDGE_HOME: /app
-      # Reach Talishar published on the host (works on Docker Desktop + Linux with extra_hosts)
-      TALISHAR_URL: http://host.docker.internal:8080/game
+      # Same compose stack as web-server so deck files in Talishar/Assets are visible to PHP
+      TALISHAR_URL: http://web-server/game
       TALISHAR_ASSETS_PATH: /app/Talishar/Assets
     volumes:
       - ./results:/app/results
-      - ./Talishar/Assets:/app/Talishar/Assets
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - ./Talishar:/app/Talishar
     depends_on:
       web-server:
         condition: service_started

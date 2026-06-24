@@ -22,7 +22,9 @@ docker compose up --build
 
 Open **http://localhost:8765** in your browser. The Talishar game server is started automatically on port **8080**.
 
-Training output and saved sideboard lists are written to **`results/`** in the repo (e.g. `results/sideboard_compare/`, `results/tui_decks/saved/`).
+Training output and saved sideboard lists are written to **`results/`** in the repo (e.g. `results/sideboard_compare/`, `results/tui_decks/saved/`). Generated deck files for final evaluation are written to **`Talishar/Assets/`** (shared with the Talishar container).
+
+If you also run Talishar separately (e.g. `cd Talishar && docker compose up`), stop that stack first so port **8080** and **`Talishar/Assets`** are not split across two instances.
 
 Stop everything with `Ctrl+C`, then:
 
