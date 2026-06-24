@@ -13,12 +13,13 @@ COPY src ./src
 COPY fab_bridge ./fab_bridge
 COPY fab_tui ./fab_tui
 COPY fab_gui ./fab_gui
+COPY rl_agents ./rl_agents
 COPY scripts ./scripts
 COPY runscripts ./runscripts
 COPY Talishar/Assets ./Talishar/Assets
 COPY Talishar/GeneratedCode ./Talishar/GeneratedCode
 
-RUN pip install --no-cache-dir -e ".[gui,cpp]"
+RUN pip install --no-cache-dir -e ".[gui,train,cpp]"
 
 EXPOSE 8765
 

@@ -17,13 +17,10 @@ services:
       TALISHAR_URL: http://host.docker.internal:8080/game
       TALISHAR_ASSETS_PATH: /app/Talishar/Assets
     volumes:
-      - fab-results:/app/results
+      - ./results:/app/results
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
       web-server:
         condition: service_started
     restart: unless-stopped
-
-volumes:
-  fab-results:

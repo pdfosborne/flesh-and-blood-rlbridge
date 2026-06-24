@@ -22,6 +22,8 @@ docker compose up --build
 
 Open **http://localhost:8765** in your browser. The Talishar game server is started automatically on port **8080**.
 
+Training output and saved sideboard lists are written to **`results/`** in the repo (e.g. `results/sideboard_compare/`, `results/tui_decks/saved/`).
+
 Stop everything with `Ctrl+C`, then:
 
 ```bash
