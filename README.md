@@ -22,6 +22,8 @@ docker compose up --build
 
 Open **http://localhost:8765** in your browser. The Talishar game server is started automatically on port **8080**.
 
+For **winner replay GIFs** on the Results tab, run [Talishar-FE](#installing-talishar-fe) on port **5173** (`npm run dev` in `Talishar-FE/`). Docker sets `TALISHAR_FE_URL=http://host.docker.internal:5173` so the bridge container can screenshot the frontend.
+
 Training output and saved sideboard lists are written to **`results/`** in the repo (e.g. `results/sideboard_compare/`, `results/tui_decks/saved/`). Generated deck files for final evaluation are written to **`Talishar/Assets/`** (shared with the Talishar container).
 
 If you also run Talishar separately (e.g. `cd Talishar && docker compose up`), stop that stack first so port **8080** and **`Talishar/Assets`** are not split across two instances. The compose stack auto-creates **`Talishar/HostFiles/Redirector.php`**, **`GameIDCounter.txt`**, and **`Talishar/APIKeys/APIKeys.php`** (stub with empty secrets — required by Talishar but not in git).

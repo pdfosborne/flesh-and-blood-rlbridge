@@ -203,6 +203,24 @@ class GuiRequestHandler(BaseHTTPRequestHandler):
                 return _json_response(self, {"error": "Run not found"}, status=404)
             return _json_response(self, results)
 
+        match = re.fullmatch(r"/api/runs/([^/]+)/replay\.gif", path)
+        if match:
+            run_id = match.group(1)
+            out_dir = gui_api.resolve_run_out_dir(run_id)
+            if out_dir is None:
+                return _json_response(self, {"error": "Run not found"}, status=404)
+            gif_path = gui_api.replay_gif_path(out_dir)
+            if gif_path is None or not gif_path.is_file():
+                return _json_response(self, {"error": "Replay GIF not ready"}, status=404)
+            return _serve_file(self, gif_path)
+
+        match = re.fullmatch(r"/api/runs/([^/]+)/replay-status", path)
+        if match:
+            status = gui_api.replay_render_status(match.group(1))
+            if status is None:
+                return _json_response(self, {"error": "Run not found"}, status=404)
+            return _json_response(self, status)
+
         self.send_error(HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:  # noqa: N802
@@ -348,6 +366,8 @@ class GuiRequestHandler(BaseHTTPRequestHandler):
                     "final_eval_episodes": int(body.get("final_eval_episodes", 50)),
                     "build_cpp_engine": bool(body.get("build_cpp_engine", True)),
                     "workers": body.get("workers"),
+                    "no_render_gif": True,
+                    "render_replay_gif": bool(body.get("render_replay_gif", True)),
                 }
                 if spec_kwargs["workers"] is not None:
                     spec_kwargs["workers"] = int(spec_kwargs["workers"])
@@ -371,6 +391,14 @@ class GuiRequestHandler(BaseHTTPRequestHandler):
                 return _json_response(self, run.to_dict())
             except Exception as exc:  # noqa: BLE001
                 return _json_response(self, {"error": str(exc)}, status=500)
+
+        match = re.fullmatch(r"/api/runs/([^/]+)/render-replay", path)
+        if match:
+            try:
+                payload = gui_api.start_replay_render(match.group(1), self.env)
+                return _json_response(self, payload)
+            except Exception as exc:  # noqa: BLE001
+                return _json_response(self, {"error": str(exc)}, status=400)
 
         return _json_response(self, {"error": "Not found"}, status=404)
 

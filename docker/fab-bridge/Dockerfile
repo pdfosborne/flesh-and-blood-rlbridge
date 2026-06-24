@@ -20,7 +20,8 @@ COPY runscripts ./runscripts
 COPY Talishar/Assets ./Talishar/Assets
 COPY Talishar/GeneratedCode ./Talishar/GeneratedCode
 
-RUN pip install --no-cache-dir -e ".[gui,train,cpp]"
+RUN pip install --no-cache-dir -e ".[gui,train,cpp]" \
+    && python -m playwright install --with-deps chromium
 
 EXPOSE 8765
 

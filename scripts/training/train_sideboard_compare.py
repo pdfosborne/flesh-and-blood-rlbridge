@@ -84,8 +84,149 @@ from train_play import (  # noqa: E402
     resolve_play_checkpoint_interval,
     run_final_evaluation,
     run_phase3_play,
+    _frames_to_gif,
+    _load_play_agent_from_path,
+    _render_game_with_talishar_frontend,
 )
 from runtime_defaults import RUNTIME  # noqa: E402
+
+
+def render_winner_replay_gif(
+    *,
+    winner: dict[str, Any],
+    winner_deck: dict[str, int],
+    hero_id: str,
+    equipment_header: str,
+    opponent_hero_id: str,
+    opponent_deck: str,
+    game_format: str,
+    candidate_dir: Path,
+    out_dir: Path,
+    talishar_url: str,
+    talishar_fe_url: str,
+    assets_path: str,
+    max_steps: int,
+    gif_fps: float = 3.0,
+) -> dict[str, Any]:
+    """Play one greedy-policy game via Talishar FE and save ``winner_replay.gif``."""
+    import shutil  # noqa: PLC0415
+
+    gif_path = out_dir / "winner_replay.gif"
+    eval_gif = candidate_dir / "final_eval" / "p1_optimal_policy.gif"
+    if eval_gif.is_file():
+        shutil.copy2(eval_gif, gif_path)
+        return {
+            "gif": str(gif_path),
+            "outcome": "copied",
+            "frames_saved": None,
+            "source": str(eval_gif),
+        }
+
+    play = _load_play_agent_from_path(str(candidate_dir / "result_p1_play.json"))
+    if play is None:
+        print("  WARNING: winner play agent not found — skipping replay GIF")
+        return {"gif": None, "error": "play agent not found"}
+
+    agents = PhaseAgents(
+        player="p1",
+        equipment_header=equipment_header,
+        play=play,
+        active_decks={opponent_hero_id: dict(winner_deck)},
+    )
+    deck_name = f"rl_replay_{winner['candidate_id']}"
+    opp_name = normalize_talishar_asset_name(opponent_deck, assets_path)
+    _write_deck_file(dict(winner_deck), equipment_header, deck_name, assets_path)
+
+    render_dir = out_dir / "winner_replay_frames"
+    print(f"\n  Rendering winner replay via Talishar FE → {render_dir}")
+    frame_paths, outcome = _render_game_with_talishar_frontend(
+        agents=agents,
+        opponent_agents=None,
+        opponent_mode="preset",
+        base_url=talishar_url,
+        fe_url=talishar_fe_url,
+        game_format=game_format,
+        deck_name=deck_name,
+        opp_name=opp_name,
+        max_steps=max_steps,
+        render_dir=render_dir,
+        player_label=str(winner.get("candidate_id") or "winner"),
+    )
+    if not frame_paths:
+        print("  WARNING: replay capture produced no frames")
+        return {"gif": None, "error": "no frames captured", "outcome": outcome}
+
+    _frames_to_gif(frame_paths, gif_path, fps=gif_fps)
+    return {
+        "gif": str(gif_path),
+        "outcome": outcome,
+        "frames_saved": len(frame_paths),
+        "frames_dir": str(render_dir),
+    }
+
+
+def render_winner_replay_gif_for_run(
+    out_dir: Path,
+    *,
+    talishar_url: str,
+    talishar_fe_url: str,
+    assets_path: str,
+    gif_fps: float = 3.0,
+) -> dict[str, Any]:
+    """Re-render the winning candidate replay GIF from a completed run directory."""
+    summary_path = out_dir / "sideboard_compare_results.json"
+    manifest_path = out_dir / "candidates_manifest.json"
+    if not summary_path.is_file() or not manifest_path.is_file():
+        return {"gif": None, "error": "run results not found"}
+
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    winner = summary.get("winner") or {}
+    candidate_id = str(winner.get("candidate_id") or "")
+    if not candidate_id:
+        return {"gif": None, "error": "winner not recorded"}
+
+    winner_deck: dict[str, int] | None = None
+    for row in manifest.get("candidates") or []:
+        if str(row.get("candidate_id") or "") == candidate_id:
+            winner_deck = {str(k): int(v) for k, v in (row.get("game_deck") or {}).items()}
+            break
+    if not winner_deck:
+        deck_state_path = out_dir / "deck_state.json"
+        if deck_state_path.is_file():
+            deck_state = json.loads(deck_state_path.read_text(encoding="utf-8"))
+            opp = str(manifest.get("opponent_hero_id") or "")
+            active = (deck_state.get("p1") or {}).get("active_decks") or {}
+            if opp in active:
+                winner_deck = {str(k): int(v) for k, v in active[opp].items()}
+    if not winner_deck:
+        return {"gif": None, "error": "winner deck not found"}
+
+    equipment_header = str(manifest.get("equipment_header") or "")
+    if not equipment_header and (out_dir / "deck_state.json").is_file():
+        deck_state = json.loads((out_dir / "deck_state.json").read_text(encoding="utf-8"))
+        equipment_header = str((deck_state.get("p1") or {}).get("equipment_header") or "")
+    render_info = render_winner_replay_gif(
+        winner=winner,
+        winner_deck=winner_deck,
+        hero_id=str(manifest.get("hero_id") or ""),
+        equipment_header=equipment_header,
+        opponent_hero_id=str(manifest.get("opponent_hero_id") or ""),
+        opponent_deck=str(manifest.get("opponent_deck") or ""),
+        game_format=str(manifest.get("format") or "silver_age"),
+        candidate_dir=out_dir / "candidates" / candidate_id,
+        out_dir=out_dir,
+        talishar_url=talishar_url,
+        talishar_fe_url=talishar_fe_url,
+        assets_path=assets_path,
+        max_steps=int(manifest.get("final_eval_max_steps") or RUNTIME.sideboard_compare.final_eval_max_steps or 1000),
+        gif_fps=gif_fps,
+    )
+    if render_info.get("gif"):
+        summary["replay_gif"] = render_info["gif"]
+        summary["replay_render"] = render_info
+        summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    return render_info
 
 
 def _baseline_final_eval_win_rate(results: list[dict[str, Any]]) -> Optional[float]:
@@ -552,12 +693,15 @@ def main() -> None:
         "started_at": datetime.now(timezone.utc).isoformat(),
         "format": args.format,
         "hero_id": args.hero_id,
+        "hero_class": args.hero_class,
+        "equipment_header": args.equipment_header,
         "opponent_hero_id": args.opponent_hero_id,
         "opponent_deck": args.opponent_deck,
         "num_options": args.num_options,
         "max_parallel": max_parallel,
         "play_episodes": args.play_episodes,
         "final_eval_episodes": args.final_eval_episodes,
+        "final_eval_max_steps": args.final_eval_max_steps,
         "skip_final_eval": bool(args.skip_final_eval),
         "checkpoint_interval": resolved_ckpt_interval,
         "checkpoint_eval_episodes": args.checkpoint_eval_episodes,
@@ -661,6 +805,28 @@ def main() -> None:
     )
     winner_agents.deck_asset_name = deck_name
 
+    replay_render: dict[str, Any] | None = None
+    if args.render_gif:
+        winner_dir = out_dir / "candidates" / winner["candidate_id"]
+        replay_render = render_winner_replay_gif(
+            winner=winner,
+            winner_deck=dict(winner_deck),
+            hero_id=args.hero_id,
+            equipment_header=args.equipment_header,
+            opponent_hero_id=args.opponent_hero_id,
+            opponent_deck=args.opponent_deck,
+            game_format=args.format,
+            candidate_dir=winner_dir,
+            out_dir=out_dir,
+            talishar_url=args.talishar_url,
+            talishar_fe_url=args.talishar_fe_url,
+            assets_path=assets_path,
+            max_steps=args.final_eval_max_steps,
+            gif_fps=args.gif_fps,
+        )
+        if replay_render.get("gif"):
+            winner["replay_gif"] = replay_render["gif"]
+
     summary = {
         "winner": winner,
         "ranking": results,
@@ -668,6 +834,10 @@ def main() -> None:
         "deck_state": str(out_dir / "deck_state.json"),
         "winning_deck_asset": deck_name,
     }
+    if replay_render:
+        summary["replay_render"] = replay_render
+        if replay_render.get("gif"):
+            summary["replay_gif"] = replay_render["gif"]
     summary_path = out_dir / "sideboard_compare_results.json"
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
 

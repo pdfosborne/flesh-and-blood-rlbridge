@@ -34,7 +34,10 @@ services:
       FAB_BRIDGE_HOME: /app
       # Same compose stack as web-server so deck files in Talishar/Assets are visible to PHP
       TALISHAR_URL: http://web-server/game
+      TALISHAR_FE_URL: http://host.docker.internal:5173
       TALISHAR_ASSETS_PATH: /app/Talishar/Assets
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./results:/app/results
       - ./Talishar:/app/Talishar

@@ -1259,6 +1259,9 @@ function startPolling() {
       state.activeRun.status = status.complete ? "completed" : status.status || "running";
       updateRunStatus(state.activeRun);
       if (document.querySelector("#panel-dashboard.active")) refreshDashboard();
+      if (document.querySelector("#panel-results.active")) {
+        loadResults(state.activeRun.run_id);
+      }
       if (status.complete) {
         clearInterval(state.pollTimer);
         loadResults(state.activeRun.run_id);
@@ -1267,6 +1270,82 @@ function startPolling() {
       /* ignore transient poll errors */
     }
   }, 5000);
+}
+
+let replayPollTimer = null;
+
+function renderReplayPanel(data, runId) {
+  const empty = document.getElementById("results-replay-empty");
+  const panel = document.getElementById("results-replay-panel");
+  const img = document.getElementById("results-replay-gif");
+  const meta = document.getElementById("results-replay-meta");
+  const btn = document.getElementById("btn-render-replay");
+  if (!empty || !panel || !img || !meta || !btn) return;
+
+  const replayUrl = data.replay_gif_url;
+  const replayStatus = data.replay_render_status || data.replay_render || {};
+  const isRunning = replayStatus.status === "running";
+
+  if (replayUrl) {
+    empty.hidden = true;
+    panel.hidden = false;
+    btn.hidden = true;
+    img.src = `${replayUrl}?t=${Date.now()}`;
+    const outcome = replayStatus.outcome || data.replay_render?.outcome;
+    const frames = replayStatus.frames_saved ?? data.replay_render?.frames_saved;
+    meta.textContent = [
+      outcome ? `Outcome: ${outcome}` : "",
+      frames != null ? `${frames} frames` : "",
+    ]
+      .filter(Boolean)
+      .join(" · ");
+    if (replayPollTimer) {
+      clearInterval(replayPollTimer);
+      replayPollTimer = null;
+    }
+    return;
+  }
+
+  panel.hidden = true;
+  btn.hidden = false;
+  btn.disabled = isRunning;
+  btn.textContent = isRunning ? "Rendering replay…" : "Generate replay GIF";
+  if (isRunning) {
+    empty.hidden = false;
+    empty.textContent = "Capturing Talishar FE replay (one full game)…";
+    if (!replayPollTimer && runId) startReplayPolling(runId);
+    return;
+  }
+  if (replayStatus.status === "failed") {
+    empty.hidden = false;
+    empty.textContent = replayStatus.error || "Replay render failed. Ensure Talishar-FE is running.";
+    return;
+  }
+  empty.hidden = false;
+  empty.textContent =
+    "No replay GIF yet. Start Talishar-FE on port 5173, then generate a replay for the winning list.";
+}
+
+function startReplayPolling(runId) {
+  if (replayPollTimer) clearInterval(replayPollTimer);
+  replayPollTimer = setInterval(async () => {
+    try {
+      const status = await api(`/api/runs/${runId}/replay-status`);
+      if (status.ready) {
+        clearInterval(replayPollTimer);
+        replayPollTimer = null;
+        await loadResults(runId);
+        return;
+      }
+      if (status.status === "failed") {
+        clearInterval(replayPollTimer);
+        replayPollTimer = null;
+        await loadResults(runId);
+      }
+    } catch {
+      /* ignore transient poll errors */
+    }
+  }, 4000);
 }
 
 async function loadResults(runId) {
@@ -1301,10 +1380,28 @@ async function loadResults(runId) {
       .join("");
     document.getElementById("results-meta").textContent =
       `Output: ${data.out_dir} · Winning deck asset: ${data.winning_deck_asset || "n/a"}`;
+    renderReplayPanel(data, runId);
   } catch (e) {
     document.getElementById("results-empty").textContent = e.message;
   }
 }
+
+document.getElementById("btn-render-replay").onclick = async () => {
+  if (!state.activeRun) return toast("No completed training run", true);
+  const btn = document.getElementById("btn-render-replay");
+  btn.disabled = true;
+  btn.textContent = "Rendering replay…";
+  try {
+    await api(`/api/runs/${state.activeRun.run_id}/render-replay`, { method: "POST", body: "{}" });
+    startReplayPolling(state.activeRun.run_id);
+    await loadResults(state.activeRun.run_id);
+    toast("Replay render started");
+  } catch (e) {
+    toast(e.message, true);
+    btn.disabled = false;
+    btn.textContent = "Generate replay GIF";
+  }
+};
 
 async function init() {
   initCardPreviewHover();

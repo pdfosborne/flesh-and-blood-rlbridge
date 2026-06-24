@@ -487,6 +487,15 @@ button:disabled {
   background: rgba(62, 207, 142, 0.08);
 }
 
+.results-replay-gif {
+  display: block;
+  width: min(100%, 720px);
+  margin: 0 auto;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: #000;
+}
+
 .toast {
   position: fixed;
   bottom: 1.25rem;

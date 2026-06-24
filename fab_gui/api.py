@@ -562,6 +562,7 @@ class RunRegistry:
     def __init__(self) -> None:
         self._runs: dict[str, TrainingRun] = {}
         self._lock = threading.Lock()
+        self._replay_jobs: dict[str, dict[str, Any]] = {}
 
     def get(self, run_id: str) -> TrainingRun | None:
         with self._lock:
@@ -571,8 +572,114 @@ class RunRegistry:
         with self._lock:
             self._runs[run.run_id] = run
 
+    def set_replay_job(self, run_id: str, payload: dict[str, Any]) -> None:
+        with self._lock:
+            self._replay_jobs[run_id] = payload
+
+    def get_replay_job(self, run_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            return self._replay_jobs.get(run_id)
+
 
 RUNS = RunRegistry()
+
+
+def resolve_run_out_dir(run_id: str) -> Path | None:
+    return _resolve_run_dir(run_id)
+
+
+def replay_gif_path(out_dir: Path) -> Path | None:
+    direct = out_dir / "winner_replay.gif"
+    if direct.is_file():
+        return direct
+
+    summary_path = out_dir / "sideboard_compare_results.json"
+    if summary_path.is_file():
+        try:
+            data = json.loads(summary_path.read_text(encoding="utf-8"))
+            raw = str(data.get("replay_gif") or (data.get("winner") or {}).get("replay_gif") or "")
+            if raw:
+                path = Path(raw)
+                if path.is_file():
+                    return path
+            winner_id = str((data.get("winner") or {}).get("candidate_id") or "")
+            if winner_id:
+                eval_gif = (
+                    out_dir / "candidates" / winner_id / "final_eval" / "p1_optimal_policy.gif"
+                )
+                if eval_gif.is_file():
+                    return eval_gif
+        except (OSError, json.JSONDecodeError):
+            pass
+    return None
+
+
+def replay_render_status(run_id: str) -> dict[str, Any] | None:
+    out_dir = _resolve_run_dir(run_id)
+    if out_dir is None:
+        return None
+    job = RUNS.get_replay_job(run_id)
+    gif = replay_gif_path(out_dir)
+    payload: dict[str, Any] = {
+        "run_id": run_id,
+        "ready": gif is not None,
+        "replay_gif_url": f"/api/runs/{run_id}/replay.gif" if gif is not None else None,
+    }
+    if job:
+        payload.update(job)
+    elif gif is not None:
+        payload["status"] = "completed"
+    else:
+        payload["status"] = "missing"
+    return payload
+
+
+def start_replay_render(run_id: str, env: EnvironmentSettings) -> dict[str, Any]:
+    out_dir = _resolve_run_dir(run_id)
+    if out_dir is None:
+        raise ValueError("Run not found")
+    existing = replay_gif_path(out_dir)
+    if existing is not None:
+        return replay_render_status(run_id) or {"run_id": run_id, "status": "completed"}
+
+    job = RUNS.get_replay_job(run_id)
+    if job and job.get("status") == "running":
+        return job
+
+    RUNS.set_replay_job(run_id, {"run_id": run_id, "status": "running"})
+
+    def _worker() -> None:
+        try:
+            training_root = REPO_ROOT / "scripts" / "training"
+            if str(training_root) not in sys.path:
+                sys.path.insert(0, str(training_root))
+            from train_sideboard_compare import render_winner_replay_gif_for_run  # noqa: PLC0415
+
+            result = render_winner_replay_gif_for_run(
+                out_dir,
+                talishar_url=env.talishar_url,
+                talishar_fe_url=env.talishar_fe_url,
+                assets_path=env.assets_path,
+            )
+            status = "completed" if result.get("gif") else "failed"
+            RUNS.set_replay_job(
+                run_id,
+                {
+                    "run_id": run_id,
+                    "status": status,
+                    "error": result.get("error"),
+                    "outcome": result.get("outcome"),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            RUNS.set_replay_job(
+                run_id,
+                {"run_id": run_id, "status": "failed", "error": str(exc)},
+            )
+
+    thread = threading.Thread(target=_worker, name=f"replay-render-{run_id}", daemon=True)
+    thread.start()
+    return {"run_id": run_id, "status": "running"}
 
 
 def start_training(
@@ -590,6 +697,7 @@ def start_training(
 ) -> TrainingRun:
     player_info = read_deck_hero_info(starting_deck_path)
     game_format = read_deck_format(starting_deck_path)
+    render_replay_gif = bool(spec_kwargs.pop("render_replay_gif", True))
     spec = SideboardCompareSpec(
         starting_deck=str(starting_deck_path),
         opponent_hero_id=opponent_hero_id,
@@ -598,6 +706,7 @@ def start_training(
         hero_class=player_info.hero_class if player_info else "",
         equipment_header=equipment_header,
         game_format=game_format,  # type: ignore[arg-type]
+        no_render_gif=True,
         **spec_kwargs,
     )
     out_dir = spec.resolved_out_dir()
@@ -643,6 +752,8 @@ def start_training(
             )
             run.exit_code = rc
             run.status = "completed" if rc == 0 else "failed"
+            if rc == 0 and render_replay_gif:
+                start_replay_render(run.run_id, env)
         except Exception:
             run.exit_code = 1
             run.status = "failed"
@@ -734,6 +845,15 @@ def run_results(run_id: str) -> dict[str, Any] | None:
     data["complete"] = True
     data["out_dir"] = str(out_dir)
     data["run_id"] = run_id
+    gif = replay_gif_path(out_dir)
+    if gif is not None:
+        data["replay_gif"] = str(gif)
+        data["replay_gif_url"] = f"/api/runs/{run_id}/replay.gif"
+    replay_job = RUNS.get_replay_job(run_id)
+    if replay_job:
+        data["replay_render_status"] = replay_job
+    elif data.get("replay_render"):
+        data["replay_render_status"] = data["replay_render"]
     return data
 
 

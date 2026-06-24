@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>FAB RL Bridge — Sideboard Compare</title>
-  <link rel="stylesheet" href="/static/styles.css?v=4" />
+  <link rel="stylesheet" href="/static/styles.css?v=5" />
 </head>
 <body>
   <header>
@@ -121,7 +121,7 @@
     <!-- Results -->
     <section id="panel-results" class="panel" role="tabpanel">
       <h2>Final results</h2>
-      <p class="hint">Ranked comparison after training and final Talishar evaluation completes.</p>
+      <p class="hint">Ranked comparison after training and final Talishar evaluation completes. Includes a Talishar FE replay GIF for the winning list when Talishar-FE is running.</p>
       <div id="results-empty" class="empty-state">Results appear when training finishes.</div>
       <div id="results-content" hidden>
         <div class="card">
@@ -141,6 +141,18 @@
           </table>
           <p id="results-meta" class="hint" style="margin-top:1rem"></p>
         </div>
+        <div class="card" style="margin-top:1rem">
+          <h3>Winner replay</h3>
+          <p class="hint">One greedy-policy game rendered through Talishar-FE (Playwright screenshots).</p>
+          <div id="results-replay-empty" class="empty-state">Replay GIF will appear here after training finishes.</div>
+          <div id="results-replay-panel" hidden>
+            <img id="results-replay-gif" class="results-replay-gif" alt="Winner replay animation" />
+            <p id="results-replay-meta" class="hint" style="margin-top:0.75rem"></p>
+          </div>
+          <button type="button" id="btn-render-replay" class="secondary" style="margin-top:0.75rem" hidden>
+            Generate replay GIF
+          </button>
+        </div>
       </div>
     </section>
   </main>
@@ -153,6 +165,6 @@
     </div>
     <div class="card-preview__caption"></div>
   </div>
-  <script src="/static/app.js?v=6"></script>
+  <script src="/static/app.js?v=7"></script>
 </body>
 </html>
