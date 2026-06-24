@@ -21,7 +21,7 @@ fi
 source .venv/bin/activate
 
 pip install --upgrade pip
-pip install -e ".[gui]"
+pip install -e ".[gui,train,cpp]"
 
 fab-bridge init
 

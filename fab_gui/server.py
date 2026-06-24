@@ -366,7 +366,6 @@ class GuiRequestHandler(BaseHTTPRequestHandler):
                     "final_eval_episodes": int(body.get("final_eval_episodes", 50)),
                     "build_cpp_engine": bool(body.get("build_cpp_engine", True)),
                     "workers": body.get("workers"),
-                    "no_render_gif": True,
                     "render_replay_gif": bool(body.get("render_replay_gif", True)),
                 }
                 if spec_kwargs["workers"] is not None:

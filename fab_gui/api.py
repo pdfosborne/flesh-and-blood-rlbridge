@@ -698,6 +698,7 @@ def start_training(
     player_info = read_deck_hero_info(starting_deck_path)
     game_format = read_deck_format(starting_deck_path)
     render_replay_gif = bool(spec_kwargs.pop("render_replay_gif", True))
+    spec_kwargs.pop("no_render_gif", None)
     spec = SideboardCompareSpec(
         starting_deck=str(starting_deck_path),
         opponent_hero_id=opponent_hero_id,

@@ -34,6 +34,23 @@ Stop everything with `Ctrl+C`, then:
 docker compose down
 ```
 
+**Terminal UI (`fab-tui`) with Docker:** the compose stack runs the **web GUI** only. `fab-tui` runs on your **host** in a second terminal (same repo checkout). One-time install, then launch:
+
+```bash
+cd flesh-and-blood-rlbridge   # your clone path
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[gui,train,cpp]"
+
+export TALISHAR_URL="http://localhost:8080/game"
+export TALISHAR_ASSETS_PATH="$(pwd)/Talishar/Assets"
+export TALISHAR_FE_URL="http://localhost:5173"   # optional; for live play / GIFs
+
+fab-tui
+```
+
+If `fab-tui: command not found`, the package is not installed in the active environment — run the `pip install -e` line again (or `./scripts/setup.sh` and `source .venv/bin/activate`). You can also use `fab-bridge tui` or `python -m fab_bridge.cli tui`.
+
 ### Option B - Local Python (recommended for development)
 
 **Windows (PowerShell):**
