@@ -20,33 +20,117 @@ _ensure_talishar_fe() {
   fi
 }
 
-_ensure_talishar_fe
-
-_print_cli_hint() {
-  echo ""
-  echo "FAB CLI (no host venv):"
-  echo "  source scripts/docker-env.sh"
-  echo "  fab-tui          # terminal UI"
-  echo "  fab-gui          # open web GUI"
-  echo "  fab-bridge ...   # other CLI subcommands"
-  echo ""
+_wait_for_service() {
+  local service="$1"
+  local url="$2"
+  local label="$3"
+  local max_secs="${4:-120}"
+  echo -n "Waiting for ${label}..."
+  for _ in $(seq 1 "$max_secs"); do
+    if docker compose ps "$service" --status running -q 2>/dev/null | grep -q .; then
+      if [[ -z "$url" ]] || curl -fsS --max-time 2 "$url" >/dev/null 2>&1; then
+        echo " ready."
+        return 0
+      fi
+    fi
+    sleep 1
+    echo -n "."
+  done
+  echo " still starting (check: docker compose ps)."
+  return 1
 }
 
+_print_startup_banner() {
+  cat <<'EOF'
+
+================================================================
+  FAB RL Bridge — starting Docker stack
+================================================================
+
+  When containers are healthy, open:
+
+    Web GUI:     http://localhost:8765   ← start here (sideboard compare)
+    Talishar-FE: http://localhost:5173   (live play + replay GIFs)
+
+  Terminal UI (open a second terminal in this repo):
+
+    source scripts/docker-env.sh
+    fab-tui
+
+  Press Ctrl+C to stop all services.
+
+================================================================
+
+EOF
+}
+
+_print_ready_banner() {
+  cat <<'EOF'
+
+================================================================
+  FAB RL Bridge — ready to use
+================================================================
+
+  WEB GUI — open in your browser:
+
+    http://localhost:8765
+
+  Pick your deck on the Decks tab, tune sideboard swaps on the Editor
+  tab, then start training. Progress and final rankings appear on the
+  Monitor tab; winner replay GIFs on the Results tab.
+
+  Also running:
+
+    Talishar backend   http://localhost:8080
+    Talishar-FE        http://localhost:5173
+
+----------------------------------------------------------------
+  TERMINAL UI (fab-tui) — second terminal, same repo checkout
+----------------------------------------------------------------
+
+    source scripts/docker-env.sh
+    fab-tui
+
+  Suggested menu options:
+
+    1  Sideboard comparison
+       Full pipeline: your deck vs a SAGE precon, swap variants,
+       parallel training, and ranked results.
+
+    2  Fixed deck simulation
+       Train agents on two fixed decks (FaBrary URL/slug or local JSON).
+
+    3  Evaluate checkpoints
+       Win-rate eval or GIF replay from saved training checkpoints.
+
+    5  Real-time Talishar play
+       Watch the agent or play against it in Chromium (uses Talishar-FE).
+
+    6  Settings
+       Talishar URLs, Assets path, FaBrary API key, card DB tools.
+
+  Quick commands:
+
+    fab-gui              open the web GUI in your browser
+    fab-bridge doctor    check Docker, Assets, and card DB
+    docker compose down  stop everything
+
+================================================================
+
+EOF
+}
+
+_ensure_talishar_fe
+
 if $FOREGROUND; then
-  _print_cli_hint
+  _print_startup_banner
   exec docker compose up --build "$@"
 fi
 
+echo "Building and starting Docker stack..."
 docker compose up --build -d "$@"
 
-echo "Waiting for fab-bridge..."
-for _ in $(seq 1 90); do
-  if docker compose ps fab-bridge --status running -q 2>/dev/null | grep -q .; then
-    break
-  fi
-  sleep 1
-done
+_wait_for_service fab-bridge "http://localhost:8765/" "web GUI" 90 || true
+_wait_for_service talishar-fe "http://localhost:5173/" "Talishar-FE" 180 || true
 
-echo "Web GUI: http://localhost:8765"
-echo "Talishar-FE: http://localhost:5173"
-_print_cli_hint
+_print_ready_banner

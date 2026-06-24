@@ -1328,24 +1328,28 @@ function renderReplayPanel(data, runId) {
 
 function startReplayPolling(runId) {
   if (replayPollTimer) clearInterval(replayPollTimer);
-  replayPollTimer = setInterval(async () => {
+  const poll = async () => {
     try {
       const status = await api(`/api/runs/${runId}/replay-status`);
       if (status.ready) {
         clearInterval(replayPollTimer);
         replayPollTimer = null;
         await loadResults(runId);
+        toast("Replay GIF ready");
         return;
       }
       if (status.status === "failed") {
         clearInterval(replayPollTimer);
         replayPollTimer = null;
         await loadResults(runId);
+        toast(status.error || "Replay render failed", true);
       }
     } catch {
       /* ignore transient poll errors */
     }
-  }, 4000);
+  };
+  poll();
+  replayPollTimer = setInterval(poll, 2000);
 }
 
 async function loadResults(runId) {
@@ -1395,7 +1399,7 @@ document.getElementById("btn-render-replay").onclick = async () => {
     await api(`/api/runs/${state.activeRun.run_id}/render-replay`, { method: "POST", body: "{}" });
     startReplayPolling(state.activeRun.run_id);
     await loadResults(state.activeRun.run_id);
-    toast("Replay render started");
+    toast("Replay render started — this may take a minute");
   } catch (e) {
     toast(e.message, true);
     btn.disabled = false;

@@ -415,8 +415,11 @@ def _load_play_agent_from_path(
 ) -> Optional[Any]:
     if not path:
         return None
+    agent_path = Path(path)
+    if not agent_path.is_file():
+        return None
     agent = make_agent(seed=seed)
-    agent.load(path)
+    agent.load(agent_path)
     return agent
 
 
@@ -1034,6 +1037,7 @@ def run_phase3_play(
                 p1_deck_fingerprint=p1_deck_fp,
                 p2_deck_fingerprint=p2_deck_fp,
             )
+            p1_agent.save(out_dir / "result_p1_play.json")
             p1.win_rates.append(p1_wr)
             print(
                 f"\n  Cache hit — converged deck-vs-deck matchup "
@@ -1601,6 +1605,11 @@ def run_phase3_play(
                 "temp_deck_files": temp_decks,
             }
         )
+    else:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        p1_agent.save(out_dir / "result_p1_play.json")
+        if p2_agent is not None and opponent_mode == "dual":
+            p2_agent.save(out_dir / "result_p2_play.json")
 
     return p1_wr, p2_wr
 

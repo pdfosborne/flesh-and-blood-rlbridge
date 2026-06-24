@@ -85,10 +85,75 @@ from train_play import (  # noqa: E402
     run_final_evaluation,
     run_phase3_play,
     _frames_to_gif,
+    _load_converged_play_agent,
     _load_play_agent_from_path,
     _render_game_with_talishar_frontend,
 )
+from agent_cache import AgentCacheStore  # noqa: E402
 from runtime_defaults import RUNTIME  # noqa: E402
+
+
+def _load_play_agent_for_candidate(
+    candidate_dir: Path,
+    *,
+    game_format: str,
+    hero_id: str,
+    opponent_hero_id: str,
+    opponent_deck: str,
+    cache_dir: Path | None = None,
+    winner_deck: dict[str, int] | None = None,
+    equipment_header: str = "",
+    assets_path: str = "",
+) -> Any | None:
+    """Load the trained play agent for replay render (disk, then agent cache)."""
+    play = _load_play_agent_from_path(str(candidate_dir / "result_p1_play.json"))
+    if play is not None:
+        return play
+
+    from agent_cache import deck_content_fingerprint, talishar_asset_deck_fingerprint  # noqa: PLC0415
+    from train_pipeline_common import Matchup  # noqa: PLC0415
+
+    p1_fp = ""
+    p2_fp = ""
+    cache_hit_path = candidate_dir / "play_cache_hit.json"
+    if cache_hit_path.is_file():
+        try:
+            hit = json.loads(cache_hit_path.read_text(encoding="utf-8"))
+            p1_fp = str(hit.get("p1_deck_fingerprint") or "")
+            p2_fp = str(hit.get("p2_deck_fingerprint") or "")
+        except (OSError, json.JSONDecodeError):
+            pass
+    if not (p1_fp and p2_fp) and winner_deck and assets_path:
+        p1_fp = deck_content_fingerprint(winner_deck, equipment_header=equipment_header)
+        p2_fp = talishar_asset_deck_fingerprint(assets_path, opponent_deck)
+    if not (p1_fp and p2_fp):
+        return None
+
+    cache_store = AgentCacheStore(cache_dir or DEFAULT_AGENT_CACHE_DIR, game_format)
+    stub_matchup = Matchup(
+        name="cached",
+        p1_deck="cached",
+        p2_deck=opponent_deck,
+        description="cached deck-vs-deck agent",
+        p1_hero=hero_id.replace("_", "-"),
+        p2_hero=opponent_hero_id.replace("_", "-"),
+    )
+    try:
+        play, _ = _load_converged_play_agent(
+            cache_store,
+            matchup=stub_matchup,
+            p1_deck_fingerprint=p1_fp,
+            p2_deck_fingerprint=p2_fp,
+            seed=None,
+        )
+    except Exception:
+        return None
+    try:
+        candidate_dir.mkdir(parents=True, exist_ok=True)
+        play.save(candidate_dir / "result_p1_play.json")
+    except OSError:
+        pass
+    return play
 
 
 def render_winner_replay_gif(
@@ -122,7 +187,16 @@ def render_winner_replay_gif(
             "source": str(eval_gif),
         }
 
-    play = _load_play_agent_from_path(str(candidate_dir / "result_p1_play.json"))
+    play = _load_play_agent_for_candidate(
+        candidate_dir,
+        game_format=game_format,
+        hero_id=hero_id,
+        opponent_hero_id=opponent_hero_id,
+        opponent_deck=opponent_deck,
+        winner_deck=winner_deck,
+        equipment_header=equipment_header,
+        assets_path=assets_path,
+    )
     if play is None:
         print("  WARNING: winner play agent not found — skipping replay GIF")
         return {"gif": None, "error": "play agent not found"}
