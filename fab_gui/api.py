@@ -267,24 +267,42 @@ def import_fabrary(url_or_slug: str) -> Path:
     return path
 
 
-def opponent_from_precon(deck_name: str, env: EnvironmentSettings) -> dict[str, str]:
-    sys.path.insert(0, str(REPO_ROOT / "src"))
-    from flesh_and_blood_rlbridge.opponent_deck import read_talishar_asset_hero_info
+def _load_opponent_pool(env: EnvironmentSettings, opponent: dict[str, Any]) -> dict[str, Any]:
+    deck_path = str(opponent.get("opponent_deck_path") or "").strip()
+    if deck_path:
+        return load_deck_payload(Path(deck_path), env)
 
-    info = read_talishar_asset_hero_info(env.assets_path, deck_name)
-    if info is None:
-        hero_id = deck_name.split("SAGE")[0].lower()
-        return {
-            "opponent_hero_id": hero_id,
-            "opponent_deck": deck_name,
-            "source": "precon",
-            "label": deck_name,
-        }
+    deck_name = str(opponent.get("opponent_deck") or opponent.get("label") or "").strip()
+    if not deck_name:
+        raise ValueError("Opponent deck is not configured")
+
+    cache_dir = TUI_DECK_CACHE
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    out = cache_dir / f"precon_{slugify(deck_name)}.json"
+    if not out.is_file():
+        export_precon_deck_json(deck_name, Path(env.assets_path), out, game_format="sage")
+    return load_deck_payload(out, env)
+
+
+def opponent_from_precon(deck_name: str, env: EnvironmentSettings) -> dict[str, Any]:
+    opp = {"opponent_deck": deck_name, "source": "precon", "label": deck_name}
+    payload = _load_opponent_pool(env, opp)
+    hero_id = str(payload.get("hero_id") or "").strip()
+    if not hero_id:
+        sys.path.insert(0, str(REPO_ROOT / "src"))
+        from flesh_and_blood_rlbridge.opponent_deck import read_talishar_asset_hero_info
+
+        info = read_talishar_asset_hero_info(env.assets_path, deck_name)
+        hero_id = info.hero_id if info else deck_name.split("SAGE")[0].lower()
+    equipment_header = str(payload.get("equipment_header") or hero_id).strip()
     return {
-        "opponent_hero_id": info.hero_id,
-        "opponent_deck": info.asset_stem,
+        "opponent_hero_id": hero_id,
+        "opponent_deck": deck_name,
         "source": "precon",
         "label": deck_name,
+        "equipment_header": equipment_header,
+        "hero_class": str(payload.get("hero_class") or ""),
+        "game_format": str(payload.get("game_format") or "silver_age"),
     }
 
 
@@ -320,6 +338,9 @@ def opponent_from_fabrary(url_or_slug: str, env: EnvironmentSettings) -> dict[st
         "opponent_deck_path": str(deck_path.resolve()),
         "source": "fabrary",
         "label": label,
+        "equipment_header": equipment_header,
+        "hero_class": str(payload.get("hero_class") or ""),
+        "game_format": str(payload.get("game_format") or "silver_age"),
     }
 
 
@@ -450,23 +471,6 @@ def compute_guide_baseline(
     }
 
 
-def _load_opponent_pool(env: EnvironmentSettings, opponent: dict[str, Any]) -> dict[str, Any]:
-    deck_path = str(opponent.get("opponent_deck_path") or "").strip()
-    if deck_path:
-        return load_deck_payload(Path(deck_path), env)
-
-    deck_name = str(opponent.get("opponent_deck") or opponent.get("label") or "").strip()
-    if not deck_name:
-        raise ValueError("Opponent deck is not configured")
-
-    cache_dir = TUI_DECK_CACHE
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    out = cache_dir / f"precon_{slugify(deck_name)}.json"
-    if not out.is_file():
-        export_precon_deck_json(deck_name, Path(env.assets_path), out, game_format="sage")
-    return load_deck_payload(out, env)
-
-
 def apply_opponent_guide_sideboard(
     env: EnvironmentSettings,
     opponent: dict[str, Any],
@@ -513,6 +517,7 @@ def apply_opponent_guide_sideboard(
         "baseline_label": "Guide policy sideboard",
         "equipment_header": equipment_header,
         "hero_id": opp_payload.get("hero_id"),
+        "hero_class": opp_payload.get("hero_class") or "",
         "game_format": game_format,
     }
 

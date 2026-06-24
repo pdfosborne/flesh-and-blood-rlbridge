@@ -554,6 +554,16 @@ button:disabled {
   margin-bottom: 1rem;
 }
 
+.equipment-loadout-grid--opponent {
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  margin-top: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.equipment-slot--readonly {
+  cursor: default;
+}
+
 .equipment-slot {
   display: flex;
   align-items: center;

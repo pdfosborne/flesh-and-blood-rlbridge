@@ -577,21 +577,85 @@ function opponentDeckSlots() {
   return slots;
 }
 
+function opponentEquipmentQueryParams() {
+  const opp = state.opponent;
+  const params = new URLSearchParams({
+    hero_id: opp?.hero_id || opp?.opponent_hero_id || "",
+    format: opp?.game_format || state.deck?.game_format || "silver_age",
+  });
+  const heroClass = opp?.hero_class || "";
+  if (heroClass) params.set("hero_class", heroClass);
+  return params;
+}
+
+async function renderOpponentLoadout() {
+  const container = document.getElementById("opponent-equipment-loadout");
+  if (!container) return;
+
+  const opp = state.opponent;
+  if (!opp) {
+    container.hidden = true;
+    container.innerHTML = "";
+    return;
+  }
+
+  const header = opp.equipment_header || opp.opponent_hero_id || "";
+  if (!header) {
+    container.hidden = true;
+    container.innerHTML = "";
+    return;
+  }
+
+  try {
+    const { loadout } = await api(
+      `/api/equipment/loadout?equipment_header=${encodeURIComponent(header)}&${opponentEquipmentQueryParams()}`
+    );
+    if (!loadout.length) {
+      container.hidden = true;
+      container.innerHTML = "";
+      return;
+    }
+    for (const row of loadout) rememberCardMeta(row);
+    container.hidden = false;
+    container.innerHTML = loadout
+      .map(
+        (e) => `<div class="equipment-slot equipment-slot--readonly">
+      ${cardTileHtml(e, { extraClass: "card-tile--thumb", title: e.name })}
+      <div><strong>${e.slot_label}</strong><br><span class="hint">${escapeHtml(e.name)}</span></div>
+    </div>`
+      )
+      .join("");
+    bindCardTileImages(container);
+  } catch {
+    container.hidden = true;
+    container.innerHTML = "";
+  }
+}
+
 function renderOpponentDeck() {
   const panel = document.getElementById("opponent-deck-panel");
   const grid = document.getElementById("opponent-deck-grid");
   const label = document.getElementById("opponent-deck-label");
   if (!panel || !grid || !label) return;
 
-  const entries = state.opponent?.deck_entries || [];
-  if (!entries.length) {
+  if (!state.opponent) {
     panel.hidden = true;
     grid.innerHTML = "";
     label.textContent = "";
+    void renderOpponentLoadout();
     return;
   }
 
   panel.hidden = false;
+  void renderOpponentLoadout();
+
+  const entries = state.opponent.deck_entries || [];
+  if (!entries.length) {
+    grid.innerHTML = "";
+    label.textContent = "Opponent loadout — main deck appears after guide policy sideboarding.";
+    return;
+  }
+
   label.textContent =
     state.opponent.baseline_label ||
     `Guide policy sideboard vs ${state.deck?.hero_id || "your hero"}`;
@@ -603,7 +667,7 @@ function renderOpponentDeck() {
 
 let guideApplyToken = 0;
 
-async function applyGuideBaseline({ navigate = true } = {}) {
+async function applyGuideBaseline({ navigate = false } = {}) {
   if (!state.deck || !state.opponent) return false;
   const token = ++guideApplyToken;
   setDecksStatus("Applying guide policy sideboard…");
@@ -635,6 +699,18 @@ async function applyGuideBaseline({ navigate = true } = {}) {
       state.opponent.deck_entries = result.opponent_guide.deck_entries;
       state.opponent.deck_size = result.opponent_guide.deck_size;
       state.opponent.baseline_label = result.opponent_guide.baseline_label;
+      if (result.opponent_guide.equipment_header) {
+        state.opponent.equipment_header = result.opponent_guide.equipment_header;
+      }
+      if (result.opponent_guide.hero_id) {
+        state.opponent.hero_id = result.opponent_guide.hero_id;
+      }
+      if (result.opponent_guide.hero_class) {
+        state.opponent.hero_class = result.opponent_guide.hero_class;
+      }
+      if (result.opponent_guide.game_format) {
+        state.opponent.game_format = result.opponent_guide.game_format;
+      }
       for (const entry of result.opponent_guide.deck_entries || []) rememberCardMeta(entry);
     }
     syncDeckEntries();
@@ -645,7 +721,7 @@ async function applyGuideBaseline({ navigate = true } = {}) {
     renderEquipment();
     renderEvalCandidates();
     updateOpponentSummary();
-    setDecksStatus("Guide policy applied — opening editor…");
+    setDecksStatus("Guide policy applied — continue on the Decks tab or open the Editor when ready.");
     if (navigate) switchTab("editor");
     toast("Guide policy baseline applied");
     return true;
@@ -667,7 +743,7 @@ async function maybeAutoGuideAndContinue() {
     );
     return;
   }
-  await applyGuideBaseline({ navigate: true });
+  await applyGuideBaseline({ navigate: false });
 }
 
 function setDeck(payload) {
