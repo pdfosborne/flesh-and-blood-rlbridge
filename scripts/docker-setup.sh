@@ -63,7 +63,7 @@ _print_ready_banner() {
 
   Pick your deck on the Decks tab, tune sideboard swaps on the Editor
   tab, then start training. Progress and final rankings appear on the
-  Monitor tab; winner replay GIFs on the Results tab.
+  Monitor tab; replay GIFs on the Results tab.
 
   Also running:
 

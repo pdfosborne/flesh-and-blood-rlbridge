@@ -490,10 +490,12 @@ button:disabled {
 .results-replay-gif {
   display: block;
   width: min(100%, 720px);
+  min-height: 12rem;
   margin: 0 auto;
   border-radius: 8px;
   border: 1px solid var(--border);
   background: #000;
+  object-fit: contain;
 }
 
 .toast {

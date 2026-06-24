@@ -214,6 +214,17 @@ class GuiRequestHandler(BaseHTTPRequestHandler):
                 return _json_response(self, {"error": "Replay GIF not ready"}, status=404)
             return _serve_file(self, gif_path)
 
+        match = re.fullmatch(r"/api/runs/([^/]+)/replay-frame/([^/]+)", path)
+        if match:
+            run_id = match.group(1)
+            out_dir = gui_api.resolve_run_out_dir(run_id)
+            if out_dir is None:
+                return _json_response(self, {"error": "Run not found"}, status=404)
+            frame_path = gui_api.replay_frame_path(out_dir, unquote(match.group(2)))
+            if frame_path is None:
+                return _json_response(self, {"error": "Replay frame not found"}, status=404)
+            return _serve_file(self, frame_path)
+
         match = re.fullmatch(r"/api/runs/([^/]+)/replay-status", path)
         if match:
             status = gui_api.replay_render_status(match.group(1))

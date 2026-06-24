@@ -15,7 +15,7 @@ import uuid
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
 
@@ -2201,6 +2201,7 @@ def _render_game_with_talishar_frontend(
     max_steps: int,
     render_dir: Path,
     player_label: str,
+    on_frame_saved: Optional[Callable[[Path, int], None]] = None,
 ) -> tuple[list[Path], str]:
     """Play one game via the HTTP Talishar backend and screenshot the live
     Talishar frontend after every step.
@@ -2245,6 +2246,8 @@ def _render_game_with_talishar_frontend(
             if _save_state_image(env, obs, frame_path):
                 frame_paths.append(frame_path)
                 print(f"  [{player_label}] Frame 0 saved (reset)")
+                if on_frame_saved is not None:
+                    on_frame_saved(frame_path, len(frame_paths))
 
             done = False
             step_no = 0
@@ -2278,6 +2281,8 @@ def _render_game_with_talishar_frontend(
                 fpath = render_dir / fname
                 if _save_state_image(env, obs, fpath):
                     frame_paths.append(fpath)
+                    if on_frame_saved is not None:
+                        on_frame_saved(fpath, len(frame_paths))
 
             outcome = _infer_render_outcome(
                 obs, terminated=terminated, truncated=truncated, env=env,
@@ -2286,6 +2291,8 @@ def _render_game_with_talishar_frontend(
             if _save_end_state_frame(env, obs, end_path, outcome=outcome, steps=step_no):
                 frame_paths.append(end_path)
                 print(f"  [{player_label}] End frame saved ({outcome})")
+                if on_frame_saved is not None:
+                    on_frame_saved(end_path, len(frame_paths))
 
         finally:
             env.close()

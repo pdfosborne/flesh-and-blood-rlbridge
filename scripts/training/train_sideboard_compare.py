@@ -31,7 +31,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 _SCRIPTS_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_SCRIPTS_ROOT))
@@ -172,6 +172,7 @@ def render_winner_replay_gif(
     assets_path: str,
     max_steps: int,
     gif_fps: float = 3.0,
+    on_progress: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Play one greedy-policy game via Talishar FE and save ``winner_replay.gif``."""
     import shutil  # noqa: PLC0415
@@ -212,7 +213,12 @@ def render_winner_replay_gif(
     _write_deck_file(dict(winner_deck), equipment_header, deck_name, assets_path)
 
     render_dir = out_dir / "winner_replay_frames"
-    print(f"\n  Rendering winner replay via Talishar FE → {render_dir}")
+    print(f"\n  Rendering replay via Talishar FE → {render_dir}")
+
+    def _on_frame_saved(_path: Path, count: int) -> None:
+        if on_progress is not None:
+            on_progress({"status": "running", "frames_saved": count})
+
     frame_paths, outcome = _render_game_with_talishar_frontend(
         agents=agents,
         opponent_agents=None,
@@ -225,11 +231,20 @@ def render_winner_replay_gif(
         max_steps=max_steps,
         render_dir=render_dir,
         player_label=str(winner.get("candidate_id") or "winner"),
+        on_frame_saved=_on_frame_saved,
     )
     if not frame_paths:
         print("  WARNING: replay capture produced no frames")
         return {"gif": None, "error": "no frames captured", "outcome": outcome}
 
+    if on_progress is not None:
+        on_progress(
+            {
+                "status": "encoding",
+                "frames_saved": len(frame_paths),
+                "outcome": outcome,
+            }
+        )
     _frames_to_gif(frame_paths, gif_path, fps=gif_fps)
     return {
         "gif": str(gif_path),
@@ -246,6 +261,7 @@ def render_winner_replay_gif_for_run(
     talishar_fe_url: str,
     assets_path: str,
     gif_fps: float = 3.0,
+    on_progress: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Re-render the winning candidate replay GIF from a completed run directory."""
     summary_path = out_dir / "sideboard_compare_results.json"
@@ -295,6 +311,7 @@ def render_winner_replay_gif_for_run(
         assets_path=assets_path,
         max_steps=int(manifest.get("final_eval_max_steps") or RUNTIME.sideboard_compare.final_eval_max_steps or 1000),
         gif_fps=gif_fps,
+        on_progress=on_progress,
     )
     if render_info.get("gif"):
         summary["replay_gif"] = render_info["gif"]

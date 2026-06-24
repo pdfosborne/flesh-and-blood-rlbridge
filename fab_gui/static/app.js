@@ -1274,6 +1274,35 @@ function startPolling() {
 
 let replayPollTimer = null;
 
+function replayPreviewMeta(status) {
+  if (status.status === "encoding") {
+    return `Building GIF from ${status.frames_saved || 0} frames…`;
+  }
+  if (status.frames_saved) {
+    return `Capturing frame ${status.frames_saved}…`;
+  }
+  return "Capturing Talishar FE replay (one full game)…";
+}
+
+function applyReplayPreview(status) {
+  const empty = document.getElementById("results-replay-empty");
+  const panel = document.getElementById("results-replay-panel");
+  const img = document.getElementById("results-replay-gif");
+  const meta = document.getElementById("results-replay-meta");
+  const btn = document.getElementById("btn-render-replay");
+  if (!empty || !panel || !img || !meta || !btn) return;
+
+  if (status.latest_frame_url) {
+    empty.hidden = true;
+    panel.hidden = false;
+    img.src = `${status.latest_frame_url}?t=${Date.now()}`;
+    meta.textContent = replayPreviewMeta(status);
+    btn.hidden = false;
+    btn.disabled = true;
+    btn.textContent = status.status === "encoding" ? "Building GIF…" : "Rendering replay…";
+  }
+}
+
 function renderReplayPanel(data, runId) {
   const empty = document.getElementById("results-replay-empty");
   const panel = document.getElementById("results-replay-panel");
@@ -1284,7 +1313,7 @@ function renderReplayPanel(data, runId) {
 
   const replayUrl = data.replay_gif_url;
   const replayStatus = data.replay_render_status || data.replay_render || {};
-  const isRunning = replayStatus.status === "running";
+  const isRunning = replayStatus.status === "running" || replayStatus.status === "encoding";
 
   if (replayUrl) {
     empty.hidden = true;
@@ -1306,16 +1335,28 @@ function renderReplayPanel(data, runId) {
     return;
   }
 
-  panel.hidden = true;
   btn.hidden = false;
   btn.disabled = isRunning;
-  btn.textContent = isRunning ? "Rendering replay…" : "Generate replay GIF";
+  btn.textContent =
+    replayStatus.status === "encoding"
+      ? "Building GIF…"
+      : isRunning
+        ? "Rendering replay…"
+        : "Generate replay GIF";
+
   if (isRunning) {
-    empty.hidden = false;
-    empty.textContent = "Capturing Talishar FE replay (one full game)…";
+    if (replayStatus.latest_frame_url) {
+      applyReplayPreview(replayStatus);
+    } else {
+      panel.hidden = true;
+      empty.hidden = false;
+      empty.textContent = replayPreviewMeta(replayStatus);
+    }
     if (!replayPollTimer && runId) startReplayPolling(runId);
     return;
   }
+
+  panel.hidden = true;
   if (replayStatus.status === "failed") {
     empty.hidden = false;
     empty.textContent = replayStatus.error || "Replay render failed. Ensure Talishar-FE is running.";
@@ -1331,6 +1372,9 @@ function startReplayPolling(runId) {
   const poll = async () => {
     try {
       const status = await api(`/api/runs/${runId}/replay-status`);
+      if (!status.ready && (status.status === "running" || status.status === "encoding")) {
+        applyReplayPreview(status);
+      }
       if (status.ready) {
         clearInterval(replayPollTimer);
         replayPollTimer = null;
@@ -1349,7 +1393,7 @@ function startReplayPolling(runId) {
     }
   };
   poll();
-  replayPollTimer = setInterval(poll, 2000);
+  replayPollTimer = setInterval(poll, 1500);
 }
 
 async function loadResults(runId) {

@@ -621,6 +621,43 @@ def replay_gif_path(out_dir: Path) -> Path | None:
     return None
 
 
+def replay_frames_dir(out_dir: Path) -> Path:
+    return out_dir / "winner_replay_frames"
+
+
+def replay_frame_path(out_dir: Path, filename: str) -> Path | None:
+    safe = Path(filename).name
+    if safe != filename or not safe.lower().endswith(".png"):
+        return None
+    path = replay_frames_dir(out_dir) / safe
+    if path.is_file():
+        return path
+    return None
+
+
+def latest_replay_frame(out_dir: Path) -> Path | None:
+    frames_dir = replay_frames_dir(out_dir)
+    if not frames_dir.is_dir():
+        return None
+    frames = sorted(frames_dir.glob("*.png"), key=lambda p: p.stat().st_mtime)
+    return frames[-1] if frames else None
+
+
+def _replay_frames_snapshot(out_dir: Path, run_id: str) -> dict[str, Any]:
+    frames_dir = replay_frames_dir(out_dir)
+    if not frames_dir.is_dir():
+        return {}
+    frames = sorted(frames_dir.glob("*.png"), key=lambda p: p.stat().st_mtime)
+    if not frames:
+        return {}
+    latest = frames[-1]
+    return {
+        "frames_saved": len(frames),
+        "latest_frame": latest.name,
+        "latest_frame_url": f"/api/runs/{run_id}/replay-frame/{latest.name}",
+    }
+
+
 def replay_render_status(run_id: str) -> dict[str, Any] | None:
     out_dir = _run_out_dir(run_id)
     if out_dir is None:
@@ -638,6 +675,13 @@ def replay_render_status(run_id: str) -> dict[str, Any] | None:
         payload["status"] = "completed"
     else:
         payload["status"] = "missing"
+
+    if gif is None:
+        frame_info = _replay_frames_snapshot(out_dir, run_id)
+        if frame_info:
+            payload.update(frame_info)
+            if payload.get("status") in {None, "missing"} and frame_info.get("frames_saved"):
+                payload["status"] = "running"
     return payload
 
 
@@ -656,6 +700,13 @@ def start_replay_render(run_id: str, env: EnvironmentSettings) -> dict[str, Any]
     RUNS.set_replay_job(run_id, {"run_id": run_id, "status": "running"})
 
     def _worker() -> None:
+        def _on_progress(info: dict[str, Any]) -> None:
+            job_payload = {"run_id": run_id, **info}
+            frame_info = _replay_frames_snapshot(out_dir, run_id)
+            if frame_info:
+                job_payload.update(frame_info)
+            RUNS.set_replay_job(run_id, job_payload)
+
         try:
             training_root = REPO_ROOT / "scripts" / "training"
             if str(training_root) not in sys.path:
@@ -667,6 +718,7 @@ def start_replay_render(run_id: str, env: EnvironmentSettings) -> dict[str, Any]
                 talishar_url=env.talishar_url,
                 talishar_fe_url=env.talishar_fe_url,
                 assets_path=env.assets_path,
+                on_progress=_on_progress,
             )
             status = "completed" if result.get("gif") else "failed"
             RUNS.set_replay_job(
@@ -676,6 +728,7 @@ def start_replay_render(run_id: str, env: EnvironmentSettings) -> dict[str, Any]
                     "status": status,
                     "error": result.get("error"),
                     "outcome": result.get("outcome"),
+                    "frames_saved": result.get("frames_saved"),
                 },
             )
         except Exception as exc:  # noqa: BLE001
@@ -873,7 +926,9 @@ def run_results(run_id: str) -> dict[str, Any] | None:
         data["replay_gif_url"] = f"/api/runs/{run_id}/replay.gif"
     replay_job = RUNS.get_replay_job(run_id)
     if replay_job:
-        data["replay_render_status"] = replay_job
+        data["replay_render_status"] = dict(replay_job)
+        if not data.get("replay_gif_url"):
+            data["replay_render_status"].update(_replay_frames_snapshot(out_dir, run_id))
     elif data.get("replay_render"):
         data["replay_render_status"] = data["replay_render"]
     return data
