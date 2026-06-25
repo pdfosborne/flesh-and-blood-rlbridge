@@ -14,6 +14,8 @@
   --shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
   --equip-loadout-width: 200px;
   --equip-picker-width: 104px;
+  --equip-picker-width-deck: 176px;
+  --equip-picker-width-opponent: 168px;
   font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
 }
 
@@ -121,7 +123,17 @@ main {
   max-width: 17rem;
 }
 
-.your-deck-layout,
+.your-deck-layout .deck-panel-import {
+  max-width: 20rem;
+}
+
+.your-deck-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 20rem) minmax(0, 1fr);
+  gap: 1rem;
+  align-items: start;
+}
+
 .opponent-deck-layout {
   display: grid;
   grid-template-columns: minmax(0, 17rem) minmax(0, 1fr);
@@ -129,7 +141,11 @@ main {
   align-items: start;
 }
 
-.your-deck-layout:has(#equipment-section[hidden]),
+.your-deck-layout:has(#equipment-section[hidden]) {
+  grid-template-columns: 1fr;
+  max-width: 20rem;
+}
+
 .opponent-deck-layout:has(#opponent-deck-panel[hidden]) {
   grid-template-columns: 1fr;
   max-width: 17rem;
@@ -141,8 +157,38 @@ main {
 }
 
 .deck-panel-equipment .equipment-loadout-grid {
-  grid-template-columns: 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   margin-bottom: 0;
+}
+
+.deck-panel-equipment .equipment-row {
+  grid-template-columns: minmax(300px, 1fr) var(--equip-picker-width-deck);
+  width: 100%;
+}
+
+.deck-panel-equipment .equipment-loadout-col {
+  width: auto;
+}
+
+.deck-panel-equipment .equipment-picker-col {
+  flex: 0 0 var(--equip-picker-width-deck);
+  width: var(--equip-picker-width-deck);
+  max-width: var(--equip-picker-width-deck);
+}
+
+.deck-panel-equipment .equipment-picker-col h4 {
+  font-size: 0.95rem;
+}
+
+.deck-panel-equipment .equipment-picker-col input[type="search"],
+.deck-panel-equipment .equipment-picker-col input[type="text"] {
+  max-width: var(--equip-picker-width-deck);
+  font-size: inherit;
+  padding: 0.5rem 0.65rem;
+}
+
+.deck-panel-equipment .equipment-row .equipment-results {
+  width: var(--equip-picker-width-deck);
 }
 
 .equipment-row {
@@ -221,7 +267,11 @@ main {
 
 .opponent-edit-row {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: minmax(
+      0,
+      calc(var(--equip-loadout-width) + var(--equip-picker-width-opponent) + 2rem)
+    )
+    minmax(0, 1fr);
   gap: 1rem;
   align-items: start;
   margin-top: 0.5rem;
@@ -248,8 +298,28 @@ main {
 
 .opponent-equipment-col {
   min-width: 0;
-  width: fit-content;
-  max-width: calc(var(--equip-loadout-width) + var(--equip-picker-width) + 0.75rem);
+  width: 100%;
+  max-width: calc(var(--equip-loadout-width) + var(--equip-picker-width-opponent) + 0.75rem);
+}
+
+.opponent-equipment-col .equipment-row {
+  grid-template-columns: minmax(160px, var(--equip-loadout-width)) var(--equip-picker-width-opponent);
+  width: 100%;
+}
+
+.opponent-equipment-col .equipment-picker-col {
+  flex: 0 0 var(--equip-picker-width-opponent);
+  width: var(--equip-picker-width-opponent);
+  max-width: var(--equip-picker-width-opponent);
+}
+
+.opponent-equipment-col .equipment-row .equipment-results {
+  width: var(--equip-picker-width-opponent);
+}
+
+.opponent-equipment-col .equipment-picker-col input[type="search"],
+.opponent-equipment-col .equipment-picker-col input[type="text"] {
+  max-width: var(--equip-picker-width-opponent);
 }
 
 .opponent-equipment-col .equipment-loadout-grid--opponent {
@@ -266,6 +336,25 @@ main {
   .your-deck-layout,
   .opponent-deck-layout {
     grid-template-columns: 1fr;
+  }
+
+  .deck-panel-equipment .equipment-loadout-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .deck-panel-equipment .equipment-row {
+    grid-template-columns: 1fr;
+  }
+
+  .deck-panel-equipment .equipment-picker-col {
+    width: 100%;
+    max-width: none;
+    flex: 1 1 auto;
+  }
+
+  .deck-panel-equipment .equipment-row .equipment-results {
+    width: 100%;
+    max-width: var(--equip-picker-width-deck);
   }
 
   .equipment-row {
