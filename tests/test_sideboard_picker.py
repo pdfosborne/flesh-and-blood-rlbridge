@@ -86,6 +86,34 @@ def test_compute_guide_policy_deck_sage_format_caps_at_40() -> None:
     assert sum(deck.values()) == 40
 
 
+def test_compute_guide_policy_deck_respects_max_copies() -> None:
+    pool = {"nimblism_red": 4, **{f"filler_{i}": 1 for i in range(50)}}
+    deck = compute_guide_policy_deck(
+        pool,
+        opponent_hero_id="dorinthea",
+        hero_id="briar",
+        hero_class="Runeblade",
+        game_format="silver_age",
+    )
+    assert deck.get("nimblism_red", 0) <= 2
+    assert all(count <= 2 for count in deck.values())
+    assert sum(deck.values()) == 40
+
+
+def test_simulate_guide_sideboard_deck_clamps_pool() -> None:
+    from flesh_and_blood_rlbridge.sideboard_guide_policy import simulate_guide_sideboard_deck
+
+    pool = {"nimblism_red": 5, **{f"card_{i}": 1 for i in range(50)}}
+    deck = simulate_guide_sideboard_deck(
+        pool,
+        "dorinthea",
+        hero_id="briar",
+        game_format="silver_age",
+    )
+    assert deck.get("nimblism_red", 0) <= 2
+    assert all(count <= 2 for count in deck.values())
+
+
 def test_variants_payload_uses_custom_baseline_label() -> None:
     baseline = {f"c_{i}": 1 for i in range(40)}
     payload = variants_to_candidate_payload(

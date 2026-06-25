@@ -30,8 +30,11 @@ from fab_tui.decks import (
 )
 from fab_tui.equipment import (
     EquipmentSearchIndex,
-    parse_equipment_header,
+    parse_standard_loadout,
+    replace_equipment_in_slot,
     slot_display_name,
+    split_equipment_header,
+    suggest_guide_equipment_header,
 )
 from fab_tui.runner import fetch_fabrary_deck, run_sideboard_compare
 from fab_tui.saved_decks import list_saved_user_decks, save_user_deck
@@ -50,6 +53,13 @@ if str(SCRIPTS_EVAL) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_EVAL))
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+if str(REPO_ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT / "src"))
+
+from flesh_and_blood_rlbridge.sideboard_guide_policy import (
+    clamp_deck_copy_counts,
+    clamp_pool_counts,
+)
 
 
 def _write_dashboard_once(out_dir: Path) -> None:
@@ -219,6 +229,9 @@ def load_deck_payload(path: Path, env: EnvironmentSettings) -> dict[str, Any]:
     pool = dict(deck)
     for cid, count in sideboard.items():
         pool[cid] = pool.get(cid, 0) + count
+    deck = clamp_deck_copy_counts(deck, game_format)
+    sideboard = clamp_deck_copy_counts(sideboard, game_format)
+    pool = clamp_pool_counts(pool, game_format)
     info = read_deck_hero_info(path)
     return {
         "path": str(path.resolve()),
@@ -368,12 +381,28 @@ def sync_opponent_deck_api(
     )
 
 
-def import_precon(deck_name: str, env: EnvironmentSettings) -> Path:
+def _precon_cache_path(deck_name: str) -> Path:
+    return TUI_DECK_CACHE / f"precon_{slugify(deck_name)}.json"
+
+
+def _ensure_precon_cache(deck_name: str, env: EnvironmentSettings) -> Path:
+    """Export a Talishar precon to JSON, refreshing when the asset file changes."""
     cache_dir = TUI_DECK_CACHE
     cache_dir.mkdir(parents=True, exist_ok=True)
-    out = cache_dir / f"precon_{slugify(deck_name)}.json"
-    export_precon_deck_json(deck_name, Path(env.assets_path), out, game_format="sage")
+    out = _precon_cache_path(deck_name)
+    asset = Path(env.assets_path) / f"{deck_name}.txt"
+    stale = (
+        not out.is_file()
+        or not asset.is_file()
+        or asset.stat().st_mtime > out.stat().st_mtime
+    )
+    if stale:
+        export_precon_deck_json(deck_name, Path(env.assets_path), out, game_format="sage")
     return out
+
+
+def import_precon(deck_name: str, env: EnvironmentSettings) -> Path:
+    return _ensure_precon_cache(deck_name, env)
 
 
 def import_fabrary(url_or_slug: str) -> Path:
@@ -401,9 +430,7 @@ def _load_opponent_pool(env: EnvironmentSettings, opponent: dict[str, Any]) -> d
 
     cache_dir = TUI_DECK_CACHE
     cache_dir.mkdir(parents=True, exist_ok=True)
-    out = cache_dir / f"precon_{slugify(deck_name)}.json"
-    if not out.is_file():
-        export_precon_deck_json(deck_name, Path(env.assets_path), out, game_format="sage")
+    out = _ensure_precon_cache(deck_name, env)
     return load_deck_payload(out, env)
 
 
@@ -558,6 +585,7 @@ def equipment_alternatives_for_slot(
     hero_class: str = "",
     talishar_url: str,
     slot: str,
+    equipment_header: str = "",
 ) -> list[dict[str, Any]]:
     """All legal equipment options for a loadout slot."""
     from fab_tui.equipment import equipment_slot
@@ -569,6 +597,17 @@ def equipment_alternatives_for_slot(
         for hit in index.all_hits()
         if equipment_slot(hit.card_id, hero_id=hero_id) == slot_key
     ]
+    seen = {hit.card_id for hit in hits}
+    if equipment_header:
+        _, sideboard = split_equipment_header(equipment_header, hero_id=hero_id)
+        for card_id in sideboard:
+            if equipment_slot(card_id, hero_id=hero_id) != slot_key or card_id in seen:
+                continue
+            hit = index.lookup(card_id)
+            if hit:
+                hits.append(hit)
+                seen.add(card_id)
+    hits.sort(key=lambda hit: (hit.name.lower(), hit.card_id))
     return [card_hit_to_dict(hit, talishar_url=talishar_url) for hit in hits]
 
 
@@ -581,20 +620,21 @@ def replace_equipment_slot(
     hero_class: str = "",
     game_format: str,
 ) -> str | None:
+    _STANDARD_SLOTS = ("hero", "weapon", "head", "chest", "arms", "legs")
+    if not (1 <= slot_index <= len(_STANDARD_SLOTS)):
+        return None
+    target_slot = _STANDARD_SLOTS[slot_index - 1]
+    if target_slot == "hero":
+        return None
     equip_index = EquipmentSearchIndex(game_format, hero_id=hero_id, hero_class=hero_class)
-    entries = parse_equipment_header(
+    if not equip_index.lookup(replacement_card_id):
+        return None
+    return replace_equipment_in_slot(
         equipment_header,
+        slot=target_slot,
+        replacement_card_id=replacement_card_id,
         hero_id=hero_id,
-        display_name=equip_index.display_name,
     )
-    entry = next((row for row in entries if row.index == slot_index), None)
-    if entry is None or entry.slot == "hero":
-        return None
-    parts = equipment_header.split()
-    if not (1 <= slot_index <= len(parts)):
-        return None
-    parts[slot_index - 1] = replacement_card_id
-    return " ".join(parts)
 
 
 def equipment_loadout(
@@ -606,7 +646,7 @@ def equipment_loadout(
     talishar_url: str,
 ) -> list[dict[str, Any]]:
     equip_index = EquipmentSearchIndex(game_format, hero_id=hero_id, hero_class=hero_class)
-    entries = parse_equipment_header(
+    entries = parse_standard_loadout(
         equipment_header,
         hero_id=hero_id,
         display_name=equip_index.display_name,
@@ -617,11 +657,14 @@ def equipment_loadout(
             "slot": entry.slot,
             "slot_label": slot_display_name(entry.slot),
             "card_id": entry.card_id,
-            "name": entry.label,
+            "name": entry.label or ("Empty slot" if entry.slot != "hero" else entry.label),
             "classification": (
-                hit.classification if (hit := equip_index.lookup(entry.card_id)) else ""
+                hit.classification
+                if entry.card_id and (hit := equip_index.lookup(entry.card_id))
+                else ""
             ),
-            "image_url": card_image_display_url(entry.card_id),
+            "image_url": card_image_display_url(entry.card_id) if entry.card_id else "",
+            "empty": not bool(entry.card_id),
         }
         for entry in entries
     ]
@@ -662,9 +705,18 @@ def compute_guide_baseline(
         game_format=game_format,
         hero_class=hero_class,
     )
+    resolved_equipment = equipment_header
+    if opponent_hero_id and equipment_header.strip():
+        resolved_equipment = suggest_guide_equipment_header(
+            equipment_header,
+            hero_id=hero_id,
+            opponent_hero_id=opponent_hero_id,
+            game_format=game_format,
+            hero_class=hero_class,
+        )
     return {
         "baseline_deck": guide_deck,
-        "equipment_header": equipment_header,
+        "equipment_header": resolved_equipment,
         "baseline_label": "Guide policy baseline",
     }
 
@@ -692,6 +744,15 @@ def apply_opponent_guide_sideboard(
     equipment_header = str(
         opp_payload.get("equipment_header") or opponent.get("opponent_hero_id") or ""
     ).strip()
+    opp_hero_id = str(opp_payload.get("hero_id") or opponent.get("opponent_hero_id") or "")
+    if player_hero_id and equipment_header:
+        equipment_header = suggest_guide_equipment_header(
+            equipment_header,
+            hero_id=opp_hero_id,
+            opponent_hero_id=player_hero_id,
+            game_format=game_format,
+            hero_class=str(opp_payload.get("hero_class") or ""),
+        )
     deck_entries = deck_counts_to_entries(
         guide_deck,
         game_format=game_format,

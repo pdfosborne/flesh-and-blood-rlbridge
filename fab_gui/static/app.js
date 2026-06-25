@@ -189,6 +189,33 @@ function cardClassification(card) {
   return card.classification || card.type_line || "";
 }
 
+function equipmentSlotTileHtml(entry) {
+  const isEmpty = entry.empty || !entry.card_id;
+  if (isEmpty) {
+    return `<div class="equipment-slot__empty" aria-hidden="true">Empty</div>`;
+  }
+  return cardTileHtml(entry, { title: entry.name });
+}
+
+function equipmentSlotMarkup(entry, { selected = false } = {}) {
+  const selectable = entry.slot !== "hero";
+  const isEmpty = entry.empty || !entry.card_id;
+  const classes = [
+    "equipment-slot",
+    selectable ? "equipment-slot--selectable" : "",
+    isEmpty ? "equipment-slot--empty" : "",
+    selected ? "selected" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const cardIdAttr = entry.card_id ? ` data-card-id="${entry.card_id}"` : "";
+  const hint = isEmpty ? "Click to equip" : escapeHtml(entry.name);
+  return `<div class="${classes}" data-slot="${entry.slot}" data-index="${entry.index}"${cardIdAttr} ${selectable ? 'role="button" tabindex="0"' : ""}>
+      ${equipmentSlotTileHtml(entry)}
+      <div class="equipment-slot__label"><strong>${entry.slot_label}</strong><span class="hint">${hint}</span></div>
+    </div>`;
+}
+
 function cardTileHtml(card, { action = "", extraClass = "", title = "", disabled = false } = {}) {
   const cardId = card.card_id || "";
   const pitch = pitchFromCard({ ...card, card_id: cardId });
@@ -820,6 +847,8 @@ function opponentEquipmentQueryParams() {
   });
   const heroClass = opp?.hero_class || "";
   if (heroClass) params.set("hero_class", heroClass);
+  const header = opp?.equipment_header || opp?.opponent_hero_id || "";
+  if (header) params.set("equipment_header", header);
   return params;
 }
 
@@ -876,17 +905,7 @@ async function renderOpponentLoadout() {
           state.opponentSelectedEquip &&
           state.opponentSelectedEquip.index === e.index &&
           state.opponentSelectedEquip.slot === e.slot;
-        const classes = [
-          "equipment-slot",
-          selectable ? "equipment-slot--selectable" : "",
-          selected ? "selected" : "",
-        ]
-          .filter(Boolean)
-          .join(" ");
-        return `<div class="${classes}" data-slot="${e.slot}" data-index="${e.index}" data-card-id="${e.card_id}" ${selectable ? 'role="button" tabindex="0"' : ""}>
-      ${cardTileHtml(e, { title: e.name })}
-      <div class="equipment-slot__label"><strong>${e.slot_label}</strong><span class="hint">${escapeHtml(e.name)}</span></div>
-    </div>`;
+        return equipmentSlotMarkup(e, { selected });
       })
       .join("");
     bindCardTileImages(container);
@@ -1542,6 +1561,9 @@ function equipmentQueryParams() {
     format: state.deck.game_format,
   });
   if (state.deck.hero_class) params.set("hero_class", state.deck.hero_class);
+  if (state.deck.equipment_header) {
+    params.set("equipment_header", state.deck.equipment_header);
+  }
   return params;
 }
 
@@ -1567,22 +1589,11 @@ async function renderEquipment() {
   }
   container.innerHTML = loadout
     .map((e) => {
-      const selectable = e.slot !== "hero";
       const selected =
         state.selectedEquip &&
         state.selectedEquip.index === e.index &&
         state.selectedEquip.slot === e.slot;
-      const classes = [
-        "equipment-slot",
-        selectable ? "equipment-slot--selectable" : "",
-        selected ? "selected" : "",
-      ]
-        .filter(Boolean)
-        .join(" ");
-      return `<div class="${classes}" data-slot="${e.slot}" data-index="${e.index}" data-card-id="${e.card_id}" ${selectable ? 'role="button" tabindex="0"' : ""}>
-      ${cardTileHtml(e, { title: e.name })}
-      <div class="equipment-slot__label"><strong>${e.slot_label}</strong><span class="hint">${escapeHtml(e.name)}</span></div>
-    </div>`;
+      return equipmentSlotMarkup(e, { selected });
     })
     .join("");
   bindCardTileImages(container);

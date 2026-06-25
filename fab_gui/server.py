@@ -22,6 +22,14 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 DEFAULT_PORT = 8765
 
 
+def _write_body(handler: BaseHTTPRequestHandler, data: bytes) -> None:
+    """Write response body; ignore client disconnects (common for lazy-loaded images)."""
+    try:
+        handler.wfile.write(data)
+    except (BrokenPipeError, ConnectionResetError):
+        pass
+
+
 def _json_response(handler: BaseHTTPRequestHandler, payload: Any, *, status: int = 200) -> None:
     body = json.dumps(payload, indent=2).encode("utf-8")
     handler.send_response(status)
@@ -29,7 +37,7 @@ def _json_response(handler: BaseHTTPRequestHandler, payload: Any, *, status: int
     handler.send_header("Content-Length", str(len(body)))
     handler.send_header("Access-Control-Allow-Origin", "*")
     handler.end_headers()
-    handler.wfile.write(body)
+    _write_body(handler, body)
 
 
 def _read_json_body(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
@@ -53,7 +61,7 @@ def _serve_bytes(
     handler.send_header("Content-Length", str(len(data)))
     handler.send_header("Cache-Control", f"public, max-age={cache_seconds}")
     handler.end_headers()
-    handler.wfile.write(data)
+    _write_body(handler, data)
 
 
 def _serve_file(handler: BaseHTTPRequestHandler, path: Path) -> None:
@@ -66,7 +74,7 @@ def _serve_file(handler: BaseHTTPRequestHandler, path: Path) -> None:
     handler.send_header("Content-Type", mime or "application/octet-stream")
     handler.send_header("Content-Length", str(len(content)))
     handler.end_headers()
-    handler.wfile.write(content)
+    _write_body(handler, content)
 
 
 class GuiRequestHandler(BaseHTTPRequestHandler):
@@ -167,6 +175,7 @@ class GuiRequestHandler(BaseHTTPRequestHandler):
             hero_id = (query.get("hero_id") or [""])[0]
             hero_class = (query.get("hero_class") or [""])[0]
             slot = (query.get("slot") or [""])[0]
+            equipment_header = (query.get("equipment_header") or [""])[0]
             if not slot:
                 return _json_response(self, {"error": "slot required"}, status=400)
             hits = gui_api.equipment_alternatives_for_slot(
@@ -175,6 +184,7 @@ class GuiRequestHandler(BaseHTTPRequestHandler):
                 hero_class=hero_class,
                 talishar_url=self.env.talishar_url,
                 slot=slot,
+                equipment_header=equipment_header,
             )
             return _json_response(self, {"equipment": hits, "slot": slot})
 

@@ -155,8 +155,29 @@ def _cards_db_by_id(cards_path: str = str(_DEFAULT_CARDS_PATH)) -> dict[str, dic
     return out
 
 
+@lru_cache(maxsize=1)
+def load_talishar_card_subtypes(
+    php_path: str = str(_DEFAULT_TALISHAR_PHP),
+) -> dict[str, str]:
+    """Parse ``GeneratedCardSubtype`` from Talishar PHP (card id → subtype string)."""
+    path = Path(php_path)
+    if not path.is_file():
+        return {}
+    text = path.read_text(encoding="utf-8", errors="replace")
+    start = text.find("function GeneratedCardSubtype")
+    if start < 0:
+        return {}
+    end = text.find("\nfunction ", start + 1)
+    block = text[start:end] if end > start else text[start:]
+    mapping: dict[str, str] = {}
+    for match in re.finditer(r'"([a-z0-9][a-z0-9_]*)"\s*=>\s*"([^"]*)"', block):
+        mapping[match.group(1)] = match.group(2)
+    return mapping
+
+
 def clear_talishar_card_id_caches() -> None:
     load_talishar_card_ids.cache_clear()
+    load_talishar_card_subtypes.cache_clear()
     _talishar_name_to_ids.cache_clear()
     _cards_db_by_id.cache_clear()
 

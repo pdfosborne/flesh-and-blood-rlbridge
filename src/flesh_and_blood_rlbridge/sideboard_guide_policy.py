@@ -23,7 +23,7 @@ import json
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 # Hero-id substring → matchup archetype (Silver Age guide groupings).
 _HERO_ARCHETYPE: tuple[tuple[str, str], ...] = (
@@ -295,6 +295,44 @@ _FORMAT_MAX_DECK: dict[str, int] = {
 }
 
 
+_FORMAT_MAX_COPIES: dict[str, int] = {
+    "blitz": 2,
+    "classic_constructed": 3,
+    "living_legend": 3,
+    "sage": 2,
+    "silver_age": 2,
+    "upf": 3,
+}
+
+
+def max_copies_for_format(game_format: str) -> int:
+    """Return the per-card copy limit for a Talishar format string."""
+    fmt = str(game_format or "silver_age").lower().replace(" ", "_")
+    return _FORMAT_MAX_COPIES.get(fmt, 2)
+
+
+def clamp_pool_counts(
+    pool: dict[str, int] | Mapping[str, int],
+    game_format: str,
+) -> dict[str, int]:
+    """Clamp each card id in *pool* to the format copy limit."""
+    max_copies = max_copies_for_format(game_format)
+    out: dict[str, int] = {}
+    for card_id, count in pool.items():
+        clamped = min(int(count), max_copies)
+        if clamped > 0:
+            out[str(card_id)] = clamped
+    return out
+
+
+def clamp_deck_copy_counts(
+    deck: dict[str, int] | Mapping[str, int],
+    game_format: str,
+) -> dict[str, int]:
+    """Clamp each card id in *deck* to the format copy limit."""
+    return clamp_pool_counts(deck, game_format)
+
+
 def _format_limits(game_format: str) -> tuple[int, int]:
     """Return (min_deck_size, max_deck_size) for a Talishar format string."""
     fmt = str(game_format or "silver_age").lower().replace(" ", "_")
@@ -334,11 +372,13 @@ def enumerate_ranked_swaps(
     pool_by_id: Optional[dict[str, dict[str, Any]]] = None,
     *,
     min_margin: float = _SWAP_MARGIN,
+    game_format: str = "silver_age",
 ) -> list[RankedSwap]:
     """Return guide-ranked 1-for-1 swaps available from *game_deck* + inventory."""
     archetype = classify_opponent_archetype(opponent_hero_id)
     pool_meta = pool_by_id or {}
     inventory = sideboard_inventory(card_pool, game_deck)
+    max_copies = max_copies_for_format(game_format)
     swaps: list[RankedSwap] = []
 
     for out_card, out_count in game_deck.items():
@@ -348,6 +388,8 @@ def enumerate_ranked_swaps(
         out_score = score_card_for_archetype(out_card, out_meta, archetype)
         for in_card, in_count in inventory.items():
             if in_count <= 0:
+                continue
+            if game_deck.get(in_card, 0) >= max_copies:
                 continue
             in_meta = _card_meta(in_card, pool_meta)
             in_score = score_card_for_archetype(in_card, in_meta, archetype)
@@ -372,11 +414,16 @@ def apply_sideboard_swap(
     card_pool: dict[str, int],
     out_card: str,
     in_card: str,
+    *,
+    game_format: str = "silver_age",
 ) -> Optional[dict[str, int]]:
     """Apply one copy of *out_card* → *in_card*; return None when invalid."""
     deck = {str(k): int(v) for k, v in game_deck.items() if int(v) > 0}
     pool = {str(k): int(v) for k, v in card_pool.items() if int(v) > 0}
     if deck.get(out_card, 0) <= 0:
+        return None
+    max_copies = max_copies_for_format(game_format)
+    if deck.get(in_card, 0) >= max_copies:
         return None
     inventory = sideboard_inventory(pool, deck)
     if inventory.get(in_card, 0) <= 0:
@@ -434,11 +481,12 @@ def _available_sideboard_actions(
     *,
     min_size: int,
     max_size: int,
+    max_copies: int,
 ) -> list[str]:
     actions: list[str] = []
     deck_size = sum(deck.values())
     for cid, count in sideboard.items():
-        if count > 0 and deck_size < max_size:
+        if count > 0 and deck_size < max_size and deck.get(cid, 0) < max_copies:
             actions.append(f"move_to_deck:{cid}")
     for cid, count in deck.items():
         if count > 0:
@@ -486,7 +534,11 @@ def simulate_guide_sideboard_deck(
     max_steps: int = 100,
 ) -> dict[str, int]:
     """Run SideboardGuidePolicy in-memory and return the resulting game deck."""
-    pool = {str(k): int(v) for k, v in card_pool.items() if int(v) > 0}
+    max_copies = max_copies_for_format(game_format)
+    pool = clamp_pool_counts(
+        {str(k): int(v) for k, v in card_pool.items() if int(v) > 0},
+        game_format,
+    )
     deck: dict[str, int] = {}
     sideboard = dict(pool)
     min_size, max_size = _format_limits(game_format)
@@ -494,7 +546,11 @@ def simulate_guide_sideboard_deck(
 
     for step_no in range(max_steps):
         actions = _available_sideboard_actions(
-            deck, sideboard, min_size=min_size, max_size=max_size
+            deck,
+            sideboard,
+            min_size=min_size,
+            max_size=max_size,
+            max_copies=max_copies,
         )
         if not actions:
             break
@@ -515,4 +571,7 @@ def simulate_guide_sideboard_deck(
 
     if sum(deck.values()) < min_size:
         return {}
-    return {cid: count for cid, count in deck.items() if count > 0}
+    return clamp_deck_copy_counts(
+        {cid: count for cid, count in deck.items() if count > 0},
+        game_format,
+    )

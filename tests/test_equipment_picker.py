@@ -11,9 +11,12 @@ sys.path.insert(0, str(_REPO))
 sys.path.insert(0, str(_REPO / "scripts" / "training"))
 
 from fab_tui.equipment import (  # noqa: E402
+    active_equipment_header,
     equipment_slot,
     parse_equipment_header,
+    parse_standard_loadout,
     rebuild_equipment_header,
+    split_equipment_header,
     suggest_guide_equipment_header,
 )
 from fab_tui.sideboard_picker import write_candidates_manifest  # noqa: E402
@@ -26,6 +29,55 @@ def test_equipment_slot_detects_weapon_and_armor() -> None:
     assert equipment_slot("snapdragon_scalers", hero_id="briar") == "legs"
     assert equipment_slot("blade_beckoner_plating", hero_id="briar") == "chest"
     assert equipment_slot("captains_coat", hero_id="briar") == "chest"
+
+
+def test_dorinthea_precon_equipment_slots() -> None:
+    assert equipment_slot("gallantry_gold", hero_id="dorinthea") == "arms"
+    assert equipment_slot("valiant_dynamo", hero_id="dorinthea") == "legs"
+    assert equipment_slot("refraction_bolters", hero_id="dorinthea") == "legs"
+    assert equipment_slot("squires_bracers", hero_id="dorinthea") == "arms"
+    assert equipment_slot("dawnblade", hero_id="dorinthea") == "weapon"
+
+
+def test_split_equipment_header_keeps_one_piece_per_slot() -> None:
+    header = (
+        "dorinthea blossom_of_spring dawnblade gauntlets_of_unity helm_of_unity "
+        "nullrune_gloves nullrune_hood nullrune_robe refraction_bolters"
+    )
+    active, sideboard = split_equipment_header(header, hero_id="dorinthea")
+    assert active == [
+        "dorinthea",
+        "blossom_of_spring",
+        "dawnblade",
+        "gauntlets_of_unity",
+        "helm_of_unity",
+        "refraction_bolters",
+    ]
+    assert sideboard == [
+        "nullrune_gloves",
+        "nullrune_hood",
+        "nullrune_robe",
+    ]
+    assert active_equipment_header(header, hero_id="dorinthea") == " ".join(active)
+
+
+def test_parse_standard_loadout_shows_empty_chest_and_head() -> None:
+    header = (
+        "dorinthea blossom_of_spring dawnblade gauntlets_of_unity helm_of_unity "
+        "nullrune_gloves nullrune_hood nullrune_robe refraction_bolters"
+    )
+    entries = parse_standard_loadout(
+        header,
+        hero_id="dorinthea",
+        display_name=lambda cid: cid,
+    )
+    by_slot = {entry.slot: entry.card_id for entry in entries}
+    assert by_slot["hero"] == "dorinthea"
+    assert by_slot["weapon"] == "dawnblade"
+    assert by_slot["head"] == "helm_of_unity"
+    assert by_slot["chest"] == "blossom_of_spring"
+    assert by_slot["arms"] == "gauntlets_of_unity"
+    assert by_slot["legs"] == "refraction_bolters"
 
 
 def test_parse_and_rebuild_equipment_header() -> None:
@@ -83,8 +135,11 @@ def test_suggest_guide_equipment_header_keeps_shape() -> None:
         opponent_hero_id="iyslander",
         game_format="silver_age",
     )
-    assert suggested.split()[0] == "briar"
-    assert len(suggested.split()) == len(header.split())
+    active, sideboard = split_equipment_header(suggested, hero_id="briar")
+    assert active[0] == "briar"
+    assert len(active) == 4
+    assert equipment_slot(active[1], hero_id="briar") == "weapon"
+    assert len({equipment_slot(cid, hero_id="briar") for cid in active[1:]}) == 3
 
 
 def test_manifest_carries_equipment_header(tmp_path: Path) -> None:

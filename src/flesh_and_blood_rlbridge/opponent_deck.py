@@ -139,14 +139,22 @@ def list_preset_opponent_options(assets_path: str | Path) -> list[tuple[str, str
     return options
 
 
-def greedy_game_deck_cut(pool: Mapping[str, int], min_size: int) -> dict[str, int]:
+def greedy_game_deck_cut(
+    pool: Mapping[str, int],
+    min_size: int,
+    *,
+    max_copies: int | None = None,
+) -> dict[str, int]:
     """Deterministic first-``min_size`` cards from a pool."""
     game_deck: dict[str, int] = {}
     remaining = min_size
     for card_id, count in pool.items():
         if remaining <= 0:
             break
-        take = min(int(count), remaining)
+        available = int(count)
+        if max_copies is not None:
+            available = min(available, max_copies)
+        take = min(available, remaining)
         if take > 0:
             game_deck[str(card_id)] = take
             remaining -= take

@@ -9,6 +9,7 @@ from typing import Any, Optional
 
 from fab_tui.card_search import CARDS_DB_PATH, CardHit, _format_legal, _score_query
 from fab_tui.card_classification import classification_from_record
+from flesh_and_blood_rlbridge.card_db.talishar_card_ids import load_talishar_card_subtypes
 from flesh_and_blood_rlbridge.sideboard_guide_policy import (
     _card_meta,
     classify_opponent_archetype,
@@ -79,6 +80,40 @@ _WEAPON_TOKENS = frozenset(
     {"club", "thorn", "bow", "staff", "axe", "sword", "katana", "scimitar", "bauble", "quiver", "wand", "dagger", "mace", "hammer", "lance", "saber", "sabre"}
 )
 
+_TALISHAR_SUBTYPE_SLOTS: dict[str, str] = {
+    "head": "head",
+    "chest": "chest",
+    "arms": "arms",
+    "legs": "legs",
+}
+
+_TALISHAR_WEAPON_SUBTYPES = frozenset(
+    {
+        "sword",
+        "staff",
+        "bow",
+        "dagger",
+        "axe",
+        "club",
+        "hammer",
+        "gun",
+        "arrow",
+        "quiver",
+        "shield",
+        "wand",
+        "flail",
+        "scythe",
+        "knife",
+        "rapier",
+        "saber",
+        "sabre",
+        "mace",
+        "spear",
+        "lance",
+        "adjudicator",
+    }
+)
+
 _SLOT_LABELS = {
     "hero": "Hero",
     "weapon": "Weapon",
@@ -89,6 +124,11 @@ _SLOT_LABELS = {
     "off_hand": "Off-hand",
     "other": "Equipment",
 }
+
+# Talishar assigns the first equipment piece per slot to the active loadout;
+# additional pieces of the same slot are equipment sideboard alternatives.
+_LOADOUT_SLOTS = ("hero", "weapon", "head", "chest", "arms", "legs", "off_hand")
+_EQUIPMENT_SLOTS = frozenset({"weapon", "head", "chest", "arms", "legs", "off_hand"})
 
 
 @dataclass(frozen=True)
@@ -130,6 +170,23 @@ def _type_line(card_id: str) -> str:
 
 def _card_id_tokens(card_id: str) -> frozenset[str]:
     return frozenset(card_id.lower().split("_"))
+
+
+def _slot_from_talishar_subtype(card_id: str) -> str | None:
+    """Map Talishar ``GeneratedCardSubtype`` values to loadout slots."""
+    subtypes = load_talishar_card_subtypes()
+    token = card_id.replace("-", "_").lower()
+    raw = subtypes.get(token)
+    if not raw:
+        return None
+    for part in raw.split(","):
+        slot = _TALISHAR_SUBTYPE_SLOTS.get(part.strip().lower())
+        if slot:
+            return slot
+    first = raw.split(",")[0].strip().lower()
+    if first in _TALISHAR_WEAPON_SUBTYPES:
+        return "weapon"
+    return None
 
 
 def _slot_from_card_id(card_id: str) -> str | None:
@@ -175,10 +232,129 @@ def equipment_slot(card_id: str, *, hero_id: str = "") -> str:
     if hero_id and hero_id.split("_")[0].lower() in cid:
         return "hero"
 
+    subtype_slot = _slot_from_talishar_subtype(card_id)
+    if subtype_slot:
+        return subtype_slot
+
     inferred = _slot_from_card_id(card_id)
     if inferred:
         return inferred
     return "other"
+
+
+def split_equipment_header(
+    equipment_header: str,
+    *,
+    hero_id: str,
+) -> tuple[list[str], list[str]]:
+    """Split a Talishar equipment line into active loadout and equipment sideboard."""
+    parts = (equipment_header or "").strip().split()
+    if not parts:
+        return [], []
+
+    active: list[str] = [parts[0]]
+    sideboard: list[str] = []
+    filled: set[str] = {"hero"}
+
+    for card_id in parts[1:]:
+        slot = equipment_slot(card_id, hero_id=hero_id)
+        if slot == "hero":
+            continue
+        if slot in _EQUIPMENT_SLOTS and slot not in filled:
+            active.append(card_id)
+            filled.add(slot)
+        elif slot in _EQUIPMENT_SLOTS or slot == "other":
+            sideboard.append(card_id)
+
+    return active, sideboard
+
+
+def active_equipment_header(equipment_header: str, *, hero_id: str) -> str:
+    """Return only the equipped pieces from a Talishar equipment header."""
+    active, _ = split_equipment_header(equipment_header, hero_id=hero_id)
+    return " ".join(active).strip()
+
+
+def active_slot_map(active_parts: list[str], *, hero_id: str) -> dict[str, str]:
+    """Map loadout slot → card id for an active equipment list (hero first)."""
+    slot_map: dict[str, str] = {}
+    for card_id in active_parts:
+        slot = equipment_slot(card_id, hero_id=hero_id)
+        if slot == "hero" or card_id.replace("-", "_").lower() == hero_id.replace("-", "_").lower():
+            slot_map["hero"] = card_id
+        elif slot in _EQUIPMENT_SLOTS and slot not in slot_map:
+            slot_map[slot] = card_id
+    if "hero" not in slot_map and active_parts:
+        slot_map["hero"] = active_parts[0]
+    return slot_map
+
+
+def active_list_from_slot_map(hero_id: str, slot_map: dict[str, str]) -> list[str]:
+    """Rebuild an active equipment list from a slot map."""
+    hero = slot_map.get("hero") or hero_id
+    ordered = [hero]
+    for slot in _LOADOUT_SLOTS[1:]:
+        card_id = str(slot_map.get(slot) or "").strip()
+        if card_id:
+            ordered.append(card_id)
+    return ordered
+
+
+def replace_equipment_in_slot(
+    equipment_header: str,
+    *,
+    slot: str,
+    replacement_card_id: str,
+    hero_id: str,
+) -> str:
+    """Swap one loadout slot and preserve equipment sideboard alternatives."""
+    active, sideboard = split_equipment_header(equipment_header, hero_id=hero_id)
+    slot_map = active_slot_map(active, hero_id=hero_id)
+    target = str(slot or "").strip().lower()
+    if target not in _EQUIPMENT_SLOTS:
+        return equipment_header.strip()
+
+    old_id = str(slot_map.get(target) or "").strip()
+    slot_map[target] = replacement_card_id
+    new_active = active_list_from_slot_map(hero_id, slot_map)
+    active_set = set(new_active)
+
+    new_sideboard = [cid for cid in sideboard if cid not in active_set]
+    if old_id and old_id not in active_set and equipment_slot(old_id, hero_id=hero_id) == target:
+        new_sideboard.append(old_id)
+
+    return " ".join([*new_active, *new_sideboard]).strip()
+
+
+def parse_standard_loadout(
+    equipment_header: str,
+    *,
+    hero_id: str,
+    display_name,
+    include_empty_slots: bool = True,
+) -> list[EquipmentSlotEntry]:
+    """Parse the active loadout, optionally including empty armor slots."""
+    active, _ = split_equipment_header(equipment_header, hero_id=hero_id)
+    if not active:
+        return []
+
+    slot_map = active_slot_map(active, hero_id=hero_id)
+    slots = list(_LOADOUT_SLOTS[:6]) if include_empty_slots else list(_LOADOUT_SLOTS)
+    entries: list[EquipmentSlotEntry] = []
+    for index, slot in enumerate(slots, start=1):
+        card_id = str(slot_map.get(slot) or "").strip()
+        if not card_id and not include_empty_slots:
+            continue
+        label = display_name(card_id) if card_id else ""
+        entries.append(
+            EquipmentSlotEntry(
+                index=index,
+                slot=slot,
+                card_id=card_id,
+                label=label,
+            )
+        )
+    return entries
 
 
 def parse_equipment_header(
@@ -296,47 +472,58 @@ def suggest_guide_equipment_header(
     hero_class: str = "",
     hero_talent: str = "",
 ) -> str:
-    """Recommend equipment swaps using guide-policy archetype scoring."""
-    pieces = _equipment_pieces_from_header(equipment_header, hero_id=hero_id)
-    if not pieces:
+    """Recommend one equipped piece per slot using guide-policy archetype scoring."""
+    active, sideboard = split_equipment_header(equipment_header, hero_id=hero_id)
+    if not active:
         return equipment_header
 
     resolved_class, resolved_talent = hero_profile_for_id(hero_id)
     hero_cls = str(hero_class or resolved_class).strip()
     hero_tal = str(hero_talent or resolved_talent).strip()
-
     archetype = classify_opponent_archetype(opponent_hero_id)
     pool_meta = pool_by_id or {}
-    by_slot = _pool_equipment_by_slot(
+
+    candidates_by_slot: dict[str, list[str]] = {}
+    for piece in active[1:] + sideboard:
+        slot = equipment_slot(piece, hero_id=hero_id)
+        if slot in _EQUIPMENT_SLOTS:
+            candidates_by_slot.setdefault(slot, [])
+            if piece not in candidates_by_slot[slot]:
+                candidates_by_slot[slot].append(piece)
+
+    for slot, ids in _pool_equipment_by_slot(
         pool_meta,
         hero_id=hero_id,
         hero_class=hero_cls,
         hero_talent=hero_tal,
-    )
+    ).items():
+        for alt_id in ids:
+            if alt_id not in candidates_by_slot.get(slot, []):
+                candidates_by_slot.setdefault(slot, []).append(alt_id)
 
-    upgraded: list[str] = []
-    for piece in pieces:
-        slot = equipment_slot(piece, hero_id=hero_id)
-        candidates = [piece]
-        for alt_id in by_slot.get(slot, []):
-            if alt_id not in candidates:
-                candidates.append(alt_id)
-        current_meta = _card_meta(piece, pool_meta)
-        current_score = score_card_for_archetype(piece, current_meta, archetype)
-        best_id = piece
-        best_score = current_score
-        for alt_id in candidates:
-            alt_meta = _card_meta(alt_id, pool_meta)
-            alt_score = score_card_for_archetype(alt_id, alt_meta, archetype)
+    slot_map = active_slot_map(active, hero_id=hero_id)
+    for slot, candidates in candidates_by_slot.items():
+        best_id = candidates[0]
+        best_score = score_card_for_archetype(
+            best_id,
+            _card_meta(best_id, pool_meta),
+            archetype,
+        )
+        for alt_id in candidates[1:]:
+            alt_score = score_card_for_archetype(
+                alt_id,
+                _card_meta(alt_id, pool_meta),
+                archetype,
+            )
             if alt_score > best_score:
                 best_score = alt_score
                 best_id = alt_id
-        upgraded.append(best_id)
+        slot_map[slot] = best_id
 
-    hero_token = (equipment_header or "").strip().split()[0]
-    if hero_token.replace("-", "_").lower() == hero_id.replace("-", "_").lower():
-        return rebuild_equipment_header(hero_id, [hero_token, *upgraded])
-    return rebuild_equipment_header(hero_id, upgraded)
+    new_active = active_list_from_slot_map(hero_id, slot_map)
+    active_set = set(new_active)
+    new_sideboard = [cid for cid in active[1:] + sideboard if cid not in active_set]
+    return " ".join([*new_active, *new_sideboard]).strip()
 
 
 def _is_equipment_record(rec: dict[str, Any]) -> bool:

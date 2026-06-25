@@ -1248,16 +1248,25 @@ def build_matchup_deck_export(
     }
 
 
-def greedy_game_deck_cut(pool: dict[str, int], min_size: int) -> dict[str, int]:
+def greedy_game_deck_cut(
+    pool: dict[str, int],
+    min_size: int,
+    *,
+    max_copies: int | None = None,
+) -> dict[str, int]:
     """Take the first min_size cards from pool (deterministic greedy cut)."""
     game_deck: dict[str, int] = {}
     remaining = min_size
     for card_id, count in pool.items():
         if remaining <= 0:
             break
-        take = min(count, remaining)
-        game_deck[card_id] = take
-        remaining -= take
+        available = int(count)
+        if max_copies is not None:
+            available = min(available, max_copies)
+        take = min(available, remaining)
+        if take > 0:
+            game_deck[card_id] = take
+            remaining -= take
     return game_deck
 
 

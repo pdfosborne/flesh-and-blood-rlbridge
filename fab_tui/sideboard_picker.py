@@ -21,7 +21,11 @@ from fab_tui.equipment import (
     slot_display_name,
     suggest_guide_equipment_header,
 )
-from flesh_and_blood_rlbridge.sideboard_guide_policy import simulate_guide_sideboard_deck
+from flesh_and_blood_rlbridge.sideboard_guide_policy import (
+    clamp_pool_counts,
+    max_copies_for_format,
+    simulate_guide_sideboard_deck,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _TRAINING_ROOT = _REPO_ROOT / "scripts" / "training"
@@ -95,27 +99,32 @@ def compute_guide_policy_deck(
     hero_class: str,
 ) -> dict[str, int]:
     """Return the SideboardGuidePolicy game deck for a matchup."""
+    pool = clamp_pool_counts(
+        {str(k): int(v) for k, v in card_pool.items() if int(v) > 0},
+        game_format,
+    )
     pool_by_id = _pool_by_id_for(
-        card_pool,
+        pool,
         hero_id=hero_id,
         hero_class=hero_class,
         game_format=game_format,
     )
     guide_deck = simulate_guide_sideboard_deck(
-        card_pool,
+        pool,
         opponent_hero_id,
         hero_id=hero_id,
         game_format=game_format,
         pool_by_id=pool_by_id,
     )
     min_size = min_deck_size_for_format(game_format)
+    max_copies = max_copies_for_format(game_format)
     if guide_deck:
         total = sum(int(v) for v in guide_deck.values())
         if total > min_size:
-            return greedy_game_deck_cut(guide_deck, min_size)
+            return greedy_game_deck_cut(guide_deck, min_size, max_copies=max_copies)
         if total >= min_size:
             return guide_deck
-    return greedy_game_deck_cut(card_pool, min_size)
+    return greedy_game_deck_cut(pool, min_size, max_copies=max_copies)
 
 
 def _show_equipment_loadout(
@@ -480,11 +489,16 @@ def apply_manual_swap(
     card_pool: dict[str, int],
     out_card: str,
     in_card: str,
+    *,
+    game_format: str = "silver_age",
 ) -> tuple[dict[str, int], dict[str, int]] | None:
     """Swap one copy out → in, expanding the registered pool when needed."""
     deck = {str(k): int(v) for k, v in game_deck.items() if int(v) > 0}
     pool = {str(k): int(v) for k, v in card_pool.items() if int(v) >= 0}
     if deck.get(out_card, 0) <= 0:
+        return None
+    max_copies = max_copies_for_format(game_format)
+    if deck.get(in_card, 0) >= max_copies:
         return None
 
     inventory = {
@@ -494,6 +508,8 @@ def apply_manual_swap(
     inventory = {cid: count for cid, count in inventory.items() if count > 0}
 
     if inventory.get(in_card, 0) <= 0:
+        if pool.get(in_card, 0) >= max_copies:
+            return None
         pool[in_card] = pool.get(in_card, 0) + 1
 
     deck[out_card] -= 1

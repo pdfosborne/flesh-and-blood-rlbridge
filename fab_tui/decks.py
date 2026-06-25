@@ -127,6 +127,9 @@ def export_precon_deck_json(
     except ImportError:
         resolver = None
 
+    fmt_norm = str(game_format or "sage").lower()
+    min_game = 40 if fmt_norm in {"sage", "silver_age", "blitz"} else 60
+    max_copies = 2 if fmt_norm in {"sage", "silver_age", "blitz"} else 3
     deck: dict[str, int] = {}
     for card in " ".join(lines[1:]).split():
         card_id = card.strip()
@@ -134,11 +137,11 @@ def export_precon_deck_json(
             continue
         if resolver is not None:
             card_id = resolver.resolve(card_id) or card_id
+        if deck.get(card_id, 0) >= max_copies:
+            continue
         deck[card_id] = deck.get(card_id, 0) + 1
 
     sideboard: dict[str, int] = {}
-    fmt_norm = str(game_format or "sage").lower()
-    min_game = 40 if fmt_norm in {"sage", "silver_age", "blitz"} else 60
     total = sum(deck.values())
     if total > min_game:
         game_deck: dict[str, int] = {}

@@ -1140,6 +1140,23 @@ button:disabled {
   background: rgba(61, 156, 240, 0.1);
 }
 
+.equipment-slot--empty {
+  border-style: dashed;
+  opacity: 0.92;
+}
+
+.equipment-slot__empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 7.5rem;
+  border-radius: 0.45rem;
+  border: 1px dashed var(--border);
+  color: var(--muted);
+  font-size: 0.85rem;
+  background: rgba(255, 255, 255, 0.02);
+}
+
 #equipment-filter,
 #opponent-equipment-filter,
 #opponent-card-search,
