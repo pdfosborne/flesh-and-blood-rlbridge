@@ -22,7 +22,9 @@ from play_outcome_stats import (  # noqa: E402
 
 def test_classify_outcomes() -> None:
     assert classify_p1_episode_outcome(p1_hp=20, p2_hp=0, terminated=True) == "win"
+    assert classify_p1_episode_outcome(p1_hp=20, p2_hp=0) == "win"
     assert classify_p1_episode_outcome(p1_hp=0, p2_hp=20, terminated=True) == "loss"
+    assert classify_p1_episode_outcome(p1_hp=0, p2_hp=20) == "loss"
     assert classify_p1_episode_outcome(p1_hp=0, p2_hp=0, terminated=True) == "draw"
     assert classify_p1_episode_outcome(p1_hp=10, p2_hp=10, terminated=True) == "timeout"
     assert (
@@ -33,9 +35,10 @@ def test_classify_outcomes() -> None:
             p2_deck=0,
             terminated=True,
         )
-        == "draw"
+        == "timeout"
     )
     assert classify_p1_episode_outcome(p1_hp=20, p2_hp=10, truncated=True) == "timeout"
+    assert classify_p1_episode_outcome(p1_hp=20, p2_hp=0, truncated=True, terminated=True) == "win"
     assert classify_p1_episode_outcome(p1_hp=20, p2_hp=10, truncated=True, terminated=True) == "timeout"
     assert classify_p1_episode_outcome(p1_hp=20, p2_hp=10, terminated=True) == "timeout"
     assert classify_p1_episode_outcome(skipped=True) == "timeout"

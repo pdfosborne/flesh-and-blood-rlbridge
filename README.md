@@ -1,5 +1,4 @@
-# Flesh and Blood rlbridge
-
+# Flesh and Blood rlbridge 
 Reinforcement learning simulation for [Flesh and Blood](https://fabtcg.com/) TCG, built on [Talishar](https://talishar.net/) as the game engine.
 
 ![FrontEnd-with-AgentGuide](./docs/_images/fab-FE-demo-agentguide.gif)
@@ -9,6 +8,8 @@ Reinforcement learning simulation for [Flesh and Blood](https://fabtcg.com/) TCG
 **NOTE: This work trains AI agents by playing thousands of games and therefore requires powerful hardware.**
 
 With limited resources you can test the interface and play against pre-trained agents. By sharing this work I hope we can pool resources to train and share AI agents to practice against and learn from.
+
+**This is a personal project and is in alpha development and will likely have bugs.**
 
 ---
 
