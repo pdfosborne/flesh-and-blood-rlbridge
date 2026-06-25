@@ -12,6 +12,8 @@
   --danger: #f06565;
   --radius: 10px;
   --shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
+  --equip-loadout-width: 200px;
+  --equip-picker-width: 104px;
   font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
 }
 
@@ -82,7 +84,7 @@ header .subtitle {
 
 main {
   padding: 1.25rem 1.5rem 2rem;
-  max-width: 1400px;
+  max-width: min(1680px, 98vw);
   margin: 0 auto;
 }
 
@@ -115,10 +117,14 @@ main {
   max-width: 36rem;
 }
 
+.deck-panel-import {
+  max-width: 17rem;
+}
+
 .your-deck-layout,
 .opponent-deck-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 17rem) minmax(0, 1fr);
   gap: 1rem;
   align-items: start;
 }
@@ -126,7 +132,7 @@ main {
 .your-deck-layout:has(#equipment-section[hidden]),
 .opponent-deck-layout:has(#opponent-deck-panel[hidden]) {
   grid-template-columns: 1fr;
-  max-width: 36rem;
+  max-width: 17rem;
 }
 
 #panel-decks .deck-panel-card,
@@ -141,18 +147,38 @@ main {
 
 .equipment-row {
   display: grid;
-  grid-template-columns: minmax(180px, 240px) minmax(0, 1fr);
-  gap: 1rem;
+  grid-template-columns: minmax(160px, var(--equip-loadout-width)) var(--equip-picker-width);
+  gap: 0.75rem;
   align-items: start;
+  width: fit-content;
+  max-width: 100%;
 }
 
 .equipment-loadout-col {
   min-width: 0;
+  width: min(100%, var(--equip-loadout-width));
 }
 
 .equipment-picker-col {
-  min-width: 0;
+  flex: 0 0 var(--equip-picker-width);
+  width: var(--equip-picker-width);
+  max-width: var(--equip-picker-width);
   min-height: 8rem;
+}
+
+.equipment-picker-col h4 {
+  font-size: 0.78rem;
+  line-height: 1.25;
+  margin: 0 0 0.5rem;
+  word-break: break-word;
+}
+
+.equipment-picker-col input[type="search"],
+.equipment-picker-col input[type="text"] {
+  width: 100%;
+  max-width: var(--equip-picker-width);
+  font-size: 0.78rem;
+  padding: 0.35rem 0.45rem;
 }
 
 .equipment-picker-col:has(#equipment-picker:not([hidden])),
@@ -175,15 +201,27 @@ main {
 
 .equipment-row .equipment-results {
   max-height: min(420px, 55vh);
+  grid-template-columns: 1fr;
+  width: var(--equip-picker-width);
 }
 
-#panel-opponent .deck-grid--opponent {
-  max-height: min(360px, 45vh);
+.equipment-picker-col .search-results {
+  grid-template-columns: 1fr;
+}
+
+.opponent-deck-col .deck-grid--opponent {
+  grid-template-columns: repeat(auto-fill, minmax(76px, 1fr));
+  max-height: min(520px, 65vh);
+}
+
+.opponent-deck-col .search-results--opponent {
+  grid-template-columns: repeat(auto-fill, minmax(76px, 1fr));
+  max-height: 280px;
 }
 
 .opponent-edit-row {
   display: grid;
-  grid-template-columns: minmax(200px, 320px) minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr);
   gap: 1rem;
   align-items: start;
   margin-top: 0.5rem;
@@ -210,6 +248,8 @@ main {
 
 .opponent-equipment-col {
   min-width: 0;
+  width: fit-content;
+  max-width: calc(var(--equip-loadout-width) + var(--equip-picker-width) + 0.75rem);
 }
 
 .opponent-equipment-col .equipment-loadout-grid--opponent {
@@ -230,6 +270,18 @@ main {
 
   .equipment-row {
     grid-template-columns: 1fr;
+    width: 100%;
+  }
+
+  .equipment-picker-col {
+    width: 100%;
+    max-width: none;
+    flex: 1 1 auto;
+  }
+
+  .equipment-row .equipment-results {
+    width: 100%;
+    max-width: min(104px, 100%);
   }
 
   .equipment-picker-col:has(#equipment-picker:not([hidden])),
