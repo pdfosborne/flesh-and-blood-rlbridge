@@ -2,6 +2,9 @@ FROM python:3.12-bookworm
 
 WORKDIR /app
 
+# Set TORCH_CUDA=1 via docker-compose.gpu.yml when a host GPU is available.
+ARG TORCH_CUDA=0
+
 # Optional: C++ engine builds during training runs
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
@@ -20,7 +23,12 @@ COPY runscripts ./runscripts
 COPY Talishar/Assets ./Talishar/Assets
 COPY Talishar/GeneratedCode ./Talishar/GeneratedCode
 
-RUN pip install --no-cache-dir -e ".[gui,train,cpp]" \
+RUN pip install --no-cache-dir -e ".[gui,cpp]" \
+    && if [ "$TORCH_CUDA" = "1" ]; then \
+         pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu124; \
+       else \
+         pip install --no-cache-dir torch; \
+       fi \
     && python -m playwright install --with-deps chromium
 
 EXPOSE 8765

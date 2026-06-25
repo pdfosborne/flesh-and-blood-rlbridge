@@ -62,6 +62,8 @@ services:
     build:
       context: .
       dockerfile: docker/fab-bridge/Dockerfile
+      args:
+        TORCH_CUDA: "0"
     ports:
       - "8765:8765"
     environment:

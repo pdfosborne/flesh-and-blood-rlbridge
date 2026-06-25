@@ -24,11 +24,17 @@ When setup finishes, the terminal prints a **“setup complete / ready to use”
 
 Then open **http://localhost:8765** in your browser.
 
-To start the stack again later (inside the repo directory):
+To start the stack again later (inside the repo directory), use a compose wrapper so GPU is picked up automatically when available:
 
 ```bash
-docker compose up
+./scripts/docker-compose.sh up      # macOS / Linux / Git Bash
 ```
+
+```powershell
+.\scripts\docker-compose.ps1 up   # Windows PowerShell
+```
+
+**Optional GPU in Docker:** `docker-setup` / `docker-compose` scripts probe for NVIDIA CUDA (`nvidia-smi` + `docker run --gpus all`). When a GPU is available, they merge `docker-compose.gpu.yml`, which gives the `fab-bridge` container CUDA PyTorch and `gpus: all`. Otherwise the stack stays on CPU PyTorch (default). Talishar PHP and C++ rollouts remain CPU-bound either way.
 
 **CLI commands** (`fab-tui`, `fab-gui`, `fab-bridge`) are installed in the Docker image and exposed on the host via wrappers in `bin/` — no separate Python venv required:
 
@@ -44,7 +50,11 @@ If you also run Talishar separately (e.g. `cd Talishar && docker compose up`), s
 Stop everything with `Ctrl+C`, then:
 
 ```bash
-docker compose down
+./scripts/docker-compose.sh down
+```
+
+```powershell
+.\scripts\docker-compose.ps1 down
 ```
 
 ### Option B - Local Python (recommended for development)

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Source from your shell to put Docker-backed fab-* commands on PATH.
+# docker compose wrapper — auto-enables GPU overlay when CUDA is available.
+set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-export PATH="$ROOT/bin:$PATH"
-export FAB_DOCKER=1
 # shellcheck source=scripts/docker-gpu-compose.sh
 source "$ROOT/scripts/docker-gpu-compose.sh"
 fab_docker_gpu_compose_init
+exec docker compose "$@"

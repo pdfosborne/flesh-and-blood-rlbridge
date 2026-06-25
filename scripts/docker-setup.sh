@@ -87,6 +87,11 @@ _print_ready_banner() {
 
 _ensure_talishar_fe
 
+# shellcheck source=scripts/docker-gpu-compose.sh
+source "$ROOT/scripts/docker-gpu-compose.sh"
+fab_docker_gpu_compose_init
+fab_docker_gpu_compose_note
+
 echo "[setup] Building and starting Docker stack..."
 docker compose up --build -d "$@"
 
