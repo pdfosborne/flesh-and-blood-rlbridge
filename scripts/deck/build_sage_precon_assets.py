@@ -1,0 +1,643 @@
+#!/usr/bin/env python3
+"""Write Talishar Assets *SAGEPrecon.txt from official Silver Age decklists."""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+_REPO = Path(__file__).resolve().parents[2]
+_ASSETS = _REPO / "Talishar" / "Assets"
+
+
+def _expand(counts: dict[str, int]) -> list[str]:
+    out: list[str] = []
+    for card_id, qty in counts.items():
+        if qty <= 0:
+            continue
+        if qty > 2:
+            raise ValueError(f"copy limit exceeded for {card_id}: {qty}")
+        out.extend([card_id] * qty)
+    return out
+
+
+# (header tokens, deck card ids with pitch — max 2 per id)
+PRECONS: dict[str, tuple[list[str], list[str]]] = {
+    "KayoSAGEPrecon": (
+        [
+            "kayo",
+            "beaten_trackers",
+            "blade_beckoner_gauntlets",
+            "knucklehead",
+            "mandible_claw",
+            "nullrune_gloves",
+            "nullrune_hood",
+            "nullrune_robe",
+            "predatory_plating",
+        ],
+        _expand(
+            {
+                "bare_fangs_red": 2,
+                "buckwild_red": 2,
+                "clash_of_agility_red": 2,
+                "clash_of_might_red": 2,
+                "high_pitched_howl_red": 2,
+                "pulping_red": 2,
+                "rough_up_red": 2,
+                "savage_feast_red": 2,
+                "strongest_survive_red": 2,
+                "test_of_might_red": 2,
+                "wild_ride_red": 2,
+                "bare_fangs_yellow": 2,
+                "clash_of_might_yellow": 1,
+                "strongest_survive_yellow": 2,
+                "wild_ride_yellow": 2,
+                "agile_windup_blue": 2,
+                "bear_hug_blue": 2,
+                "buckwild_blue": 2,
+                "rally_the_coast_guard_blue": 2,
+                "reincarnate_blue": 2,
+                "run_roughshod_blue": 2,
+                "smash_instinct_blue": 2,
+                "strongest_survive_blue": 2,
+                "unexpected_backhand_blue": 2,
+            }
+        ),
+    ),
+    "ViseraiSAGEPrecon": (
+        [
+            "viserai",
+            "beckoning_haunt",
+            "blade_beckoner_boots",
+            "blade_beckoner_helm",
+            "blossom_of_spring",
+            "crown_of_dichotomy",
+            "nullrune_boots",
+            "nullrune_gloves",
+            "reaping_blade",
+            "runebleed_robe",
+        ],
+        _expand(
+            {
+                "amplify_the_arknight_red": 2,
+                "condemn_to_slaughter_red": 2,
+                "hit_the_high_notes_red": 2,
+                "malefic_incantation_red": 2,
+                "mauvrion_skies_red": 2,
+                "read_the_runes_red": 2,
+                "reduce_to_runechant_red": 2,
+                "rune_flash_red": 2,
+                "runerager_swarm_red": 2,
+                "runic_fellingsong_red": 2,
+                "shrill_of_skullform_red": 2,
+                "sigil_of_suffering_red": 2,
+                "spellblade_assault_red": 2,
+                "malefic_incantation_yellow": 2,
+                "shrill_of_skullform_yellow": 2,
+                "condemn_to_slaughter_blue": 2,
+                "flying_high_blue": 2,
+                "mauvrion_skies_blue": 2,
+                "shrill_of_skullform_blue": 2,
+                "sigil_of_silphidae_blue": 2,
+                "spellblade_assault_blue": 2,
+                "trot_along_blue": 2,
+                "vexing_malice_blue": 2,
+            }
+        ),
+    ),
+    "IyslanderSAGEPrecon": (
+        [
+            "iyslander",
+            "aetherstorm_wellingtons",
+            "blade_beckoner_boots",
+            "blade_beckoner_gauntlets",
+            "blade_beckoner_helm",
+            "crucible_of_aetherweave",
+            "nullrune_gloves",
+            "nullrune_hood",
+            "spellfire_cloak",
+        ],
+        _expand(
+            {
+                "absorb_in_aether_red": 2,
+                "aether_icevein_red": 2,
+                "fyendals_fighting_spirit_red": 2,
+                "ice_bolt_red": 2,
+                "look_tuff_red": 1,
+                "on_the_horizon_red": 2,
+                "polar_cap_red": 2,
+                "wounded_bull_red": 2,
+                "aether_icevein_yellow": 2,
+                "aether_hail_blue": 2,
+                "aether_icevein_blue": 2,
+                "arcane_twining_blue": 2,
+                "brain_freeze_blue": 2,
+                "brothers_in_arms_blue": 2,
+                "cold_snap_blue": 2,
+                "emeritus_scolding_blue": 2,
+                "frosting_blue": 2,
+                "frost_spike_blue": 2,
+                "ice_bolt_blue": 2,
+                "ice_eternal_blue": 2,
+                "photon_splicing_blue": 2,
+                "pyroglyphic_protection_blue": 1,
+                "stir_the_aetherwinds_blue": 1,
+                "voltic_bolt_blue": 2,
+                "winters_bite_blue": 2,
+            }
+        ),
+    ),
+    "DashSAGEPrecon": (
+        [
+            "dash",
+            "achilles_accelerator",
+            "blade_beckoner_boots",
+            "blade_beckoner_gauntlets",
+            "blade_beckoner_helm",
+            "blossom_of_spring",
+            "hope_merchants_hood",
+            "nullrune_gloves",
+            "nullrune_hood",
+            "plasma_barrel_shot",
+            "talishar_the_lost_prince",
+        ],
+        _expand(
+            {
+                "boom_grenade_red": 2,
+                "crankshaft_red": 2,
+                "fender_bender_red": 2,
+                "hyper_driver_red": 1,
+                "jump_start_red": 2,
+                "out_pace_red": 2,
+                "overblast_red": 2,
+                "re_charge_red": 2,
+                "rev_up_red": 2,
+                "throttle_red": 2,
+                "under_loop_red": 2,
+                "zero_to_sixty_red": 2,
+                "zipper_hit_red": 2,
+                "jump_start_yellow": 2,
+                "zero_to_sixty_yellow": 2,
+                "zipper_hit_yellow": 2,
+                "big_bertha_blue": 2,
+                "crankshaft_blue": 2,
+                "jump_start_blue": 2,
+                "teklo_trebuchet_2000_blue": 2,
+                "throttle_blue": 2,
+                "zero_to_sixty_blue": 2,
+                "zipper_hit_blue": 2,
+            }
+        ),
+    ),
+    "FaiSAGEPrecon": (
+        [
+            "fai",
+            "blade_beckoner_helm",
+            "blood_scent",
+            "double_cross_strap",
+            "hope_merchants_hood",
+            "mask_of_the_swarming_claw",
+            "pouncing_paws",
+            "searing_emberblade",
+            "tearing_shuko",
+        ],
+        _expand(
+            {
+                "arcane_polarity_red": 1,
+                "art_of_the_dragon_fire_red": 1,
+                "blaze_headlong_red": 2,
+                "brand_with_cinderclaw_red": 2,
+                "display_loyalty_red": 2,
+                "enflame_the_firebrand_red": 2,
+                "fire_tenet_strike_first_red": 2,
+                "fire_that_burns_within_red": 2,
+                "flamecall_awakening_red": 2,
+                "hot_on_their_heels_red": 2,
+                "lava_burst_red": 2,
+                "mounting_anger_red": 2,
+                "phoenix_flame_red": 2,
+                "rise_from_the_ashes_red": 2,
+                "rising_resentment_red": 2,
+                "ronin_renegade_red": 2,
+                "scar_for_a_scar_red": 2,
+                "snatch_red": 2,
+                "wax_on_red": 1,
+                "brand_with_cinderclaw_yellow": 2,
+                "salt_the_wound_yellow": 1,
+                "brand_with_cinderclaw_blue": 2,
+                "cinderskin_devotion_blue": 2,
+                "dragon_power_blue": 2,
+                "energy_potion_blue": 1,
+                "nip_at_the_heels_blue": 2,
+            }
+        ),
+    ),
+    "DorintheSAGEPrecon": (
+        [
+            "dorinthea",
+            "blossom_of_spring",
+            "dawnblade",
+            "gauntlets_of_unity",
+            "helm_of_unity",
+            "nullrune_gloves",
+            "nullrune_hood",
+            "nullrune_robe",
+            "refraction_bolters",
+        ],
+        _expand(
+            {
+                "agile_engagement_red": 2,
+                "ironsong_response_red": 2,
+                "lead_with_speed_red": 2,
+                "oasis_respite_red": 2,
+                "out_for_blood_red": 2,
+                "overpower_red": 2,
+                "puncture_red": 2,
+                "scar_for_a_scar_red": 2,
+                "sharpen_steel_red": 2,
+                "stroke_of_foresight_red": 2,
+                "warriors_valor_red": 2,
+                "wreck_havoc_red": 2,
+                "run_through_yellow": 1,
+                "springboard_somersault_yellow": 2,
+                "warriors_valor_yellow": 2,
+                "energy_potion_blue": 1,
+                "goblet_of_bloodrun_wine_blue": 2,
+                "hit_and_run_blue": 2,
+                "ironsong_response_blue": 2,
+                "nip_at_the_heels_blue": 2,
+                "overpower_blue": 2,
+                "puncture_blue": 1,
+                "put_in_context_blue": 2,
+                "trot_along_blue": 2,
+                "warriors_valor_blue": 2,
+            }
+        ),
+    ),
+    "AzaleaSAGEPrecon": (
+        [
+            "azalea",
+            "blade_beckoner_helm",
+            "blossom_of_spring",
+            "boltn_boots",
+            "bulls_eye_bracers",
+            "crows_nest",
+            "death_dealer",
+            "quick_clicks",
+            "talismanic_lens",
+        ],
+        _expand(
+            {
+                "boltn_shot_red": 2,
+                "call_in_the_big_guns_red": 2,
+                "drill_shot_red": 2,
+                "drop_the_anchor_red": 2,
+                "dry_powder_shot_red": 2,
+                "entangling_shot_red": 2,
+                "infecting_shot_red": 2,
+                "lace_with_bloodrot_red": 2,
+                "lace_with_frailty_red": 2,
+                "lace_with_inertia_red": 2,
+                "murkmire_grapnel_red": 2,
+                "nimblism_red": 2,
+                "ravenous_rabble_red": 2,
+                "read_the_glide_path_red": 2,
+                "release_the_tension_red": 2,
+                "ridge_rider_shot_red": 2,
+                "scout_the_periphery_red": 2,
+                "searing_shot_red": 2,
+                "swift_shot_red": 2,
+                "take_aim_red": 2,
+                "infecting_shot_yellow": 2,
+                "memorial_ground_yellow": 1,
+                "spire_sniping_yellow": 2,
+                "widowmaker_yellow": 2,
+            }
+        ),
+    ),
+    "EnigmaSAGEPrecon": (
+        [
+            "enigma",
+            "blade_beckoner_boots",
+            "blade_beckoner_helm",
+            "blossom_of_spring",
+            "cosmo_scroll_of_ancestral_tapestry",
+            "nullrune_hood",
+            "nullrune_robe",
+            "silent_stilettos",
+            "uphold_tradition",
+        ],
+        _expand(
+            {
+                "astral_etchings_red": 2,
+                "enigma_chimera_red": 2,
+                "look_tuff_red": 2,
+                "oasis_respite_red": 2,
+                "on_the_horizon_red": 2,
+                "spectral_manifestations_red": 2,
+                "test_of_strength_red": 2,
+                "unmovable_red": 2,
+                "waning_vengeance_red": 2,
+                "waxing_specter_red": 2,
+                "enigma_chimera_yellow": 2,
+                "springboard_somersault_yellow": 2,
+                "a_drop_in_the_ocean_blue": 1,
+                "big_blue_sky_blue": 2,
+                "fluid_motion_blue": 2,
+                "homage_to_ancestors_blue": 1,
+                "manifest_muscle_blue": 2,
+                "pass_over_blue": 1,
+                "phantasmal_haze_blue": 2,
+                "preserve_tradition_blue": 1,
+                "put_in_context_blue": 2,
+                "rising_sun_setting_moon_blue": 1,
+                "second_tenet_of_chi_wind_blue": 2,
+                "spears_of_surreality_blue": 2,
+                "spectral_rider_blue": 2,
+                "unmovable_blue": 2,
+            }
+        ),
+    ),
+    "BoltynSAGEPrecon": (
+        [
+            "boltyn",
+            "flat_trackers",
+            "garland_of_spring",
+            "gauntlets_of_unity",
+            "halo_of_illumination",
+            "helm_of_unity",
+            "nullrune_boots",
+            "nullrune_robe",
+            "radiant_touch",
+            "raydn_duskbane",
+        ],
+        _expand(
+            {
+                "beaming_bravado_red": 2,
+                "bolt_of_courage_red": 2,
+                "courageous_steelhand_red": 2,
+                "duty_bound_blitz_red": 2,
+                "edict_of_steel_red": 2,
+                "engulfing_light_red": 2,
+                "glisten_red": 2,
+                "illuminate_red": 2,
+                "light_the_way_red": 2,
+                "snatch_red": 2,
+                "take_flight_red": 2,
+                "toe_the_line_red": 2,
+                "banneret_of_salvation_yellow": 2,
+                "beaming_bravado_yellow": 2,
+                "bolt_of_courage_yellow": 2,
+                "duty_bound_blitz_yellow": 2,
+                "engulfing_light_yellow": 2,
+                "light_the_way_yellow": 2,
+                "roaring_beam_yellow": 2,
+                "springboard_somersault_yellow": 2,
+                "take_flight_yellow": 2,
+                "valiant_thrust_yellow": 2,
+                "v_of_the_vanguard_yellow": 2,
+            }
+        ),
+    ),
+    "BriarSAGEPrecon": (
+        [
+            "briar",
+            "blade_beckoner_boots",
+            "blade_beckoner_gauntlets",
+            "blade_beckoner_helm",
+            "blossom_of_spring",
+            "crown_of_dichotomy",
+            "quick_clicks",
+            "scorpio_comet_tail",
+            "star_fall",
+            "swiftstrike_bracers",
+        ],
+        _expand(
+            {
+                "arcane_polarity_red": 2,
+                "arcane_seeds__life_red": 2,
+                "arcanic_shockwave_red": 2,
+                "burn_up__shock_red": 2,
+                "cloud_cover_red": 2,
+                "entwine_lightning_red": 2,
+                "fry_red": 2,
+                "jack_be_quick_red": 2,
+                "lightning_press_red": 2,
+                "lightning_surge_red": 2,
+                "nimblism_red": 2,
+                "path_of_same_ends_red": 2,
+                "ravenous_rabble_red": 2,
+                "rush_of_power_red": 2,
+                "scar_for_a_scar_red": 2,
+                "second_strike_red": 2,
+                "sigil_of_suffering_red": 2,
+                "sizzle_red": 2,
+                "snatch_red": 2,
+                "sprout_strength_red": 2,
+                "static_shock_red": 2,
+                "weave_lightning_red": 2,
+                "nimblism_yellow": 2,
+            }
+        ),
+    ),
+    "GravyBonesSAGEPrecon": (
+        [
+            "gravy_bones",
+            "carrion_crown",
+            "compass_of_sunken_depths",
+            "mage_master_boots",
+            "mournful_casket",
+            "nullrune_gloves",
+            "nullrune_robe",
+            "scuttle_toes",
+            "washed_up_wave",
+        ],
+        _expand(
+            {
+                "battalion_barque_red": 2,
+                "golden_tipple_red": 2,
+                "saltwater_swell_red": 2,
+                "swiftwater_sloop_red": 2,
+                "barnacle_yellow": 2,
+                "cutty_shark_quick_clip_yellow": 2,
+                "golden_tipple_yellow": 2,
+                "limpit_hop_a_long_yellow": 2,
+                "oysten_heart_of_gold_yellow": 2,
+                "riggermortis_yellow": 2,
+                "swabbie_yellow": 2,
+                "avast_ye_blue": 2,
+                "back_alley_breakline_blue": 1,
+                "flying_high_blue": 2,
+                "golden_tipple_blue": 2,
+                "jittery_bones_blue": 2,
+                "loot_the_arsenal_blue": 2,
+                "loot_the_hold_blue": 2,
+                "murderous_rabble_blue": 2,
+                "portside_exchange_blue": 2,
+                "saltwater_swell_blue": 2,
+                "swiftwater_sloop_blue": 2,
+                "throw_caution_to_the_wind_blue": 2,
+                "timesnap_potion_blue": 1,
+                "yo_ho_ho_blue": 1,
+            }
+        ),
+    ),
+    "LyathGoldmaneSAGEPrecon": (
+        [
+            "lyath_goldmane",
+            "arcane_lantern",
+            "blade_beckoner_helm",
+            "blade_beckoner_plating",
+            "line_crossers",
+            "nullrune_hood",
+            "nullrune_robe",
+            "stand_strong",
+            "stonewall_impasse",
+            "titans_fist",
+        ],
+        _expand(
+            {
+                "act_of_glory_red": 2,
+                "drag_down_red": 2,
+                "edge_of_their_seats_red": 2,
+                "mocking_blow_red": 2,
+                "oasis_respite_red": 2,
+                "prime_the_crowd_red": 2,
+                "sadistic_scowl_red": 2,
+                "tension_in_the_air_red": 2,
+                "villainous_pose_red": 2,
+                "mocking_blow_yellow": 2,
+                "short_shrift_yellow": 2,
+                "walk_in_my_shoes_yellow": 2,
+                "wee_wrecking_ball_yellow": 2,
+                "booze_blue": 2,
+                "brothers_in_arms_blue": 2,
+                "concealed_object_blue": 2,
+                "edge_of_their_seats_blue": 2,
+                "full_of_bravado_blue": 2,
+                "goon_beatdown_blue": 2,
+                "goon_tactics_blue": 2,
+                "mocking_blow_blue": 2,
+                "power_play_blue": 2,
+                "the_suspense_is_killing_me_blue": 2,
+            }
+        ),
+    ),
+    "BlazeSAGEPrecon": (
+        [
+            "blaze_firemind",
+            "aetherstorm_wellingtons",
+            "blade_beckoner_boots",
+            "blade_beckoner_gauntlets",
+            "crucible_of_aetherweave",
+            "seekers_mitts",
+            "spellfire_cloak",
+            "talismanic_lens",
+        ],
+        _expand(
+            {
+                "absorb_in_aether_red": 2,
+                "aether_spindle_red": 2,
+                "arcane_polarity_red": 2,
+                "cindering_foresight_red": 2,
+                "emeritus_scolding_red": 2,
+                "fyendals_fighting_spirit_red": 2,
+                "look_tuff_red": 2,
+                "snapback_red": 2,
+                "turn_to_mindfire_red": 2,
+                "voltic_bolt_red": 2,
+                "whisper_of_the_oracle_red": 2,
+                "wounded_bull_red": 2,
+                "cindering_foresight_yellow": 2,
+                "emeritus_scolding_yellow": 2,
+                "whisper_of_the_oracle_yellow": 2,
+                "aether_quickening_blue": 2,
+                "aether_spindle_blue": 2,
+                "arcane_twining_blue": 2,
+                "cindering_foresight_blue": 2,
+                "emeritus_scolding_blue": 2,
+                "open_the_flood_gates_blue": 2,
+                "photon_splicing_blue": 2,
+                "voltic_bolt_blue": 2,
+                "whisper_of_the_oracle_blue": 2,
+            }
+        ),
+    ),
+}
+
+FAB_PRECON_ALIASES: dict[str, str] = {
+    "KayoSAGEPrecon": "fab_precon_sage_ch1_kayo",
+    "ViseraiSAGEPrecon": "fab_precon_sage_ch1_viserai",
+    "IyslanderSAGEPrecon": "fab_precon_sage_ch1_iyslander",
+    "DashSAGEPrecon": "fab_precon_sage_ch1_dash",
+    "AzaleaSAGEPrecon": "fab_precon_sage_ch2_azalea",
+    "DorintheSAGEPrecon": "fab_precon_sage_ch2_dorinthea",
+    "FaiSAGEPrecon": "fab_precon_sage_ch2_fai",
+    "EnigmaSAGEPrecon": "fab_precon_sage_ch2_enigma",
+    "BoltynSAGEPrecon": "fab_precon_sage_ch3_boltyn",
+    "BriarSAGEPrecon": "fab_precon_sage_ch3_briar",
+    "GravyBonesSAGEPrecon": "fab_precon_sage_ch3_gravy_bones",
+    "LyathGoldmaneSAGEPrecon": "fab_precon_sage_ch3_lyath_goldmane",
+    "BlazeSAGEPrecon": "fab_precon_sage_ch3_blaze_firemind",
+}
+
+YOUNG_HEROES = {
+    "kayo",
+    "viserai",
+    "iyslander",
+    "dash",
+    "fai",
+    "dorinthea",
+    "azalea",
+    "enigma",
+    "boltyn",
+    "briar",
+    "gravy_bones",
+    "lyath_goldmane",
+    "blaze_firemind",
+}
+
+ADULT_HERO_IDS = {
+    "azalea_ace_in_the_hole",
+    "dash_inventor_extraordinaire",
+    "fai_rising_rebellion",
+    "viserai_rune_blood",
+    "kayo_berserker_runt",
+    "iyslander_stormbind",
+    "ser_boltyn_breaker_of_dawn",
+    "dorinthea_ironsong",
+}
+
+
+def write_asset(stem: str, header: list[str], deck: list[str]) -> Path:
+    path = _ASSETS / f"{stem}.txt"
+    text = f"{' '.join(header)}\n{' '.join(deck)}\n"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def main() -> int:
+    if not _ASSETS.is_dir():
+        print(f"Assets dir missing: {_ASSETS}", file=sys.stderr)
+        return 1
+
+    written: list[str] = []
+    for stem, (header, deck) in PRECONS.items():
+        write_asset(stem, header, deck)
+        written.append(stem)
+        alias = FAB_PRECON_ALIASES.get(stem)
+        if alias:
+            write_asset(alias, header, deck)
+            written.append(alias)
+
+    # Keep DorintheaSAGEPrecon in sync with DorintheSAGEPrecon
+    header, deck = PRECONS["DorintheSAGEPrecon"]
+    write_asset("DorintheaSAGEPrecon", header, deck)
+    written.append("DorintheaSAGEPrecon")
+
+    print(f"Wrote {len(written)} asset file(s): {', '.join(sorted(set(written)))}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

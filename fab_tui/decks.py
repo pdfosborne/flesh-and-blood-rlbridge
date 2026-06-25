@@ -10,7 +10,6 @@ from fab_tui.config import REPO_ROOT, RESULTS_ROOT, slugify
 
 # SAGE precon decks (hero slug, Talishar Assets deck name)
 SAGE_PRECONS: list[tuple[str, str]] = [
-    ("aurora", "AuroraSAGEPrecon"),
     ("briar", "BriarSAGEPrecon"),
     ("dorinthea", "DorintheSAGEPrecon"),
     ("kayo", "KayoSAGEPrecon"),
@@ -21,6 +20,9 @@ SAGE_PRECONS: list[tuple[str, str]] = [
     ("azalea", "AzaleaSAGEPrecon"),
     ("boltyn", "BoltynSAGEPrecon"),
     ("enigma", "EnigmaSAGEPrecon"),
+    ("gravy", "GravyBonesSAGEPrecon"),
+    ("lyath", "LyathGoldmaneSAGEPrecon"),
+    ("blaze", "BlazeSAGEPrecon"),
 ]
 
 EXTRA_PRECONS: list[tuple[str, str]] = [
@@ -39,8 +41,13 @@ HERO_CLASSES: dict[str, str] = {
     "azalea": "Ranger",
     "boltyn": "Light",
     "enigma": "Illusionist",
+    "gravy": "Necromancer",
+    "gravy_bones": "Necromancer",
+    "lyath": "Guardian",
+    "lyath_goldmane": "Guardian",
+    "blaze": "Wizard",
+    "blaze_firemind": "Wizard",
     "ira": "Ninja",
-    "aurora": "Runeblade",
     "briar_whetstone": "Elementalist",
 }
 

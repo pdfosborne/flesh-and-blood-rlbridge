@@ -14,8 +14,8 @@ from fab_tui.sage_picker import list_sage_precon_options
 def test_list_sage_precon_options_from_assets(tmp_path: Path) -> None:
     assets = tmp_path / "Assets"
     assets.mkdir()
-    (assets / "AuroraSAGEPrecon.txt").write_text(
-        "aurora equip\nlightning_press_red\n",
+    (assets / "KayoSAGEPrecon.txt").write_text(
+        "kayo equip\nbare_fangs_red\n",
         encoding="utf-8",
     )
     (assets / "BriarSAGEPrecon.txt").write_text(
@@ -25,7 +25,7 @@ def test_list_sage_precon_options_from_assets(tmp_path: Path) -> None:
 
     options = list_sage_precon_options(assets)
     heroes = {opt.hero_slug for opt in options}
-    assert "aurora" in heroes
+    assert "kayo" in heroes
     assert "briar" in heroes
     assert all((assets / f"{opt.deck_name}.txt").is_file() for opt in options)
 
