@@ -864,7 +864,10 @@ def _write_results_json(
     print(f"\n  Results written → {out_path}")
 
 def min_deck_size_for_format(game_format: str) -> int:
-    return 40 if game_format == "silver_age" else 60
+    fmt = str(game_format or "silver_age").lower().replace(" ", "_")
+    if fmt in {"silver_age", "sage", "blitz"}:
+        return 40
+    return 60
 
 
 _CARDS_DB_PATH = (

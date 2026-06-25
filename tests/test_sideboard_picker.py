@@ -74,6 +74,18 @@ def test_compute_guide_policy_deck_reaches_min_size() -> None:
     assert sum(deck.values()) == 40
 
 
+def test_compute_guide_policy_deck_sage_format_caps_at_40() -> None:
+    pool = {f"card_{i}": 1 for i in range(45)}
+    deck = compute_guide_policy_deck(
+        pool,
+        opponent_hero_id="dorinthea",
+        hero_id="kayo_berserker_runt",
+        hero_class="Brute",
+        game_format="sage",
+    )
+    assert sum(deck.values()) == 40
+
+
 def test_variants_payload_uses_custom_baseline_label() -> None:
     baseline = {f"c_{i}": 1 for i in range(40)}
     payload = variants_to_candidate_payload(

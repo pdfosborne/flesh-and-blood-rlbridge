@@ -108,9 +108,13 @@ def compute_guide_policy_deck(
         game_format=game_format,
         pool_by_id=pool_by_id,
     )
-    if guide_deck:
-        return guide_deck
     min_size = min_deck_size_for_format(game_format)
+    if guide_deck:
+        total = sum(int(v) for v in guide_deck.values())
+        if total > min_size:
+            return greedy_game_deck_cut(guide_deck, min_size)
+        if total >= min_size:
+            return guide_deck
     return greedy_game_deck_cut(card_pool, min_size)
 
 

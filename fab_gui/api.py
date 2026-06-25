@@ -513,38 +513,27 @@ def apply_opponent_guide_sideboard(
 ) -> dict[str, Any]:
     """Sideboard the opponent list vs the player hero and sync Talishar Assets."""
     opp_payload = _load_opponent_pool(env, opponent)
+    game_format = str(opp_payload.get("game_format") or "silver_age")
     guide_deck = compute_guide_policy_deck(
         {str(k): int(v) for k, v in (opp_payload.get("card_pool") or {}).items()},
         opponent_hero_id=player_hero_id,
         hero_id=str(opp_payload.get("hero_id") or opponent.get("opponent_hero_id") or ""),
-        game_format=str(opp_payload.get("game_format") or "silver_age"),
+        game_format=game_format,
         hero_class=str(opp_payload.get("hero_class") or ""),
     )
-    asset_stem = str(opponent.get("opponent_deck") or "").strip()
+    asset_stem = str(opponent.get("opponent_deck") or opponent.get("label") or "").strip()
     if not asset_stem:
         raise ValueError("Opponent Talishar asset name is missing")
-
-    training_root = REPO_ROOT / "scripts" / "training"
-    if str(training_root) not in sys.path:
-        sys.path.insert(0, str(training_root))
-    from train_pipeline_common import _write_deck_file  # noqa: PLC0415
 
     equipment_header = str(
         opp_payload.get("equipment_header") or opponent.get("opponent_hero_id") or ""
     ).strip()
-    _write_deck_file(
-        {str(k): int(v) for k, v in guide_deck.items() if int(v) > 0},
-        equipment_header,
-        asset_stem,
-        env.assets_path,
-    )
-    game_format = str(opp_payload.get("game_format") or "silver_age")
     deck_entries = deck_counts_to_entries(
         guide_deck,
         game_format=game_format,
         talishar_url=env.talishar_url,
     )
-    return {
+    result: dict[str, Any] = {
         "deck": guide_deck,
         "deck_entries": deck_entries,
         "deck_size": sum(int(v) for v in guide_deck.values()),
@@ -554,6 +543,22 @@ def apply_opponent_guide_sideboard(
         "hero_class": opp_payload.get("hero_class") or "",
         "game_format": game_format,
     }
+
+    training_root = REPO_ROOT / "scripts" / "training"
+    if str(training_root) not in sys.path:
+        sys.path.insert(0, str(training_root))
+    from train_pipeline_common import _write_deck_file  # noqa: PLC0415
+
+    try:
+        _write_deck_file(
+            {str(k): int(v) for k, v in guide_deck.items() if int(v) > 0},
+            equipment_header,
+            asset_stem,
+            env.assets_path,
+        )
+    except Exception as exc:  # noqa: BLE001
+        result["asset_write_error"] = str(exc)
+    return result
 
 
 def guide_baseline_with_opponent(
@@ -588,10 +593,11 @@ def guide_baseline_with_opponent(
     if not isinstance(opponent, dict):
         return result
 
-    opponent_deck = str(opponent.get("opponent_deck") or "").strip()
+    opponent_deck = str(opponent.get("opponent_deck") or opponent.get("label") or "").strip()
     if not opponent_deck:
         return result
 
+    opponent = {**opponent, "opponent_deck": opponent_deck}
     try:
         result["opponent_guide"] = apply_opponent_guide_sideboard(
             env,

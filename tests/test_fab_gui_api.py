@@ -196,10 +196,11 @@ def test_guide_baseline_with_opponent_sideboards_both_decks(
             "opponent": opponent,
         },
     )
+    assert sum(result["baseline_deck"].values()) == 40
     assert result["baseline_deck"] != player["deck"]
     assert result["deck_entries"]
     assert result["opponent_guide"]["deck_entries"]
-    assert result["opponent_guide"]["deck_size"] > 0
+    assert result["opponent_guide"]["deck_size"] == 40
 
 
 def test_try_swap_valid() -> None:

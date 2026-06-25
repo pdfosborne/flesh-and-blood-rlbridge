@@ -280,6 +280,7 @@ _FORMAT_MIN_DECK: dict[str, int] = {
     "blitz": 40,
     "classic_constructed": 60,
     "living_legend": 60,
+    "sage": 40,
     "silver_age": 40,
     "upf": 60,
 }
@@ -288,9 +289,18 @@ _FORMAT_MAX_DECK: dict[str, int] = {
     "blitz": 40,
     "classic_constructed": 80,
     "living_legend": 80,
+    "sage": 40,
     "silver_age": 40,
     "upf": 80,
 }
+
+
+def _format_limits(game_format: str) -> tuple[int, int]:
+    """Return (min_deck_size, max_deck_size) for a Talishar format string."""
+    fmt = str(game_format or "silver_age").lower().replace(" ", "_")
+    min_size = _FORMAT_MIN_DECK.get(fmt, 40)
+    max_size = _FORMAT_MAX_DECK.get(fmt, min_size)
+    return min_size, max_size
 
 
 @dataclass(frozen=True)
@@ -479,8 +489,7 @@ def simulate_guide_sideboard_deck(
     pool = {str(k): int(v) for k, v in card_pool.items() if int(v) > 0}
     deck: dict[str, int] = {}
     sideboard = dict(pool)
-    min_size = _FORMAT_MIN_DECK.get(game_format, 40)
-    max_size = _FORMAT_MAX_DECK.get(game_format, sum(pool.values()))
+    min_size, max_size = _format_limits(game_format)
     policy = SideboardGuidePolicy(pool_by_id=pool_by_id)
 
     for step_no in range(max_steps):

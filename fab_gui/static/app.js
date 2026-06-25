@@ -722,8 +722,10 @@ function guideCardPool() {
 function opponentPayloadForGuide() {
   const opp = state.opponent;
   if (!opp) return null;
+  const opponentDeck = opp.opponent_deck || opp.label || "";
+  if (!opponentDeck) return null;
   return {
-    opponent_deck: opp.opponent_deck,
+    opponent_deck: opponentDeck,
     opponent_deck_path: opp.opponent_deck_path,
     opponent_hero_id: opp.opponent_hero_id,
     equipment_header: opp.equipment_header,
@@ -759,7 +761,15 @@ async function applyGuideBaseline({ navigate = false } = {}) {
       }),
     });
     if (token !== guideApplyToken) return false;
-    state.deck.deck = result.baseline_deck;
+    const required = requiredDeckSize(state.deck.game_format);
+    const baseline = result.baseline_deck || {};
+    const baselineCount = Object.values(baseline).reduce((sum, n) => sum + Number(n), 0);
+    if (baselineCount !== required) {
+      throw new Error(
+        `Guide policy returned ${baselineCount} cards (expected ${required}) — re-import your deck and try again`
+      );
+    }
+    state.deck.deck = baseline;
     state.deck.deck_entries = result.deck_entries;
     for (const entry of result.deck_entries || []) rememberCardMeta(entry);
     if (result.opponent_guide) {
@@ -780,10 +790,15 @@ async function applyGuideBaseline({ navigate = false } = {}) {
         state.opponent.game_format = result.opponent_guide.game_format;
       }
       for (const entry of result.opponent_guide.deck_entries || []) rememberCardMeta(entry);
+      if (result.opponent_guide.asset_write_error) {
+        toast(`Opponent sideboard computed (asset sync failed: ${result.opponent_guide.asset_write_error})`, true);
+      }
     } else if (result.opponent_guide_error) {
       state.opponent.deck_entries = null;
       state.opponent.deck_size = null;
       toast(`Opponent sideboard failed: ${result.opponent_guide_error}`, true);
+    } else if (state.opponent?.opponent_deck || state.opponent?.label) {
+      toast("Opponent sideboard was not returned — check server logs", true);
     }
     syncDeckEntries();
     state.deck.baseline_label = result.baseline_label;
