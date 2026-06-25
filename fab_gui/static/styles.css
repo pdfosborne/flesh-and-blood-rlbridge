@@ -111,6 +111,14 @@ main {
   gap: 1rem;
 }
 
+.deck-panel-card {
+  max-width: 36rem;
+}
+
+#panel-opponent .deck-grid--opponent {
+  max-height: 420px;
+}
+
 @media (max-width: 900px) {
   .grid-2 {
     grid-template-columns: 1fr;

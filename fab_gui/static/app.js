@@ -49,6 +49,14 @@ function switchTab(name) {
   });
   if (name === "dashboard") refreshDashboard();
   if (name === "results" && state.activeRun) loadResults(state.activeRun.run_id);
+  if (name === "opponent") {
+    updateOpponentSummary();
+    if (state.opponent && !state.lastOpponentSearchCards) {
+      void doOpponentCardSearch(document.getElementById("opponent-card-search")?.value || "");
+    } else {
+      refreshOpponentSearchResults();
+    }
+  }
 }
 
 document.querySelectorAll(".tab").forEach((tab) => {
@@ -578,9 +586,17 @@ function syncBaselineRef() {
   state.baselineRef.label = state.deck.baseline_label || "Baseline";
 }
 
-function setDecksStatus(text) {
-  const el = document.getElementById("decks-status");
-  if (el) el.textContent = text || "";
+function setDecksStatus(text, { target = "both" } = {}) {
+  const ids =
+    target === "player"
+      ? ["decks-status"]
+      : target === "opponent"
+        ? ["opponent-status"]
+        : ["decks-status", "opponent-status"];
+  for (const id of ids) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = text || "";
+  }
 }
 
 function syncOpponentDeckEntries() {
@@ -932,7 +948,7 @@ async function applyGuideBaseline({ navigate = false } = {}) {
     return false;
   }
   const token = ++guideApplyToken;
-  setDecksStatus("Applying guide policy sideboard…");
+  setDecksStatus("Applying guide policy sideboard…", { target: "opponent" });
   try {
     const result = await api("/api/guide-baseline", {
       method: "POST",
@@ -982,13 +998,13 @@ async function applyGuideBaseline({ navigate = false } = {}) {
     renderEquipment();
     renderEvalCandidates();
     updateOpponentSummary();
-    setDecksStatus("Guide policy applied — continue on the Decks tab or open the Editor when ready.");
+    setDecksStatus("Guide policy applied — continue on the Editor tab when ready.", { target: "opponent" });
     if (navigate) switchTab("editor");
     toast("Guide policy baseline applied");
     return true;
   } catch (e) {
     if (token === guideApplyToken) {
-      setDecksStatus("");
+      setDecksStatus("", { target: "opponent" });
       toast(e.message, true);
     }
     return false;
@@ -997,11 +1013,19 @@ async function applyGuideBaseline({ navigate = false } = {}) {
 
 async function maybeAutoGuideAndContinue() {
   if (!state.deck || !state.opponent) {
-    setDecksStatus(
-      state.deck && !state.opponent
-        ? "Select an opponent to run guide policy sideboarding."
-        : ""
-    );
+    if (state.deck && !state.opponent) {
+      setDecksStatus("Your deck is loaded — select an opponent on the Opponent tab.", {
+        target: "player",
+      });
+      setDecksStatus("", { target: "opponent" });
+    } else if (!state.deck && state.opponent) {
+      setDecksStatus("Opponent selected — import your deck on the Your deck tab.", {
+        target: "opponent",
+      });
+      setDecksStatus("", { target: "player" });
+    } else {
+      setDecksStatus("", { target: "both" });
+    }
     return;
   }
   await applyGuideBaseline({ navigate: false });
@@ -1081,7 +1105,12 @@ document.getElementById("opponent-select").onchange = async () => {
   if (!deck_name) {
     state.opponent = null;
     updateOpponentSummary();
-    setDecksStatus(state.deck ? "Select an opponent to run guide policy sideboarding." : "");
+    setDecksStatus("", { target: "opponent" });
+    if (state.deck) {
+      setDecksStatus("Your deck is loaded — select an opponent on the Opponent tab.", {
+        target: "player",
+      });
+    }
     return;
   }
   document.getElementById("opponent-fabrary-input").value = "";
@@ -1485,7 +1514,7 @@ document.getElementById("btn-save-eval").onclick = () => saveForEvaluation();
 function renderTrainReview() {
   const el = document.getElementById("train-review");
   if (!state.deck || !state.opponent) {
-    el.textContent = "Import deck and opponent on the Decks tab.";
+    el.textContent = "Import your deck and select an opponent before training.";
     return;
   }
   const required = requiredDeckSize(state.deck.game_format);

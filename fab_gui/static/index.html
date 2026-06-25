@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>FAB RL Bridge — Sideboard Compare</title>
-  <link rel="stylesheet" href="/static/styles.css?v=7" />
+  <link rel="stylesheet" href="/static/styles.css?v=8" />
 </head>
 <body>
   <header>
@@ -16,66 +16,70 @@
   </header>
 
   <nav class="tabs" role="tablist">
-    <button class="tab active" data-tab="decks" role="tab">1. Decks</button>
-    <button class="tab" data-tab="editor" role="tab">2. Editor</button>
-    <button class="tab" data-tab="dashboard" role="tab">3. Dashboard</button>
-    <button class="tab" data-tab="results" role="tab">4. Results</button>
+    <button class="tab active" data-tab="decks" role="tab">1. Your deck</button>
+    <button class="tab" data-tab="opponent" role="tab">2. Opponent</button>
+    <button class="tab" data-tab="editor" role="tab">3. Editor</button>
+    <button class="tab" data-tab="dashboard" role="tab">4. Dashboard</button>
+    <button class="tab" data-tab="results" role="tab">5. Results</button>
   </nav>
 
   <main>
-    <!-- Deck selection -->
+    <!-- Your deck -->
     <section id="panel-decks" class="panel active" role="tabpanel">
-      <h2>Select decks</h2>
-      <p class="hint">Import your deck and pick an opponent. Guide policy sideboarding runs automatically on the Decks tab.</p>
-      <div class="grid-2">
-        <div class="card">
-          <h3>Your deck</h3>
-          <label for="precon-select">Talishar SAGE precon</label>
-          <select id="precon-select"><option value="">— select precon —</option></select>
-          <button type="button" id="btn-import-precon">Import precon</button>
-          <label for="fabrary-input">FaBrary URL or slug</label>
-          <input id="fabrary-input" type="text" placeholder="https://fabrary.net/decks/… or slug" />
-          <button type="button" id="btn-import-fabrary">Import from FaBrary</button>
-          <label for="saved-select">Saved sideboard lists</label>
-          <select id="saved-select"><option value="">— select saved list —</option></select>
-          <button type="button" id="btn-load-saved" class="secondary">Load saved list</button>
-          <div id="player-deck-summary" class="hint" style="margin-top:0.75rem"></div>
-          <div id="equipment-section" hidden style="margin-top:0.75rem">
-            <h4>Equipment loadout</h4>
-            <p class="hint">Click a slot to browse equippable alternatives for that slot. Adjust loadout before selecting an opponent.</p>
-            <div id="equipment-loadout" class="equipment-loadout-grid"></div>
-            <div id="equipment-picker" hidden>
-              <h4 id="equipment-picker-title"></h4>
-              <input id="equipment-filter" type="search" placeholder="Filter alternatives…" autocomplete="off" />
-              <div id="equipment-results" class="search-results equipment-results"></div>
-            </div>
+      <h2>Your deck</h2>
+      <p class="hint">Import your deck, adjust equipment, then choose an opponent on the Opponent tab. Guide policy sideboarding runs when both are set.</p>
+      <div class="card deck-panel-card">
+        <label for="precon-select">Talishar SAGE precon</label>
+        <select id="precon-select"><option value="">— select precon —</option></select>
+        <button type="button" id="btn-import-precon">Import precon</button>
+        <label for="fabrary-input">FaBrary URL or slug</label>
+        <input id="fabrary-input" type="text" placeholder="https://fabrary.net/decks/… or slug" />
+        <button type="button" id="btn-import-fabrary">Import from FaBrary</button>
+        <label for="saved-select">Saved sideboard lists</label>
+        <select id="saved-select"><option value="">— select saved list —</option></select>
+        <button type="button" id="btn-load-saved" class="secondary">Load saved list</button>
+        <div id="player-deck-summary" class="hint" style="margin-top:0.75rem"></div>
+        <div id="decks-status" class="hint" style="margin-top:0.75rem"></div>
+        <div id="equipment-section" hidden style="margin-top:0.75rem">
+          <h4>Equipment loadout</h4>
+          <p class="hint">Click a slot to browse equippable alternatives for that slot. Adjust loadout before selecting an opponent.</p>
+          <div id="equipment-loadout" class="equipment-loadout-grid"></div>
+          <div id="equipment-picker" hidden>
+            <h4 id="equipment-picker-title"></h4>
+            <input id="equipment-filter" type="search" placeholder="Filter alternatives…" autocomplete="off" />
+            <div id="equipment-results" class="search-results equipment-results"></div>
           </div>
         </div>
-        <div class="card">
-          <h3>Opponent</h3>
-          <label for="opponent-select">Talishar precon</label>
-          <select id="opponent-select"><option value="">— select opponent —</option></select>
-          <label for="opponent-fabrary-input">FaBrary URL or slug</label>
-          <input id="opponent-fabrary-input" type="text" placeholder="https://fabrary.net/decks/… or slug" />
-          <button type="button" id="btn-opponent-fabrary">Import opponent from FaBrary</button>
-          <label for="saved-opponent-select">Saved opponent lists</label>
-          <select id="saved-opponent-select"><option value="">— select saved opponent —</option></select>
-          <button type="button" id="btn-load-opponent-saved" class="secondary">Load saved opponent</button>
-          <div id="opponent-summary" class="hint" style="margin-top:0.75rem"></div>
-          <div id="opponent-deck-panel" hidden>
-            <div id="opponent-deck-label" class="hint" style="margin-top:0.75rem"></div>
-            <div id="opponent-deck-status" class="deck-status deck-status--compact"></div>
-            <div id="opponent-equipment-loadout" class="equipment-loadout-grid equipment-loadout-grid--opponent" hidden></div>
-            <p class="hint opponent-edit-hint">Click a card to remove it. Search below to add cards from the opponent inventory.</p>
-            <div id="opponent-deck-grid" class="deck-grid deck-grid--opponent"></div>
-            <div class="opponent-add-cards">
-              <label for="opponent-card-search">Add cards to opponent deck</label>
-              <input id="opponent-card-search" type="search" placeholder="Search cards by name…" autocomplete="off" />
-              <div id="opponent-search-results" class="search-results search-results--opponent"></div>
-            </div>
-            <button type="button" id="btn-save-opponent" class="secondary" style="margin-top:0.75rem">Save opponent list</button>
+      </div>
+    </section>
+
+    <!-- Opponent -->
+    <section id="panel-opponent" class="panel" role="tabpanel">
+      <h2>Opponent</h2>
+      <p class="hint">Select or import an opponent deck. Guide policy sideboards both decks automatically when your deck is already loaded.</p>
+      <div class="card deck-panel-card">
+        <label for="opponent-select">Talishar precon</label>
+        <select id="opponent-select"><option value="">— select opponent —</option></select>
+        <label for="opponent-fabrary-input">FaBrary URL or slug</label>
+        <input id="opponent-fabrary-input" type="text" placeholder="https://fabrary.net/decks/… or slug" />
+        <button type="button" id="btn-opponent-fabrary">Import opponent from FaBrary</button>
+        <label for="saved-opponent-select">Saved opponent lists</label>
+        <select id="saved-opponent-select"><option value="">— select saved opponent —</option></select>
+        <button type="button" id="btn-load-opponent-saved" class="secondary">Load saved opponent</button>
+        <div id="opponent-summary" class="hint" style="margin-top:0.75rem"></div>
+        <div id="opponent-status" class="hint" style="margin-top:0.75rem"></div>
+        <div id="opponent-deck-panel" hidden>
+          <div id="opponent-deck-label" class="hint" style="margin-top:0.75rem"></div>
+          <div id="opponent-deck-status" class="deck-status deck-status--compact"></div>
+          <div id="opponent-equipment-loadout" class="equipment-loadout-grid equipment-loadout-grid--opponent" hidden></div>
+          <p class="hint opponent-edit-hint">Click a card to remove it. Search below to add cards from the opponent inventory.</p>
+          <div id="opponent-deck-grid" class="deck-grid deck-grid--opponent"></div>
+          <div class="opponent-add-cards">
+            <label for="opponent-card-search">Add cards to opponent deck</label>
+            <input id="opponent-card-search" type="search" placeholder="Search cards by name…" autocomplete="off" />
+            <div id="opponent-search-results" class="search-results search-results--opponent"></div>
           </div>
-          <div id="decks-status" class="hint" style="margin-top:1rem"></div>
+          <button type="button" id="btn-save-opponent" class="secondary" style="margin-top:0.75rem">Save opponent list</button>
         </div>
       </div>
     </section>
@@ -193,6 +197,6 @@
     </div>
     <div class="card-preview__caption"></div>
   </div>
-  <script src="/static/app.js?v=11"></script>
+  <script src="/static/app.js?v=12"></script>
 </body>
 </html>
