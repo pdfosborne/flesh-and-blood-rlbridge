@@ -1,10 +1,14 @@
 # Flesh and Blood rlbridge
 
-Reinforcement-learning simulation for [Flesh and Blood](https://fabtcg.com/) TCG, built on [Talishar](https://talishar.net/) as the game engine.
+Reinforcement learning simulation for [Flesh and Blood](https://fabtcg.com/) TCG, built on [Talishar](https://talishar.net/) as the game engine.
 
-![FrontEnd-with-AgentGuide](./fab_tui/_images/fab-FE-demo-agentguide.gif)
+![FrontEnd-with-AgentGuide](./docs/_images/fab-FE-demo-agentguide.gif)
 
 *Example usage: play against AI agents with guidance for optimal play based on millions of simulated matches.*
+
+**NOTE: This work trains AI agents by playing thousands of games and therefore requires powerful hardware.**
+
+With limited resources you can test the interface and play against pre-trained agents. By sharing this work I hope we can pool resources to train and share AI agents to practice against and learn from.
 
 ---
 
@@ -20,9 +24,16 @@ cd flesh-and-blood-rlbridge
 ./scripts/docker-setup.sh
 ```
 
-When setup finishes, the terminal prints a **“setup complete / ready to use”** banner.
+When setup finishes (~10mins), the terminal prints a **“setup complete / ready to use”** banner.
 
 Then open **http://localhost:8765** in your browser.
+
+![GUI-Demo](./docs/_images/fab-GUI-Demo.gif)
+*GUI demo - select decks, create a variation by swapping cards and evaluate which is best by training the agents on thousands of games.*
+
+![GUI-Demo-2](./docs/_images/fab-GUI-Demo-2.gif)
+*GUI demo - agents are evaluated on local Talishar server directly to ensure correctness, results include example render of gameplay.*
+
 
 To start the stack again later (inside the repo directory), use a compose wrapper so GPU is picked up automatically when available:
 
