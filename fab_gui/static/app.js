@@ -544,7 +544,16 @@ async function loadPrecons() {
 async function loadSavedDecks() {
   const { decks } = await api("/api/saved-decks");
   const sel = document.getElementById("saved-select");
+  sel.innerHTML = '<option value="">— select saved list —</option>';
   decks.forEach((d) => sel.appendChild(new Option(d.label, d.path)));
+}
+
+async function loadSavedOpponents() {
+  const { opponents } = await api("/api/saved-opponents");
+  const sel = document.getElementById("saved-opponent-select");
+  if (!sel) return;
+  sel.innerHTML = '<option value="">— select saved opponent —</option>';
+  opponents.forEach((d) => sel.appendChild(new Option(d.label, d.path)));
 }
 
 function snapshotEditorDeck() {
@@ -572,6 +581,115 @@ function syncBaselineRef() {
 function setDecksStatus(text) {
   const el = document.getElementById("decks-status");
   if (el) el.textContent = text || "";
+}
+
+function syncOpponentDeckEntries() {
+  if (!state.opponent) return;
+  state.opponent.deck_entries = Object.entries(state.opponent.deck || {}).map(([card_id, count]) => {
+    const meta = cardMetaFor(card_id);
+    return { ...meta, card_id, count: Number(count) };
+  });
+  state.opponent.deck_size = opponentDeckCount();
+}
+
+function opponentDeckCount(deck = state.opponent?.deck) {
+  return Object.values(deck || {}).reduce((sum, n) => sum + Number(n), 0);
+}
+
+function opponentCardPool() {
+  return state.opponent?.import_card_pool || state.opponent?.card_pool || {};
+}
+
+function applyOpponentInventory(opp, source) {
+  if (!opp || !source) return;
+  opp.deck = { ...(source.deck || {}) };
+  const pool = cardPoolFromPayload(source);
+  opp.card_pool = pool;
+  opp.import_card_pool = { ...(source.import_card_pool || pool) };
+  opp.sideboard = { ...(source.sideboard || {}) };
+  if (source.deck_entries) opp.deck_entries = source.deck_entries;
+  if (source.deck_size != null) opp.deck_size = source.deck_size;
+  if (source.baseline_label) opp.baseline_label = source.baseline_label;
+  if (source.equipment_header) opp.equipment_header = source.equipment_header;
+  if (source.hero_id) {
+    opp.hero_id = source.hero_id;
+    opp.opponent_hero_id = source.hero_id;
+  }
+  if (source.hero_class) opp.hero_class = source.hero_class;
+  if (source.game_format) opp.game_format = source.game_format;
+  syncOpponentDeckEntries();
+}
+
+function removeOneOpponentCard(cardId) {
+  if (!state.opponent) return false;
+  const deck = { ...(state.opponent.deck || {}) };
+  if ((deck[cardId] || 0) <= 0) return false;
+  deck[cardId] = Number(deck[cardId]) - 1;
+  if (deck[cardId] <= 0) delete deck[cardId];
+  state.opponent.deck = deck;
+  syncOpponentDeckEntries();
+  return true;
+}
+
+function addOneOpponentCard(card) {
+  if (!state.opponent) return false;
+  const required = requiredDeckSize(state.opponent.game_format || state.deck?.game_format);
+  if (opponentDeckCount() >= required) return false;
+
+  rememberCardMeta(card);
+  const deck = { ...(state.opponent.deck || {}) };
+  const pool = { ...opponentCardPool() };
+  const cardId = card.card_id;
+  const available = (pool[cardId] || 0) - (deck[cardId] || 0);
+  if (available <= 0) {
+    pool[cardId] = (pool[cardId] || 0) + 1;
+  }
+  deck[cardId] = (deck[cardId] || 0) + 1;
+  state.opponent.deck = deck;
+  state.opponent.card_pool = pool;
+  state.opponent.import_card_pool = { ...pool };
+  syncOpponentDeckEntries();
+  return true;
+}
+
+function renderOpponentDeckStatus() {
+  const el = document.getElementById("opponent-deck-status");
+  if (!el || !state.opponent) return;
+  const required = requiredDeckSize(state.opponent.game_format || state.deck?.game_format);
+  const count = opponentDeckCount();
+  const remaining = required - count;
+  el.classList.remove("complete", "incomplete", "over");
+  if (count === required) {
+    el.classList.add("complete");
+    el.textContent = `Opponent deck complete — ${count} / ${required} cards`;
+  } else if (count > required) {
+    el.classList.add("over");
+    el.textContent = `Too many cards — ${count} / ${required} (remove ${count - required})`;
+  } else {
+    el.classList.add("incomplete");
+    el.textContent = `${count} / ${required} cards — add ${remaining} more`;
+  }
+}
+
+function setOpponent(opp) {
+  const cardPool = cardPoolFromPayload(opp);
+  state.opponent = {
+    ...opp,
+    opponent_hero_id: opp.opponent_hero_id || opp.hero_id || "",
+    card_pool: cardPool,
+    import_card_pool: { ...(opp.import_card_pool || cardPool) },
+    sideboard: opp.sideboard || {},
+    deck: { ...(opp.deck || {}) },
+  };
+  for (const entry of [
+    ...(opp.deck_entries || []),
+    ...(opp.pool_entries || []),
+    ...(opp.sideboard_entries || []),
+  ]) {
+    rememberCardMeta(entry);
+  }
+  syncOpponentDeckEntries();
+  updateOpponentSummary();
 }
 
 function updateOpponentSummary() {
@@ -682,20 +800,90 @@ function renderOpponentDeck() {
   panel.hidden = false;
   void renderOpponentLoadout();
 
+  const editHint = panel.querySelector(".opponent-edit-hint");
+  const addCards = panel.querySelector(".opponent-add-cards");
+  const saveBtn = document.getElementById("btn-save-opponent");
+  const statusEl = document.getElementById("opponent-deck-status");
   const entries = state.opponent.deck_entries || [];
   if (!entries.length) {
     grid.innerHTML = "";
     label.textContent = "Opponent loadout — main deck appears after guide policy sideboarding.";
+    if (editHint) editHint.hidden = true;
+    if (addCards) addCards.hidden = true;
+    if (saveBtn) saveBtn.hidden = true;
+    if (statusEl) statusEl.textContent = "";
     return;
   }
+
+  if (editHint) editHint.hidden = false;
+  if (addCards) addCards.hidden = false;
+  if (saveBtn) saveBtn.hidden = false;
 
   label.textContent =
     state.opponent.baseline_label ||
     `Guide policy sideboard vs ${state.deck?.hero_id || "your hero"}`;
   grid.innerHTML = opponentDeckSlots()
-    .map((slot) => cardTileHtml(slot, { title: cardDisplayName(slot) }))
+    .map((slot) =>
+      cardTileHtml(slot, {
+        action: "remove",
+        title: `Remove ${cardDisplayName(slot)}`,
+      })
+    )
     .join("");
   bindCardTileImages(grid);
+  bindOpponentDeckClicks();
+  renderOpponentDeckStatus();
+  refreshOpponentSearchResults();
+}
+
+function bindOpponentDeckClicks() {
+  document.querySelectorAll("#opponent-deck-grid .card-tile[data-action='remove']").forEach((el) => {
+    el.onclick = () => {
+      const id = cardIdFrom(el);
+      if (!id || !removeOneOpponentCard(id)) return;
+      const meta = cardMetaFor(id);
+      renderOpponentDeck();
+      toast(`Removed ${meta.name} from opponent deck`);
+    };
+  });
+}
+
+function refreshOpponentSearchResults() {
+  const el = document.getElementById("opponent-search-results");
+  if (!el || !state.lastOpponentSearchCards) return;
+  const canAdd = Boolean(
+    state.opponent &&
+      opponentDeckCount() < requiredDeckSize(state.opponent.game_format || state.deck?.game_format)
+  );
+  el.innerHTML = state.lastOpponentSearchCards
+    .map((c) => searchHitHtml(c, { canAdd }))
+    .join("");
+  bindCardTileImages(el);
+  el.querySelectorAll(".card-tile[data-action='add']").forEach((hit) => {
+    hit.onclick = () => {
+      if (!state.opponent) return toast("Select an opponent first", true);
+      if (hit.classList.contains("card-tile--disabled")) {
+        toast("Opponent deck is full — remove a card first", true);
+        return;
+      }
+      const card = state.lastOpponentSearchCards.find((c) => c.card_id === cardIdFrom(hit));
+      if (!card || !addOneOpponentCard(card)) {
+        toast("Opponent deck is full — remove a card first", true);
+        return;
+      }
+      renderOpponentDeck();
+      toast(`Added ${card.name} to opponent deck`);
+    };
+  });
+}
+
+async function doOpponentCardSearch(q) {
+  if (!state.opponent) return;
+  const fmt = state.opponent.game_format || state.deck?.game_format || "silver_age";
+  const { cards } = await api(`/api/cards/search?q=${encodeURIComponent(q)}&format=${fmt}`);
+  cards.forEach(rememberCardMeta);
+  state.lastOpponentSearchCards = cards;
+  refreshOpponentSearchResults();
 }
 
 function cardPoolFromPayload(payload) {
@@ -773,22 +961,7 @@ async function applyGuideBaseline({ navigate = false } = {}) {
     state.deck.deck_entries = result.deck_entries;
     for (const entry of result.deck_entries || []) rememberCardMeta(entry);
     if (result.opponent_guide) {
-      state.opponent.deck = result.opponent_guide.deck;
-      state.opponent.deck_entries = result.opponent_guide.deck_entries;
-      state.opponent.deck_size = result.opponent_guide.deck_size;
-      state.opponent.baseline_label = result.opponent_guide.baseline_label;
-      if (result.opponent_guide.equipment_header) {
-        state.opponent.equipment_header = result.opponent_guide.equipment_header;
-      }
-      if (result.opponent_guide.hero_id) {
-        state.opponent.hero_id = result.opponent_guide.hero_id;
-      }
-      if (result.opponent_guide.hero_class) {
-        state.opponent.hero_class = result.opponent_guide.hero_class;
-      }
-      if (result.opponent_guide.game_format) {
-        state.opponent.game_format = result.opponent_guide.game_format;
-      }
+      applyOpponentInventory(state.opponent, result.opponent_guide);
       for (const entry of result.opponent_guide.deck_entries || []) rememberCardMeta(entry);
       if (result.opponent_guide.asset_write_error) {
         toast(`Opponent sideboard computed (asset sync failed: ${result.opponent_guide.asset_write_error})`, true);
@@ -913,13 +1086,12 @@ document.getElementById("opponent-select").onchange = async () => {
   }
   document.getElementById("opponent-fabrary-input").value = "";
   try {
-    state.opponent = await api("/api/opponent/precon", {
+    const payload = await api("/api/opponent/precon", {
       method: "POST",
       body: JSON.stringify({ deck_name }),
     });
-    state.opponent.deck_entries = null;
-    state.opponent.deck_size = null;
-    updateOpponentSummary();
+    document.getElementById("saved-opponent-select").value = "";
+    setOpponent(payload);
     await maybeAutoGuideAndContinue();
   } catch (e) {
     toast(e.message, true);
@@ -930,14 +1102,13 @@ document.getElementById("btn-opponent-fabrary").onclick = async () => {
   const url_or_slug = document.getElementById("opponent-fabrary-input").value.trim();
   if (!url_or_slug) return toast("Enter a FaBrary URL or slug for the opponent", true);
   try {
-    state.opponent = await api("/api/opponent/fabrary", {
+    const payload = await api("/api/opponent/fabrary", {
       method: "POST",
       body: JSON.stringify({ url_or_slug }),
     });
     document.getElementById("opponent-select").value = "";
-    state.opponent.deck_entries = null;
-    state.opponent.deck_size = null;
-    updateOpponentSummary();
+    document.getElementById("saved-opponent-select").value = "";
+    setOpponent(payload);
     await maybeAutoGuideAndContinue();
     toast("Opponent imported from FaBrary");
   } catch (e) {
@@ -958,6 +1129,65 @@ async function doCardSearch(q) {
   state.lastSearchCards = cards;
   refreshSearchResults();
 }
+
+document.getElementById("btn-load-opponent-saved").onclick = async () => {
+  const path = document.getElementById("saved-opponent-select").value;
+  if (!path) return toast("Select a saved opponent list", true);
+  try {
+    const payload = await api(`/api/opponent/load?path=${encodeURIComponent(path)}`);
+    document.getElementById("opponent-select").value = "";
+    document.getElementById("opponent-fabrary-input").value = "";
+    setOpponent(payload);
+    toast("Saved opponent loaded");
+  } catch (e) {
+    toast(e.message, true);
+  }
+};
+
+document.getElementById("btn-save-opponent").onclick = async () => {
+  if (!state.opponent) return toast("Select an opponent first", true);
+  const required = requiredDeckSize(state.opponent.game_format || state.deck?.game_format);
+  const count = opponentDeckCount();
+  if (count !== required) {
+    return toast(`Opponent deck must be exactly ${required} cards (currently ${count})`, true);
+  }
+  const defaultLabel =
+    state.opponent.label ||
+    `${state.opponent.opponent_hero_id || "opponent"} vs ${state.deck?.hero_id || "player"}`;
+  const label = prompt("Saved opponent list name:", defaultLabel);
+  if (!label) return;
+  try {
+    const result = await api("/api/opponent/save", {
+      method: "POST",
+      body: JSON.stringify({
+        deck: state.opponent.deck,
+        card_pool: opponentCardPool(),
+        equipment_header: state.opponent.equipment_header || state.opponent.opponent_hero_id || "",
+        hero_id: state.opponent.hero_id || state.opponent.opponent_hero_id || "",
+        hero_class: state.opponent.hero_class || "",
+        game_format: state.opponent.game_format || state.deck?.game_format || "silver_age",
+        label,
+        player_hero_id: state.deck?.hero_id || "",
+        opponent_deck: state.opponent.source === "saved" ? state.opponent.opponent_deck : "",
+        baseline_label: state.opponent.baseline_label || "GUI opponent",
+      }),
+    });
+    state.opponent.opponent_deck = result.opponent_deck;
+    state.opponent.label = result.label || label;
+    state.opponent.source = "saved";
+    toast("Opponent list saved");
+    await loadSavedOpponents();
+    document.getElementById("saved-opponent-select").value = result.path;
+  } catch (e) {
+    toast(e.message, true);
+  }
+};
+
+let opponentSearchTimer;
+document.getElementById("opponent-card-search")?.addEventListener("input", (e) => {
+  clearTimeout(opponentSearchTimer);
+  opponentSearchTimer = setTimeout(() => doOpponentCardSearch(e.target.value), 250);
+});
 
 document.getElementById("btn-save-deck").onclick = async () => {
   if (!state.deck) return;
@@ -1281,6 +1511,11 @@ document.getElementById("btn-start-training").onclick = async () => {
   if (count !== required) {
     return toast(`Deck must be exactly ${required} cards (currently ${count})`, true);
   }
+  const oppRequired = requiredDeckSize(state.opponent.game_format || state.deck.game_format);
+  const oppCount = opponentDeckCount();
+  if (oppCount !== oppRequired) {
+    return toast(`Opponent deck must be exactly ${oppRequired} cards (currently ${oppCount})`, true);
+  }
   const btn = document.getElementById("btn-start-training");
   btn.disabled = true;
   try {
@@ -1305,6 +1540,8 @@ document.getElementById("btn-start-training").onclick = async () => {
         baseline_label: state.deck.baseline_label || "Baseline",
         opponent_hero_id: state.opponent.opponent_hero_id,
         opponent_deck: state.opponent.opponent_deck,
+        opponent_game_deck: state.opponent.deck,
+        opponent_equipment_header: state.opponent.equipment_header || state.opponent.opponent_hero_id || "",
         variants,
         play_episodes: +document.getElementById("play-episodes").value,
         final_eval_episodes: +document.getElementById("final-eval-episodes").value,
@@ -1623,7 +1860,9 @@ async function init() {
   await loadConfig();
   await loadPrecons();
   await loadSavedDecks();
+  await loadSavedOpponents();
   doCardSearch("");
+  if (state.opponent) doOpponentCardSearch("");
 }
 
 init();

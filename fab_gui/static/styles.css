@@ -285,6 +285,27 @@ button:disabled {
   margin-top: 0.5rem;
 }
 
+.deck-status--compact {
+  margin-top: 0.35rem;
+  margin-bottom: 0.35rem;
+  font-size: 0.9rem;
+}
+
+.opponent-edit-hint {
+  margin: 0.5rem 0 0.25rem;
+}
+
+.opponent-add-cards {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
+}
+
+.search-results--opponent {
+  max-height: 220px;
+  margin-top: 0.35rem;
+}
+
 .card-tile {
   position: relative;
   cursor: pointer;

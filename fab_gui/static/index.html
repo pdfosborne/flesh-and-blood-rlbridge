@@ -58,11 +58,22 @@
           <label for="opponent-fabrary-input">FaBrary URL or slug</label>
           <input id="opponent-fabrary-input" type="text" placeholder="https://fabrary.net/decks/… or slug" />
           <button type="button" id="btn-opponent-fabrary">Import opponent from FaBrary</button>
+          <label for="saved-opponent-select">Saved opponent lists</label>
+          <select id="saved-opponent-select"><option value="">— select saved opponent —</option></select>
+          <button type="button" id="btn-load-opponent-saved" class="secondary">Load saved opponent</button>
           <div id="opponent-summary" class="hint" style="margin-top:0.75rem"></div>
           <div id="opponent-deck-panel" hidden>
             <div id="opponent-deck-label" class="hint" style="margin-top:0.75rem"></div>
+            <div id="opponent-deck-status" class="deck-status deck-status--compact"></div>
             <div id="opponent-equipment-loadout" class="equipment-loadout-grid equipment-loadout-grid--opponent" hidden></div>
+            <p class="hint opponent-edit-hint">Click a card to remove it. Search below to add cards from the opponent inventory.</p>
             <div id="opponent-deck-grid" class="deck-grid deck-grid--opponent"></div>
+            <div class="opponent-add-cards">
+              <label for="opponent-card-search">Add cards to opponent deck</label>
+              <input id="opponent-card-search" type="search" placeholder="Search cards by name…" autocomplete="off" />
+              <div id="opponent-search-results" class="search-results search-results--opponent"></div>
+            </div>
+            <button type="button" id="btn-save-opponent" class="secondary" style="margin-top:0.75rem">Save opponent list</button>
           </div>
           <div id="decks-status" class="hint" style="margin-top:1rem"></div>
         </div>

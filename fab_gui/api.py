@@ -35,6 +35,7 @@ from fab_tui.equipment import (
 )
 from fab_tui.runner import fetch_fabrary_deck, run_sideboard_compare
 from fab_tui.saved_decks import list_saved_user_decks, save_user_deck
+from fab_tui.saved_opponent_decks import list_saved_opponent_decks, save_opponent_deck
 from fab_tui.sideboard_picker import (
     ManualSwapVariant,
     apply_manual_swap,
@@ -260,6 +261,113 @@ def list_saved_decks_api() -> list[dict[str, Any]]:
     ]
 
 
+def list_saved_opponents_api() -> list[dict[str, Any]]:
+    return [
+        {
+            "deck_id": entry.deck_id,
+            "label": entry.label,
+            "path": str(entry.path),
+            "hero_id": entry.hero_id,
+            "player_hero_id": entry.player_hero_id,
+            "opponent_deck": entry.opponent_deck,
+            "game_format": entry.game_format,
+            "saved_at": entry.saved_at,
+        }
+        for entry in list_saved_opponent_decks()
+    ]
+
+
+def opponent_from_saved(path: Path, env: EnvironmentSettings) -> dict[str, Any]:
+    payload = load_deck_payload(path, env)
+    saved_meta: dict[str, Any] = {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(raw.get("saved_meta"), dict):
+            saved_meta = raw["saved_meta"]
+    except (OSError, json.JSONDecodeError):
+        pass
+    hero_id = str(payload.get("hero_id") or "").strip()
+    asset_stem = str(saved_meta.get("opponent_deck") or saved_meta.get("deck_id") or path.stem).strip()
+    fmt = str(payload.get("game_format") or "silver_age")
+    label = str(saved_meta.get("label") or payload.get("name") or asset_stem).strip()
+    opponent = {
+        "opponent_hero_id": hero_id,
+        "opponent_deck": asset_stem,
+        "opponent_deck_path": str(path.resolve()),
+        "source": "saved",
+        "label": label,
+        "equipment_header": str(payload.get("equipment_header") or hero_id).strip(),
+        "hero_id": hero_id,
+        "hero_class": str(payload.get("hero_class") or ""),
+        "game_format": fmt,
+        "baseline_label": str(saved_meta.get("baseline_label") or "Saved opponent list"),
+        **_opponent_inventory_fields(payload, env=env, game_format=fmt),
+    }
+    try:
+        _write_opponent_asset_file(
+            env,
+            asset_stem=asset_stem,
+            game_deck=opponent["deck"],
+            equipment_header=opponent["equipment_header"],
+        )
+    except Exception:
+        pass
+    return opponent
+
+
+def save_opponent_deck_api(
+    env: EnvironmentSettings,
+    *,
+    game_deck: dict[str, int],
+    card_pool: dict[str, int],
+    equipment_header: str,
+    hero_id: str,
+    hero_class: str,
+    game_format: str,
+    label: str,
+    player_hero_id: str = "",
+    opponent_deck: str = "",
+    baseline_label: str = "",
+) -> dict[str, str]:
+    path, asset_stem = save_opponent_deck(
+        game_deck=game_deck,
+        card_pool=card_pool,
+        equipment_header=equipment_header,
+        hero_id=hero_id,
+        hero_class=hero_class,
+        game_format=game_format,
+        label=label,
+        opponent_deck=opponent_deck,
+        player_hero_id=player_hero_id,
+        baseline_label=baseline_label,
+    )
+    _write_opponent_asset_file(
+        env,
+        asset_stem=asset_stem,
+        game_deck=game_deck,
+        equipment_header=equipment_header,
+    )
+    return {"path": str(path), "opponent_deck": asset_stem, "label": label}
+
+
+def sync_opponent_deck_api(
+    env: EnvironmentSettings,
+    *,
+    opponent_deck: str,
+    game_deck: dict[str, int],
+    equipment_header: str,
+) -> None:
+    asset_stem = str(opponent_deck or "").strip()
+    if not asset_stem:
+        raise ValueError("Opponent Talishar asset name is missing")
+    _write_opponent_asset_file(
+        env,
+        asset_stem=asset_stem,
+        game_deck=game_deck,
+        equipment_header=equipment_header,
+    )
+
+
 def import_precon(deck_name: str, env: EnvironmentSettings) -> Path:
     cache_dir = TUI_DECK_CACHE
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -299,6 +407,56 @@ def _load_opponent_pool(env: EnvironmentSettings, opponent: dict[str, Any]) -> d
     return load_deck_payload(out, env)
 
 
+def _write_opponent_asset_file(
+    env: EnvironmentSettings,
+    *,
+    asset_stem: str,
+    game_deck: dict[str, int],
+    equipment_header: str,
+) -> None:
+    training_root = REPO_ROOT / "scripts" / "training"
+    if str(training_root) not in sys.path:
+        sys.path.insert(0, str(training_root))
+    from train_pipeline_common import _write_deck_file  # noqa: PLC0415
+
+    _write_deck_file(
+        {str(k): int(v) for k, v in game_deck.items() if int(v) > 0},
+        equipment_header,
+        asset_stem,
+        env.assets_path,
+    )
+
+
+def _opponent_inventory_fields(
+    payload: dict[str, Any],
+    *,
+    game_deck: dict[str, int] | None = None,
+    env: EnvironmentSettings | None = None,
+    game_format: str | None = None,
+) -> dict[str, Any]:
+    """Build opponent card pool / entries fields for the GUI editor."""
+    pool = {str(k): int(v) for k, v in (payload.get("card_pool") or {}).items() if int(v) > 0}
+    deck = {str(k): int(v) for k, v in ((game_deck or payload.get("deck")) or {}).items() if int(v) > 0}
+    sideboard = {
+        str(k): int(v) for k, v in (payload.get("sideboard") or {}).items() if int(v) > 0
+    }
+    if not sideboard and pool:
+        sideboard = _sideboard_from_pool(pool, deck)
+    fmt = str(game_format or payload.get("game_format") or "silver_age")
+    talishar_url = env.talishar_url if env else ""
+    deck_entries = (
+        deck_counts_to_entries(deck, game_format=fmt, talishar_url=talishar_url) if env else []
+    )
+    return {
+        "deck": deck,
+        "card_pool": pool,
+        "import_card_pool": dict(pool),
+        "sideboard": sideboard,
+        "deck_entries": deck_entries,
+        "deck_size": sum(deck.values()),
+    }
+
+
 def opponent_from_precon(deck_name: str, env: EnvironmentSettings) -> dict[str, Any]:
     opp = {"opponent_deck": deck_name, "source": "precon", "label": deck_name}
     payload = _load_opponent_pool(env, opp)
@@ -310,14 +468,17 @@ def opponent_from_precon(deck_name: str, env: EnvironmentSettings) -> dict[str, 
         info = read_talishar_asset_hero_info(env.assets_path, deck_name)
         hero_id = info.hero_id if info else deck_name.split("SAGE")[0].lower()
     equipment_header = str(payload.get("equipment_header") or hero_id).strip()
+    fmt = str(payload.get("game_format") or "silver_age")
     return {
         "opponent_hero_id": hero_id,
         "opponent_deck": deck_name,
         "source": "precon",
         "label": deck_name,
         "equipment_header": equipment_header,
+        "hero_id": hero_id,
         "hero_class": str(payload.get("hero_class") or ""),
-        "game_format": str(payload.get("game_format") or "silver_age"),
+        "game_format": fmt,
+        **_opponent_inventory_fields(payload, env=env, game_format=fmt),
     }
 
 
@@ -347,6 +508,7 @@ def opponent_from_fabrary(url_or_slug: str, env: EnvironmentSettings) -> dict[st
         env.assets_path,
     )
     label = str(payload.get("name") or url_or_slug).strip()
+    fmt = str(payload.get("game_format") or "silver_age")
     return {
         "opponent_hero_id": hero_id,
         "opponent_deck": stem,
@@ -354,8 +516,10 @@ def opponent_from_fabrary(url_or_slug: str, env: EnvironmentSettings) -> dict[st
         "source": "fabrary",
         "label": label,
         "equipment_header": equipment_header,
+        "hero_id": hero_id,
         "hero_class": str(payload.get("hero_class") or ""),
-        "game_format": str(payload.get("game_format") or "silver_age"),
+        "game_format": fmt,
+        **_opponent_inventory_fields(payload, env=env, game_format=fmt),
     }
 
 
@@ -533,6 +697,8 @@ def apply_opponent_guide_sideboard(
         game_format=game_format,
         talishar_url=env.talishar_url,
     )
+    pool = {str(k): int(v) for k, v in (opp_payload.get("card_pool") or {}).items() if int(v) > 0}
+    sideboard = _sideboard_from_pool(pool, guide_deck)
     result: dict[str, Any] = {
         "deck": guide_deck,
         "deck_entries": deck_entries,
@@ -542,6 +708,9 @@ def apply_opponent_guide_sideboard(
         "hero_id": opp_payload.get("hero_id"),
         "hero_class": opp_payload.get("hero_class") or "",
         "game_format": game_format,
+        "card_pool": pool,
+        "import_card_pool": dict(pool),
+        "sideboard": sideboard,
     }
 
     training_root = REPO_ROOT / "scripts" / "training"

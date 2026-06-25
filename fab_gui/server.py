@@ -115,6 +115,8 @@ class GuiRequestHandler(BaseHTTPRequestHandler):
             return _json_response(self, {"precons": gui_api.list_precons(self.env)})
         if path == "/api/saved-decks":
             return _json_response(self, {"decks": gui_api.list_saved_decks_api()})
+        if path == "/api/saved-opponents":
+            return _json_response(self, {"opponents": gui_api.list_saved_opponents_api()})
 
         query = parse_qs(parsed.query)
 
@@ -123,6 +125,15 @@ class GuiRequestHandler(BaseHTTPRequestHandler):
             if not deck_path.is_file():
                 return _json_response(self, {"error": "Deck file not found"}, status=404)
             return _json_response(self, gui_api.load_deck_payload(deck_path, self.env))
+
+        if path == "/api/opponent/load":
+            deck_path = Path((query.get("path") or [""])[0]).expanduser()
+            if not deck_path.is_file():
+                return _json_response(self, {"error": "Opponent deck file not found"}, status=404)
+            try:
+                return _json_response(self, gui_api.opponent_from_saved(deck_path, self.env))
+            except Exception as exc:  # noqa: BLE001
+                return _json_response(self, {"error": str(exc)}, status=400)
 
         if path == "/api/cards/search":
             q = (query.get("q") or [""])[0]
@@ -324,6 +335,37 @@ class GuiRequestHandler(BaseHTTPRequestHandler):
             except Exception as exc:  # noqa: BLE001
                 return _json_response(self, {"error": str(exc)}, status=400)
 
+        if path == "/api/opponent/save":
+            try:
+                result = gui_api.save_opponent_deck_api(
+                    self.env,
+                    game_deck={str(k): int(v) for k, v in (body.get("deck") or {}).items()},
+                    card_pool={str(k): int(v) for k, v in (body.get("card_pool") or {}).items()},
+                    equipment_header=str(body.get("equipment_header") or ""),
+                    hero_id=str(body.get("hero_id") or body.get("opponent_hero_id") or ""),
+                    hero_class=str(body.get("hero_class") or ""),
+                    game_format=str(body.get("game_format") or "silver_age"),
+                    label=str(body.get("label") or "Saved opponent"),
+                    player_hero_id=str(body.get("player_hero_id") or ""),
+                    opponent_deck=str(body.get("opponent_deck") or ""),
+                    baseline_label=str(body.get("baseline_label") or "GUI opponent"),
+                )
+                return _json_response(self, result)
+            except Exception as exc:  # noqa: BLE001
+                return _json_response(self, {"error": str(exc)}, status=400)
+
+        if path == "/api/opponent/sync":
+            try:
+                gui_api.sync_opponent_deck_api(
+                    self.env,
+                    opponent_deck=str(body.get("opponent_deck") or ""),
+                    game_deck={str(k): int(v) for k, v in (body.get("deck") or {}).items()},
+                    equipment_header=str(body.get("equipment_header") or ""),
+                )
+                return _json_response(self, {"ok": True})
+            except Exception as exc:  # noqa: BLE001
+                return _json_response(self, {"error": str(exc)}, status=400)
+
         if path == "/api/equipment/replace":
             try:
                 header = str(body.get("equipment_header") or "")
@@ -350,6 +392,17 @@ class GuiRequestHandler(BaseHTTPRequestHandler):
 
         if path == "/api/training/start":
             try:
+                opponent_deck = str(body.get("opponent_deck") or "")
+                opponent_game_deck = body.get("opponent_game_deck")
+                if opponent_deck and isinstance(opponent_game_deck, dict) and opponent_game_deck:
+                    gui_api.sync_opponent_deck_api(
+                        self.env,
+                        opponent_deck=opponent_deck,
+                        game_deck={
+                            str(k): int(v) for k, v in opponent_game_deck.items() if int(v) > 0
+                        },
+                        equipment_header=str(body.get("opponent_equipment_header") or ""),
+                    )
                 session_path = gui_api.persist_session_deck(body)
                 variants = body.get("variants") or []
                 spec_kwargs = {

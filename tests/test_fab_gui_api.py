@@ -203,6 +203,15 @@ def test_guide_baseline_with_opponent_sideboards_both_decks(
     assert result["opponent_guide"]["deck_size"] == 40
 
 
+def test_opponent_from_precon_includes_card_pool(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    env = EnvironmentSettings()
+    monkeypatch.setattr(gui_api, "TUI_DECK_CACHE", tmp_path)
+    opponent = gui_api.opponent_from_precon("KayoSAGEPrecon", env)
+    assert opponent["opponent_deck"] == "KayoSAGEPrecon"
+    assert sum(opponent["card_pool"].values()) >= sum(opponent["deck"].values())
+    assert opponent["deck_entries"]
+
+
 def test_try_swap_valid() -> None:
     deck = {"a_red": 2, "b_blue": 1}
     pool = {"a_red": 2, "b_blue": 1, "c_yellow": 1}
