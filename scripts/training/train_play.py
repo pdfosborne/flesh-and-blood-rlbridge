@@ -1711,6 +1711,7 @@ def _evaluate_fast_p1_vs_fixed_opponent(
             timeouts += 1
 
     total = max(1, episodes)
+    decided = max(1, wins + losses + draws)
     return {
         "episodes": episodes,
         "p1_wins": wins,
@@ -1720,6 +1721,7 @@ def _evaluate_fast_p1_vs_fixed_opponent(
         "losses": losses,
         "p1_win_rate": wins / total,
         "p2_win_rate": losses / total,
+        "win_rate_decided": wins / decided,
         "draw_rate": draws / total,
         "timeout_rate": timeouts / total,
         "runtime_backend": "C++ engine fast sampled eval",
@@ -1807,6 +1809,9 @@ def _evaluate_p1_vs_fixed_opponent(
                 truncated = bool(step.truncated)
                 done = terminated or truncated
                 steps += 1
+
+            if not terminated and not truncated and steps >= max_steps:
+                truncated = True
 
             obs_data = json.loads(obs) if isinstance(obs, str) else (obs or {})
             p1_hp, p2_hp = absolute_p1_p2_hp_from_env(env)
@@ -1937,6 +1942,8 @@ def _run_phase3_fallback(
         )
 
     p1_wins = 0
+    p1_losses = 0
+    p1_timeouts = 0
     backend_printed = False
     try:
         for ep in range(1, n_episodes + 1):
@@ -1954,7 +1961,10 @@ def _run_phase3_fallback(
                     backend_printed = True
                 result = env.reset(options={"acting_player_id": 1 + ((ep - 1) % 2)})
                 done = False
-                while not done:
+                terminated = False
+                truncated = False
+                steps = 0
+                while not done and steps < max_play_steps:
                     obs_data = json.loads(result.observation)
                     acting_player = obs_data.get("actingPlayerID", 1)
                     agent = (p1.play if acting_player == 1 else (p2.play if p2 else None))
@@ -1963,12 +1973,38 @@ def _run_phase3_fallback(
                     else:
                         action = env.sample_action()
                     step = env.step(action)
-                    done = step.terminated or step.truncated
+                    terminated = bool(step.terminated)
+                    truncated = bool(step.truncated)
+                    done = terminated or truncated
+                    steps += 1
                     result.observation = step.observation
 
+                if not terminated and not truncated and steps >= max_play_steps:
+                    truncated = True
+
                 obs_data = json.loads(result.observation)
-                if obs_data.get("playerHealth", 0) > 0 and obs_data.get("opponentHealth", 0) <= 0:
+                p1_hp, p2_hp = absolute_p1_p2_hp_from_env(env)
+                if p1_hp is None or p2_hp is None:
+                    p1_hp_f, p2_hp_f = absolute_p1_p2_hp_from_obs(obs_data)
+                    p1_hp = int(p1_hp_f) if p1_hp_f is not None else None
+                    p2_hp = int(p2_hp_f) if p2_hp_f is not None else None
+                p1_deck, p2_deck = absolute_p1_p2_deck_from_env(env)
+                if p1_deck is None or p2_deck is None:
+                    p1_deck, p2_deck = absolute_p1_p2_deck_from_obs(obs_data)
+                outcome = classify_p1_episode_outcome(
+                    p1_hp=p1_hp,
+                    p2_hp=p2_hp,
+                    p1_deck=p1_deck,
+                    p2_deck=p2_deck,
+                    terminated=terminated,
+                    truncated=truncated,
+                )
+                if outcome == "win":
                     p1_wins += 1
+                elif outcome == "loss":
+                    p1_losses += 1
+                elif outcome == "timeout":
+                    p1_timeouts += 1
             finally:
                 env.close()
     finally:
@@ -1979,12 +2015,16 @@ def _run_phase3_fallback(
             except Exception:
                 pass
 
-    p1_wr = p1_wins / max(1, n_episodes)
-    p2_wr = 1.0 - p1_wr
+    total = max(1, n_episodes)
+    p1_wr = p1_wins / total
+    p2_wr = p1_losses / total
     p1.win_rates.append(p1_wr)
     if opponent_mode == "dual" and p2 is not None:
         p2.win_rates.append(p2_wr)
-    print(f"\n  Fallback win rates: p1={p1_wr:.1%}  p2={p2_wr:.1%}")
+    print(
+        f"\n  Fallback win rates: p1={p1_wr:.1%}  p2={p2_wr:.1%}  "
+        f"({p1_wins}W/{p1_losses}L/{p1_timeouts}T)"
+    )
     return p1_wr, p2_wr
 
 
@@ -2026,20 +2066,10 @@ def _save_play_checkpoint_package(
             episodes=episodes_completed,
         )
     else:
-        wins = sum(1 for r in rewards if r > 0)
-        losses = sum(1 for r in rewards if r < 0)
-        draws = len(rewards) - wins - losses
-        total = max(1, len(rewards)) if rewards else 1
-        outcome_stats = {
-            "wins": wins,
-            "losses": losses,
-            "draws": draws,
-            "timeouts": 0,
-            "win_rate": wins / total,
-            "loss_rate": losses / total,
-            "draw_rate": draws / total,
-            "timeout_rate": 0.0,
-        }
+        outcome_stats = summarize_p1_outcomes(
+            [],
+            episodes=episodes_completed,
+        )
     metadata = {
         "checkpoint_type": "phase3_play",
         "created_at": datetime.now().isoformat(),
@@ -2059,6 +2089,7 @@ def _save_play_checkpoint_package(
         "runtime_backend": runtime_backend,
         "avg_reward": avg_reward,
         "win_rate": outcome_stats["win_rate"],
+        "win_rate_decided": outcome_stats.get("win_rate_decided", outcome_stats["win_rate"]),
         "wins": outcome_stats["wins"],
         "losses": outcome_stats["losses"],
         "draws": outcome_stats["draws"],

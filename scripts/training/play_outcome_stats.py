@@ -155,6 +155,7 @@ def summarize_p1_outcomes(
     elif total > counted:
         timeouts += total - counted
     total = max(1, total) if total > 0 else 1
+    decided = max(1, wins + losses + draws)
     return {
         "episodes": total,
         "wins": wins,
@@ -162,6 +163,7 @@ def summarize_p1_outcomes(
         "draws": draws,
         "timeouts": timeouts,
         "win_rate": wins / total,
+        "win_rate_decided": wins / decided,
         "loss_rate": losses / total,
         "draw_rate": draws / total,
         "timeout_rate": timeouts / total,

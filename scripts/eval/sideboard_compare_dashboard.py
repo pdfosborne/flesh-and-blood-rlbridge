@@ -104,6 +104,9 @@ def _training_win_series(candidate_dir: Path) -> list[dict[str, Any]]:
                 {
                     "episode": int(row.get("episodes_completed", 0) or 0),
                     "win_rate": float(row.get("win_rate", 0.0) or 0.0),
+                    "win_rate_decided": float(
+                        row.get("win_rate_decided", row.get("win_rate", 0.0)) or 0.0
+                    ),
                     "wins": int(row.get("wins", 0) or 0),
                     "losses": int(row.get("losses", 0) or 0),
                     "draws": int(row.get("draws", 0) or 0),
@@ -656,24 +659,34 @@ def collect_sideboard_compare_state(out_dir: Path) -> dict[str, Any]:
             )
             for pt in train_series
         ]
+        for point, src in zip(train_chart_points, train_series):
+            if src.get("win_rate_decided") is not None:
+                point["win_rate_decided"] = float(src.get("win_rate_decided", 0.0) or 0.0)
 
         live_train_wr = None
+        live_train_wr_decided = None
         train_wins = train_losses = train_draws = train_timeouts = None
         if live_training is not None:
             if live_training.get("win_rate") is not None:
                 live_train_wr = float(live_training["win_rate"])
+            if live_training.get("win_rate_decided") is not None:
+                live_train_wr_decided = float(live_training["win_rate_decided"])
             train_wins = int(live_training.get("wins", 0) or 0)
             train_losses = int(live_training.get("losses", 0) or 0)
             train_draws = int(live_training.get("draws", 0) or 0)
             train_timeouts = int(live_training.get("timeouts", 0) or 0)
         elif training_meta is not None and training_meta.get("win_rate") is not None:
             live_train_wr = float(training_meta["win_rate"])
+            if training_meta.get("win_rate_decided") is not None:
+                live_train_wr_decided = float(training_meta["win_rate_decided"])
             train_wins = int(training_meta.get("wins", 0) or 0)
             train_losses = int(training_meta.get("losses", 0) or 0)
             train_draws = int(training_meta.get("draws", 0) or 0)
             train_timeouts = int(training_meta.get("timeouts", 0) or 0)
         elif train_chart_points:
             live_train_wr = float(train_chart_points[-1]["win_rate"])
+            if train_chart_points[-1].get("win_rate_decided") is not None:
+                live_train_wr_decided = float(train_chart_points[-1]["win_rate_decided"])
 
         play_win_rate = None
         if result and result.get("play_win_rate") is not None:
@@ -704,12 +717,19 @@ def collect_sideboard_compare_state(out_dir: Path) -> dict[str, Any]:
             "training_stage": training_progress["stage"],
             "training_plan": training_progress["plan"],
             "play_win_rate": play_win_rate,
+            "play_win_rate_decided": live_train_wr_decided,
             "train_wins": train_wins,
             "train_losses": train_losses,
             "train_draws": train_draws,
             "train_timeouts": train_timeouts,
             "latest_checkpoint_timeouts": (
                 int(eval_series[-1].get("timeouts", 0) or 0) if eval_series else None
+            ),
+            "latest_checkpoint_wins": (
+                int(eval_series[-1].get("p1_wins", 0) or 0) if eval_series else None
+            ),
+            "latest_checkpoint_losses": (
+                int(eval_series[-1].get("losses", 0) or 0) if eval_series else None
             ),
             "latest_checkpoint_win_rate": (
                 chart_points[-1]["win_rate"] if chart_points else None
@@ -1107,17 +1127,38 @@ def _render_candidate_card(row: dict[str, Any], *, play_episodes: int) -> str:
     if row.get("train_timeouts") is not None:
         record_bits.append(f"{int(row['train_timeouts'])}T")
     ckpt_timeouts = row.get("latest_checkpoint_timeouts")
+    ckpt_wins = row.get("latest_checkpoint_wins")
+    ckpt_losses = row.get("latest_checkpoint_losses")
     ckpt_record = ""
+    ckpt_record_bits = []
+    if ckpt_wins is not None:
+        ckpt_record_bits.append(f"{int(ckpt_wins)}W")
+    if ckpt_losses is not None:
+        ckpt_record_bits.append(f"{int(ckpt_losses)}L")
     if ckpt_timeouts is not None:
-        ckpt_record = f" · ckpt eval incl. {int(ckpt_timeouts)}T"
+        ckpt_record_bits.append(f"{int(ckpt_timeouts)}T")
+    if ckpt_record_bits:
+        ckpt_record = " · ".join(ckpt_record_bits)
     best_seed = row.get("latest_checkpoint_best_seed")
     ckpt_seed_hint = ""
     if best_seed is not None:
         ckpt_seed_hint = f" · best seed {int(best_seed)}"
     train_record = " · ".join(record_bits)
+    train_decided = row.get("play_win_rate_decided")
+    train_timeouts_val = int(row.get("train_timeouts", 0) or 0)
+    train_win_display = _pct_text(row.get("play_win_rate"))
+    if train_timeouts_val > 0 and train_decided is not None:
+        train_win_display = (
+            f"{_pct_text(train_decided)} decided"
+            f" <span class=\"metric-sub\">({_pct_text(row.get('play_win_rate'))} incl. timeouts)</span>"
+        )
     train_record_html = (
-        f'<span class="train-record">{html.escape(train_record)}{html.escape(ckpt_record)}</span>'
-        if train_record or ckpt_record else ""
+        f'<span class="train-record">{html.escape(train_record)}</span>'
+        if train_record else ""
+    )
+    ckpt_record_html = (
+        f'<span class="train-record">{html.escape(ckpt_record)}</span>'
+        if ckpt_record else ""
     )
 
     return f"""
@@ -1142,8 +1183,8 @@ def _render_candidate_card(row: dict[str, Any], *, play_episodes: int) -> str:
     <div class="progress-bar"><div class="progress-fill" style="width:{float(row.get("train_pct", 0)):.1f}%"></div></div>
   </section>
   <section class="metrics">
-    <div><span class="metric-label">Train win%</span><span class="metric-value">{_pct_text(row.get("play_win_rate"))}</span>{train_record_html}<p class="metric-hint">Self-play P1 vs co-trained P2 on the C++ stub — not fixed-opponent eval.</p></div>
-    <div><span class="metric-label">Checkpoint eval</span><span class="metric-value">{_pct_text(row.get("latest_checkpoint_win_rate"))}</span>{html.escape(ckpt_seed_hint) if ckpt_seed_hint else ""}</div>
+    <div><span class="metric-label">Train win%</span><span class="metric-value">{train_win_display}</span>{train_record_html}<p class="metric-hint">P1 lethal wins / all training episodes. Step-limit endings count as timeouts, not wins. 0T means games ended by lethal before the step cap.</p></div>
+    <div><span class="metric-label">Checkpoint eval</span><span class="metric-value">{_pct_text(row.get("latest_checkpoint_win_rate"))}</span>{ckpt_record_html}{html.escape(ckpt_seed_hint) if ckpt_seed_hint else ""}</div>
     {_render_stability_block(row.get("eval_stability"))}
     <div><span class="metric-label">Final eval</span><span class="metric-value">{_pct_text(row.get("final_eval_win_rate"))} {delta_html}</span></div>
   </section>

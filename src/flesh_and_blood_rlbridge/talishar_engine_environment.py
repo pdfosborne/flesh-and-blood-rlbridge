@@ -439,11 +439,16 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
     def fast_step_index(self, action_index: int) -> dict[str, Any]:
         if not self._using_cpp or not hasattr(self._cpp_env, "fast_step_index"):
             raise RuntimeError("fast_step_index requires a C++ engine with fast training support")
-        result = self._cpp_env.fast_step_index(action_index)  # type: ignore[union-attr]
+        result = dict(self._cpp_env.fast_step_index(action_index))  # type: ignore[union-attr]
         self._acting_player_id = int(result["acting_player_id"])
         self._player_hp = int(result["p1_health"])
         self._opp_hp = int(result["p2_health"])
         self._steps = int(getattr(self._cpp_env, "_steps", self._steps + 1))  # type: ignore[union-attr]
+        if "truncated" not in result:
+            terminated = bool(result.get("terminated", False))
+            result["truncated"] = (
+                not terminated and self._steps >= self._max_turns
+            )
         return result
 
     def _tracker_state_snapshot(

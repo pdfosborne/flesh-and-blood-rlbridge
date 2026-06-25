@@ -68,6 +68,7 @@ def test_summarize_includes_draws_and_timeouts_in_denominator() -> None:
     assert summary["draws"] == 1
     assert summary["timeouts"] == 2
     assert summary["win_rate"] == 0.2
+    assert summary["win_rate_decided"] == pytest.approx(1 / 3)
 
 
 def test_eval_stability_converged() -> None:

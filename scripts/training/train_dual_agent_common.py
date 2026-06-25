@@ -2150,6 +2150,10 @@ def train_agents_from_both_perspectives(
 
         global_step += 1
 
+        if not done and episode_step >= max_steps:
+            truncated = True
+            done = True
+
         if done:
             p1_hp = p2_hp = None
             p1_deck = p2_deck = None
@@ -2780,6 +2784,7 @@ def train_matchup(
         "terminated": 0,
         "timeout_rate": 0.0,
     }
+    p1_outcomes: list[str] = []
     live_state_image_path: Optional[Path] = None
     if show_frontend:
         live_state_image_path = out_dir / matchup.name / "training_live_state.png"
@@ -2808,6 +2813,7 @@ def train_matchup(
         overall_stats["episodes"]   += int(rem_stats.get("episodes", 0))
         overall_stats["timeouts"]   += int(rem_stats.get("timeouts", 0))
         overall_stats["terminated"] += int(rem_stats.get("terminated", 0))
+        p1_outcomes.extend(rem_stats.get("p1_outcomes") or [])
 
         # Run warmup-baseline eval so we still get a checkpoint/baseline record.
         if warmup_count > 0 and warmup_baseline_eval_episodes > 0:
@@ -2880,6 +2886,7 @@ def train_matchup(
             overall_stats["episodes"]   += int(warm_stats.get("episodes", 0))
             overall_stats["timeouts"]   += int(warm_stats.get("timeouts", 0))
             overall_stats["terminated"] += int(warm_stats.get("terminated", 0))
+            p1_outcomes.extend(warm_stats.get("p1_outcomes") or [])
 
             print(
                 f"  Warmup baseline eval: {warmup_baseline_eval_episodes} episode(s) before PPO handoff"
@@ -2932,20 +2939,33 @@ def train_matchup(
             overall_stats["episodes"]   += int(rem_stats.get("episodes", 0))
             overall_stats["timeouts"]   += int(rem_stats.get("timeouts", 0))
             overall_stats["terminated"] += int(rem_stats.get("terminated", 0))
+            p1_outcomes.extend(rem_stats.get("p1_outcomes") or [])
 
         env.close()
 
     overall_stats["timeout_rate"] = overall_stats["timeouts"] / max(
         1, int(overall_stats["episodes"])
     )
+    outcome_summary = summarize_p1_outcomes(
+        p1_outcomes,
+        episodes=len(p1_rewards) if p1_rewards else None,
+    )
+    overall_stats.update(outcome_summary)
 
     elapsed = time.time() - t0
 
     cache_store.persist_player(p1_bundle)
     cache_store.persist_player(p2_bundle)
 
-    p1_wr = float(np.mean([1.0 if r > 0 else 0.0 for r in p1_rewards])) if p1_rewards else None
-    p2_wr = float(np.mean([1.0 if r > 0 else 0.0 for r in p2_rewards])) if p2_rewards else None
+    p1_wr = float(outcome_summary["win_rate"]) if p1_outcomes else None
+    p2_wr = (
+        float(outcome_summary["loss_rate"])
+        if p1_outcomes
+        else (
+            float(np.mean([1.0 if r > 0 else 0.0 for r in p2_rewards]))
+            if p2_rewards else None
+        )
+    )
     if len(p1_rewards) >= n_episodes and not _skip_cache_converge:
         cache_store.mark_matchup_converged(
             p1_fingerprint=p1_deck_fp,
