@@ -117,6 +117,56 @@ main {
   }
 }
 
+.editor-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(200px, 240px) minmax(260px, 300px);
+  gap: 1rem;
+  align-items: start;
+}
+
+.editor-sidebar .hint {
+  margin-bottom: 0.75rem;
+}
+
+.editor-sidebar .training-params {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.editor-sidebar .training-params input {
+  width: 100%;
+}
+
+.editor-sidebar #btn-start-training {
+  width: 100%;
+}
+
+.editor-sidebar .eval-candidate-row {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.search-results--editor {
+  grid-template-columns: repeat(auto-fill, minmax(88px, 1fr));
+  max-height: 280px;
+}
+
+@media (max-width: 1100px) {
+  .editor-layout {
+    grid-template-columns: minmax(0, 1fr) minmax(220px, 280px);
+  }
+
+  .editor-sidebar {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 700px) {
+  .editor-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
 .card {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -498,6 +548,58 @@ button:disabled {
   object-fit: contain;
 }
 
+.results-damage-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+  margin-top: 0.75rem;
+}
+
+.results-damage-grid h4 {
+  margin: 0 0 0.5rem;
+  font-size: 0.95rem;
+}
+
+.results-damage-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.results-damage-row {
+  display: grid;
+  grid-template-columns: 1.5rem minmax(0, 1fr) auto;
+  gap: 0.5rem;
+  align-items: center;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  font-size: 0.9rem;
+}
+
+.results-damage-rank {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.results-damage-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.results-damage-value {
+  font-weight: 600;
+  color: var(--accent);
+}
+
+@media (max-width: 800px) {
+  .results-damage-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .toast {
   position: fixed;
   bottom: 1.25rem;
@@ -563,6 +665,16 @@ button:disabled {
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
   gap: 0.65rem;
   margin-bottom: 1rem;
+}
+
+#equipment-section {
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
+}
+
+#equipment-section h4 {
+  margin: 0 0 0.35rem;
+  font-size: 0.95rem;
 }
 
 .equipment-loadout-grid--opponent {

@@ -12,6 +12,7 @@ const state = {
   baselineRef: null,
   activeRun: null,
   pollTimer: null,
+  lastResultsRanking: null,
 };
 
 const MIN_DECK_SIZES = {
@@ -85,6 +86,42 @@ function imageUrlFor(cardId) {
   return urls[0] || "";
 }
 
+function loadImageFromCandidates(img, urls, { onLoaded, onFailed } = {}) {
+  if (!img || !urls.length) {
+    onFailed?.();
+    return;
+  }
+  let urlIndex = 0;
+
+  const tryNextUrl = () => {
+    if (urlIndex >= urls.length) {
+      onFailed?.();
+      return;
+    }
+    const next = urls[urlIndex++];
+    if (img.getAttribute("src") !== next) {
+      img.src = next;
+    } else if (urlIndex < urls.length) {
+      tryNextUrl();
+    } else {
+      onFailed?.();
+    }
+  };
+
+  const markLoaded = () => {
+    if (img.naturalWidth > 0) {
+      onLoaded?.();
+    } else {
+      tryNextUrl();
+    }
+  };
+
+  img.addEventListener("load", markLoaded);
+  img.addEventListener("error", tryNextUrl);
+  img.removeAttribute("src");
+  tryNextUrl();
+}
+
 function bindCardTileImages(root = document) {
   const scope = root instanceof Element ? root : document;
   scope.querySelectorAll(".card-tile").forEach((tile) => {
@@ -94,47 +131,16 @@ function bindCardTileImages(root = document) {
 
     const cardId = tile.dataset.cardId || tile.getAttribute("data-card-id") || "";
     const urls = cardImageCandidates(cardId);
-    let urlIndex = 0;
 
     const showFallback = () => {
       tile.classList.add("card-tile--no-img");
       if (img.isConnected) img.remove();
     };
 
-    const markLoaded = () => {
-      if (img.naturalWidth > 0) {
-        tile.classList.remove("card-tile--no-img");
-      } else {
-        tryNextUrl();
-      }
-    };
-
-    const tryNextUrl = () => {
-      if (urlIndex >= urls.length) {
-        showFallback();
-        return;
-      }
-      const next = urls[urlIndex++];
-      if (img.getAttribute("src") !== next) {
-        img.src = next;
-      } else if (urlIndex < urls.length) {
-        tryNextUrl();
-      } else {
-        showFallback();
-      }
-    };
-
-    img.addEventListener("load", markLoaded);
-    img.addEventListener("error", tryNextUrl);
-
-    const existing = img.getAttribute("src") || "";
-    if (existing.startsWith("/api/card-image/") || !existing) {
-      tryNextUrl();
-    } else {
-      const at = urls.indexOf(existing);
-      if (at >= 0) urlIndex = at + 1;
-      if (img.complete) markLoaded();
-    }
+    loadImageFromCandidates(img, urls, {
+      onLoaded: () => tile.classList.remove("card-tile--no-img"),
+      onFailed: showFallback,
+    });
   });
 }
 
@@ -171,11 +177,12 @@ function cardClassification(card) {
 }
 
 function cardTileHtml(card, { action = "", extraClass = "", title = "", disabled = false } = {}) {
-  const pitch = pitchFromCard(card);
+  const cardId = card.card_id || "";
+  const pitch = pitchFromCard({ ...card, card_id: cardId });
   const pitchClass = pitch ? ` pitch-${pitch}` : "";
   const disabledClass = disabled ? " card-tile--disabled" : "";
   const actionClass = action === "add" ? " card-tile--add" : action === "remove" ? " card-tile--remove" : "";
-  const imgUrl = card.image_url || imageUrlFor(card.card_id);
+  const imgUrl = imageUrlFor(cardId);
   const name = escapeHtml(cardDisplayName(card));
   const colorName = pitchColorName(card);
   const classification = escapeHtml(cardClassification(card));
@@ -195,7 +202,7 @@ function cardTileHtml(card, { action = "", extraClass = "", title = "", disabled
   ]
     .filter(Boolean)
     .join(" ");
-  return `<div class="${classes}" data-card-id="${card.card_id}" ${action ? `data-action="${action}"` : ""} title="${resolvedTitle}">
+  return `<div class="${classes}" data-card-id="${cardId}" ${action ? `data-action="${action}"` : ""} title="${resolvedTitle}">
     <div class="card-tile__art">
       <img class="card-tile__img" src="${imgUrl}" alt="" loading="lazy" decoding="async" />
       <div class="card-tile__fallback">
@@ -241,7 +248,6 @@ function initCardPreviewHover() {
 
   const showCardPreview = (tile, event) => {
     const cardId = tile.dataset.cardId || tile.getAttribute("data-card-id") || "";
-    const tileImg = tile.querySelector(".card-tile__img");
     const name =
       tile.querySelector(".card-tile__name")?.textContent?.trim() ||
       cardMetaFor(cardId).name ||
@@ -256,22 +262,29 @@ function initCardPreviewHover() {
     preview.classList.add("card-preview--visible");
     requestAnimationFrame(() => positionCardPreview(event));
 
-    if (tile.classList.contains("card-tile--no-img") || !tileImg?.src) {
+    const showFallback = () => {
       previewImg.hidden = true;
       previewFallback.classList.add("card-preview__fallback--visible");
       previewFallback.innerHTML = `
         <div class="card-preview__fallback-name">${escapeHtml(name)}</div>
         ${classification ? `<div class="card-preview__fallback-type">${escapeHtml(classification)}</div>` : ""}
       `;
+    };
+
+    if (tile.classList.contains("card-tile--no-img")) {
+      showFallback();
       return;
     }
 
     previewImg.hidden = false;
     previewFallback.classList.remove("card-preview__fallback--visible");
     previewFallback.innerHTML = "";
-    if (previewImg.src !== tileImg.src) {
-      previewImg.src = tileImg.src;
-    }
+    loadImageFromCandidates(previewImg, cardImageCandidates(cardId), {
+      onLoaded: () => {
+        previewImg.hidden = false;
+      },
+      onFailed: showFallback,
+    });
   };
 
   document.body.addEventListener(
@@ -312,7 +325,15 @@ function initCardPreviewHover() {
 
 function rememberCardMeta(card) {
   if (!card?.card_id) return;
-  state.cardMeta[card.card_id] = { ...state.cardMeta[card.card_id], ...card };
+  const card_id = card.card_id;
+  const pitch = pitchNumericFromCardId(card_id) ?? card.pitch ?? null;
+  state.cardMeta[card_id] = {
+    ...state.cardMeta[card_id],
+    ...card,
+    card_id,
+    pitch,
+    image_url: imageUrlFor(card_id),
+  };
 }
 
 function cardMetaFor(cardId) {
@@ -324,11 +345,11 @@ function cardMetaFor(cardId) {
   if (fromPool) return fromPool;
   const fromOpp = (state.opponent?.deck_entries || []).find((e) => e.card_id === cardId);
   if (fromOpp) return fromOpp;
-  const pitchMatch = cardId.match(/_(red|yellow|blue)$/i);
+  const pitchMatch = cardId.match(/_(red|yellow|blue|purple)$/i);
   const pitchMap = { red: 1, yellow: 2, blue: 3 };
   return {
     card_id: cardId,
-    name: cardId.replace(/_(red|yellow|blue)$/i, "").replace(/_/g, " "),
+    name: cardId.replace(/_(red|yellow|blue|purple)$/i, "").replace(/_/g, " "),
     pitch: pitchMatch ? pitchMap[pitchMatch[1].toLowerCase()] : null,
     image_url: imageUrlFor(cardId),
   };
@@ -404,17 +425,29 @@ function renderDeckStatus() {
   }
 }
 
-function pitchFromCard(card) {
-  if (card?.pitch != null) {
-    const map = { 1: "r", 2: "y", 3: "b" };
-    return map[Number(card.pitch)] || null;
-  }
-  const match = String(card?.card_id || "").match(/_(red|yellow|blue)$/i);
+function pitchFromCardId(cardId) {
+  const match = String(cardId || "").match(/_(red|yellow|blue|purple)$/i);
   if (!match) return null;
   const token = match[1].toLowerCase();
   if (token === "red") return "r";
   if (token === "yellow") return "y";
   if (token === "blue") return "b";
+  return null;
+}
+
+function pitchNumericFromCardId(cardId) {
+  const pitch = pitchFromCardId(cardId);
+  if (!pitch) return null;
+  return { r: 1, y: 2, b: 3 }[pitch] ?? null;
+}
+
+function pitchFromCard(card) {
+  const fromId = pitchFromCardId(card?.card_id);
+  if (fromId) return fromId;
+  if (card?.pitch != null) {
+    const map = { 1: "r", 2: "y", 3: "b" };
+    return map[Number(card.pitch)] || null;
+  }
   return null;
 }
 
@@ -1396,6 +1429,68 @@ function startReplayPolling(runId) {
   replayPollTimer = setInterval(poll, 1500);
 }
 
+function formatCardIdLabel(cardId) {
+  return String(cardId || "?").replace(/_/g, " ");
+}
+
+function renderResultsDamageList(container, entries, emptyHint) {
+  if (!container) return;
+  if (!entries?.length) {
+    container.innerHTML = `<div class="hint">${escapeHtml(emptyHint)}</div>`;
+    return;
+  }
+  container.innerHTML = entries
+    .map(
+      (row, index) => `<div class="results-damage-row">
+      <span class="results-damage-rank">${index + 1}</span>
+      <span class="results-damage-name" title="${escapeHtml(formatCardIdLabel(row.card_id))}">${escapeHtml(formatCardIdLabel(row.card_id))}</span>
+      <span class="results-damage-value">${row.damage}</span>
+    </div>`
+    )
+    .join("");
+}
+
+function renderResultsDamagePanel(ranking, candidateId) {
+  const panel = document.getElementById("results-damage-panel");
+  const select = document.getElementById("results-damage-candidate");
+  const summary = document.getElementById("results-damage-summary");
+  const dealtEl = document.getElementById("results-damage-dealt");
+  const takenEl = document.getElementById("results-damage-taken");
+  if (!panel || !select || !summary || !dealtEl || !takenEl) return;
+
+  const withBreakdown = (ranking || []).filter((row) => row.final_eval?.damage_breakdown);
+  if (!withBreakdown.length) {
+    panel.hidden = true;
+    select.innerHTML = "";
+    return;
+  }
+
+  panel.hidden = false;
+  const selectedId = candidateId || select.value || withBreakdown[0].candidate_id;
+  if (select.options.length !== withBreakdown.length) {
+    select.innerHTML = withBreakdown
+      .map(
+        (row) =>
+          `<option value="${escapeHtml(row.candidate_id)}">${escapeHtml(row.label || row.candidate_id)}</option>`
+      )
+      .join("");
+  }
+  select.value = selectedId;
+
+  const row = withBreakdown.find((entry) => entry.candidate_id === selectedId) || withBreakdown[0];
+  const breakdown = row.final_eval.damage_breakdown;
+  summary.textContent =
+    `${row.label || row.candidate_id} · ${breakdown.episodes || "?"} eval games · ` +
+    `${breakdown.total_dealt ?? 0} dealt (${breakdown.avg_dealt_per_episode ?? "?"} avg) · ` +
+    `${breakdown.total_taken ?? 0} taken (${breakdown.avg_taken_per_episode ?? "?"} avg)`;
+  renderResultsDamageList(dealtEl, breakdown.cards_dealt, "No card-attributed damage dealt recorded.");
+  renderResultsDamageList(
+    takenEl,
+    breakdown.cards_taken_from,
+    "No card-attributed damage taken recorded."
+  );
+}
+
 async function loadResults(runId) {
   try {
     const data = await api(`/api/runs/${runId}/results`);
@@ -1410,6 +1505,7 @@ async function loadResults(runId) {
     empty.hidden = true;
     content.hidden = false;
     const ranking = data.ranking || [];
+    state.lastResultsRanking = ranking;
     const winner = data.winner || {};
     document.getElementById("winner-banner").innerHTML = winner.candidate_id
       ? `<strong>Winner:</strong> ${winner.candidate_id} — ${winner.label || ""} <span class="status-pill completed">final eval ${((winner.final_eval_win_rate || 0) * 100).toFixed(1)}%</span>`
@@ -1428,6 +1524,7 @@ async function loadResults(runId) {
       .join("");
     document.getElementById("results-meta").textContent =
       `Output: ${data.out_dir} · Winning deck asset: ${data.winning_deck_asset || "n/a"}`;
+    renderResultsDamagePanel(ranking, winner.candidate_id);
     renderReplayPanel(data, runId);
   } catch (e) {
     document.getElementById("results-empty").textContent = e.message;
@@ -1453,6 +1550,13 @@ document.getElementById("btn-render-replay").onclick = async () => {
 
 async function init() {
   initCardPreviewHover();
+  const damageSelect = document.getElementById("results-damage-candidate");
+  if (damageSelect) {
+    damageSelect.onchange = () => {
+      if (!state.lastResultsRanking) return;
+      renderResultsDamagePanel(state.lastResultsRanking, damageSelect.value);
+    };
+  }
   await loadConfig();
   await loadPrecons();
   await loadSavedDecks();

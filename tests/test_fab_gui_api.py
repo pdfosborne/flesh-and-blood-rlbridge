@@ -120,6 +120,25 @@ def test_deck_entries_resolve_underscored_ids() -> None:
     assert entries[0]["classification"] == "Lightning Runeblade Action"
 
 
+def test_deck_entries_pitch_follows_card_id_suffix() -> None:
+    env = EnvironmentSettings()
+    entries = gui_api.deck_counts_to_entries(
+        {
+            "snatch_red": 2,
+            "snatch_yellow": 2,
+        },
+        game_format="silver_age",
+        talishar_url=env.talishar_url,
+    )
+    by_id = {row["card_id"]: row for row in entries}
+    assert by_id["snatch_red"]["pitch"] == 1
+    assert by_id["snatch_yellow"]["pitch"] == 2
+    assert all(
+        row["image_url"].endswith(f"/{row['card_id']}.webp")
+        for row in entries
+    )
+
+
 def test_equipment_alternatives_filter_by_slot_only() -> None:
     env = EnvironmentSettings()
     hits = gui_api.equipment_alternatives_for_slot(

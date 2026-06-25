@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 import threading
 import uuid
@@ -151,6 +152,17 @@ def fetch_card_image(env: EnvironmentSettings, card_id: str) -> tuple[bytes, str
     return None
 
 
+_PITCH_SUFFIX = re.compile(r"_(red|yellow|blue|purple)$", re.IGNORECASE)
+_PITCH_NUMERIC = {"red": 1, "yellow": 2, "blue": 3, "purple": 4}
+
+
+def _pitch_from_card_id(card_id: str) -> int | None:
+    match = _PITCH_SUFFIX.search(str(card_id or "").strip())
+    if not match:
+        return None
+    return _PITCH_NUMERIC.get(match.group(1).lower())
+
+
 def card_hit_to_dict(hit: CardHit, *, talishar_url: str) -> dict[str, Any]:
     classification = hit.classification or hit.type_line
     return {
@@ -179,12 +191,15 @@ def deck_counts_to_entries(
         if int(count) <= 0:
             continue
         hit = index.lookup(card_id)
+        pitch = _pitch_from_card_id(card_id)
+        if pitch is None and hit:
+            pitch = hit.pitch
         entries.append(
             {
                 "card_id": card_id,
                 "count": int(count),
                 "name": hit.name if hit else card_id.replace("_", " ").title(),
-                "pitch": hit.pitch if hit else None,
+                "pitch": pitch,
                 "type_line": hit.type_line if hit else "",
                 "classification": hit.classification if hit else "",
                 "image_url": card_image_display_url(card_id),
@@ -905,6 +920,34 @@ def _status_from_disk(out_dir: Path, run_id: str) -> dict[str, Any]:
     }
 
 
+def _load_final_eval_damage_breakdown(out_dir: Path, candidate_id: str) -> dict[str, Any] | None:
+    final_eval = out_dir / "candidates" / candidate_id / "final_eval" / "p1_final_eval.json"
+    if not final_eval.is_file():
+        return None
+    try:
+        payload = json.loads(final_eval.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    breakdown = (payload.get("analysis") or {}).get("damage_breakdown")
+    return breakdown if isinstance(breakdown, dict) else None
+
+
+def _enrich_results_damage_breakdown(data: dict[str, Any], out_dir: Path) -> None:
+    for row in data.get("ranking") or []:
+        final_eval = row.get("final_eval")
+        if not isinstance(final_eval, dict):
+            final_eval = {}
+            row["final_eval"] = final_eval
+        if final_eval.get("damage_breakdown"):
+            continue
+        candidate_id = str(row.get("candidate_id") or "")
+        if not candidate_id:
+            continue
+        breakdown = _load_final_eval_damage_breakdown(out_dir, candidate_id)
+        if breakdown:
+            final_eval["damage_breakdown"] = breakdown
+
+
 def run_results(run_id: str) -> dict[str, Any] | None:
     run = RUNS.get(run_id)
     out_dir = run.out_dir if run else _resolve_run_dir(run_id)
@@ -931,6 +974,7 @@ def run_results(run_id: str) -> dict[str, Any] | None:
             data["replay_render_status"].update(_replay_frames_snapshot(out_dir, run_id))
     elif data.get("replay_render"):
         data["replay_render_status"] = data["replay_render"]
+    _enrich_results_damage_breakdown(data, out_dir)
     return data
 
 

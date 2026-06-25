@@ -105,6 +105,26 @@ def _infer_card_types(rec: dict[str, Any]) -> list[str]:
     return infer_types(rec)
 
 
+def _card_id_lookup_variants(card_id: str) -> list[str]:
+    token = str(card_id or "").strip()
+    if not token:
+        return []
+    variants = [token, token.lower()]
+    for mapped in (
+        token.replace("_", "-"),
+        token.replace("-", "_"),
+        normalize_card_id(token),
+    ):
+        if mapped and mapped not in variants:
+            variants.append(mapped)
+    return variants
+
+
+def _pitch_suffix(card_id: str) -> str | None:
+    match = _PITCH_SUFFIX.search(str(card_id or "").strip().lower())
+    return match.group(0) if match else None
+
+
 @lru_cache(maxsize=1)
 def _full_card_db_by_id() -> dict[str, dict[str, Any]]:
     try:
@@ -118,11 +138,8 @@ def _full_card_db_by_id() -> dict[str, dict[str, Any]]:
         cid = str(rec.get("id") or "").strip()
         if not cid:
             continue
-        out[cid] = rec
-        out[normalize_card_id(cid)] = rec
-        hyphen = cid.replace("_", "-")
-        if hyphen not in out:
-            out[hyphen] = rec
+        for alias in _card_id_lookup_variants(cid):
+            out[alias] = rec
     return out
 
 
@@ -191,22 +208,23 @@ class CardSearchIndex:
         return [hit for _, hit in scored[:limit]]
 
     def lookup(self, card_id: str) -> Optional[CardHit]:
-        token = card_id.strip().lower()
-        norm = normalize_card_id(card_id)
+        targets = set(_card_id_lookup_variants(card_id))
+        query_suffix = _pitch_suffix(card_id)
         for hit in self._cards:
-            if hit.card_id == card_id or hit.card_id.lower() == token:
-                return hit
-            if normalize_card_id(hit.card_id) == norm:
-                return hit
+            hit_variants = set(_card_id_lookup_variants(hit.card_id))
+            if not (targets & hit_variants):
+                continue
+            if query_suffix:
+                hit_suffix = _pitch_suffix(hit.card_id)
+                if hit_suffix and hit_suffix != query_suffix:
+                    continue
+            return hit
 
-        rec = (
-            _full_card_db_by_id().get(card_id)
-            or _full_card_db_by_id().get(token)
-            or _full_card_db_by_id().get(norm)
-            or _full_card_db_by_id().get(card_id.replace("_", "-"))
-        )
-        if rec is not None:
-            return _record_to_hit(rec)
+        db = _full_card_db_by_id()
+        for variant in _card_id_lookup_variants(card_id):
+            rec = db.get(variant)
+            if rec is not None:
+                return _record_to_hit(rec)
         return None
 
 

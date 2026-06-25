@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>FAB RL Bridge — Sideboard Compare</title>
-  <link rel="stylesheet" href="/static/styles.css?v=5" />
+  <link rel="stylesheet" href="/static/styles.css?v=7" />
 </head>
 <body>
   <header>
@@ -40,6 +40,16 @@
           <select id="saved-select"><option value="">— select saved list —</option></select>
           <button type="button" id="btn-load-saved" class="secondary">Load saved list</button>
           <div id="player-deck-summary" class="hint" style="margin-top:0.75rem"></div>
+          <div id="equipment-section" hidden style="margin-top:0.75rem">
+            <h4>Equipment loadout</h4>
+            <p class="hint">Click a slot to browse equippable alternatives for that slot. Adjust loadout before selecting an opponent.</p>
+            <div id="equipment-loadout" class="equipment-loadout-grid"></div>
+            <div id="equipment-picker" hidden>
+              <h4 id="equipment-picker-title"></h4>
+              <input id="equipment-filter" type="search" placeholder="Filter alternatives…" autocomplete="off" />
+              <div id="equipment-results" class="search-results equipment-results"></div>
+            </div>
+          </div>
         </div>
         <div class="card">
           <h3>Opponent</h3>
@@ -57,16 +67,6 @@
           <div id="decks-status" class="hint" style="margin-top:1rem"></div>
         </div>
       </div>
-      <div id="equipment-section" class="card" style="margin-top:1rem" hidden>
-        <h3>Equipment loadout</h3>
-        <p class="hint">Click a slot to browse equippable alternatives for that slot. Adjust loadout before selecting an opponent.</p>
-        <div id="equipment-loadout" class="equipment-loadout-grid"></div>
-        <div id="equipment-picker" hidden>
-          <h4 id="equipment-picker-title"></h4>
-          <input id="equipment-filter" type="search" placeholder="Filter alternatives…" autocomplete="off" />
-          <div id="equipment-results" class="search-results equipment-results"></div>
-        </div>
-      </div>
     </section>
 
     <!-- Deck editor -->
@@ -74,39 +74,39 @@
       <h2>Deck editor</h2>
       <p class="hint">Click a card in your deck to remove it. Search and click cards to add until the deck reaches the required size.</p>
       <div id="deck-status" class="deck-status"></div>
-      <div class="grid-2">
-        <div class="card">
+      <div class="editor-layout">
+        <div class="card editor-main">
           <h3>Main deck</h3>
           <div id="deck-grid" class="deck-grid deck-grid--slots"></div>
         </div>
-        <div class="card">
+        <div class="card editor-add">
           <h3>Add cards</h3>
           <input id="card-search" type="search" placeholder="Search cards by name…" autocomplete="off" />
-          <div id="search-results" class="search-results"></div>
+          <div id="search-results" class="search-results search-results--editor"></div>
           <div class="row" style="margin-top:0.75rem">
             <button type="button" id="btn-save-deck" class="secondary">Save list</button>
           </div>
         </div>
-      </div>
-      <div class="card" style="margin-top:1rem">
-        <h3>Evaluation &amp; training</h3>
-        <p class="hint">Edit your deck, save alternates to compare, then start training. The current editor deck is the baseline.</p>
-        <div class="row">
-          <button type="button" id="btn-save-eval">Save for evaluation</button>
-        </div>
-        <div id="eval-candidates-list" class="eval-candidates-list"></div>
-        <div class="training-params grid-2" style="margin-top:1rem">
-          <div>
-            <label for="play-episodes">Play episodes per list</label>
-            <input id="play-episodes" type="number" min="100" step="100" value="5000" />
+        <aside class="card editor-sidebar">
+          <h3>Evaluation &amp; training</h3>
+          <p class="hint">Edit your deck, save alternates to compare, then start training. The current editor deck is the baseline.</p>
+          <div class="row">
+            <button type="button" id="btn-save-eval">Save for evaluation</button>
           </div>
-          <div>
-            <label for="final-eval-episodes">Final eval games per list</label>
-            <input id="final-eval-episodes" type="number" min="10" step="10" value="50" />
+          <div id="eval-candidates-list" class="eval-candidates-list"></div>
+          <div class="training-params" style="margin-top:1rem">
+            <div>
+              <label for="play-episodes">Play episodes per list</label>
+              <input id="play-episodes" type="number" min="100" step="100" value="5000" />
+            </div>
+            <div>
+              <label for="final-eval-episodes">Final eval games per list</label>
+              <input id="final-eval-episodes" type="number" min="10" step="10" value="50" />
+            </div>
           </div>
-        </div>
-        <div id="train-review" class="hint" style="margin-top:0.75rem"></div>
-        <button type="button" id="btn-start-training" style="margin-top:0.75rem">Start sideboard comparison</button>
+          <div id="train-review" class="hint" style="margin-top:0.75rem"></div>
+          <button type="button" id="btn-start-training" style="margin-top:0.75rem">Start sideboard comparison</button>
+        </aside>
       </div>
     </section>
 
@@ -141,6 +141,23 @@
           </table>
           <p id="results-meta" class="hint" style="margin-top:1rem"></p>
         </div>
+        <div class="card" id="results-damage-panel" style="margin-top:1rem" hidden>
+          <h3>Card impact (final eval)</h3>
+          <p class="hint">Damage dealt vs taken across final evaluation games, aggregated by card.</p>
+          <label for="results-damage-candidate">Candidate</label>
+          <select id="results-damage-candidate"></select>
+          <div id="results-damage-summary" class="hint" style="margin-top:0.5rem"></div>
+          <div class="results-damage-grid">
+            <div>
+              <h4>Top damage dealt</h4>
+              <div id="results-damage-dealt" class="results-damage-list"></div>
+            </div>
+            <div>
+              <h4>Top damage taken (source)</h4>
+              <div id="results-damage-taken" class="results-damage-list"></div>
+            </div>
+          </div>
+        </div>
         <div class="card" style="margin-top:1rem">
           <h3>Replay</h3>
           <p class="hint">One greedy-policy game rendered through Talishar-FE (Playwright screenshots). Live frames appear during capture, then the GIF replaces them when ready.</p>
@@ -165,6 +182,6 @@
     </div>
     <div class="card-preview__caption"></div>
   </div>
-  <script src="/static/app.js?v=9"></script>
+  <script src="/static/app.js?v=11"></script>
 </body>
 </html>

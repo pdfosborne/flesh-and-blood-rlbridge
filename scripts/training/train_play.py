@@ -31,6 +31,7 @@ if str(_RL_SRC) not in sys.path:
 from flesh_and_blood_rlbridge import TalisharEngineEnvironment  # noqa: E402
 from flesh_and_blood_rlbridge.opponent_deck import normalize_talishar_asset_name  # noqa: E402
 
+from eval_damage_stats import EvalDamageAccumulator, merge_damage_breakdowns  # noqa: E402
 from train_pipeline_common import (  # noqa: E402
     DEFAULT_AGENT_CACHE_DIR,
     DEFAULT_EQUIPMENT_HEADER,
@@ -3024,6 +3025,7 @@ def run_final_evaluation(
     timeouts = 0
     episode_log: list[dict[str, Any]] = []
     turn_trajectories: list[dict[int, tuple[int, int]]] = []
+    episode_damage_breakdowns: list[dict[str, Any]] = []
 
     progress_t0 = datetime.now()
 
@@ -3128,6 +3130,9 @@ def run_final_evaluation(
                     timeouts += 1
 
                 turn_trajectories.append(turn_hp)
+                damage_acc = EvalDamageAccumulator(deck_card_ids=set(game_deck.keys()))
+                damage_acc.ingest_trace(env.get_combat_trace())
+                episode_damage_breakdowns.append(damage_acc.to_dict())
                 episode_log.append({
                     "episode": ep,
                     "outcome": outcome,
@@ -3164,6 +3169,7 @@ def run_final_evaluation(
         episode_log=episode_log,
     )
     hp_by_turn = _aggregate_hp_by_turn(turn_trajectories)
+    damage_breakdown = merge_damage_breakdowns(episode_damage_breakdowns)
     player_label = hero_id.replace("_", " ").title()
     opponent_label = opponent_hero_id.replace("_", " ").title()
     hp_chart_path = out_dir / f"{player}_final_eval_hp_by_turn.png"
@@ -3255,6 +3261,7 @@ def run_final_evaluation(
         "analysis": {
             "summary": outcome_summary,
             "hp_by_turn": hp_by_turn,
+            "damage_breakdown": damage_breakdown,
             "charts": {
                 "hp_by_turn": str(hp_chart_path) if chart_ok else None,
             },

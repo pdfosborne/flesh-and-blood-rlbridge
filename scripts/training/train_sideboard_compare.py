@@ -530,6 +530,7 @@ def _final_eval_candidate(
         return {"skipped": True, "reason": summary.get("reason", "unknown")}
 
     eval_block = summary.get("eval") or {}
+    analysis = summary.get("analysis") or {}
     return {
         "win_rate": float(eval_block.get("win_rate", 0.0)),
         "wins": int(eval_block.get("wins", 0)),
@@ -537,6 +538,7 @@ def _final_eval_candidate(
         "draws": int(eval_block.get("draws", 0)),
         "episodes": int(eval_block.get("episodes", args.final_eval_episodes)),
         "json": str(eval_dir / f"{agents.player}_final_eval.json"),
+        "damage_breakdown": analysis.get("damage_breakdown"),
     }
 
 

@@ -35,7 +35,7 @@ class MetaRuntime:
 
     # ── Checkpoints during training ──────────────────────────────────────────
     checkpoint_interval_pct: float = 5.0
-    checkpoint_eval_episodes: int = min(500, int(play_episodes/100)) # 1% of play episodes
+    checkpoint_eval_episodes: int = min(100, int(play_episodes/100)) # 1% of play episodes
     play_checkpoint_interval: int | None = int(play_episodes/20) # 5% of play episodes
 
     # ── Per-episode limits & warmup ──────────────────────────────────────────

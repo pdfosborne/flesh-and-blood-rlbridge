@@ -20,17 +20,19 @@ cd flesh-and-blood-rlbridge
 ./scripts/docker-setup.sh --foreground
 ```
 
-Or run detached: `./scripts/docker-setup.sh` (same as `docker compose up --build -d` plus CLI setup).
+Then open **http://localhost:8765** in your browser. 
 
-Open **http://localhost:8765** in your browser. The Talishar game server starts on port **8080** and **Talishar-FE** on **http://localhost:5173** (cloned and started automatically on first run).
+The initial install will take a few minutes, once setup you can run the docker server with the following command (use inside the flesh-and-blood-rlbridge directory):
+
+```bash
+docker compose up
+```
 
 **CLI commands** (`fab-tui`, `fab-gui`, `fab-bridge`) are installed in the Docker image and exposed on the host via wrappers in `bin/` — no separate Python venv required:
 
 ```bash
 source scripts/docker-env.sh   # once per shell
 fab-tui                        # terminal UI (second terminal while compose is up)
-fab-gui                        # open web GUI in browser
-fab-bridge init                # other subcommands
 ```
 
 Training output and saved sideboard lists are written to **`results/`** in the repo (e.g. `results/sideboard_compare/`, `results/tui_decks/saved/`). Generated deck files for final evaluation are written to **`Talishar/Assets/`** (shared with the Talishar container). Replay GIFs on the Results tab use the bundled Talishar-FE container.
@@ -42,10 +44,6 @@ Stop everything with `Ctrl+C`, then:
 ```bash
 docker compose down
 ```
-
-If `fab-tui: command not found`, run `source scripts/docker-env.sh` (or add `bin/` to your `PATH`). You can also invoke directly: `./bin/fab-tui` or `docker compose exec -it fab-bridge fab-tui`.
-
-For **local Python development** without Docker wrappers, use [Option B](#option-b---local-python-recommended-for-development) below.
 
 ### Option B - Local Python (recommended for development)
 
@@ -69,6 +67,38 @@ source .venv/bin/activate && fab-gui
 ```
 
 `setup` creates a venv, installs the package, verifies `Talishar/Assets`, and starts the Talishar backend via Docker.
+
+
+#### Starting and stopping
+
+```bash
+# Backend only (recommended for training)
+python start_talishar.py --backend-only
+fab-bridge talishar --backend-only
+
+# Backend + FE together
+python start_talishar.py
+
+# Stop backend containers
+python start_talishar.py --down
+fab-bridge talishar --down
+```
+
+Or use Docker Compose from the repo root (starts backend + GUI + host CLI wrappers):
+
+```bash
+./scripts/docker-setup.sh --foreground
+source scripts/docker-env.sh   # once per shell; then fab-tui / fab-gui / fab-bridge
+```
+
+#### Talishar-FE
+
+If you use [Option B](#option-b---local-python-recommended-for-development) without the root Docker stack, clone and start Talishar-FE from your `flesh-and-blood-rlbridge` checkout:
+
+```bash
+git clone https://github.com/Talishar/Talishar-FE
+python start_talishar.py --fe-only
+```
 
 ### Commands
 
@@ -99,50 +129,6 @@ This package wraps the [Talishar](https://talishar.net/) server into Gym-compati
 
 ---
 
-## Talishar Setup
-
-The RL pipeline requires the Talishar game server running locally.
-
-| Component | Directory | Default URL |
-|-----------|-----------|-------------|
-| Talishar backend (PHP + Docker) | `Talishar/` | `http://localhost:8080` |
-| Talishar-FE (Vite) | `Talishar-FE/` (auto-cloned) | `http://localhost:5173` |
-
-With **Docker** (`./scripts/docker-setup.sh`), Talishar-FE is cloned on first start and run as a compose service. Use **http://localhost:5173** for live play (TUI option 5) and Results-tab replay GIFs.
-
-### Talishar-FE (local Python only)
-
-If you use [Option B](#option-b---local-python-recommended-for-development) without the root Docker stack, clone and start Talishar-FE from your `flesh-and-blood-rlbridge` checkout:
-
-```bash
-git clone https://github.com/Talishar/Talishar-FE
-python start_talishar.py --fe-only
-```
-
-### Starting and stopping
-
-```bash
-# Backend only (recommended for training)
-python start_talishar.py --backend-only
-fab-bridge talishar --backend-only
-
-# Backend + FE together
-python start_talishar.py
-
-# Stop backend containers
-python start_talishar.py --down
-fab-bridge talishar --down
-```
-
-Or use Docker Compose from the repo root (starts backend + GUI + host CLI wrappers):
-
-```bash
-./scripts/docker-setup.sh --foreground
-source scripts/docker-env.sh   # once per shell; then fab-tui / fab-gui / fab-bridge
-```
-
----
-
 ## Interactive launcher
 
 | Entry point | Description |
@@ -167,64 +153,6 @@ source scripts/docker-env.sh   # once per shell; then fab-tui / fab-gui / fab-br
 
 - Options **3–5** need the Talishar backend (`fab-bridge init` or `python start_talishar.py --backend-only`).
 - Option **5** also needs Talishar-FE (`http://localhost:5173`; started automatically with Docker).
-
----
-
-## Implementation status
-
-### Three-phase pipeline
-
-| Step | Status | Notes |
-|------|--------|-------|
-| **Phase 1 - Deck tuning** | ✓ | Starting from a deck, swap specific cards and evaluate variants by win rate (e.g. sideboard comparison). |
-| **Phase 2 - Sideboard** | ✓ | A default policy auto-selects the game deck for each matchup; you can override manually when needed. |
-| **Phase 3 - Play** | ✓ | Dual-agent PPO self-play. Training uses the **C++ engine** when built; checkpoints and final eval can use Talishar HTTP. |
-| **Final evaluation** | ✓ | Win-rate games on the Talishar backend; optional GIF replay via Talishar-FE + Playwright. |
-
-### TUI & launcher
-
-| Step | Status | Notes |
-|------|--------|-------|
-| **1 - Sideboard comparison** | ✓ | Swap variants, parallel Phase 3 training, HTML dashboard. |
-| **2 - Fixed deck simulation** | ✓ | Two fixed decks, optional C++ engine, play training + final eval. |
-| **3 - Evaluate checkpoints** | ✓ | Win-rate eval or GIF render-only; can watch for new checkpoints. |
-| **4 - Evaluate trained agent** | ✓ | Extra Talishar eval games against a completed run. |
-| **5 - Real-time Talishar play** | ✓ | Watch agent or play against it in Chromium; optional agent-coach overlay. |
-| **6 - Settings** | ✓ | Talishar URLs, Assets path, FaBrary key, card DB rescan / ID normalization. |
-| **Agent coach overlay** | ✓ | Policy % and C++ win estimates during human vs agent play. |
-
-### Reinforcement Learning Agents
-
-| Step | Status | Notes |
-|------|--------|-------|
-| **PPO** | ✓ | Simple PPO agent implementation. |
-| **Warm-start Training** | ✓ | Logic based policy (best net attack for current hand) used for early exploration. |
-| **Agent Cache** | ✓ | Store trained agents, re-use for future runs. |
-
-### Simulation backends
-
-| Backend | Status | Notes |
-|---------|--------|-------|
-| **HTTP Talishar** | ✓ | Full FaB rules via local Docker backend. Required for live play, GIF rendering, and authoritative final eval. |
-| **C++ engine** | Partial | Auto-generated per matchup (`scripts/cpp/generate_cpp_engine.py`). Fast and thread-safe for training, but uses a simplified turn loop and **per-card stubs** that must be translated from Talishar PHP. |
-| **C++ ↔ Talishar parity** | Partial | Checker at `scripts/cpp/check_cpp_vs_talishar_parity.py`; expect discrepancies until card stubs are finished. |
-| **Legacy Python simulator** | ✓ | `FleshAndBloodGameplayEnvironment` - lightweight scripted opponent, not full Talishar rules. |
-
-### Integrations & tooling
-
-| Feature | Status | Notes |
-|---------|--------|-------|
-| **FaBrary deck fetch** | ✓ | URL, slug, or local JSON throughout TUI and training scripts. |
-| **Format rules** | ✓ | Silver Age, Classic Constructed, Blitz, UPF (SAGE maps to Silver Age). |
-| **MCP tools** | ✓ | `fab_simulate_matchup`, `fab_simulate_vs_fixed_opponent`, `fab_run_full_pipeline`, `fab_start_talishar`. |
-| **Card database** | ✓ | ~6,900 cards; rescan from FAB Card Vault; Talishar ID normalization. |
-
-### Not yet implemented or intentionally limited
-
-- **Full Talishar fidelity in C++ training** - training win rates reflect the compiled C++ engine, not Talishar due to runtime costs.
-- **Complete card effect coverage** - ~447 cards still have partial, unparsed, or missing effect logic (see `card_db/unimplemented_cards.md`).
-- **Arbitrary-deck C++ engine without build step** - each matchup needs generation + compile under `results/cpp_engines/`.
-- **Cloud / remote Talishar** - workflows assume a local backend.
 
 ---
 
