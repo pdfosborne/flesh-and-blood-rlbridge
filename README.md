@@ -70,6 +70,17 @@ source .venv/bin/activate && fab-gui
 
 `setup` creates a venv, installs the package, verifies `Talishar/Assets`, and starts the Talishar backend via Docker.
 
+**Fix permission errors:**
+
+```bash
+docker compose down
+cd Talishar && docker compose down && cd ..
+sudo chown -R "$USER:$USER" results Talishar .venv
+rm -rf .venv
+./scripts/setup.sh
+source .venv/bin/activate && fab-gui
+```
+
 
 #### Starting and stopping
 

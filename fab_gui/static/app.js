@@ -54,11 +54,6 @@ function switchTab(name) {
   if (name === "results" && state.activeRun) loadResults(state.activeRun.run_id);
   if (name === "opponent") {
     updateOpponentSummary();
-    if (state.opponent && !state.lastOpponentSearchCards) {
-      void doOpponentCardSearch(document.getElementById("opponent-card-search")?.value || "");
-    } else {
-      refreshOpponentSearchResults();
-    }
   }
 }
 
@@ -234,6 +229,8 @@ function cardTileHtml(card, { action = "", extraClass = "", title = "", disabled
 
 let cardPreviewTile = null;
 
+const CARD_PREVIEW_HOVER_SELECTOR = ".card-tile:not(.card-tile--disabled), .deck-list-item";
+
 function initCardPreviewHover() {
   const preview = document.getElementById("card-preview");
   if (!preview) return;
@@ -266,13 +263,14 @@ function initCardPreviewHover() {
 
   const showCardPreview = (tile, event) => {
     const cardId = tile.dataset.cardId || tile.getAttribute("data-card-id") || "";
+    const meta = cardMetaFor(cardId);
     const name =
       tile.querySelector(".card-tile__name")?.textContent?.trim() ||
-      cardMetaFor(cardId).name ||
+      tile.querySelector(".deck-list-item__name")?.textContent?.trim() ||
+      meta.name ||
       cardId.replace(/_/g, " ");
     const classification =
-      tile.querySelector(".card-tile__type")?.textContent?.trim() ||
-      cardClassification(cardMetaFor(cardId));
+      tile.querySelector(".card-tile__type")?.textContent?.trim() || cardClassification(meta);
 
     previewCaption.textContent = name;
     preview.hidden = false;
@@ -289,7 +287,7 @@ function initCardPreviewHover() {
       `;
     };
 
-    if (tile.classList.contains("card-tile--no-img")) {
+    if (tile.classList.contains("card-tile") && tile.classList.contains("card-tile--no-img")) {
       showFallback();
       return;
     }
@@ -308,7 +306,7 @@ function initCardPreviewHover() {
   document.body.addEventListener(
     "mouseover",
     (event) => {
-      const tile = event.target.closest(".card-tile:not(.card-tile--disabled)");
+      const tile = event.target.closest(CARD_PREVIEW_HOVER_SELECTOR);
       if (!tile) {
         if (cardPreviewTile) hideCardPreview();
         return;
@@ -329,7 +327,7 @@ function initCardPreviewHover() {
     "mouseout",
     (event) => {
       if (!cardPreviewTile) return;
-      const leftTile = event.target.closest(".card-tile") === cardPreviewTile;
+      const leftTile = event.target.closest(CARD_PREVIEW_HOVER_SELECTOR) === cardPreviewTile;
       if (!leftTile) return;
       const related = event.relatedTarget;
       if (related && cardPreviewTile.contains(related)) return;
@@ -489,6 +487,57 @@ function searchHitHtml(c, { canAdd = true } = {}) {
   });
 }
 
+function sortDeckEntriesForList(entries) {
+  return [...entries].sort((a, b) => {
+    const pa = pitchNumericFromCardId(a.card_id) ?? 99;
+    const pb = pitchNumericFromCardId(b.card_id) ?? 99;
+    if (pa !== pb) return pa - pb;
+    return cardDisplayName(a).localeCompare(cardDisplayName(b));
+  });
+}
+
+function compactDeckListHtml(entries) {
+  const sorted = sortDeckEntriesForList(entries);
+  if (!sorted.length) return '<div class="hint">No deck cards loaded.</div>';
+  return sorted
+    .map((entry) => {
+      const pitch = pitchFromCard(entry);
+      const pitchClass = pitch ? ` deck-list-item--pitch-${pitch}` : "";
+      const count =
+        Number(entry.count) > 1
+          ? `<span class="deck-list-item__count">${entry.count}×</span>`
+          : "";
+      return `<div class="deck-list-item${pitchClass}" data-card-id="${escapeHtml(entry.card_id)}">
+      ${count}<span class="deck-list-item__name">${escapeHtml(cardDisplayName(entry))}</span>
+    </div>`;
+    })
+    .join("");
+}
+
+function renderPlayerDeckList() {
+  const el = document.getElementById("player-deck-list");
+  if (!el) return;
+  if (!state.deck) {
+    el.innerHTML = "";
+    return;
+  }
+  el.innerHTML = compactDeckListHtml(state.deck.deck_entries || []);
+}
+
+function renderOpponentDeckList() {
+  const wrap = document.getElementById("opponent-deck-list-wrap");
+  const el = document.getElementById("opponent-deck-list");
+  if (!el) return;
+  const entries = state.opponent?.deck_entries || [];
+  if (!state.opponent || !entries.length) {
+    if (wrap) wrap.hidden = true;
+    el.innerHTML = "";
+    return;
+  }
+  if (wrap) wrap.hidden = false;
+  el.innerHTML = compactDeckListHtml(entries);
+}
+
 function renderDeck() {
   if (!state.deck) return;
   const deckGrid = document.getElementById("deck-grid");
@@ -496,7 +545,10 @@ function renderDeck() {
   bindCardTileImages(deckGrid);
   bindDeckSlotClicks();
   renderDeckStatus();
-  refreshSearchResults();
+  renderPlayerDeckList();
+  if (!document.getElementById("editor-cards-modal")?.hidden) {
+    refreshSearchResults();
+  }
   document.getElementById("player-deck-summary").textContent = state.deck.name
     ? `${state.deck.name} · ${state.deck.hero_id} · ${state.deck.game_format}`
     : "";
@@ -540,6 +592,7 @@ function bindSearchClicks() {
         return;
       }
       renderDeck();
+      openEditorCardsModal();
       toast(`Added ${card.name}`);
     };
   });
@@ -710,6 +763,8 @@ function setOpponent(opp) {
   state.opponentSelectedEquip = null;
   state.opponentEquipAlternatives = [];
   state.opponentEquipLoadout = [];
+  closeOpponentEquipmentModal();
+  closeOpponentCardsModal();
   for (const entry of [
     ...(opp.deck_entries || []),
     ...(opp.pool_entries || []),
@@ -770,7 +825,6 @@ function opponentEquipmentQueryParams() {
 
 async function renderOpponentLoadout() {
   const container = document.getElementById("opponent-equipment-loadout");
-  const picker = document.getElementById("opponent-equipment-picker");
   const equipHint = document.querySelector(".opponent-equipment-hint");
   const equipHeading = document.querySelector(".opponent-equipment-heading");
   if (!container) return;
@@ -779,9 +833,9 @@ async function renderOpponentLoadout() {
   if (!opp) {
     container.hidden = true;
     container.innerHTML = "";
-    if (picker) picker.hidden = true;
     if (equipHint) equipHint.hidden = true;
     if (equipHeading) equipHeading.hidden = true;
+    closeOpponentEquipmentModal();
     state.opponentSelectedEquip = null;
     state.opponentEquipAlternatives = [];
     state.opponentEquipLoadout = [];
@@ -792,9 +846,9 @@ async function renderOpponentLoadout() {
   if (!header) {
     container.hidden = true;
     container.innerHTML = "";
-    if (picker) picker.hidden = true;
     if (equipHint) equipHint.hidden = true;
     if (equipHeading) equipHeading.hidden = true;
+    closeOpponentEquipmentModal();
     return;
   }
 
@@ -806,9 +860,9 @@ async function renderOpponentLoadout() {
     if (!loadout.length) {
       container.hidden = true;
       container.innerHTML = "";
-      if (picker) picker.hidden = true;
       if (equipHint) equipHint.hidden = true;
       if (equipHeading) equipHeading.hidden = true;
+      closeOpponentEquipmentModal();
       return;
     }
     for (const row of loadout) rememberCardMeta(row);
@@ -830,8 +884,8 @@ async function renderOpponentLoadout() {
           .filter(Boolean)
           .join(" ");
         return `<div class="${classes}" data-slot="${e.slot}" data-index="${e.index}" data-card-id="${e.card_id}" ${selectable ? 'role="button" tabindex="0"' : ""}>
-      ${cardTileHtml(e, { extraClass: "card-tile--thumb", title: e.name })}
-      <div><strong>${e.slot_label}</strong><br><span class="hint">${escapeHtml(e.name)}</span></div>
+      ${cardTileHtml(e, { title: e.name })}
+      <div class="equipment-slot__label"><strong>${e.slot_label}</strong><span class="hint">${escapeHtml(e.name)}</span></div>
     </div>`;
       })
       .join("");
@@ -855,18 +909,92 @@ async function renderOpponentLoadout() {
       if (stillThere) {
         await loadOpponentEquipmentAlternatives();
       } else {
-        state.opponentSelectedEquip = null;
-        state.opponentEquipAlternatives = [];
-        if (picker) picker.hidden = true;
+        closeOpponentEquipmentModal();
       }
     }
   } catch {
     container.hidden = true;
     container.innerHTML = "";
-    if (picker) picker.hidden = true;
     if (equipHint) equipHint.hidden = true;
     if (equipHeading) equipHeading.hidden = true;
+    closeOpponentEquipmentModal();
   }
+}
+
+function syncModalBodyLock() {
+  const anyOpen = [
+    "equipment-modal",
+    "opponent-equipment-modal",
+    "opponent-cards-modal",
+    "editor-cards-modal",
+  ].some((id) => {
+    const el = document.getElementById(id);
+    return el && !el.hidden;
+  });
+  document.body.classList.toggle("equipment-modal-open", anyOpen);
+}
+
+function openOpponentEquipmentModal() {
+  const modal = document.getElementById("opponent-equipment-modal");
+  if (!modal) return;
+  modal.hidden = false;
+  modal.setAttribute("aria-hidden", "false");
+  syncModalBodyLock();
+}
+
+function closeOpponentEquipmentModal() {
+  const modal = document.getElementById("opponent-equipment-modal");
+  if (modal) {
+    modal.hidden = true;
+    modal.setAttribute("aria-hidden", "true");
+  }
+  state.opponentSelectedEquip = null;
+  state.opponentEquipAlternatives = [];
+  const container = document.getElementById("opponent-equipment-loadout");
+  if (container) {
+    container.querySelectorAll(".equipment-slot.selected").forEach((el) => el.classList.remove("selected"));
+  }
+  syncModalBodyLock();
+}
+
+function openOpponentCardsModal() {
+  const modal = document.getElementById("opponent-cards-modal");
+  if (!modal || !state.opponent) return;
+  modal.hidden = false;
+  modal.setAttribute("aria-hidden", "false");
+  syncModalBodyLock();
+  const search = document.getElementById("opponent-card-search");
+  void doOpponentCardSearch(search?.value || "");
+  search?.focus();
+}
+
+function closeOpponentCardsModal() {
+  const modal = document.getElementById("opponent-cards-modal");
+  if (modal) {
+    modal.hidden = true;
+    modal.setAttribute("aria-hidden", "true");
+  }
+  syncModalBodyLock();
+}
+
+function openEditorCardsModal() {
+  const modal = document.getElementById("editor-cards-modal");
+  if (!modal || !state.deck) return;
+  modal.hidden = false;
+  modal.setAttribute("aria-hidden", "false");
+  syncModalBodyLock();
+  const search = document.getElementById("card-search");
+  void doCardSearch(search?.value || "");
+  search?.focus();
+}
+
+function closeEditorCardsModal() {
+  const modal = document.getElementById("editor-cards-modal");
+  if (modal) {
+    modal.hidden = true;
+    modal.setAttribute("aria-hidden", "true");
+  }
+  syncModalBodyLock();
 }
 
 async function selectOpponentEquipmentSlot(index) {
@@ -879,8 +1007,10 @@ async function selectOpponentEquipmentSlot(index) {
     card_id: row.card_id,
     name: row.name,
   };
-  document.getElementById("opponent-equipment-filter").value = "";
+  const filter = document.getElementById("opponent-equipment-filter");
+  if (filter) filter.value = "";
   await renderOpponentLoadout();
+  openOpponentEquipmentModal();
 }
 
 function filteredOpponentEquipAlternatives() {
@@ -895,15 +1025,15 @@ function filteredOpponentEquipAlternatives() {
 }
 
 function renderOpponentEquipmentAlternatives() {
-  const picker = document.getElementById("opponent-equipment-picker");
   const title = document.getElementById("opponent-equipment-picker-title");
   const el = document.getElementById("opponent-equipment-results");
   if (!state.opponentSelectedEquip) {
-    if (picker) picker.hidden = true;
+    closeOpponentEquipmentModal();
     return;
   }
-  picker.hidden = false;
-  title.textContent = `${state.opponentSelectedEquip.slot_label} — pick equipment`;
+  if (title) {
+    title.textContent = `${state.opponentSelectedEquip.slot_label} — pick equipment`;
+  }
   const items = filteredOpponentEquipAlternatives();
   if (!items.length) {
     el.innerHTML = '<div class="empty-state">No matching equipment for this slot.</div>';
@@ -937,6 +1067,7 @@ function renderOpponentEquipmentAlternatives() {
         const pick = state.opponentSelectedEquip;
         state.opponentSelectedEquip = { ...pick, card_id: cardId };
         await renderOpponentLoadout();
+        openOpponentEquipmentModal();
         const name =
           state.opponentEquipAlternatives.find((c) => c.card_id === cardId)?.name || cardId;
         toast(`Opponent equipped ${name} in ${pick.slot_label}`);
@@ -966,6 +1097,7 @@ function renderOpponentDeck() {
     panel.hidden = true;
     grid.innerHTML = "";
     label.textContent = "";
+    renderOpponentDeckList();
     void renderOpponentLoadout();
     return;
   }
@@ -974,7 +1106,7 @@ function renderOpponentDeck() {
   void renderOpponentLoadout();
 
   const editHint = panel.querySelector(".opponent-edit-hint");
-  const addCards = panel.querySelector(".opponent-add-cards");
+  const addBtn = document.getElementById("btn-opponent-add-cards");
   const saveBtn = document.getElementById("btn-save-opponent");
   const statusEl = document.getElementById("opponent-deck-status");
   const entries = state.opponent.deck_entries || [];
@@ -982,14 +1114,16 @@ function renderOpponentDeck() {
     grid.innerHTML = "";
     label.textContent = "Opponent loadout — main deck appears after guide policy sideboarding.";
     if (editHint) editHint.hidden = true;
-    if (addCards) addCards.hidden = true;
+    if (addBtn) addBtn.hidden = true;
     if (saveBtn) saveBtn.hidden = true;
     if (statusEl) statusEl.textContent = "";
+    closeOpponentCardsModal();
+    renderOpponentDeckList();
     return;
   }
 
   if (editHint) editHint.hidden = false;
-  if (addCards) addCards.hidden = false;
+  if (addBtn) addBtn.hidden = false;
   if (saveBtn) saveBtn.hidden = false;
 
   label.textContent =
@@ -1006,7 +1140,7 @@ function renderOpponentDeck() {
   bindCardTileImages(grid);
   bindOpponentDeckClicks();
   renderOpponentDeckStatus();
-  refreshOpponentSearchResults();
+  renderOpponentDeckList();
 }
 
 function bindOpponentDeckClicks() {
@@ -1045,6 +1179,7 @@ function refreshOpponentSearchResults() {
         return;
       }
       renderOpponentDeck();
+      openOpponentCardsModal();
       toast(`Added ${card.name} to opponent deck`);
     };
   });
@@ -1416,6 +1551,7 @@ async function renderEquipment() {
     if (section) section.hidden = true;
     state.selectedEquip = null;
     state.equipAlternatives = [];
+    closeEquipmentModal();
     return;
   }
   if (section) section.hidden = false;
@@ -1426,7 +1562,7 @@ async function renderEquipment() {
   const container = document.getElementById("equipment-loadout");
   if (!loadout.length) {
     container.innerHTML = '<div class="hint">No equipment parsed from header.</div>';
-    document.getElementById("equipment-picker").hidden = true;
+    closeEquipmentModal();
     return;
   }
   container.innerHTML = loadout
@@ -1444,8 +1580,8 @@ async function renderEquipment() {
         .filter(Boolean)
         .join(" ");
       return `<div class="${classes}" data-slot="${e.slot}" data-index="${e.index}" data-card-id="${e.card_id}" ${selectable ? 'role="button" tabindex="0"' : ""}>
-      ${cardTileHtml(e, { extraClass: "card-tile--thumb", title: e.name })}
-      <div><strong>${e.slot_label}</strong><br><span class="hint">${escapeHtml(e.name)}</span></div>
+      ${cardTileHtml(e, { title: e.name })}
+      <div class="equipment-slot__label"><strong>${e.slot_label}</strong><span class="hint">${escapeHtml(e.name)}</span></div>
     </div>`;
     })
     .join("");
@@ -1467,11 +1603,32 @@ async function renderEquipment() {
     if (stillThere) {
       await loadEquipmentAlternatives();
     } else {
-      state.selectedEquip = null;
-      state.equipAlternatives = [];
-      document.getElementById("equipment-picker").hidden = true;
+      closeEquipmentModal();
     }
   }
+}
+
+function openEquipmentModal() {
+  const modal = document.getElementById("equipment-modal");
+  if (!modal) return;
+  modal.hidden = false;
+  modal.setAttribute("aria-hidden", "false");
+  syncModalBodyLock();
+}
+
+function closeEquipmentModal() {
+  const modal = document.getElementById("equipment-modal");
+  if (modal) {
+    modal.hidden = true;
+    modal.setAttribute("aria-hidden", "true");
+  }
+  state.selectedEquip = null;
+  state.equipAlternatives = [];
+  const container = document.getElementById("equipment-loadout");
+  if (container) {
+    container.querySelectorAll(".equipment-slot.selected").forEach((el) => el.classList.remove("selected"));
+  }
+  syncModalBodyLock();
 }
 
 async function selectEquipmentSlot(index) {
@@ -1485,8 +1642,10 @@ async function selectEquipmentSlot(index) {
     name: row.name,
   };
   state.selectedEquipSlot = row.index;
-  document.getElementById("equipment-filter").value = "";
+  const filter = document.getElementById("equipment-filter");
+  if (filter) filter.value = "";
   await renderEquipment();
+  openEquipmentModal();
 }
 
 function equipmentPickHtml(c, { current = false } = {}) {
@@ -1509,15 +1668,15 @@ function filteredEquipAlternatives() {
 }
 
 function renderEquipmentAlternatives() {
-  const picker = document.getElementById("equipment-picker");
   const title = document.getElementById("equipment-picker-title");
   const el = document.getElementById("equipment-results");
   if (!state.selectedEquip) {
-    picker.hidden = true;
+    closeEquipmentModal();
     return;
   }
-  picker.hidden = false;
-  title.textContent = `${state.selectedEquip.slot_label} — pick equipment`;
+  if (title) {
+    title.textContent = `${state.selectedEquip.slot_label} — pick equipment`;
+  }
   const items = filteredEquipAlternatives();
   if (!items.length) {
     el.innerHTML = '<div class="empty-state">No matching equipment for this slot.</div>';
@@ -1549,6 +1708,7 @@ function renderEquipmentAlternatives() {
         const pick = state.selectedEquip;
         state.selectedEquip = { ...pick, card_id: cardId };
         await renderEquipment();
+        openEquipmentModal();
         const name = state.equipAlternatives.find((c) => c.card_id === cardId)?.name || cardId;
         toast(`Equipped ${name} in ${pick.slot_label}`);
       } catch (e) {
@@ -1568,6 +1728,31 @@ async function loadEquipmentAlternatives() {
 }
 
 document.getElementById("equipment-filter").oninput = () => renderEquipmentAlternatives();
+document.getElementById("btn-close-equipment-modal")?.addEventListener("click", closeEquipmentModal);
+document.getElementById("equipment-modal")?.addEventListener("click", (event) => {
+  if (event.target.closest("[data-action='close-equipment-modal']")) closeEquipmentModal();
+});
+document.getElementById("btn-close-opponent-equipment-modal")?.addEventListener("click", closeOpponentEquipmentModal);
+document.getElementById("opponent-equipment-modal")?.addEventListener("click", (event) => {
+  if (event.target.closest("[data-action='close-opponent-equipment-modal']")) closeOpponentEquipmentModal();
+});
+document.getElementById("btn-close-opponent-cards-modal")?.addEventListener("click", closeOpponentCardsModal);
+document.getElementById("opponent-cards-modal")?.addEventListener("click", (event) => {
+  if (event.target.closest("[data-action='close-opponent-cards-modal']")) closeOpponentCardsModal();
+});
+document.getElementById("btn-opponent-add-cards")?.addEventListener("click", openOpponentCardsModal);
+document.getElementById("btn-editor-add-cards")?.addEventListener("click", openEditorCardsModal);
+document.getElementById("btn-close-editor-cards-modal")?.addEventListener("click", closeEditorCardsModal);
+document.getElementById("editor-cards-modal")?.addEventListener("click", (event) => {
+  if (event.target.closest("[data-action='close-editor-cards-modal']")) closeEditorCardsModal();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  if (!document.getElementById("editor-cards-modal")?.hidden) closeEditorCardsModal();
+  else if (!document.getElementById("opponent-cards-modal")?.hidden) closeOpponentCardsModal();
+  else if (!document.getElementById("opponent-equipment-modal")?.hidden) closeOpponentEquipmentModal();
+  else if (!document.getElementById("equipment-modal")?.hidden) closeEquipmentModal();
+});
 document.getElementById("opponent-equipment-filter")?.addEventListener("input", () =>
   renderOpponentEquipmentAlternatives()
 );
@@ -2050,7 +2235,6 @@ async function init() {
   await loadPrecons();
   await loadSavedDecks();
   await loadSavedOpponents();
-  doCardSearch("");
   if (state.opponent) doOpponentCardSearch("");
 }
 

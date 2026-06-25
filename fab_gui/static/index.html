@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>FAB RL Bridge — Sideboard Compare</title>
-  <link rel="stylesheet" href="/static/styles.css?v=15" />
+  <link rel="stylesheet" href="/static/styles.css?v=26" />
 </head>
 <body>
   <header>
@@ -45,18 +45,12 @@
         <div id="equipment-section" class="card deck-panel-card deck-panel-equipment" hidden>
           <h4>Equipment loadout</h4>
           <p class="hint">Click a slot to browse equippable alternatives. Adjust loadout before selecting an opponent.</p>
-          <div class="equipment-row">
-            <div class="equipment-loadout-col">
-              <div id="equipment-loadout" class="equipment-loadout-grid"></div>
-            </div>
-            <aside class="equipment-picker-col">
-              <p class="hint equipment-picker-placeholder">Select a slot to browse alternatives.</p>
-              <div id="equipment-picker" hidden>
-                <h4 id="equipment-picker-title"></h4>
-                <input id="equipment-filter" type="search" placeholder="Filter alternatives…" autocomplete="off" />
-                <div id="equipment-results" class="search-results equipment-results"></div>
-              </div>
-            </aside>
+          <div class="equipment-row equipment-row--deck">
+            <div id="equipment-loadout" class="equipment-loadout-grid equipment-loadout-grid--deck"></div>
+          </div>
+          <div class="player-deck-list-wrap">
+            <h4 class="player-deck-list-heading">Deck list</h4>
+            <div id="player-deck-list" class="player-deck-list"></div>
           </div>
         </div>
       </div>
@@ -67,47 +61,39 @@
       <h2>Opponent</h2>
       <p class="hint">Select or import an opponent deck. Guide policy sideboards both decks automatically when your deck is already loaded.</p>
       <div class="opponent-deck-layout">
-        <div class="card deck-panel-card deck-panel-import">
-          <label for="opponent-select">Talishar precon</label>
-          <select id="opponent-select"><option value="">— select opponent —</option></select>
-          <label for="opponent-fabrary-input">FaBrary URL or slug</label>
-          <input id="opponent-fabrary-input" type="text" placeholder="https://fabrary.net/decks/… or slug" />
-          <button type="button" id="btn-opponent-fabrary">Import opponent from FaBrary</button>
-          <label for="saved-opponent-select">Saved opponent lists</label>
-          <select id="saved-opponent-select"><option value="">— select saved opponent —</option></select>
-          <button type="button" id="btn-load-opponent-saved" class="secondary">Load saved opponent</button>
-          <div id="opponent-summary" class="hint" style="margin-top:0.75rem"></div>
-          <div id="opponent-status" class="hint" style="margin-top:0.75rem"></div>
+        <div class="opponent-import-col">
+          <div class="card deck-panel-card deck-panel-import">
+            <label for="opponent-select">Talishar precon</label>
+            <select id="opponent-select"><option value="">— select opponent —</option></select>
+            <label for="opponent-fabrary-input">FaBrary URL or slug</label>
+            <input id="opponent-fabrary-input" type="text" placeholder="https://fabrary.net/decks/… or slug" />
+            <button type="button" id="btn-opponent-fabrary">Import opponent from FaBrary</button>
+            <label for="saved-opponent-select">Saved opponent lists</label>
+            <select id="saved-opponent-select"><option value="">— select saved opponent —</option></select>
+            <button type="button" id="btn-load-opponent-saved" class="secondary">Load saved opponent</button>
+            <div id="opponent-summary" class="hint" style="margin-top:0.75rem"></div>
+            <div id="opponent-status" class="hint" style="margin-top:0.75rem"></div>
+          </div>
+          <div id="opponent-deck-list-wrap" class="card deck-panel-card opponent-deck-list-wrap" hidden>
+            <h4 class="opponent-deck-list-heading">Deck list</h4>
+            <div id="opponent-deck-list" class="compact-deck-list"></div>
+          </div>
         </div>
         <div id="opponent-deck-panel" class="card deck-panel-card deck-panel-edit" hidden>
           <div id="opponent-deck-label" class="hint"></div>
           <div id="opponent-deck-status" class="deck-status deck-status--compact"></div>
-          <div class="opponent-edit-row">
-            <div class="opponent-equipment-col">
+          <div class="opponent-deck-main">
+            <div class="opponent-equipment-section">
               <h4 class="opponent-equipment-heading">Equipment loadout</h4>
               <p class="hint opponent-equipment-hint" hidden>Click a slot to browse equippable alternatives for that slot.</p>
-              <div class="equipment-row opponent-equipment-row">
-                <div class="equipment-loadout-col">
-                  <div id="opponent-equipment-loadout" class="equipment-loadout-grid equipment-loadout-grid--opponent" hidden></div>
-                </div>
-                <aside class="equipment-picker-col">
-                  <p class="hint equipment-picker-placeholder">Select a slot to browse alternatives.</p>
-                  <div id="opponent-equipment-picker" hidden>
-                    <h4 id="opponent-equipment-picker-title"></h4>
-                    <input id="opponent-equipment-filter" type="search" placeholder="Filter alternatives…" autocomplete="off" />
-                    <div id="opponent-equipment-results" class="search-results equipment-results"></div>
-                  </div>
-                </aside>
-              </div>
+              <div id="opponent-equipment-loadout" class="equipment-loadout-grid equipment-loadout-grid--opponent-deck" hidden></div>
             </div>
-            <div class="opponent-deck-col">
-              <p class="hint opponent-edit-hint">Click a card to remove it. Search below to add cards from the opponent inventory.</p>
-              <div id="opponent-deck-grid" class="deck-grid deck-grid--opponent"></div>
-              <div class="opponent-add-cards">
-                <label for="opponent-card-search">Add cards to opponent deck</label>
-                <input id="opponent-card-search" type="search" placeholder="Search cards by name…" autocomplete="off" />
-                <div id="opponent-search-results" class="search-results search-results--opponent"></div>
+            <div class="opponent-deck-section">
+              <div class="opponent-deck-toolbar">
+                <p class="hint opponent-edit-hint">Click a card to remove it.</p>
+                <button type="button" id="btn-opponent-add-cards" class="secondary" hidden>Add cards</button>
               </div>
+              <div id="opponent-deck-grid" class="deck-grid deck-grid--opponent"></div>
             </div>
           </div>
           <button type="button" id="btn-save-opponent" class="secondary" style="margin-top:0.75rem">Save opponent list</button>
@@ -118,20 +104,18 @@
     <!-- Deck editor -->
     <section id="panel-editor" class="panel" role="tabpanel">
       <h2>Deck editor</h2>
-      <p class="hint">Click a card in your deck to remove it. Search and click cards to add until the deck reaches the required size.</p>
+      <p class="hint">Click a card in your deck to remove it. Use Add cards to search the inventory until the deck reaches the required size.</p>
       <div id="deck-status" class="deck-status"></div>
       <div class="editor-layout">
         <div class="card editor-main">
-          <h3>Main deck</h3>
-          <div id="deck-grid" class="deck-grid deck-grid--slots"></div>
-        </div>
-        <div class="card editor-add">
-          <h3>Add cards</h3>
-          <input id="card-search" type="search" placeholder="Search cards by name…" autocomplete="off" />
-          <div id="search-results" class="search-results search-results--editor"></div>
-          <div class="row" style="margin-top:0.75rem">
-            <button type="button" id="btn-save-deck" class="secondary">Save list</button>
+          <div class="editor-deck-toolbar">
+            <h3>Main deck</h3>
+            <div class="editor-deck-actions">
+              <button type="button" id="btn-editor-add-cards">Add cards</button>
+              <button type="button" id="btn-save-deck" class="secondary">Save list</button>
+            </div>
           </div>
+          <div id="deck-grid" class="deck-grid deck-grid--slots"></div>
         </div>
         <aside class="card editor-sidebar">
           <h3>Evaluation &amp; training</h3>
@@ -228,6 +212,50 @@
     </div>
     <div class="card-preview__caption"></div>
   </div>
-  <script src="/static/app.js?v=14"></script>
+  <div id="equipment-modal" class="equipment-modal" hidden aria-hidden="true">
+    <div class="equipment-modal__backdrop" data-action="close-equipment-modal"></div>
+    <div class="equipment-modal__panel" role="dialog" aria-modal="true" aria-labelledby="equipment-picker-title">
+      <div class="equipment-modal__header">
+        <h4 id="equipment-picker-title">Pick equipment</h4>
+        <button type="button" id="btn-close-equipment-modal" class="secondary equipment-modal__close" aria-label="Close">×</button>
+      </div>
+      <input id="equipment-filter" type="search" placeholder="Filter alternatives…" autocomplete="off" />
+      <div id="equipment-results" class="search-results equipment-results equipment-modal__results"></div>
+    </div>
+  </div>
+  <div id="opponent-equipment-modal" class="equipment-modal" hidden aria-hidden="true">
+    <div class="equipment-modal__backdrop" data-action="close-opponent-equipment-modal"></div>
+    <div class="equipment-modal__panel" role="dialog" aria-modal="true" aria-labelledby="opponent-equipment-picker-title">
+      <div class="equipment-modal__header">
+        <h4 id="opponent-equipment-picker-title">Pick equipment</h4>
+        <button type="button" id="btn-close-opponent-equipment-modal" class="secondary equipment-modal__close" aria-label="Close">×</button>
+      </div>
+      <input id="opponent-equipment-filter" type="search" placeholder="Filter alternatives…" autocomplete="off" />
+      <div id="opponent-equipment-results" class="search-results equipment-results equipment-modal__results"></div>
+    </div>
+  </div>
+  <div id="opponent-cards-modal" class="equipment-modal" hidden aria-hidden="true">
+    <div class="equipment-modal__backdrop" data-action="close-opponent-cards-modal"></div>
+    <div class="equipment-modal__panel" role="dialog" aria-modal="true" aria-labelledby="opponent-cards-modal-title">
+      <div class="equipment-modal__header">
+        <h4 id="opponent-cards-modal-title">Add cards to opponent deck</h4>
+        <button type="button" id="btn-close-opponent-cards-modal" class="secondary equipment-modal__close" aria-label="Close">×</button>
+      </div>
+      <input id="opponent-card-search" type="search" placeholder="Search cards by name…" autocomplete="off" />
+      <div id="opponent-search-results" class="search-results equipment-modal__results"></div>
+    </div>
+  </div>
+  <div id="editor-cards-modal" class="equipment-modal" hidden aria-hidden="true">
+    <div class="equipment-modal__backdrop" data-action="close-editor-cards-modal"></div>
+    <div class="equipment-modal__panel" role="dialog" aria-modal="true" aria-labelledby="editor-cards-modal-title">
+      <div class="equipment-modal__header">
+        <h4 id="editor-cards-modal-title">Add cards to deck</h4>
+        <button type="button" id="btn-close-editor-cards-modal" class="secondary equipment-modal__close" aria-label="Close">×</button>
+      </div>
+      <input id="card-search" type="search" placeholder="Search cards by name…" autocomplete="off" />
+      <div id="search-results" class="search-results equipment-modal__results"></div>
+    </div>
+  </div>
+  <script src="/static/app.js?v=19"></script>
 </body>
 </html>
