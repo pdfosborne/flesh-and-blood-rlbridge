@@ -115,12 +115,37 @@ main {
   max-width: 36rem;
 }
 
+.your-deck-layout,
+.opponent-deck-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 1rem;
+  align-items: start;
+}
+
+.your-deck-layout:has(#equipment-section[hidden]),
+.opponent-deck-layout:has(#opponent-deck-panel[hidden]) {
+  grid-template-columns: 1fr;
+  max-width: 36rem;
+}
+
+#panel-decks .deck-panel-card,
+#panel-opponent .deck-panel-card {
+  max-width: none;
+}
+
+.deck-panel-equipment .equipment-loadout-grid {
+  grid-template-columns: 1fr;
+}
+
 #panel-opponent .deck-grid--opponent {
   max-height: 420px;
 }
 
 @media (max-width: 900px) {
-  .grid-2 {
+  .grid-2,
+  .your-deck-layout,
+  .opponent-deck-layout {
     grid-template-columns: 1fr;
   }
 }
@@ -696,9 +721,8 @@ button:disabled {
   margin-bottom: 1rem;
 }
 
-#equipment-section {
-  padding-top: 0.75rem;
-  border-top: 1px solid var(--border);
+#equipment-section h4:first-child {
+  margin-top: 0;
 }
 
 #equipment-section h4 {
@@ -707,9 +731,18 @@ button:disabled {
 }
 
 .equipment-loadout-grid--opponent {
-  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  grid-template-columns: 1fr;
   margin-top: 0.5rem;
   margin-bottom: 0.75rem;
+}
+
+.opponent-equipment-heading {
+  margin: 0.75rem 0 0.35rem;
+  font-size: 0.95rem;
+}
+
+.opponent-equipment-heading:first-of-type {
+  margin-top: 0;
 }
 
 .equipment-slot--readonly {
@@ -741,18 +774,21 @@ button:disabled {
   background: rgba(61, 156, 240, 0.1);
 }
 
-#equipment-picker {
+#equipment-picker,
+#opponent-equipment-picker {
   margin-top: 0.75rem;
   padding-top: 0.75rem;
   border-top: 1px solid var(--border);
 }
 
-#equipment-picker h4 {
+#equipment-picker h4,
+#opponent-equipment-picker h4 {
   margin: 0 0 0.5rem;
   font-size: 0.95rem;
 }
 
-#equipment-filter {
+#equipment-filter,
+#opponent-equipment-filter {
   margin-bottom: 0.65rem;
 }
 

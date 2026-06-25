@@ -8,6 +8,9 @@ const state = {
   selectedEquipSlot: null,
   selectedEquip: null,
   equipAlternatives: [],
+  opponentSelectedEquip: null,
+  opponentEquipAlternatives: [],
+  opponentEquipLoadout: [],
   evalCandidates: [],
   baselineRef: null,
   activeRun: null,
@@ -697,6 +700,9 @@ function setOpponent(opp) {
     sideboard: opp.sideboard || {},
     deck: { ...(opp.deck || {}) },
   };
+  state.opponentSelectedEquip = null;
+  state.opponentEquipAlternatives = [];
+  state.opponentEquipLoadout = [];
   for (const entry of [
     ...(opp.deck_entries || []),
     ...(opp.pool_entries || []),
@@ -757,12 +763,21 @@ function opponentEquipmentQueryParams() {
 
 async function renderOpponentLoadout() {
   const container = document.getElementById("opponent-equipment-loadout");
+  const picker = document.getElementById("opponent-equipment-picker");
+  const equipHint = document.querySelector(".opponent-equipment-hint");
+  const equipHeading = document.querySelector(".opponent-equipment-heading");
   if (!container) return;
 
   const opp = state.opponent;
   if (!opp) {
     container.hidden = true;
     container.innerHTML = "";
+    if (picker) picker.hidden = true;
+    if (equipHint) equipHint.hidden = true;
+    if (equipHeading) equipHeading.hidden = true;
+    state.opponentSelectedEquip = null;
+    state.opponentEquipAlternatives = [];
+    state.opponentEquipLoadout = [];
     return;
   }
 
@@ -770,6 +785,9 @@ async function renderOpponentLoadout() {
   if (!header) {
     container.hidden = true;
     container.innerHTML = "";
+    if (picker) picker.hidden = true;
+    if (equipHint) equipHint.hidden = true;
+    if (equipHeading) equipHeading.hidden = true;
     return;
   }
 
@@ -777,26 +795,158 @@ async function renderOpponentLoadout() {
     const { loadout } = await api(
       `/api/equipment/loadout?equipment_header=${encodeURIComponent(header)}&${opponentEquipmentQueryParams()}`
     );
+    state.opponentEquipLoadout = loadout;
     if (!loadout.length) {
       container.hidden = true;
       container.innerHTML = "";
+      if (picker) picker.hidden = true;
+      if (equipHint) equipHint.hidden = true;
+      if (equipHeading) equipHeading.hidden = true;
       return;
     }
     for (const row of loadout) rememberCardMeta(row);
     container.hidden = false;
+    if (equipHint) equipHint.hidden = false;
+    if (equipHeading) equipHeading.hidden = false;
     container.innerHTML = loadout
-      .map(
-        (e) => `<div class="equipment-slot equipment-slot--readonly">
+      .map((e) => {
+        const selectable = e.slot !== "hero";
+        const selected =
+          state.opponentSelectedEquip &&
+          state.opponentSelectedEquip.index === e.index &&
+          state.opponentSelectedEquip.slot === e.slot;
+        const classes = [
+          "equipment-slot",
+          selectable ? "equipment-slot--selectable" : "",
+          selected ? "selected" : "",
+        ]
+          .filter(Boolean)
+          .join(" ");
+        return `<div class="${classes}" data-slot="${e.slot}" data-index="${e.index}" data-card-id="${e.card_id}" ${selectable ? 'role="button" tabindex="0"' : ""}>
       ${cardTileHtml(e, { extraClass: "card-tile--thumb", title: e.name })}
       <div><strong>${e.slot_label}</strong><br><span class="hint">${escapeHtml(e.name)}</span></div>
-    </div>`
-      )
+    </div>`;
+      })
       .join("");
     bindCardTileImages(container);
+    container.querySelectorAll(".equipment-slot--selectable").forEach((el) => {
+      const pick = () => selectOpponentEquipmentSlot(+el.dataset.index);
+      el.onclick = pick;
+      el.onkeydown = (ev) => {
+        if (ev.key === "Enter" || ev.key === " ") {
+          ev.preventDefault();
+          pick();
+        }
+      };
+    });
+    if (state.opponentSelectedEquip) {
+      const stillThere = loadout.some(
+        (row) =>
+          row.index === state.opponentSelectedEquip.index &&
+          row.slot === state.opponentSelectedEquip.slot
+      );
+      if (stillThere) {
+        await loadOpponentEquipmentAlternatives();
+      } else {
+        state.opponentSelectedEquip = null;
+        state.opponentEquipAlternatives = [];
+        if (picker) picker.hidden = true;
+      }
+    }
   } catch {
     container.hidden = true;
     container.innerHTML = "";
+    if (picker) picker.hidden = true;
+    if (equipHint) equipHint.hidden = true;
+    if (equipHeading) equipHeading.hidden = true;
   }
+}
+
+async function selectOpponentEquipmentSlot(index) {
+  const row = (state.opponentEquipLoadout || []).find((e) => e.index === index);
+  if (!row || row.slot === "hero" || !state.opponent) return;
+  state.opponentSelectedEquip = {
+    index: row.index,
+    slot: row.slot,
+    slot_label: row.slot_label,
+    card_id: row.card_id,
+    name: row.name,
+  };
+  document.getElementById("opponent-equipment-filter").value = "";
+  await renderOpponentLoadout();
+}
+
+function filteredOpponentEquipAlternatives() {
+  const q = document.getElementById("opponent-equipment-filter")?.value.trim().toLowerCase() || "";
+  if (!q) return state.opponentEquipAlternatives;
+  return state.opponentEquipAlternatives.filter(
+    (c) =>
+      c.name.toLowerCase().includes(q) ||
+      c.card_id.toLowerCase().includes(q) ||
+      (c.type_line || "").toLowerCase().includes(q)
+  );
+}
+
+function renderOpponentEquipmentAlternatives() {
+  const picker = document.getElementById("opponent-equipment-picker");
+  const title = document.getElementById("opponent-equipment-picker-title");
+  const el = document.getElementById("opponent-equipment-results");
+  if (!state.opponentSelectedEquip) {
+    if (picker) picker.hidden = true;
+    return;
+  }
+  picker.hidden = false;
+  title.textContent = `${state.opponentSelectedEquip.slot_label} — pick equipment`;
+  const items = filteredOpponentEquipAlternatives();
+  if (!items.length) {
+    el.innerHTML = '<div class="empty-state">No matching equipment for this slot.</div>';
+    return;
+  }
+  el.innerHTML = items
+    .map((c) =>
+      equipmentPickHtml(c, { current: c.card_id === state.opponentSelectedEquip.card_id })
+    )
+    .join("");
+  bindCardTileImages(el);
+  el.querySelectorAll("#opponent-equipment-results .card-tile").forEach((hit) => {
+    hit.onclick = async () => {
+      if (hit.classList.contains("equipment-pick--current")) return;
+      const cardId = cardIdFrom(hit);
+      const opp = state.opponent;
+      if (!opp) return;
+      try {
+        const result = await api("/api/equipment/replace", {
+          method: "POST",
+          body: JSON.stringify({
+            equipment_header: opp.equipment_header || opp.opponent_hero_id || "",
+            slot_index: state.opponentSelectedEquip.index,
+            replacement_card_id: cardId,
+            hero_id: opp.hero_id || opp.opponent_hero_id || "",
+            hero_class: opp.hero_class || "",
+            game_format: opp.game_format || state.deck?.game_format || "silver_age",
+          }),
+        });
+        opp.equipment_header = result.equipment_header;
+        const pick = state.opponentSelectedEquip;
+        state.opponentSelectedEquip = { ...pick, card_id: cardId };
+        await renderOpponentLoadout();
+        const name =
+          state.opponentEquipAlternatives.find((c) => c.card_id === cardId)?.name || cardId;
+        toast(`Opponent equipped ${name} in ${pick.slot_label}`);
+      } catch (e) {
+        toast(e.message, true);
+      }
+    };
+  });
+}
+
+async function loadOpponentEquipmentAlternatives() {
+  if (!state.opponent || !state.opponentSelectedEquip) return;
+  const { equipment } = await api(
+    `/api/equipment/alternatives?slot=${encodeURIComponent(state.opponentSelectedEquip.slot)}&${opponentEquipmentQueryParams()}`
+  );
+  state.opponentEquipAlternatives = equipment;
+  renderOpponentEquipmentAlternatives();
 }
 
 function renderOpponentDeck() {
@@ -1411,6 +1561,9 @@ async function loadEquipmentAlternatives() {
 }
 
 document.getElementById("equipment-filter").oninput = () => renderEquipmentAlternatives();
+document.getElementById("opponent-equipment-filter")?.addEventListener("input", () =>
+  renderOpponentEquipmentAlternatives()
+);
 
 function diffSwaps(fromDeck, toDeck) {
   const swaps = [];
