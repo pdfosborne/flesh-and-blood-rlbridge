@@ -29,11 +29,21 @@ When setup finishes (~10mins), the terminal prints a **“setup complete / ready
 
 Then open **http://localhost:8765** in your browser.
 
-![GUI-Demo](./docs/_images/fab-GUI-Demo.gif)
-*GUI demo - select decks, create a variation by swapping cards and evaluate which is best by training the agents on thousands of games.*
+![GUI-Demo-1](./docs/_images/GUI-demo-img-1.png)
+*GUI demo - select player deck (precons or import from Fabrary), you can edit equipment as needed.*
 
-![GUI-Demo-2](./docs/_images/fab-GUI-Demo-2.gif)
-*GUI demo - agents are evaluated on local Talishar server directly to ensure correctness, results include example render of gameplay.*
+![GUI-Demo-2](./docs/_images/GUI-demo-img-2.png)
+*GUI demo - select opponent deck, auto sideboards, can edit equipment or any card and save for future runs.*
+
+![GUI-Demo-3](./docs/_images/GUI-demo-img-3.png)
+*GUI demo - create a deck variation by swapping cards, 'save for evaluation' confirms the selection.*
+
+
+![GUI-Demo-4](./docs/_images/GUI-demo-img-4.png)
+*GUI demo - agents are trained for both player and opponent, final evaluation on local Talishar server directly to ensure correctness (but can take a long time).*
+
+![GUI-Demo-5](./docs/_images/GUI-demo-img-5.png)
+*GUI demo - final results include win % summary, damage breakdown and example render of gameplay.*
 
 
 To start the stack again later (inside the repo directory), use a compose wrapper so GPU is picked up automatically when available:
@@ -86,22 +96,12 @@ fab-gui
 git clone https://github.com/pdfosborne/flesh-and-blood-rlbridge.git
 cd flesh-and-blood-rlbridge
 chmod +x scripts/setup.sh
+sudo chown -R "$USER:$USER" results Talishar .venv
 ./scripts/setup.sh
 source .venv/bin/activate && fab-gui
 ```
 
 `setup` creates a venv, installs the package, verifies `Talishar/Assets`, and starts the Talishar backend via Docker.
-
-**Fix permission errors:**
-
-```bash
-docker compose down
-cd Talishar && docker compose down && cd ..
-sudo chown -R "$USER:$USER" results Talishar .venv
-rm -rf .venv
-./scripts/setup.sh
-source .venv/bin/activate && fab-gui
-```
 
 
 #### Starting and stopping
