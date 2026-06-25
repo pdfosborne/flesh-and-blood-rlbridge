@@ -166,6 +166,42 @@ def test_compute_guide_baseline_preserves_equipment_header() -> None:
     assert result["equipment_header"] == equipment
 
 
+def test_card_pool_from_parts_merges_deck_and_sideboard() -> None:
+    pool = gui_api.card_pool_from_parts(
+        deck={"a_red": 2, "b_blue": 2},
+        sideboard={"b_blue": 1, "c_yellow": 3},
+    )
+    assert pool == {"a_red": 2, "b_blue": 3, "c_yellow": 3}
+
+
+def test_guide_baseline_with_opponent_sideboards_both_decks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env = EnvironmentSettings()
+    monkeypatch.setattr(gui_api, "TUI_DECK_CACHE", tmp_path)
+    player_path = gui_api.import_precon("KayoSAGEPrecon", env)
+    player = gui_api.load_deck_payload(player_path, env)
+    opponent = gui_api.opponent_from_precon("DorintheSAGEPrecon", env)
+    result = gui_api.guide_baseline_with_opponent(
+        env,
+        {
+            "deck": player["deck"],
+            "sideboard": player["sideboard"],
+            "opponent_hero_id": opponent["opponent_hero_id"],
+            "hero_id": player["hero_id"],
+            "hero_class": player["hero_class"],
+            "game_format": player["game_format"],
+            "equipment_header": player["equipment_header"],
+            "opponent": opponent,
+        },
+    )
+    assert result["baseline_deck"] != player["deck"]
+    assert result["deck_entries"]
+    assert result["opponent_guide"]["deck_entries"]
+    assert result["opponent_guide"]["deck_size"] > 0
+
+
 def test_try_swap_valid() -> None:
     deck = {"a_red": 2, "b_blue": 1}
     pool = {"a_red": 2, "b_blue": 1, "c_yellow": 1}

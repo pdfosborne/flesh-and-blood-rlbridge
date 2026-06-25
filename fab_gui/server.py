@@ -282,26 +282,7 @@ class GuiRequestHandler(BaseHTTPRequestHandler):
 
         if path == "/api/guide-baseline":
             try:
-                result = gui_api.compute_guide_baseline(
-                    card_pool={str(k): int(v) for k, v in (body.get("card_pool") or {}).items()},
-                    opponent_hero_id=str(body.get("opponent_hero_id") or ""),
-                    hero_id=str(body.get("hero_id") or ""),
-                    hero_class=str(body.get("hero_class") or ""),
-                    game_format=str(body.get("game_format") or "silver_age"),
-                    equipment_header=str(body.get("equipment_header") or ""),
-                )
-                fmt = str(body.get("game_format") or "silver_age")
-                result["deck_entries"] = gui_api.deck_counts_to_entries(
-                    result["baseline_deck"], game_format=fmt, talishar_url=self.env.talishar_url
-                )
-                opponent = body.get("opponent")
-                if isinstance(opponent, dict) and opponent.get("opponent_deck"):
-                    result["opponent_guide"] = gui_api.apply_opponent_guide_sideboard(
-                        self.env,
-                        opponent,
-                        player_hero_id=str(body.get("hero_id") or ""),
-                    )
-                return _json_response(self, result)
+                return _json_response(self, gui_api.guide_baseline_with_opponent(self.env, body))
             except Exception as exc:  # noqa: BLE001
                 return _json_response(self, {"error": str(exc)}, status=400)
 

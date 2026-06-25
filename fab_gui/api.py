@@ -463,6 +463,25 @@ def equipment_loadout(
     ]
 
 
+def card_pool_from_parts(
+    *,
+    card_pool: dict[str, int] | None = None,
+    deck: dict[str, int] | None = None,
+    sideboard: dict[str, int] | None = None,
+) -> dict[str, int]:
+    """Build a full sideboard inventory pool from explicit pool or deck+sideboard."""
+    pool = {str(k): int(v) for k, v in (card_pool or {}).items() if int(v) > 0}
+    if pool:
+        return pool
+    merged: dict[str, int] = {}
+    for source in (deck or {}, sideboard or {}):
+        for card_id, count in source.items():
+            qty = int(count)
+            if qty > 0:
+                merged[str(card_id)] = merged.get(str(card_id), 0) + qty
+    return merged
+
+
 def compute_guide_baseline(
     *,
     card_pool: dict[str, int],
@@ -535,6 +554,53 @@ def apply_opponent_guide_sideboard(
         "hero_class": opp_payload.get("hero_class") or "",
         "game_format": game_format,
     }
+
+
+def guide_baseline_with_opponent(
+    env: EnvironmentSettings,
+    body: dict[str, Any],
+) -> dict[str, Any]:
+    """Apply guide policy sideboarding for the player and optionally the opponent."""
+    card_pool = card_pool_from_parts(
+        card_pool={str(k): int(v) for k, v in (body.get("card_pool") or {}).items()},
+        deck={str(k): int(v) for k, v in (body.get("deck") or {}).items()},
+        sideboard={str(k): int(v) for k, v in (body.get("sideboard") or {}).items()},
+    )
+    if not card_pool:
+        raise ValueError("Card pool is empty — re-import your deck")
+
+    fmt = str(body.get("game_format") or "silver_age")
+    result = compute_guide_baseline(
+        card_pool=card_pool,
+        opponent_hero_id=str(body.get("opponent_hero_id") or ""),
+        hero_id=str(body.get("hero_id") or ""),
+        hero_class=str(body.get("hero_class") or ""),
+        game_format=fmt,
+        equipment_header=str(body.get("equipment_header") or ""),
+    )
+    result["deck_entries"] = deck_counts_to_entries(
+        result["baseline_deck"],
+        game_format=fmt,
+        talishar_url=env.talishar_url,
+    )
+
+    opponent = body.get("opponent")
+    if not isinstance(opponent, dict):
+        return result
+
+    opponent_deck = str(opponent.get("opponent_deck") or "").strip()
+    if not opponent_deck:
+        return result
+
+    try:
+        result["opponent_guide"] = apply_opponent_guide_sideboard(
+            env,
+            opponent,
+            player_hero_id=str(body.get("hero_id") or ""),
+        )
+    except Exception as exc:  # noqa: BLE001
+        result["opponent_guide_error"] = str(exc)
+    return result
 
 
 def try_swap(

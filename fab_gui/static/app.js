@@ -698,29 +698,64 @@ function renderOpponentDeck() {
   bindCardTileImages(grid);
 }
 
+function cardPoolFromPayload(payload) {
+  const fromPool = payload?.card_pool;
+  if (fromPool && Object.keys(fromPool).length > 0) {
+    return { ...fromPool };
+  }
+  const pool = {};
+  for (const [cardId, count] of Object.entries(payload?.deck || {})) {
+    const qty = Number(count);
+    if (qty > 0) pool[cardId] = (pool[cardId] || 0) + qty;
+  }
+  for (const [cardId, count] of Object.entries(payload?.sideboard || {})) {
+    const qty = Number(count);
+    if (qty > 0) pool[cardId] = (pool[cardId] || 0) + qty;
+  }
+  return pool;
+}
+
+function guideCardPool() {
+  return state.deck?.import_card_pool || state.deck?.card_pool || {};
+}
+
+function opponentPayloadForGuide() {
+  const opp = state.opponent;
+  if (!opp) return null;
+  return {
+    opponent_deck: opp.opponent_deck,
+    opponent_deck_path: opp.opponent_deck_path,
+    opponent_hero_id: opp.opponent_hero_id,
+    equipment_header: opp.equipment_header,
+    source: opp.source,
+    label: opp.label,
+  };
+}
+
 let guideApplyToken = 0;
 
 async function applyGuideBaseline({ navigate = false } = {}) {
   if (!state.deck || !state.opponent) return false;
+  const pool = guideCardPool();
+  if (!Object.keys(pool).length) {
+    toast("Card pool is missing — re-import your deck", true);
+    return false;
+  }
   const token = ++guideApplyToken;
   setDecksStatus("Applying guide policy sideboard…");
   try {
     const result = await api("/api/guide-baseline", {
       method: "POST",
       body: JSON.stringify({
-        card_pool: state.deck.card_pool,
+        card_pool: pool,
+        deck: state.deck.deck,
+        sideboard: state.deck.sideboard,
         opponent_hero_id: state.opponent.opponent_hero_id,
         hero_id: state.deck.hero_id,
         hero_class: state.deck.hero_class,
         game_format: state.deck.game_format,
         equipment_header: state.deck.equipment_header,
-        opponent: {
-          opponent_deck: state.opponent.opponent_deck,
-          opponent_deck_path: state.opponent.opponent_deck_path,
-          opponent_hero_id: state.opponent.opponent_hero_id,
-          source: state.opponent.source,
-          label: state.opponent.label,
-        },
+        opponent: opponentPayloadForGuide(),
       }),
     });
     if (token !== guideApplyToken) return false;
@@ -745,9 +780,14 @@ async function applyGuideBaseline({ navigate = false } = {}) {
         state.opponent.game_format = result.opponent_guide.game_format;
       }
       for (const entry of result.opponent_guide.deck_entries || []) rememberCardMeta(entry);
+    } else if (result.opponent_guide_error) {
+      state.opponent.deck_entries = null;
+      state.opponent.deck_size = null;
+      toast(`Opponent sideboard failed: ${result.opponent_guide_error}`, true);
     }
     syncDeckEntries();
     state.deck.baseline_label = result.baseline_label;
+    state.deck.guide_opponent_hero_id = state.opponent.opponent_hero_id;
     state.evalCandidates = [];
     syncBaselineRef();
     renderDeck();
@@ -779,14 +819,22 @@ async function maybeAutoGuideAndContinue() {
   await applyGuideBaseline({ navigate: false });
 }
 
-function setDeck(payload) {
+async function setDeck(payload) {
+  const cardPool = cardPoolFromPayload(payload);
   state.deck = {
     ...payload,
+    card_pool: cardPool,
+    import_card_pool: { ...cardPool },
+    sideboard: payload.sideboard || {},
     baseline_label: payload.baseline_label || "Baseline deck",
   };
   state.cardMeta = {};
   state.evalCandidates = [];
-  for (const entry of [...(payload.deck_entries || []), ...(payload.pool_entries || [])]) {
+  for (const entry of [
+    ...(payload.deck_entries || []),
+    ...(payload.pool_entries || []),
+    ...(payload.sideboard_entries || []),
+  ]) {
     rememberCardMeta(entry);
   }
   syncDeckEntries();
@@ -795,7 +843,7 @@ function setDeck(payload) {
   renderEquipment();
   renderEvalCandidates();
   renderTrainReview();
-  void maybeAutoGuideAndContinue();
+  await maybeAutoGuideAndContinue();
 }
 
 document.getElementById("btn-import-precon").onclick = async () => {
@@ -806,7 +854,7 @@ document.getElementById("btn-import-precon").onclick = async () => {
       method: "POST",
       body: JSON.stringify({ deck_name }),
     });
-    setDeck(payload);
+    await setDeck(payload);
     toast("Precon imported");
   } catch (e) {
     toast(e.message, true);
@@ -821,7 +869,7 @@ document.getElementById("btn-import-fabrary").onclick = async () => {
       method: "POST",
       body: JSON.stringify({ url_or_slug }),
     });
-    setDeck(payload);
+    await setDeck(payload);
     toast("Deck imported");
   } catch (e) {
     toast(e.message, true);
@@ -833,7 +881,7 @@ document.getElementById("btn-load-saved").onclick = async () => {
   if (!path) return toast("Select a saved list", true);
   try {
     const payload = await api(`/api/deck/load?path=${encodeURIComponent(path)}`);
-    setDeck(payload);
+    await setDeck(payload);
     toast("Saved list loaded");
   } catch (e) {
     toast(e.message, true);
