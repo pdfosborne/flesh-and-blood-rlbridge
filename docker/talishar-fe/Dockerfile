@@ -7,7 +7,8 @@ WORKDIR /app
 
 COPY docker/talishar-fe/entrypoint.sh /entrypoint.sh
 COPY docker/talishar-fe/patch-vite-config.cjs /patch-vite-config.cjs
-RUN chmod +x /entrypoint.sh
+# Strip CRLF from Windows checkouts so the shebang interpreter resolves correctly.
+RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
 
 EXPOSE 5173
 
