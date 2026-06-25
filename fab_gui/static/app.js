@@ -89,7 +89,14 @@ function cardImageCandidates(cardId) {
   const underscore = token.replace(/-/g, "_");
   if (hyphen && !variants.includes(hyphen)) variants.push(hyphen);
   if (underscore && !variants.includes(underscore)) variants.push(underscore);
-  return variants.map((id) => `${CARD_IMAGE_CDN}/${encodeURIComponent(id)}.webp`);
+  const urls = [];
+  for (const id of variants) {
+    urls.push(`/api/card-image/${encodeURIComponent(id)}`);
+  }
+  for (const id of variants) {
+    urls.push(`${CARD_IMAGE_CDN}/${encodeURIComponent(id)}.webp`);
+  }
+  return urls;
 }
 
 function imageUrlFor(cardId) {
@@ -103,33 +110,33 @@ function loadImageFromCandidates(img, urls, { onLoaded, onFailed } = {}) {
     return;
   }
   let urlIndex = 0;
+  let settled = false;
+
+  const finish = (ok) => {
+    if (settled) return;
+    settled = true;
+    img.removeEventListener("load", onLoad);
+    img.removeEventListener("error", onError);
+    if (ok) onLoaded?.();
+    else onFailed?.();
+  };
 
   const tryNextUrl = () => {
     if (urlIndex >= urls.length) {
-      onFailed?.();
+      finish(false);
       return;
     }
-    const next = urls[urlIndex++];
-    if (img.getAttribute("src") !== next) {
-      img.src = next;
-    } else if (urlIndex < urls.length) {
-      tryNextUrl();
-    } else {
-      onFailed?.();
-    }
+    img.src = urls[urlIndex++];
   };
 
-  const markLoaded = () => {
-    if (img.naturalWidth > 0) {
-      onLoaded?.();
-    } else {
-      tryNextUrl();
-    }
+  const onLoad = () => {
+    if (img.naturalWidth > 0) finish(true);
+    else tryNextUrl();
   };
+  const onError = () => tryNextUrl();
 
-  img.addEventListener("load", markLoaded);
-  img.addEventListener("error", tryNextUrl);
-  img.removeAttribute("src");
+  img.addEventListener("load", onLoad);
+  img.addEventListener("error", onError);
   tryNextUrl();
 }
 

@@ -29,6 +29,7 @@ for p in (FAB_SRC, REPO_ROOT, RL_SRC):
     if s not in sys.path:
         sys.path.insert(0, s)
 
+from fab_tui.deck_cards import assign_pitch_variants  # noqa: E402
 from play_outcome_stats import (  # noqa: E402
     absolute_p1_p2_deck_from_env,
     absolute_p1_p2_hp_from_env,
@@ -3161,7 +3162,7 @@ def resolve_fabrary_deck_cards(deck_entry: dict, format_name: str) -> list[str]:
         count = min(int(card_entry.get("count", 1)), max_copies)
         candidates = name_map.get(name)
         if candidates:
-            result.extend([candidates[0]["id"]] * count)
+            result.extend(assign_pitch_variants(candidates, count))
         else:
             unresolved.append(card_entry.get("name", name))
     if unresolved:

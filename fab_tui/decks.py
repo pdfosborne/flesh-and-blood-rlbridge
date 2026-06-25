@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from fab_tui.config import RESULTS_ROOT, slugify
+from fab_tui.config import REPO_ROOT, RESULTS_ROOT, slugify
 
 # SAGE precon decks (hero slug, Talishar Assets deck name)
 SAGE_PRECONS: list[tuple[str, str]] = [
@@ -115,11 +115,26 @@ def export_precon_deck_json(
     setup = lines[0].split() if lines else []
     hero_id = setup[0] if setup else deck_name
     equipment_header = " ".join(setup)
+    resolver = None
+    try:
+        from flesh_and_blood_rlbridge.card_db.talishar_card_ids import (  # noqa: PLC0415
+            TalisharCardIdResolver,
+        )
+
+        php = assets_path.parent / "GeneratedCode" / "GeneratedCardDictionaries.php"
+        cards_path = REPO_ROOT / "src" / "flesh_and_blood_rlbridge" / "card_db" / "cards.json"
+        resolver = TalisharCardIdResolver(talishar_php_path=php, cards_path=cards_path)
+    except ImportError:
+        resolver = None
+
     deck: dict[str, int] = {}
     for card in " ".join(lines[1:]).split():
         card_id = card.strip()
-        if card_id:
-            deck[card_id] = deck.get(card_id, 0) + 1
+        if not card_id:
+            continue
+        if resolver is not None:
+            card_id = resolver.resolve(card_id) or card_id
+        deck[card_id] = deck.get(card_id, 0) + 1
 
     sideboard: dict[str, int] = {}
     fmt_norm = str(game_format or "sage").lower()
