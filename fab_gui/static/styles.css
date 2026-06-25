@@ -136,10 +136,89 @@ main {
 
 .deck-panel-equipment .equipment-loadout-grid {
   grid-template-columns: 1fr;
+  margin-bottom: 0;
+}
+
+.equipment-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 240px) minmax(0, 1fr);
+  gap: 1rem;
+  align-items: start;
+}
+
+.equipment-loadout-col {
+  min-width: 0;
+}
+
+.equipment-picker-col {
+  min-width: 0;
+  min-height: 8rem;
+}
+
+.equipment-picker-col:has(#equipment-picker:not([hidden])),
+.equipment-picker-col:has(#opponent-equipment-picker:not([hidden])) {
+  border-left: 1px solid var(--border);
+  padding-left: 1rem;
+}
+
+.equipment-picker-col:has(#equipment-picker:not([hidden])) .equipment-picker-placeholder,
+.equipment-picker-col:has(#opponent-equipment-picker:not([hidden])) .equipment-picker-placeholder {
+  display: none;
+}
+
+.equipment-row #equipment-picker,
+.equipment-row #opponent-equipment-picker {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+
+.equipment-row .equipment-results {
+  max-height: min(420px, 55vh);
 }
 
 #panel-opponent .deck-grid--opponent {
-  max-height: 420px;
+  max-height: min(360px, 45vh);
+}
+
+.opponent-edit-row {
+  display: grid;
+  grid-template-columns: minmax(200px, 320px) minmax(0, 1fr);
+  gap: 1rem;
+  align-items: start;
+  margin-top: 0.5rem;
+}
+
+.opponent-edit-row:has(#opponent-equipment-loadout[hidden]) {
+  grid-template-columns: 1fr;
+}
+
+.opponent-edit-row:has(#opponent-equipment-loadout[hidden]) .opponent-equipment-col {
+  display: none;
+}
+
+.opponent-edit-row:has(#opponent-equipment-loadout[hidden]) .opponent-deck-col {
+  border-left: none;
+  padding-left: 0;
+}
+
+.opponent-deck-col {
+  min-width: 0;
+  border-left: 1px solid var(--border);
+  padding-left: 1rem;
+}
+
+.opponent-equipment-col {
+  min-width: 0;
+}
+
+.opponent-equipment-col .equipment-loadout-grid--opponent {
+  margin-top: 0;
+  margin-bottom: 0;
+}
+
+.opponent-equipment-row {
+  margin-top: 0.35rem;
 }
 
 @media (max-width: 900px) {
@@ -147,6 +226,29 @@ main {
   .your-deck-layout,
   .opponent-deck-layout {
     grid-template-columns: 1fr;
+  }
+
+  .equipment-row {
+    grid-template-columns: 1fr;
+  }
+
+  .equipment-picker-col:has(#equipment-picker:not([hidden])),
+  .equipment-picker-col:has(#opponent-equipment-picker:not([hidden])) {
+    border-left: none;
+    padding-left: 0;
+    border-top: 1px solid var(--border);
+    padding-top: 1rem;
+  }
+
+  .opponent-edit-row {
+    grid-template-columns: 1fr;
+  }
+
+  .opponent-edit-row .opponent-deck-col {
+    border-left: none;
+    padding-left: 0;
+    border-top: 1px solid var(--border);
+    padding-top: 1rem;
   }
 }
 
@@ -314,8 +416,7 @@ button:disabled {
 }
 
 .deck-grid--opponent {
-  max-height: 320px;
-  margin-top: 0.5rem;
+  margin-top: 0.35rem;
 }
 
 .deck-status--compact {
@@ -332,6 +433,10 @@ button:disabled {
   margin-top: 0.75rem;
   padding-top: 0.75rem;
   border-top: 1px solid var(--border);
+}
+
+.opponent-deck-col .opponent-add-cards {
+  margin-top: 0.65rem;
 }
 
 .search-results--opponent {
@@ -732,17 +837,11 @@ button:disabled {
 
 .equipment-loadout-grid--opponent {
   grid-template-columns: 1fr;
-  margin-top: 0.5rem;
-  margin-bottom: 0.75rem;
 }
 
 .opponent-equipment-heading {
-  margin: 0.75rem 0 0.35rem;
+  margin: 0 0 0.35rem;
   font-size: 0.95rem;
-}
-
-.opponent-equipment-heading:first-of-type {
-  margin-top: 0;
 }
 
 .equipment-slot--readonly {

@@ -17,12 +17,14 @@ Reinforcement-learning simulation for [Flesh and Blood](https://fabtcg.com/) TCG
 ```bash
 git clone https://github.com/pdfosborne/flesh-and-blood-rlbridge.git
 cd flesh-and-blood-rlbridge
-./scripts/docker-setup.sh --foreground
+./scripts/docker-setup.sh
 ```
 
-Then open **http://localhost:8765** in your browser. 
+When setup finishes, the terminal prints a **“setup complete / ready to use”** banner.
 
-The initial install will take a few minutes, once setup you can run the docker server with the following command (use inside the flesh-and-blood-rlbridge directory):
+Then open **http://localhost:8765** in your browser.
+
+To start the stack again later (inside the repo directory):
 
 ```bash
 docker compose up

@@ -1,0 +1,22 @@
+
+================================================================
+  FAB RL Bridge — setup complete / ready to use
+================================================================
+
+  >>> Open the web GUI in your browser:  http://localhost:8765 <<<
+
+  Decks tab  → pick a deck
+  Editor tab → tune sideboard swaps
+  Monitor    → training progress
+  Results    → rankings and winner replay GIF
+
+  Also running:
+    Talishar backend   http://localhost:8080
+    Talishar-FE        http://localhost:5173
+
+  Terminal UI (second terminal, same repo):
+    source scripts/docker-env.sh
+    fab-tui
+
+  Stop everything:  docker compose down
+================================================================

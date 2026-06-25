@@ -95,5 +95,40 @@ services:
         condition: service_started
     restart: "no"
 
+  # Prints the ready message after the full stack is up (visible in `docker compose up` logs)
+  setup-complete:
+    image: curlimages/curl:8.12.0
+    volumes:
+      - ./docker/ready-message.txt:/ready-message.txt:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      fab-bridge:
+        condition: service_started
+      talishar-fe:
+        condition: service_healthy
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        for url in \
+          http://host.docker.internal:8080/ \
+          http://host.docker.internal:5173/ \
+          http://host.docker.internal:8765/; do
+          ok=0
+          for _ in $$(seq 1 120); do
+            if curl -fsS --max-time 2 "$$url" >/dev/null 2>&1; then
+              ok=1
+              break
+            fi
+            sleep 2
+          done
+          if [ "$$ok" -eq 0 ]; then
+            echo "[setup-complete] warning: $$url not reachable yet"
+          fi
+        done
+        cat /ready-message.txt
+    restart: "no"
+
 volumes:
   talishar_fe_node_modules:

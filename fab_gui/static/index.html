@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>FAB RL Bridge — Sideboard Compare</title>
-  <link rel="stylesheet" href="/static/styles.css?v=11" />
+  <link rel="stylesheet" href="/static/styles.css?v=13" />
 </head>
 <body>
   <header>
@@ -44,12 +44,19 @@
         </div>
         <div id="equipment-section" class="card deck-panel-card deck-panel-equipment" hidden>
           <h4>Equipment loadout</h4>
-          <p class="hint">Click a slot to browse equippable alternatives for that slot. Adjust loadout before selecting an opponent.</p>
-          <div id="equipment-loadout" class="equipment-loadout-grid"></div>
-          <div id="equipment-picker" hidden>
-            <h4 id="equipment-picker-title"></h4>
-            <input id="equipment-filter" type="search" placeholder="Filter alternatives…" autocomplete="off" />
-            <div id="equipment-results" class="search-results equipment-results"></div>
+          <p class="hint">Click a slot to browse equippable alternatives. Adjust loadout before selecting an opponent.</p>
+          <div class="equipment-row">
+            <div class="equipment-loadout-col">
+              <div id="equipment-loadout" class="equipment-loadout-grid"></div>
+            </div>
+            <aside class="equipment-picker-col">
+              <p class="hint equipment-picker-placeholder">Select a slot to browse alternatives.</p>
+              <div id="equipment-picker" hidden>
+                <h4 id="equipment-picker-title"></h4>
+                <input id="equipment-filter" type="search" placeholder="Filter alternatives…" autocomplete="off" />
+                <div id="equipment-results" class="search-results equipment-results"></div>
+              </div>
+            </aside>
           </div>
         </div>
       </div>
@@ -75,20 +82,33 @@
         <div id="opponent-deck-panel" class="card deck-panel-card deck-panel-edit" hidden>
           <div id="opponent-deck-label" class="hint"></div>
           <div id="opponent-deck-status" class="deck-status deck-status--compact"></div>
-          <h4 class="opponent-equipment-heading">Equipment loadout</h4>
-          <p class="hint opponent-equipment-hint" hidden>Click a slot to browse equippable alternatives for that slot.</p>
-          <div id="opponent-equipment-loadout" class="equipment-loadout-grid equipment-loadout-grid--opponent" hidden></div>
-          <div id="opponent-equipment-picker" hidden>
-            <h4 id="opponent-equipment-picker-title"></h4>
-            <input id="opponent-equipment-filter" type="search" placeholder="Filter alternatives…" autocomplete="off" />
-            <div id="opponent-equipment-results" class="search-results equipment-results"></div>
-          </div>
-          <p class="hint opponent-edit-hint">Click a card to remove it. Search below to add cards from the opponent inventory.</p>
-          <div id="opponent-deck-grid" class="deck-grid deck-grid--opponent"></div>
-          <div class="opponent-add-cards">
-            <label for="opponent-card-search">Add cards to opponent deck</label>
-            <input id="opponent-card-search" type="search" placeholder="Search cards by name…" autocomplete="off" />
-            <div id="opponent-search-results" class="search-results search-results--opponent"></div>
+          <div class="opponent-edit-row">
+            <div class="opponent-equipment-col">
+              <h4 class="opponent-equipment-heading">Equipment loadout</h4>
+              <p class="hint opponent-equipment-hint" hidden>Click a slot to browse equippable alternatives for that slot.</p>
+              <div class="equipment-row opponent-equipment-row">
+                <div class="equipment-loadout-col">
+                  <div id="opponent-equipment-loadout" class="equipment-loadout-grid equipment-loadout-grid--opponent" hidden></div>
+                </div>
+                <aside class="equipment-picker-col">
+                  <p class="hint equipment-picker-placeholder">Select a slot to browse alternatives.</p>
+                  <div id="opponent-equipment-picker" hidden>
+                    <h4 id="opponent-equipment-picker-title"></h4>
+                    <input id="opponent-equipment-filter" type="search" placeholder="Filter alternatives…" autocomplete="off" />
+                    <div id="opponent-equipment-results" class="search-results equipment-results"></div>
+                  </div>
+                </aside>
+              </div>
+            </div>
+            <div class="opponent-deck-col">
+              <p class="hint opponent-edit-hint">Click a card to remove it. Search below to add cards from the opponent inventory.</p>
+              <div id="opponent-deck-grid" class="deck-grid deck-grid--opponent"></div>
+              <div class="opponent-add-cards">
+                <label for="opponent-card-search">Add cards to opponent deck</label>
+                <input id="opponent-card-search" type="search" placeholder="Search cards by name…" autocomplete="off" />
+                <div id="opponent-search-results" class="search-results search-results--opponent"></div>
+              </div>
+            </div>
           </div>
           <button type="button" id="btn-save-opponent" class="secondary" style="margin-top:0.75rem">Save opponent list</button>
         </div>
