@@ -64,7 +64,7 @@ def _serve_bytes(
     _write_body(handler, data)
 
 
-def _serve_file(handler: BaseHTTPRequestHandler, path: Path) -> None:
+def _serve_file(handler: BaseHTTPRequestHandler, path: Path, *, no_cache: bool = False) -> None:
     if not path.is_file():
         handler.send_error(HTTPStatus.NOT_FOUND)
         return
@@ -73,6 +73,9 @@ def _serve_file(handler: BaseHTTPRequestHandler, path: Path) -> None:
     handler.send_response(HTTPStatus.OK)
     handler.send_header("Content-Type", mime or "application/octet-stream")
     handler.send_header("Content-Length", str(len(content)))
+    if no_cache:
+        handler.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+        handler.send_header("Pragma", "no-cache")
     handler.end_headers()
     _write_body(handler, content)
 
@@ -208,7 +211,7 @@ class GuiRequestHandler(BaseHTTPRequestHandler):
             html_path = gui_api.dashboard_path(run_id)
             if html_path is None or not html_path.is_file():
                 return _json_response(self, {"error": "Dashboard not ready"}, status=404)
-            return _serve_file(self, html_path)
+            return _serve_file(self, html_path, no_cache=True)
 
         match = re.fullmatch(r"/api/runs/([^/]+)/status", path)
         if match:

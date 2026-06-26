@@ -1126,8 +1126,10 @@ def start_evaluation(
     manifest = json.loads(candidates_path.read_text(encoding="utf-8"))
     manifest["gui_run_id"] = run_id
     manifest["eval_only"] = True
+    manifest["play_episodes"] = 0
     manifest["cpp_eval_episodes"] = cpp_eval_episodes
     manifest["talishar_eval_episodes"] = talishar_eval_episodes
+    manifest["final_eval_episodes"] = talishar_eval_episodes
     candidates_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
     run = TrainingRun(run_id=run_id, out_dir=out_dir)
@@ -1384,22 +1386,27 @@ def run_results(run_id: str) -> dict[str, Any] | None:
 
 
 def dashboard_path(run_id: str) -> Path | None:
+    """Return dashboard HTML path, regenerating from live eval files on each call."""
     run = RUNS.get(run_id)
     out_dir = run.out_dir if run else _resolve_run_dir(run_id)
     if out_dir is None:
         return None
-    html_path = out_dir / "sideboard_compare_dashboard.html"
-    if html_path.is_file():
-        return html_path
-    _write_dashboard_once(out_dir)
-    if html_path.is_file():
-        return html_path
+    active = run is not None and run.status == "running"
+    if not active:
+        active = not (out_dir / "sideboard_compare_results.json").is_file()
     try:
         from sideboard_compare_dashboard import write_sideboard_compare_dashboard  # noqa: PLC0415
 
-        return write_sideboard_compare_dashboard(out_dir, auto_refresh_seconds=5.0)
+        return write_sideboard_compare_dashboard(
+            out_dir,
+            auto_refresh_seconds=5.0 if active else None,
+        )
     except Exception:
-        return None
+        html_path = out_dir / "sideboard_compare_dashboard.html"
+        if html_path.is_file():
+            return html_path
+        _write_dashboard_once(out_dir)
+        return html_path if html_path.is_file() else None
 
 
 def save_deck_api(

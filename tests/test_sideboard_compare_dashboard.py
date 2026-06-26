@@ -266,6 +266,126 @@ def test_collect_and_render_dashboard(tmp_path: Path) -> None:
     assert "sideboard_compare_dashboard.html" in html_path.name
 
 
+def test_collect_eval_only_dashboard(tmp_path: Path) -> None:
+    out_dir = tmp_path / "eval_run"
+    candidate_dir = out_dir / "candidates" / "baseline"
+    candidate_dir.mkdir(parents=True)
+    (out_dir / "candidates_manifest.json").write_text(
+        json.dumps({
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "eval_only": True,
+            "format": "silver_age",
+            "hero_id": "briar",
+            "opponent_hero_id": "briar",
+            "opponent_deck": "BriarSAGEPrecon",
+            "play_episodes": 100000,
+            "cpp_eval_episodes": 1000,
+            "talishar_eval_episodes": 10,
+            "final_eval_episodes": 10,
+            "skip_final_eval": False,
+            "max_parallel": 1,
+            "candidates": [{
+                "candidate_id": "baseline",
+                "label": "Guide policy baseline",
+                "game_deck": {"a_red": 40},
+                "swaps": [],
+            }],
+        }),
+        encoding="utf-8",
+    )
+    (candidate_dir / "eval_live.json").write_text(
+        json.dumps({
+            "phase": "cpp_checkpoint",
+            "episodes_completed": 350,
+            "target_episodes": 1000,
+            "wins": 180,
+            "losses": 165,
+            "draws": 3,
+            "timeouts": 2,
+            "errors": 0,
+            "runtime_backend": "C++ engine fast sampled eval",
+        }),
+        encoding="utf-8",
+    )
+
+    state = collect_sideboard_compare_state(out_dir)
+    assert state["eval_only"] is True
+    assert state["cpp_eval_episodes"] == 1000
+    row = state["candidates"][0]
+    assert row["status"] == "cpp_eval"
+    assert row["train_done"] == 350
+    assert row["train_target"] == 1000
+    assert row["eval_progress"]["cpp_done"] == 350
+    assert row["play_win_rate"] == pytest.approx(180 / 350)
+
+    html = render_sideboard_compare_html(state, auto_refresh_seconds=5.0)
+    assert "Sideboard evaluation dashboard" in html
+    assert "1000 C++ eval games/candidate" in html
+    assert "C++ checkpoint eval" in html
+    assert "Talishar final eval" in html
+    assert "350/1000 games" in html
+    assert "Training win rate" not in html
+    assert "policy episodes/candidate" not in html
+
+
+def test_collect_eval_only_talishar_phase(tmp_path: Path) -> None:
+    out_dir = tmp_path / "eval_run"
+    candidate_dir = out_dir / "candidates" / "baseline"
+    (candidate_dir / "final_eval").mkdir(parents=True)
+    (out_dir / "candidates_manifest.json").write_text(
+        json.dumps({
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "eval_only": True,
+            "cpp_eval_episodes": 100,
+            "talishar_eval_episodes": 10,
+            "final_eval_episodes": 10,
+            "skip_final_eval": False,
+            "candidates": [{
+                "candidate_id": "baseline",
+                "label": "Baseline",
+                "game_deck": {"a_red": 40},
+                "swaps": [],
+            }],
+        }),
+        encoding="utf-8",
+    )
+    (candidate_dir / "candidate_result.json").write_text(
+        json.dumps({
+            "candidate_id": "baseline",
+            "play_win_rate": 0.52,
+            "cpp_eval_win_rate": 0.52,
+        }),
+        encoding="utf-8",
+    )
+    (candidate_dir / "eval_live.json").write_text(
+        json.dumps({
+            "episodes_completed": 100,
+            "target_episodes": 100,
+            "wins": 52,
+            "losses": 48,
+        }),
+        encoding="utf-8",
+    )
+    (candidate_dir / "final_eval" / "final_eval_live.json").write_text(
+        json.dumps({
+            "phase": "final_eval",
+            "episodes_completed": 3,
+            "target_episodes": 10,
+            "wins": 2,
+            "losses": 1,
+            "runtime_backend": "HTTP Talishar",
+        }),
+        encoding="utf-8",
+    )
+
+    state = collect_sideboard_compare_state(out_dir)
+    row = state["candidates"][0]
+    assert row["status"] == "talishar_eval"
+    assert row["eval_progress"]["talishar_done"] == 3
+    assert row["eval_progress"]["talishar_target"] == 10
+    assert row["final_eval_win_rate"] == pytest.approx(2 / 3)
+
+
 def test_training_phase_eta_accounts_for_slow_final_eval() -> None:
     started = datetime.now(timezone.utc) - timedelta(minutes=30)
     eta_seconds, _ = _estimate_sideboard_compare_eta(

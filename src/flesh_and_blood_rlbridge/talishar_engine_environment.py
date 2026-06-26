@@ -137,6 +137,8 @@ _DEFAULT_RENDER_WIDTH = 1920
 _DEFAULT_RENDER_HEIGHT = 1080
 _TRUNCATION_PENALTY = -0.1  # negative reward for hitting max_turns without a winner
 _STEP_PENALTY = -0.001  # small per-step penalty to encourage faster game completion
+_HTTP_REQUEST_RETRIES = 6
+_HTTP_RETRY_BASE_SLEEP_S = 0.5
 _DISABLE_CARD_HOVER_STORAGE_KEY = "talishar-disable-card-hover"
 
 _PLAYWRIGHT_GDPR_INIT_SCRIPT = (
@@ -583,27 +585,44 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         """Build a requests.Session with connection pooling, keep-alive, and retry."""
         session = requests.Session()
         retry = Retry(
-            total=3,
-            backoff_factor=0.3,
+            total=2,
+            connect=2,
+            read=2,
+            backoff_factor=0.4,
             status_forcelist=(500, 502, 503, 504),
             allowed_methods={"GET", "POST"},
             raise_on_status=False,
         )
         adapter = HTTPAdapter(
             pool_connections=2,
-            pool_maxsize=8,
+            pool_maxsize=4,
             max_retries=retry,
         )
         session.mount("http://",  adapter)
         session.mount("https://", adapter)
-        session.headers.update({"User-Agent": "TalisharRLEnv/1.0"})
+        session.headers.update({
+            "User-Agent": "TalisharRLEnv/1.0",
+            "Connection": "close",
+        })
         return session
+
+    def _reset_http_session(self) -> None:
+        """Drop pooled connections after a transport failure."""
+        try:
+            self._session.close()
+        except Exception:
+            pass
+        self._session = self._make_session()
+
+    def _http_retry_sleep(self, attempt: int) -> None:
+        delay = min(8.0, _HTTP_RETRY_BASE_SLEEP_S * (2 ** attempt))
+        time.sleep(delay)
 
     def _http_get(
         self,
         path: str,
         params: dict[str, str],
-        _retries: int = 3,
+        _retries: int = _HTTP_REQUEST_RETRIES,
         *,
         allow_empty_body: bool = False,
     ) -> dict[str, Any]:
@@ -612,7 +631,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         for attempt in range(_retries):
             try:
                 if attempt > 0:
-                    time.sleep(0.3 * (2 ** attempt))
+                    self._http_retry_sleep(attempt - 1)
                 resp = self._session.get(
                     url, params=params, timeout=self._request_timeout
                 )
@@ -635,15 +654,22 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                 ) from None
             except requests.RequestException as exc:
                 last_exc = exc
+                if attempt < _retries - 1:
+                    self._reset_http_session()
         raise TalisharConnectionError(f"GET {url} failed: {last_exc}") from last_exc
 
-    def _http_post_json(self, path: str, payload: dict[str, Any], _retries: int = 3) -> dict[str, Any]:
+    def _http_post_json(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        _retries: int = _HTTP_REQUEST_RETRIES,
+    ) -> dict[str, Any]:
         url = self._base_url + path
         last_exc: Exception = RuntimeError("no attempts")
         for attempt in range(_retries):
             try:
                 if attempt > 0:
-                    time.sleep(0.3 * (2 ** attempt))
+                    self._http_retry_sleep(attempt - 1)
                 resp = self._session.post(
                     url, json=payload, timeout=self._request_timeout
                 )
@@ -660,6 +686,8 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                 ) from None
             except requests.RequestException as exc:
                 last_exc = exc
+                if attempt < _retries - 1:
+                    self._reset_http_session()
         raise TalisharConnectionError(f"POST {url} failed: {last_exc}") from last_exc
 
     # ── Game lifecycle ────────────────────────────────────────────────────────

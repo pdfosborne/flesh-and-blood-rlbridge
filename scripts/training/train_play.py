@@ -11,6 +11,7 @@ import os
 import statistics
 import sys
 import threading
+import time
 import uuid
 from collections import defaultdict
 from datetime import datetime
@@ -30,6 +31,7 @@ if str(_RL_SRC) not in sys.path:
 
 from flesh_and_blood_rlbridge import TalisharEngineEnvironment  # noqa: E402
 from flesh_and_blood_rlbridge.opponent_deck import normalize_talishar_asset_name  # noqa: E402
+from flesh_and_blood_rlbridge.talishar_oracle import TalisharConnectionError  # noqa: E402
 
 from eval_damage_stats import EvalDamageAccumulator, merge_damage_breakdowns  # noqa: E402
 from train_pipeline_common import (  # noqa: E402
@@ -1657,6 +1659,100 @@ def _fast_sample_action_index(
     return action
 
 
+def _maybe_refresh_sideboard_dashboard(
+    live_progress_path: Path,
+    *,
+    completed: int,
+    total: int,
+    progress_interval: int,
+) -> None:
+    """Regenerate sideboard HTML from live eval files (throttled)."""
+    if (
+        progress_interval > 0
+        and completed % progress_interval != 0
+        and completed != total
+    ):
+        return
+    out_dir = live_progress_path.parent.parent.parent
+    if not (out_dir / "candidates_manifest.json").is_file():
+        return
+    eval_root = _SCRIPTS_ROOT / "eval"
+    if str(eval_root) not in sys.path:
+        sys.path.insert(0, str(eval_root))
+    try:
+        from sideboard_compare_dashboard import write_sideboard_compare_dashboard  # noqa: PLC0415
+
+        write_sideboard_compare_dashboard(out_dir, auto_refresh_seconds=5.0)
+    except Exception:
+        pass
+
+
+def _reset_talishar_http_session(env: Any) -> None:
+    reset = getattr(env, "_reset_http_session", None)
+    if callable(reset):
+        reset()
+
+
+def _env_reset_with_retries(
+    env: Any,
+    *,
+    seed: Optional[int],
+    options: dict[str, Any],
+    eval_label: str,
+    ep: int,
+    max_attempts: int = 4,
+) -> Any:
+    last_exc: Optional[Exception] = None
+    for attempt in range(max_attempts):
+        try:
+            return env.reset(seed=seed, options=options)
+        except TalisharConnectionError as exc:
+            last_exc = exc
+            if attempt >= max_attempts - 1:
+                break
+            wait = min(8.0, 0.75 * (2 ** attempt))
+            print(
+                f"  WARNING: {eval_label} ep {ep + 1} reset: "
+                f"Talishar connection error "
+                f"(retry {attempt + 1}/{max_attempts - 1} in {wait:.1f}s): {exc!r}"
+            )
+            _reset_talishar_http_session(env)
+            time.sleep(wait)
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError(f"{eval_label} reset failed")
+
+
+def _env_step_with_retries(
+    env: Any,
+    action: Any,
+    *,
+    eval_label: str,
+    ep: int,
+    step: int,
+    max_attempts: int = 5,
+) -> Any:
+    last_exc: Optional[Exception] = None
+    for attempt in range(max_attempts):
+        try:
+            return env.step(action)
+        except TalisharConnectionError as exc:
+            last_exc = exc
+            if attempt >= max_attempts - 1:
+                break
+            wait = min(8.0, 0.75 * (2 ** attempt))
+            print(
+                f"  WARNING: {eval_label} ep {ep + 1} step {step}: "
+                f"Talishar connection error "
+                f"(retry {attempt + 1}/{max_attempts - 1} in {wait:.1f}s): {exc!r}"
+            )
+            _reset_talishar_http_session(env)
+            time.sleep(wait)
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError(f"{eval_label} step failed")
+
+
 def _record_eval_outcome(
     outcome: str,
     *,
@@ -1772,6 +1868,12 @@ def _evaluate_fast_p1_vs_fixed_opponent(
                     indent=2,
                 ),
                 encoding="utf-8",
+            )
+            _maybe_refresh_sideboard_dashboard(
+                live_progress_path,
+                completed=completed,
+                total=episodes,
+                progress_interval=progress_interval,
             )
 
     if episodes > 1 and len(end_state_keys) <= 2 and (wins == 0 or losses == 0):
@@ -1890,6 +1992,7 @@ def _evaluate_p1_vs_fixed_opponent(
             max_turns=max_steps,
             use_cpp_engine=False,
             require_fast_training=False,
+            request_timeout=60.0,
         )
 
     wins = 0
@@ -1903,10 +2006,20 @@ def _evaluate_p1_vs_fixed_opponent(
         for ep in range(episodes):
             ep_seed = (seed + ep) if seed is not None else ep
             try:
-                result = env.reset(
+                result = _env_reset_with_retries(
+                    env,
                     seed=ep_seed,
                     options={"acting_player_id": 1 + (ep % 2)},
+                    eval_label=eval_label,
+                    ep=ep,
                 )
+            except TalisharConnectionError as exc:
+                errors += 1
+                print(
+                    f"  WARNING: {eval_label} ep {ep + 1}/{episodes} "
+                    f"reset failed after retries: {exc!r}"
+                )
+                continue
             except Exception as exc:
                 errors += 1
                 print(
@@ -1932,12 +2045,26 @@ def _evaluate_p1_vs_fixed_opponent(
                         action = _agent_action_for_eval(p1_agent, obs)
                     else:
                         action = _agent_action_for_eval(p2_agent, obs)
-                    step = env.step(action)
+                    step = _env_step_with_retries(
+                        env,
+                        action,
+                        eval_label=eval_label,
+                        ep=ep,
+                        step=steps + 1,
+                    )
                     obs = step.observation
                     terminated = bool(step.terminated)
                     truncated = bool(step.truncated)
                     done = terminated or truncated
                     steps += 1
+                except TalisharConnectionError as exc:
+                    errors += 1
+                    episode_error = True
+                    print(
+                        f"  WARNING: {eval_label} ep {ep + 1}/{episodes} "
+                        f"step {steps + 1} failed after retries: {exc!r}"
+                    )
+                    break
                 except Exception as exc:
                     errors += 1
                     episode_error = True
@@ -1948,6 +2075,8 @@ def _evaluate_p1_vs_fixed_opponent(
                     break
 
             if episode_error:
+                if ep + 1 < episodes:
+                    time.sleep(1.5)
                 continue
 
             if not terminated and not truncated and steps >= max_steps:
@@ -2011,6 +2140,14 @@ def _evaluate_p1_vs_fixed_opponent(
                     ),
                     encoding="utf-8",
                 )
+                _maybe_refresh_sideboard_dashboard(
+                    live_progress_path,
+                    completed=completed,
+                    total=episodes,
+                    progress_interval=1,
+                )
+            if ep + 1 < episodes:
+                time.sleep(1.0)
     finally:
         env.close()
 
