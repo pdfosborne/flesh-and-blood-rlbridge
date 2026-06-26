@@ -2646,6 +2646,99 @@ def save_agent(
     }
 
 
+def _talishar_deck_spec(deck_stem: str) -> dict[str, Any]:
+    """Build phase-3-compatible ``deck_spec`` from a Talishar Assets deck stem."""
+    from flesh_and_blood_rlbridge.deck_context import _read_asset_deck  # noqa: PLC0415
+    from flesh_and_blood_rlbridge.talishar_deck_assets import resolve_talishar_deck_stem  # noqa: PLC0415
+
+    assets = talishar_assets_path()
+    resolved = resolve_talishar_deck_stem(assets, deck_stem)
+    asset_file = assets / f"{resolved}.txt"
+    equipment_header = ""
+    if asset_file.is_file():
+        lines = [
+            line.strip()
+            for line in asset_file.read_text(encoding="utf-8", errors="replace").splitlines()
+            if line.strip()
+        ]
+        if lines:
+            equipment_header = lines[0]
+    _hero_id, counts = _read_asset_deck(assets, resolved)
+    if not equipment_header and _hero_id:
+        equipment_header = _hero_id
+    return {"equipment_header": equipment_header, "cards": counts}
+
+
+def _save_unified_selfplay_checkpoint(
+    *,
+    out_dir: Path,
+    matchup: Matchup,
+    game_format: str,
+    policy: PPOAgent,
+    episodes_completed: int,
+    target_episodes: int,
+) -> None:
+    """Persist discoverable unified self-play checkpoints for Talishar eval."""
+    matchup_dir = matchup_out_dir(out_dir, matchup)
+    p1_spec = _talishar_deck_spec(matchup.p1_deck)
+    p2_spec = _talishar_deck_spec(matchup.p2_deck)
+    role_specs = {
+        "p1": p1_spec,
+        "p2": p2_spec,
+    }
+    for role, deck_spec in role_specs.items():
+        ckpt_dir = (
+            matchup_dir
+            / "unified_selfplay"
+            / role
+            / f"episode_{episodes_completed:06d}"
+        )
+        weights_dir = ckpt_dir / "weights"
+        weights_dir.mkdir(parents=True, exist_ok=True)
+        policy.save(weights_dir / "agent_weights.json")
+        metadata = {
+            "checkpoint_type": "unified_selfplay",
+            "created_at": datetime.now().isoformat(),
+            "matchup": matchup.name,
+            "role": role,
+            "game_format": game_format,
+            "weights_file": "agent_weights.json",
+            "episodes_completed": episodes_completed,
+            "target_episodes": target_episodes,
+            "p1_deck": matchup.p1_deck,
+            "p2_deck": matchup.p2_deck,
+            "p1_hero": matchup.p1_hero,
+            "p2_hero": matchup.p2_hero,
+            "cpp_engine_deck1": matchup.cpp_engine_deck1,
+            "cpp_engine_deck2": matchup.cpp_engine_deck2,
+            "cpp_engine_dir": matchup.cpp_engine_dir,
+            "opponent_mode": "dual",
+            "opponent_deck_name": matchup.p2_hero if role == "p1" else matchup.p1_hero,
+            "deck_spec": deck_spec,
+        }
+        (ckpt_dir / "metadata.json").write_text(
+            json.dumps(metadata, indent=2),
+            encoding="utf-8",
+        )
+
+
+def _write_unified_checkpoint_eval_scope(
+    out_dir: Path,
+    matchup: Matchup,
+) -> None:
+    from fab_bridge.unified_results import CHECKPOINT_EVAL_SCOPE  # noqa: PLC0415
+
+    payload = {
+        "matchup": matchup.name,
+        "matchup_dir": _resolve_matchup_subdir(out_dir, matchup),
+        "updated_at": datetime.now().isoformat(),
+    }
+    (out_dir / CHECKPOINT_EVAL_SCOPE).write_text(
+        json.dumps(payload, indent=2),
+        encoding="utf-8",
+    )
+
+
 class _CheckpointEvalTracker:
     """Periodic head-to-head eval snapshots during unified self-play training."""
 
@@ -2717,6 +2810,8 @@ class _CheckpointEvalTracker:
             eval_label="Checkpoint eval",
         )
         record = {
+            "matchup": self.matchup.name,
+            "matchup_dir": _resolve_matchup_subdir(self.out_dir, self.matchup),
             "episodes_completed": completed,
             "target_episodes": self.n_episodes,
             "eval_episodes": self.checkpoint_eval_episodes,
@@ -2727,6 +2822,15 @@ class _CheckpointEvalTracker:
         if self.first_win_rate is None:
             self.first_win_rate = wr
         self.final_win_rate = wr
+        _save_unified_selfplay_checkpoint(
+            out_dir=self.out_dir,
+            matchup=self.matchup,
+            game_format=self.game_format,
+            policy=self.p1_policy,
+            episodes_completed=completed,
+            target_episodes=self.n_episodes,
+        )
+        _write_unified_checkpoint_eval_scope(self.out_dir, self.matchup)
         ckpt_dir = (
             matchup_out_dir(self.out_dir, self.matchup)
             / "checkpoint_eval"
@@ -2737,6 +2841,10 @@ class _CheckpointEvalTracker:
             json.dumps(record, indent=2),
             encoding="utf-8",
         )
+        matchup_history_path = (
+            matchup_out_dir(self.out_dir, self.matchup) / "checkpoint_eval_history.json"
+        )
+        matchup_history_path.write_text(json.dumps(self.log, indent=2), encoding="utf-8")
         history_path = self.out_dir / "checkpoint_eval_history.json"
         history_path.write_text(json.dumps(self.log, indent=2), encoding="utf-8")
         print(
@@ -3262,6 +3370,7 @@ def train_matchup(
             f"  Checkpoint eval: every {effective_ckpt_interval} episode(s), "
             f"{checkpoint_eval_episodes} eval game(s) per checkpoint"
         )
+        _write_unified_checkpoint_eval_scope(out_dir, matchup)
 
     # ── parallel / fast rollout path ────────────────────────────────────────
     if rollout_workers > 1 or use_fast_parallel:

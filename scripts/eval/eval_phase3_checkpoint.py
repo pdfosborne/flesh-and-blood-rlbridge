@@ -60,6 +60,11 @@ from runtime_defaults import (  # noqa: E402
     DEFAULT_STALL_MIN_ATTACK_HAND,
     DEFAULT_STALL_NO_DAMAGE_TURNS,
 )
+from fab_bridge.unified_results import (  # noqa: E402
+    is_unified_random_matchup_run,
+    iter_unified_checkpoint_metadata,
+    resolve_latest_unified_matchup_dir,
+)
 from scripts.training.train_pipeline_common import _write_deck_file  # noqa: E402
 
 
@@ -240,6 +245,10 @@ def _resolve_eval_dashboard_dir(
             idx = parts.index(_SIDEBOARD_CANDIDATES_DIR)
             if idx + 1 < len(parts):
                 return root / _SIDEBOARD_CANDIDATES_DIR / parts[idx + 1] / "eval_dashboard"
+    if is_unified_random_matchup_run(root):
+        matchup_dir = resolve_latest_unified_matchup_dir(root)
+        if matchup_dir is not None:
+            return matchup_dir / "eval_dashboard"
     return root / "eval_dashboard"
 
 
@@ -250,6 +259,9 @@ def _iter_checkpoint_metadata_paths(
     candidate_id: Optional[str] = None,
 ) -> list[Path]:
     """Collect ``metadata.json`` paths for phase-3 checkpoints under *results_dir*."""
+    if is_unified_random_matchup_run(results_dir):
+        return iter_unified_checkpoint_metadata(results_dir, role)
+
     paths: list[Path] = []
 
     def add_from_root(root: Path) -> None:
@@ -350,11 +362,19 @@ def _load_agent(weights_path: Path) -> PPOAgent:
     return agent
 
 
-def _deck_cards(bundle: CheckpointBundle) -> dict[str, int]:
+def _deck_cards(bundle: CheckpointBundle, *, assets_path: str = "") -> dict[str, int]:
     cards = bundle.deck_spec.get("cards", {})
-    if not isinstance(cards, dict):
-        return {}
-    return {str(card_id): int(count) for card_id, count in cards.items()}
+    if isinstance(cards, dict) and cards:
+        return {str(card_id): int(count) for card_id, count in cards.items()}
+    if str(bundle.metadata.get("checkpoint_type", "")) == "unified_selfplay" and assets_path:
+        from flesh_and_blood_rlbridge.deck_context import _read_asset_deck  # noqa: PLC0415
+
+        deck_key = "p1_deck" if bundle.role == "p1" else "p2_deck"
+        deck_stem = str(bundle.metadata.get(deck_key, "") or "").strip()
+        if deck_stem:
+            _, counts = _read_asset_deck(Path(assets_path), deck_stem)
+            return {str(card_id): int(count) for card_id, count in counts.items()}
+    return {}
 
 
 def _equipment_header(bundle: CheckpointBundle) -> str:
@@ -1139,7 +1159,7 @@ def _evaluate_checkpoint(
         print(f"  P1 weights : {p1_bundle.weights_path}")
         print("  P2 weights : (none found — will use heuristic)")
 
-    p1_cards = _deck_cards(p1_bundle)
+    p1_cards = _deck_cards(p1_bundle, assets_path=assets_path)
     if not p1_cards:
         raise RuntimeError(f"Checkpoint missing P1 deck spec: {p1_bundle.checkpoint_dir}")
 
@@ -1157,10 +1177,10 @@ def _evaluate_checkpoint(
     opponent_mode = str(p1_bundle.metadata.get("opponent_mode", "preset") or "preset")
     p2_deck_file: Optional[Path] = None
     cleanup_files = [p1_deck_file]
-    if p2_bundle is not None and _deck_cards(p2_bundle):
+    if p2_bundle is not None and _deck_cards(p2_bundle, assets_path=assets_path):
         p2_deck_name = f"eval_p2_{uuid.uuid4().hex[:8]}"
         p2_deck_file = _write_deck_file(
-            _deck_cards(p2_bundle),
+            _deck_cards(p2_bundle, assets_path=assets_path),
             _equipment_header(p2_bundle),
             p2_deck_name,
             assets_path,
@@ -1541,6 +1561,13 @@ def main() -> None:
                 )
             else:
                 print("  Candidate     : (all under candidates/)")
+    elif is_unified_random_matchup_run(results_dir):
+        print("  Run type      : unified random matchups")
+        latest = resolve_latest_unified_matchup_dir(results_dir)
+        if latest is not None:
+            print(f"  Latest matchup: {latest.name}")
+        else:
+            print("  Latest matchup: (waiting for first matchup output)")
     print(f"  Talishar URL  : {args.talishar_url}")
     print(f"  Assets path   : {args.assets_path}")
     if args.render_only:
@@ -1573,8 +1600,20 @@ def main() -> None:
     print("=" * 72, flush=True)
 
     last_seen: Optional[Path] = None
+    last_matchup_dir: Optional[Path] = None
     poll_count = 0
     while True:
+        if is_unified_random_matchup_run(results_dir):
+            active_matchup = resolve_latest_unified_matchup_dir(results_dir)
+            if active_matchup != last_matchup_dir:
+                last_seen = None
+                last_matchup_dir = active_matchup
+                if active_matchup is not None:
+                    print(
+                        f"  [watch] Eval scope → latest matchup {active_matchup.name}",
+                        flush=True,
+                    )
+
         if args.checkpoint_dir:
             p1_bundle = _load_checkpoint(Path(args.checkpoint_dir).expanduser().resolve(), "p1")
         else:
@@ -1588,6 +1627,8 @@ def main() -> None:
             scope = results_dir
             if args.candidate_id and is_sideboard_compare_dir(results_dir):
                 scope = results_dir / _SIDEBOARD_CANDIDATES_DIR / args.candidate_id
+            elif last_matchup_dir is not None:
+                scope = last_matchup_dir
             print(f"  [watch] No checkpoints found under {scope}  "
                   f"(poll #{poll_count + 1})", flush=True)
         elif p1_bundle.checkpoint_dir != last_seen:

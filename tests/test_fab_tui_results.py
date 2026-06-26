@@ -92,3 +92,34 @@ def test_discover_completed_training_requires_completion_marker(
     assert len(completed) == 1
     assert completed[0].status_summary.startswith("trained")
     assert "manual_01" in completed[0].status_summary
+
+
+def test_discover_unified_random_matchup_runs(tmp_path: Path, monkeypatch) -> None:
+    from fab_tui import results as results_mod
+
+    root = tmp_path / "unified_random_matchups"
+    run_dir = root / "silver_age" / "20260626_120000"
+    matchup_dir = run_dir / "abc12345"
+    ckpt = matchup_dir / "unified_selfplay" / "p1" / "episode_000100"
+    ckpt.mkdir(parents=True)
+    (ckpt / "metadata.json").write_text("{}", encoding="utf-8")
+    (run_dir / "run_manifest.json").write_text(
+        json.dumps({"format": "silver_age", "matchups_sampled": ["a-vs-b"]}),
+        encoding="utf-8",
+    )
+    (matchup_dir / "matchup_label.json").write_text(
+        json.dumps({"name": "a-vs-b"}),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        results_mod,
+        "RESULT_CATEGORY_ROOTS",
+        (("unified_random_matchups", root),),
+    )
+
+    entries = discover_evaluable_results(limit=5)
+    assert len(entries) == 1
+    assert entries[0].category == "unified_random_matchups"
+    assert "silver age" in entries[0].label.lower()
+    assert entries[0].latest_episode == "episode_000100"

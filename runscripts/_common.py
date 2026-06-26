@@ -91,6 +91,39 @@ def start_sideboard_compare_dashboard(
     )
 
 
+def start_unified_random_matchups_eval_dashboard(
+    out_dir: Path,
+    *,
+    assets: str | Path,
+    talishar_url_value: str | None = None,
+    poll_seconds: float = RUNTIME.eval_dashboard.poll_seconds,
+) -> subprocess.Popen[Any]:
+    """Watch unified random matchup checkpoints on the latest trained matchup."""
+    _eval = RUNTIME.eval_dashboard
+    return run_python_background(
+        SCRIPTS_EVAL / "eval_phase3_checkpoint.py",
+        "--results-dir",
+        str(out_dir),
+        "--assets-path",
+        str(assets),
+        "--talishar-url",
+        talishar_url_value or talishar_url(),
+        "--episodes",
+        str(_eval.episodes),
+        "--parallel-workers",
+        str(_eval.parallel_workers),
+        "--max-steps",
+        str(_eval.max_steps),
+        "--render-max-steps",
+        str(_eval.render_max_steps),
+        "--poll-seconds",
+        str(poll_seconds),
+        "--watch",
+        "--skip-parity",
+        cwd=REPO_ROOT,
+    )
+
+
 def title_case_token(token: str) -> str:
     token = token.strip()
     if not token:

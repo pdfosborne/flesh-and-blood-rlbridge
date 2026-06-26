@@ -602,6 +602,10 @@ def wizard_unified_random_matchups(env: EnvironmentSettings) -> None:
         "Eval games per checkpoint",
         default=spec.checkpoint_eval_episodes,
     )
+    console.print(
+        "[dim]When checkpoint eval is enabled, a Talishar eval watcher runs in the "
+        "background on the latest matchup in this experiment.[/dim]"
+    )
     spec.workers = IntPrompt.ask("Parallel workers", default=spec.workers)
     spec.skip_converged = Confirm.ask(
         "Skip already-converged deck pairs in cache?",

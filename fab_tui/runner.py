@@ -687,4 +687,22 @@ def run_unified_random_matchups(
     else:
         cmd.append("--no-skip-converged")
     cmd.append("--require-cpp-engine")
-    return run_streaming(cmd)
+    dashboard_proc = None
+    try:
+        if spec.checkpoint_eval_episodes > 0:
+            from runscripts._common import (  # noqa: PLC0415
+                start_unified_random_matchups_eval_dashboard,
+                stop_background_process,
+            )
+
+            dashboard_proc = start_unified_random_matchups_eval_dashboard(
+                out_dir,
+                assets=env.assets_path,
+                talishar_url_value=env.talishar_url,
+            )
+        return run_streaming(cmd)
+    finally:
+        if dashboard_proc is not None:
+            from runscripts._common import stop_background_process  # noqa: PLC0415
+
+            stop_background_process(dashboard_proc)

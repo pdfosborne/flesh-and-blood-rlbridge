@@ -8,6 +8,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from fab_bridge.unified_results import (
+    has_unified_selfplay_checkpoints,
+    is_unified_random_matchup_run,
+    iter_unified_checkpoint_metadata,
+    resolve_latest_unified_matchup_dir,
+    unified_run_label,
+)
 from fab_tui.config import REPO_ROOT, RESULTS_ROOT
 
 RESULT_CATEGORY_ROOTS: tuple[tuple[str, Path], ...] = (
@@ -15,6 +22,7 @@ RESULT_CATEGORY_ROOTS: tuple[tuple[str, Path], ...] = (
     ("matchup_sims", RESULTS_ROOT / "matchup_sims"),
     ("full_pipeline", RESULTS_ROOT / "full_pipeline"),
     ("sideboard_compare", RESULTS_ROOT / "sideboard_compare"),
+    ("unified_random_matchups", RESULTS_ROOT / "unified_random_matchups"),
 )
 
 _RUN_STAMP_SUFFIX = re.compile(r"_(\d{8}_\d{6})$")
@@ -119,6 +127,8 @@ def _is_sideboard_compare_dir(path: Path) -> bool:
 
 
 def _has_phase3_checkpoints(path: Path) -> bool:
+    if is_unified_random_matchup_run(path):
+        return has_unified_selfplay_checkpoints(path)
     if _is_sideboard_compare_dir(path):
         patterns = (
             "candidates/*/p3_*/p1/episode_*/metadata.json",
@@ -133,6 +143,13 @@ def _has_phase3_checkpoints(path: Path) -> bool:
 
 
 def _checkpoint_summary(path: Path) -> tuple[int, str | None]:
+    if is_unified_random_matchup_run(path):
+        meta_paths = iter_unified_checkpoint_metadata(path, "p1")
+        latest_episode: str | None = None
+        for meta in sorted(meta_paths, key=lambda p: p.parent.name, reverse=True):
+            latest_episode = meta.parent.name
+            break
+        return len(meta_paths), latest_episode
     if _is_sideboard_compare_dir(path):
         p3_dirs = [
             p
@@ -171,6 +188,9 @@ def _checkpoint_summary(path: Path) -> tuple[int, str | None]:
 
 
 def _label_for_results_dir(path: Path) -> str:
+    if is_unified_random_matchup_run(path):
+        return unified_run_label(path)
+
     manifest_path = path / "candidates_manifest.json"
     if manifest_path.is_file():
         try:
@@ -242,6 +262,8 @@ def _training_target_reached(live_path: Path) -> bool:
 
 def _is_training_complete(path: Path) -> bool:
     """True when a run looks finished (not an in-progress checkpoint watcher target)."""
+    if (path / "training_summary.json").is_file():
+        return True
     if (path / "sideboard_compare_results.json").is_file():
         return True
     if (path / "results.json").is_file():
@@ -315,17 +337,28 @@ def _completion_summary(path: Path) -> str:
     return "trained"
 
 
+def _iter_result_run_dirs(category: str, root: Path) -> list[Path]:
+    if not root.is_dir():
+        return []
+    if category == "unified_random_matchups":
+        runs: list[Path] = []
+        for format_dir in root.iterdir():
+            if not format_dir.is_dir():
+                continue
+            for run_dir in format_dir.iterdir():
+                if run_dir.is_dir() and is_unified_random_matchup_run(run_dir):
+                    runs.append(run_dir)
+        return runs
+    return [path for path in root.iterdir() if path.is_dir()]
+
+
 def discover_evaluable_results(*, limit: int = 25) -> list[EvaluableResultsEntry]:
     """Return result folders that contain phase-3 play checkpoints, newest first."""
     entries: list[EvaluableResultsEntry] = []
     seen: set[Path] = set()
 
     for category, root in RESULT_CATEGORY_ROOTS:
-        if not root.is_dir():
-            continue
-        for path in root.iterdir():
-            if not path.is_dir():
-                continue
+        for path in _iter_result_run_dirs(category, root):
             resolved = path.resolve()
             if resolved in seen or not _has_phase3_checkpoints(path):
                 continue
@@ -355,11 +388,7 @@ def discover_completed_training_runs(*, limit: int = 25) -> list[CompletedTraini
     seen: set[Path] = set()
 
     for category, root in RESULT_CATEGORY_ROOTS:
-        if not root.is_dir():
-            continue
-        for path in root.iterdir():
-            if not path.is_dir():
-                continue
+        for path in _iter_result_run_dirs(category, root):
             resolved = path.resolve()
             if resolved in seen:
                 continue
