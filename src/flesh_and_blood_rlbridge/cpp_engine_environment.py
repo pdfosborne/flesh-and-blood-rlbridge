@@ -76,6 +76,7 @@ from .legal_action_filter import align_filtered_actions, filter_legal_actions
 from .obs_encoding import observation_fingerprint
 from .talishar_default_policy import (
     RepeatActionTracker,
+    choose_talishar_action_index,
 )
 
 # Reward constants mirror talishar_engine_environment.py
@@ -939,6 +940,27 @@ class CppEngineEnvironment(rlbridgeEnvironment):
 
     def fast_action_capacity(self) -> int:
         return ACTION_CAPACITY
+
+    def logic_policy_action_index(
+        self,
+        *,
+        max_pitch_value: int = 3,
+        min_resource_cost: int = 0,
+    ) -> int:
+        """Pick a legal action index using the shared Talishar default/heuristic policy."""
+        assert self._gs is not None, "call fast_reset() first"
+        legal_objects = self._filter_legal_actions(self._legal_actions())
+        legal_dicts = self._legal_to_dicts(legal_objects)
+        if not legal_dicts:
+            return 0
+        talishar_state = self._synthetic_talishar_state()
+        idx = choose_talishar_action_index(
+            legal_dicts,
+            talishar_state,
+            max_pitch_value=max_pitch_value,
+            min_resource_cost=min_resource_cost,
+        )
+        return min(max(0, int(idx)), len(legal_dicts) - 1)
 
     def fast_reset(
         self,

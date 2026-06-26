@@ -1886,7 +1886,7 @@ function renderTrainReview() {
     <div><strong>Baseline:</strong> ${state.deck.baseline_label || "Baseline"}</div>
     <div><strong>Lists:</strong> 1 baseline + ${state.evalCandidates.length} saved alternate(s)</div>
     <div><strong>Deck:</strong> ${count} / ${required} cards${deckOk ? "" : " — complete the deck in the editor"}</div>
-    <div><strong>Evaluation:</strong> ${document.getElementById("cpp-eval-episodes")?.value || "?"} C++ games, ${document.getElementById("talishar-eval-episodes")?.value || "?"} Talishar games per list</div>`;
+    <div><strong>Evaluation:</strong> ${document.getElementById("cpp-eval-episodes")?.value || "?"} C++ games × 4 matchups, ${document.getElementById("talishar-eval-episodes")?.value || "?"} Talishar games per list</div>`;
 }
 
 document.getElementById("btn-start-evaluation").onclick = async () => {
@@ -2176,6 +2176,17 @@ function renderResultsDamagePanel(ranking, candidateId) {
   );
 }
 
+function cppVariantPct(row, key) {
+  const variants = row.cpp_eval_variants;
+  const wr = variants?.[key]?.p1_win_rate;
+  if (wr != null) return `${(wr * 100).toFixed(1)}%`;
+  if (key === "agent_vs_agent") {
+    const fallback = row.cpp_eval_win_rate ?? row.play_win_rate;
+    if (fallback != null) return `${(fallback * 100).toFixed(1)}%`;
+  }
+  return "—";
+}
+
 async function loadResults(runId) {
   try {
     const data = await api(`/api/runs/${runId}/results`);
@@ -2193,18 +2204,17 @@ async function loadResults(runId) {
     state.lastResultsRanking = ranking;
     const winner = data.winner || {};
     document.getElementById("winner-banner").innerHTML = winner.candidate_id
-      ? `<strong>Winner:</strong> ${winner.candidate_id} — ${winner.label || ""} <span class="status-pill completed">C++ ${(((winner.cpp_eval_win_rate ?? winner.play_win_rate) || 0) * 100).toFixed(1)}%</span> <span class="status-pill completed">Talishar ${((winner.final_eval_win_rate || 0) * 100).toFixed(1)}%</span>`
+      ? `<strong>Winner:</strong> ${winner.candidate_id} — ${winner.label || ""} <span class="status-pill completed">C++ A/A ${cppVariantPct(winner, "agent_vs_agent")}</span> <span class="status-pill completed">Talishar ${((winner.final_eval_win_rate || 0) * 100).toFixed(1)}%</span>`
       : "";
     const tbody = document.getElementById("results-tbody");
     tbody.innerHTML = ranking
       .map((row, i) => {
-        const cpp = (((row.cpp_eval_win_rate ?? row.play_win_rate) || 0) * 100).toFixed(1);
         const talishar = row.final_eval_win_rate != null ? `${(row.final_eval_win_rate * 100).toFixed(1)}%` : "n/a";
         const delta = row.final_eval_delta_vs_baseline != null
           ? `${(row.final_eval_delta_vs_baseline * 100).toFixed(1)}%`
           : "n/a";
         const winCls = i === 0 ? "winner" : "";
-        return `<tr class="${winCls}"><td>${i + 1}</td><td>${row.candidate_id}</td><td>${cpp}%</td><td>${talishar}</td><td>${delta}</td><td>${row.label || ""}</td></tr>`;
+        return `<tr class="${winCls}"><td>${i + 1}</td><td>${row.candidate_id}</td><td>${cppVariantPct(row, "logic_vs_logic")}</td><td>${cppVariantPct(row, "agent_vs_logic")}</td><td>${cppVariantPct(row, "logic_vs_agent")}</td><td>${cppVariantPct(row, "agent_vs_agent")}</td><td>${talishar}</td><td>${delta}</td><td>${row.label || ""}</td></tr>`;
       })
       .join("");
     document.getElementById("results-meta").textContent =

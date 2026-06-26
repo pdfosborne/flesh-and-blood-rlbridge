@@ -16,7 +16,9 @@ from datetime import datetime, timedelta, timezone
 from sideboard_compare_dashboard import (  # noqa: E402
     _chart_engine_label,
     _chart_title,
+    _cpp_eval_aggregate_progress,
     _estimate_sideboard_compare_eta,
+    _load_cpp_eval_variants,
     _slug_to_display_name,
     collect_sideboard_compare_state,
     render_sideboard_compare_html,
@@ -280,6 +282,7 @@ def test_collect_eval_only_dashboard(tmp_path: Path) -> None:
             "opponent_deck": "BriarSAGEPrecon",
             "play_episodes": 100000,
             "cpp_eval_episodes": 1000,
+            "cpp_eval_variant_count": 4,
             "talishar_eval_episodes": 10,
             "final_eval_episodes": 10,
             "skip_final_eval": False,
@@ -304,6 +307,9 @@ def test_collect_eval_only_dashboard(tmp_path: Path) -> None:
             "timeouts": 2,
             "errors": 0,
             "runtime_backend": "C++ engine fast sampled eval",
+            "variant": "logic_vs_logic",
+            "p1_policy": "logic",
+            "p2_policy": "logic",
         }),
         encoding="utf-8",
     )
@@ -314,16 +320,17 @@ def test_collect_eval_only_dashboard(tmp_path: Path) -> None:
     row = state["candidates"][0]
     assert row["status"] == "cpp_eval"
     assert row["train_done"] == 350
-    assert row["train_target"] == 1000
+    assert row["train_target"] == 4000
     assert row["eval_progress"]["cpp_done"] == 350
+    assert row["eval_progress"]["cpp_target"] == 4000
     assert row["play_win_rate"] == pytest.approx(180 / 350)
 
     html = render_sideboard_compare_html(state, auto_refresh_seconds=5.0)
     assert "Sideboard evaluation dashboard" in html
-    assert "1000 C++ eval games/candidate" in html
-    assert "C++ checkpoint eval" in html
+    assert "1000 C++ games × 4 policy matchups/candidate" in html
+    assert "C++ eval — Logic vs logic" in html
     assert "Talishar final eval" in html
-    assert "350/1000 games" in html
+    assert "350/4000 games" in html
     assert "Training win rate" not in html
     assert "policy episodes/candidate" not in html
 
@@ -337,6 +344,7 @@ def test_collect_eval_only_talishar_phase(tmp_path: Path) -> None:
             "started_at": datetime.now(timezone.utc).isoformat(),
             "eval_only": True,
             "cpp_eval_episodes": 100,
+            "cpp_eval_variant_count": 4,
             "talishar_eval_episodes": 10,
             "final_eval_episodes": 10,
             "skip_final_eval": False,
@@ -349,11 +357,24 @@ def test_collect_eval_only_talishar_phase(tmp_path: Path) -> None:
         }),
         encoding="utf-8",
     )
+    cpp_eval_dir = candidate_dir / "cpp_eval"
+    cpp_eval_dir.mkdir(parents=True)
+    for key in ("logic_vs_logic", "agent_vs_logic", "logic_vs_agent", "agent_vs_agent"):
+        (cpp_eval_dir / f"{key}.json").write_text(
+            json.dumps({"p1_win_rate": 0.5, "p1_wins": 50, "losses": 50}),
+            encoding="utf-8",
+        )
     (candidate_dir / "candidate_result.json").write_text(
         json.dumps({
             "candidate_id": "baseline",
             "play_win_rate": 0.52,
             "cpp_eval_win_rate": 0.52,
+            "cpp_eval_variants": {
+                "logic_vs_logic": {"p1_win_rate": 0.5},
+                "agent_vs_logic": {"p1_win_rate": 0.55},
+                "logic_vs_agent": {"p1_win_rate": 0.45},
+                "agent_vs_agent": {"p1_win_rate": 0.52},
+            },
         }),
         encoding="utf-8",
     )
@@ -381,9 +402,44 @@ def test_collect_eval_only_talishar_phase(tmp_path: Path) -> None:
     state = collect_sideboard_compare_state(out_dir)
     row = state["candidates"][0]
     assert row["status"] == "talishar_eval"
+    assert row["eval_progress"]["cpp_done"] == 400
+    assert row["eval_progress"]["cpp_target"] == 400
     assert row["eval_progress"]["talishar_done"] == 3
     assert row["eval_progress"]["talishar_target"] == 10
     assert row["final_eval_win_rate"] == pytest.approx(2 / 3)
+    variants = row["cpp_eval_variants"]
+    assert variants["agent_vs_logic"]["p1_win_rate"] == pytest.approx(0.55)
+
+
+def test_cpp_eval_aggregate_progress_counts_variants(tmp_path: Path) -> None:
+    candidate_dir = tmp_path / "baseline"
+    cpp_eval_dir = candidate_dir / "cpp_eval"
+    cpp_eval_dir.mkdir(parents=True)
+    (cpp_eval_dir / "logic_vs_logic.json").write_text("{}", encoding="utf-8")
+    done, target, active = _cpp_eval_aggregate_progress(
+        candidate_dir,
+        cpp_eval_episodes=50,
+        variant_count=4,
+        live_eval={
+            "variant": "agent_vs_logic",
+            "episodes_completed": 20,
+        },
+    )
+    assert done == 70
+    assert target == 200
+    assert active == "agent_vs_logic"
+
+
+def test_load_cpp_eval_variants_from_disk(tmp_path: Path) -> None:
+    candidate_dir = tmp_path / "swap"
+    cpp_eval_dir = candidate_dir / "cpp_eval"
+    cpp_eval_dir.mkdir(parents=True)
+    (cpp_eval_dir / "logic_vs_agent.json").write_text(
+        json.dumps({"p1_win_rate": 0.42}),
+        encoding="utf-8",
+    )
+    loaded = _load_cpp_eval_variants(candidate_dir, None)
+    assert loaded["logic_vs_agent"]["p1_win_rate"] == pytest.approx(0.42)
 
 
 def test_training_phase_eta_accounts_for_slow_final_eval() -> None:

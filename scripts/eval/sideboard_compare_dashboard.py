@@ -159,6 +159,68 @@ def _live_eval_only_progress(candidate_dir: Path) -> Optional[dict[str, Any]]:
     return None
 
 
+_CPP_EVAL_VARIANT_ORDER = (
+    "logic_vs_logic",
+    "agent_vs_logic",
+    "logic_vs_agent",
+    "agent_vs_agent",
+)
+
+_CPP_EVAL_VARIANT_LABELS = {
+    "logic_vs_logic": "Logic vs logic",
+    "agent_vs_logic": "Agent vs logic",
+    "logic_vs_agent": "Logic vs agent",
+    "agent_vs_agent": "Agent vs agent",
+}
+
+
+def _load_cpp_eval_variants(
+    candidate_dir: Path,
+    result: Optional[dict[str, Any]],
+) -> dict[str, Any]:
+    if result and isinstance(result.get("cpp_eval_variants"), dict):
+        return {
+            str(key): value
+            for key, value in result["cpp_eval_variants"].items()
+            if isinstance(value, dict)
+        }
+    variants: dict[str, Any] = {}
+    cpp_eval_dir = candidate_dir / "cpp_eval"
+    if cpp_eval_dir.is_dir():
+        for key in _CPP_EVAL_VARIANT_ORDER:
+            path = cpp_eval_dir / f"{key}.json"
+            if path.is_file():
+                data = _read_json(path)
+                if isinstance(data, dict):
+                    variants[key] = data
+    return variants
+
+
+def _cpp_eval_aggregate_progress(
+    candidate_dir: Path,
+    *,
+    cpp_eval_episodes: int,
+    variant_count: int,
+    live_eval: Optional[dict[str, Any]],
+) -> tuple[int, int, Optional[str]]:
+    per_variant = max(0, int(cpp_eval_episodes))
+    target = per_variant * max(1, int(variant_count))
+    done = 0
+    active_variant: Optional[str] = None
+    cpp_eval_dir = candidate_dir / "cpp_eval"
+    for key in _CPP_EVAL_VARIANT_ORDER[: max(0, int(variant_count))]:
+        if (cpp_eval_dir / f"{key}.json").is_file():
+            done += per_variant
+    if live_eval and isinstance(live_eval, dict):
+        active_variant = str(live_eval.get("variant") or "").strip() or None
+        live_done = int(live_eval.get("episodes_completed", 0) or 0)
+        if active_variant and not (cpp_eval_dir / f"{active_variant}.json").is_file():
+            done += min(live_done, per_variant)
+        elif not active_variant and done < target:
+            done = min(target, done + live_done)
+    return min(done, target), target, active_variant
+
+
 def _resolve_final_eval_eta_weight(manifest: dict[str, Any]) -> float:
     raw = manifest.get("final_eval_eta_weight")
     if raw is not None:
@@ -631,6 +693,7 @@ def collect_sideboard_compare_state(out_dir: Path) -> dict[str, Any]:
         or manifest.get("checkpoint_eval_episodes")
         or 0
     )
+    cpp_eval_variant_count = int(manifest.get("cpp_eval_variant_count", 1) or 1)
     talishar_eval_episodes = int(
         manifest.get("talishar_eval_episodes")
         or manifest.get("final_eval_episodes", 0)
@@ -697,7 +760,20 @@ def collect_sideboard_compare_state(out_dir: Path) -> dict[str, Any]:
             train_series = _training_win_series(candidate_dir)
 
         eval_progress: Optional[dict[str, Any]] = None
+        cpp_eval_variants: dict[str, Any] = {}
+        if eval_only and candidate_dir is not None:
+            cpp_eval_variants = _load_cpp_eval_variants(candidate_dir, result)
         if eval_only:
+            agg_done, agg_target, active_cpp_variant = (
+                _cpp_eval_aggregate_progress(
+                    candidate_dir,
+                    cpp_eval_episodes=cpp_eval_episodes,
+                    variant_count=cpp_eval_variant_count,
+                    live_eval=live_eval_only,
+                )
+                if candidate_dir is not None
+                else (0, cpp_eval_episodes * cpp_eval_variant_count, None)
+            )
             eval_progress = _eval_only_progress(
                 cpp_eval_episodes=cpp_eval_episodes,
                 talishar_eval_episodes=talishar_eval_episodes,
@@ -706,8 +782,22 @@ def collect_sideboard_compare_state(out_dir: Path) -> dict[str, Any]:
                 live_final=live_final_eval,
                 result=result,
             )
+            if eval_progress is not None:
+                eval_progress["cpp_done"] = agg_done
+                eval_progress["cpp_target"] = agg_target
+                eval_progress["cpp_pct"] = (
+                    (agg_done / agg_target * 100.0) if agg_target else 0.0
+                )
+                eval_progress["active_cpp_variant"] = active_cpp_variant
+                eval_progress["cpp_eval_variants"] = cpp_eval_variants
             train_done = int(eval_progress["cpp_done"])
             train_target = int(eval_progress["cpp_target"])
+            stage = "C++ checkpoint eval"
+            if active_cpp_variant := eval_progress.get("active_cpp_variant"):
+                stage = (
+                    f"C++ eval — "
+                    f"{_CPP_EVAL_VARIANT_LABELS.get(str(active_cpp_variant), active_cpp_variant)}"
+                )
             status = _candidate_status_eval_only(
                 result=result,
                 skip_final_eval=skip_final_eval,
@@ -720,7 +810,7 @@ def collect_sideboard_compare_state(out_dir: Path) -> dict[str, Any]:
                 "done": train_done,
                 "target": train_target,
                 "pct": float(eval_progress["cpp_pct"]),
-                "stage": "C++ checkpoint eval",
+                "stage": stage,
                 "plan": progress_plan,
             }
         else:
@@ -921,6 +1011,7 @@ def collect_sideboard_compare_state(out_dir: Path) -> dict[str, Any]:
             "training_stage": training_progress["stage"],
             "training_plan": training_progress["plan"],
             "eval_progress": eval_progress,
+            "cpp_eval_variants": cpp_eval_variants,
             "play_win_rate": play_win_rate,
             "play_win_rate_decided": live_train_wr_decided,
             "train_wins": train_wins,
@@ -1000,6 +1091,7 @@ def collect_sideboard_compare_state(out_dir: Path) -> dict[str, Any]:
         "play_episodes": play_episodes,
         "eval_only": eval_only,
         "cpp_eval_episodes": cpp_eval_episodes,
+        "cpp_eval_variant_count": cpp_eval_variant_count,
         "talishar_eval_episodes": talishar_eval_episodes,
         "final_eval_episodes": final_eval_episodes,
         "skip_final_eval": skip_final_eval,
@@ -1369,6 +1461,37 @@ def _render_eval_only_candidate_card(row: dict[str, Any]) -> str:
     <div class="progress-bar"><div class="progress-fill progress-fill-talishar" style="width:{talishar_pct:.1f}%"></div></div>
   </section>"""
 
+    variant_rows: list[str] = []
+    variants = row.get("cpp_eval_variants") or progress.get("cpp_eval_variants") or {}
+    active_variant = str(progress.get("active_cpp_variant") or "")
+    if isinstance(variants, dict):
+        for key in _CPP_EVAL_VARIANT_ORDER:
+            metrics = variants.get(key)
+            if not isinstance(metrics, dict):
+                continue
+            label = _CPP_EVAL_VARIANT_LABELS.get(key, key)
+            wr = _pct_text(metrics.get("p1_win_rate"))
+            active_mark = " · running" if key == active_variant else ""
+            variant_rows.append(
+                f"<div class=\"variant-row\">"
+                f"<span>{html.escape(label)}</span>"
+                f"<span>{wr}{html.escape(active_mark)}</span>"
+                f"</div>"
+            )
+    variants_html = ""
+    if variant_rows:
+        variants_html = (
+            '<section class="cpp-variants">'
+            '<h4>C++ policy matchups</h4>'
+            + "\n".join(variant_rows)
+            + "</section>"
+        )
+
+    agent_vs_agent_wr = None
+    if isinstance(variants, dict) and isinstance(variants.get("agent_vs_agent"), dict):
+        agent_vs_agent_wr = variants["agent_vs_agent"].get("p1_win_rate")
+    cpp_win_display = _pct_text(agent_vs_agent_wr or row.get("play_win_rate"))
+
     return f"""
 <article class="{card_class}">
   <header class="candidate-head">
@@ -1385,14 +1508,14 @@ def _render_eval_only_candidate_card(row: dict[str, Any]) -> str:
   </section>
   <section class="progress-block">
     <div class="progress-label">
-      <span>C++ checkpoint eval</span>
+      <span>{html.escape(str(row.get("training_stage", "C++ checkpoint eval")))}</span>
       <span>{cpp_done}/{cpp_target} games</span>
     </div>
     <div class="progress-bar"><div class="progress-fill" style="width:{cpp_pct:.1f}%"></div></div>
-  </section>{talishar_section}
+  </section>{variants_html}{talishar_section}
   <section class="metrics metrics-eval-only">
-    <div><span class="metric-label">C++ eval win%</span><span class="metric-value">{_pct_text(row.get("play_win_rate"))}</span>{cpp_record_html}</div>
-    <div><span class="metric-label">Talishar eval win%</span><span class="metric-value">{_pct_text(row.get("final_eval_win_rate"))} {delta_html}</span>{talishar_record_html}</div>
+    <div><span class="metric-label">C++ agent vs agent</span><span class="metric-value">{cpp_win_display}</span>{cpp_record_html}</div>
+    <div><span class="metric-label">Talishar agent vs agent</span><span class="metric-value">{_pct_text(row.get("final_eval_win_rate"))} {delta_html}</span>{talishar_record_html}</div>
   </section>
 </article>"""
 
@@ -1582,7 +1705,11 @@ def render_sideboard_compare_html(
             if talishar_eval_episodes > 0
             else ""
         )
-        run_config = f"{cpp_eval_episodes} C++ eval games/candidate{talishar_part}"
+        variant_count = int(state.get("cpp_eval_variant_count", 1) or 1)
+        run_config = (
+            f"{cpp_eval_episodes} C++ games × {variant_count} policy matchups/candidate"
+            f"{talishar_part}"
+        )
     else:
         run_config = f"{play_episodes} policy episodes/candidate{staged_info}"
         if ckpt_info:
@@ -1687,6 +1814,22 @@ def render_sideboard_compare_html(
     }}
     .metrics-eval-only {{
       grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    }}
+    .cpp-variants {{
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }}
+    .variant-row {{
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      font-size: 0.82rem;
+      color: var(--muted);
+    }}
+    .variant-row span:last-child {{
+      color: var(--text);
+      font-weight: 500;
     }}
     .progress-label {{
       display: flex;

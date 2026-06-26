@@ -126,8 +126,9 @@
           <div id="eval-candidates-list" class="eval-candidates-list"></div>
           <div class="training-params" style="margin-top:1rem">
             <div>
-              <label for="cpp-eval-episodes">C++ eval games per list</label>
+              <label for="cpp-eval-episodes">C++ eval games per matchup</label>
               <input id="cpp-eval-episodes" type="number" min="10" step="10" value="1000" />
+              <p class="hint" style="margin:0.25rem 0 0">4 C++ matchups per list: logic vs logic, agent vs logic, logic vs agent, agent vs agent.</p>
             </div>
             <div>
               <label for="talishar-eval-episodes">Talishar eval games per list</label>
@@ -151,7 +152,7 @@
     <!-- Results -->
     <section id="panel-results" class="panel" role="tabpanel">
       <h2>Final results</h2>
-      <p class="hint">Ranked comparison after C++ and Talishar evaluation completes.</p>
+      <p class="hint">Ranked comparison after all C++ policy matchups and Talishar evaluation complete. Primary ranking uses C++ agent vs agent.</p>
       <div id="results-empty" class="empty-state">Results appear when evaluation finishes.</div>
       <div id="results-content" hidden>
         <div class="card">
@@ -161,8 +162,11 @@
               <tr>
                 <th>#</th>
                 <th>Candidate</th>
-                <th>C++ eval</th>
-                <th>Talishar eval</th>
+                <th>C++ L/L</th>
+                <th>C++ A/L</th>
+                <th>C++ L/A</th>
+                <th>C++ A/A</th>
+                <th>Talishar</th>
                 <th>Δ vs baseline</th>
                 <th>Label</th>
               </tr>

@@ -1128,6 +1128,7 @@ def start_evaluation(
     manifest["eval_only"] = True
     manifest["play_episodes"] = 0
     manifest["cpp_eval_episodes"] = cpp_eval_episodes
+    manifest["cpp_eval_variant_count"] = 4
     manifest["talishar_eval_episodes"] = talishar_eval_episodes
     manifest["final_eval_episodes"] = talishar_eval_episodes
     candidates_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")

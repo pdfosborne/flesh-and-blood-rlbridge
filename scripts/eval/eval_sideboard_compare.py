@@ -61,7 +61,11 @@ from train_pipeline_common import (  # noqa: E402
     resolve_assets_path,
     save_deck_state,
 )
-from train_play import evaluate_fixed_matchup  # noqa: E402
+from train_play import (  # noqa: E402
+    LOGIC_POLICY,
+    evaluate_fixed_matchup,
+    evaluate_policy_matchup,
+)
 from train_sideboard_compare import (  # noqa: E402
     _attach_final_eval_deltas,
     _baseline_final_eval_win_rate,
@@ -73,6 +77,19 @@ from train_sideboard_compare import (  # noqa: E402
 DEFAULT_CPP_EVAL_EPISODES = 1000
 DEFAULT_TALISHAR_EVAL_EPISODES = 10
 DEFAULT_MAX_STEPS = RUNTIME.sideboard_compare.final_eval_max_steps or RUNTIME.play.max_play_steps
+
+CPP_EVAL_VARIANTS: tuple[tuple[str, str, str, str], ...] = (
+    ("logic_vs_logic", "logic", "logic", "C++ logic vs logic"),
+    ("agent_vs_logic", "agent", "logic", "C++ agent vs logic"),
+    ("logic_vs_agent", "logic", "agent", "C++ logic vs agent"),
+    ("agent_vs_agent", "agent", "agent", "C++ agent vs agent"),
+)
+
+
+def _resolve_cpp_seat_policy(kind: str, agent: PPOAgent) -> Any:
+    if kind == "logic":
+        return LOGIC_POLICY
+    return agent
 
 
 def _load_unified_agent(
@@ -179,6 +196,9 @@ def _write_eval_live(
     draws: int = 0,
     timeouts: int = 0,
     runtime_backend: str = "",
+    variant: str = "",
+    p1_policy: str = "",
+    p2_policy: str = "",
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -192,6 +212,12 @@ def _write_eval_live(
         "runtime_backend": runtime_backend,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
+    if variant:
+        payload["variant"] = variant
+    if p1_policy:
+        payload["p1_policy"] = p1_policy
+    if p2_policy:
+        payload["p2_policy"] = p2_policy
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
@@ -202,6 +228,7 @@ def _write_partial_candidate_result(
     args: argparse.Namespace,
     play_win_rate: float | None = None,
     cpp_metrics: dict[str, Any] | None = None,
+    cpp_eval_variants: dict[str, Any] | None = None,
     final_eval_win_rate: float | None = None,
     talishar_metrics: dict[str, Any] | None = None,
 ) -> None:
@@ -220,6 +247,8 @@ def _write_partial_candidate_result(
         result["cpp_eval_win_rate"] = float(play_win_rate)
     if cpp_metrics:
         result["cpp_eval"] = cpp_metrics
+    if cpp_eval_variants:
+        result["cpp_eval_variants"] = cpp_eval_variants
     if final_eval_win_rate is not None:
         result["final_eval_win_rate"] = float(final_eval_win_rate)
         result["final_eval"] = {
@@ -315,12 +344,14 @@ def _eval_candidate(
 
     print(
         f"\n  [{candidate.candidate_id}] {candidate.label}\n"
-        f"    C++ checkpoint eval: {args.cpp_eval_episodes if cpp_dir else 0} ep  |  "
+        f"    C++ eval: {len(CPP_EVAL_VARIANTS)} policy matchups × "
+        f"{args.cpp_eval_episodes if cpp_dir else 0} ep  |  "
         f"Talishar final eval: {args.talishar_eval_episodes} ep"
     )
 
     eval_live_path = candidate_dir / "eval_live.json"
     final_live_path = candidate_dir / "final_eval" / "final_eval_live.json"
+    cpp_eval_dir = candidate_dir / "cpp_eval"
     _write_eval_live(
         eval_live_path,
         phase="cpp_checkpoint",
@@ -331,22 +362,69 @@ def _eval_candidate(
     _write_partial_candidate_result(candidate_dir, candidate=candidate, args=args)
     _refresh_dashboard(out_dir)
 
+    cpp_variant_metrics: dict[str, Any] = {}
     cpp_metrics: dict[str, Any] = {}
     if cpp_dir and args.cpp_eval_episodes > 0:
-        print(f"  Running C++ checkpoint eval ({args.cpp_eval_episodes} games)…")
-        cpp_metrics = evaluate_fixed_matchup(
-            matchup,
-            agent,
-            base_url=args.talishar_url,
-            game_format=args.format,
-            max_steps=args.max_eval_steps,
-            episodes=args.cpp_eval_episodes,
-            seed=eval_seed,
-            backend="cpp",
-            eval_label="C++ checkpoint eval",
-            live_progress_path=eval_live_path,
-        )
-        cpp_wr = float(cpp_metrics.get("p1_win_rate", 0.0))
+        cpp_eval_dir.mkdir(parents=True, exist_ok=True)
+        for variant_index, (variant_key, p1_kind, p2_kind, variant_label) in enumerate(
+            CPP_EVAL_VARIANTS
+        ):
+            p1_policy = _resolve_cpp_seat_policy(p1_kind, agent)
+            p2_policy = _resolve_cpp_seat_policy(p2_kind, agent)
+            variant_seed = eval_seed + variant_index * 50_000
+            print(f"  Running {variant_label} ({args.cpp_eval_episodes} games)…")
+            _write_eval_live(
+                eval_live_path,
+                phase="cpp_checkpoint",
+                completed=0,
+                target=args.cpp_eval_episodes,
+                runtime_backend="C++ engine",
+                variant=variant_key,
+                p1_policy=p1_kind,
+                p2_policy=p2_kind,
+            )
+            _refresh_dashboard(out_dir)
+            metrics = evaluate_policy_matchup(
+                matchup,
+                p1_policy,
+                p2_policy,
+                base_url=args.talishar_url,
+                game_format=args.format,
+                max_steps=args.max_eval_steps,
+                episodes=args.cpp_eval_episodes,
+                seed=variant_seed,
+                backend="cpp",
+                eval_label=variant_label,
+                live_progress_path=eval_live_path,
+            )
+            cpp_variant_metrics[variant_key] = metrics
+            (cpp_eval_dir / f"{variant_key}.json").write_text(
+                json.dumps(metrics, indent=2),
+                encoding="utf-8",
+            )
+            wr = float(metrics.get("p1_win_rate", 0.0))
+            print(
+                f"  {variant_label} done: {wr * 100:.1f}% "
+                f"({metrics.get('p1_wins', 0)}W/"
+                f"{metrics.get('losses', 0)}L/"
+                f"{metrics.get('draws', 0)}D)"
+            )
+            _write_partial_candidate_result(
+                candidate_dir,
+                candidate=candidate,
+                args=args,
+                play_win_rate=float(
+                    cpp_variant_metrics.get("agent_vs_agent", {}).get("p1_win_rate", wr)
+                )
+                if "agent_vs_agent" in cpp_variant_metrics
+                else None,
+                cpp_metrics=cpp_variant_metrics.get("agent_vs_agent"),
+                cpp_eval_variants=cpp_variant_metrics,
+            )
+            _refresh_dashboard(out_dir)
+
+        cpp_metrics = cpp_variant_metrics.get("agent_vs_agent", {})
+        cpp_wr = float(cpp_metrics.get("p1_win_rate", 0.0)) if cpp_metrics else 0.0
         _write_eval_live(
             eval_live_path,
             phase="cpp_checkpoint",
@@ -357,6 +435,9 @@ def _eval_candidate(
             draws=int(cpp_metrics.get("draws", 0)),
             timeouts=int(cpp_metrics.get("timeouts", 0)),
             runtime_backend=str(cpp_metrics.get("runtime_backend", "C++ engine")),
+            variant="agent_vs_agent",
+            p1_policy="agent",
+            p2_policy="agent",
         )
         _write_partial_candidate_result(
             candidate_dir,
@@ -364,10 +445,11 @@ def _eval_candidate(
             args=args,
             play_win_rate=cpp_wr,
             cpp_metrics=cpp_metrics,
+            cpp_eval_variants=cpp_variant_metrics,
         )
         _refresh_dashboard(out_dir)
         print(
-            f"  C++ checkpoint eval done: {cpp_wr * 100:.1f}% "
+            f"  C++ agent vs agent done: {cpp_wr * 100:.1f}% "
             f"({cpp_metrics.get('p1_wins', 0)}W/"
             f"{cpp_metrics.get('losses', 0)}L/"
             f"{cpp_metrics.get('draws', 0)}D/"
@@ -376,8 +458,8 @@ def _eval_candidate(
         )
         if int(cpp_metrics.get("errors", 0)) > 0:
             print(
-                f"  WARNING: C++ checkpoint eval had "
-                f"{cpp_metrics.get('errors', 0)} classification error(s) — not counted as losses"
+                f"  WARNING: C++ agent vs agent had "
+                f"{cpp_metrics.get('errors', 0)} classification error(s)"
             )
 
     talishar_metrics: dict[str, Any] = {}
@@ -447,6 +529,7 @@ def _eval_candidate(
         "play_win_rate": play_wr,
         "cpp_eval_win_rate": cpp_wr,
         "cpp_eval": cpp_metrics,
+        "cpp_eval_variants": cpp_variant_metrics or None,
         "final_eval_win_rate": tal_wr,
         "final_eval": (
             {
@@ -619,6 +702,7 @@ def main() -> int:
         "play_episodes": 0,
         "checkpoint_eval_episodes": args.cpp_eval_episodes,
         "cpp_eval_episodes": args.cpp_eval_episodes,
+        "cpp_eval_variant_count": len(CPP_EVAL_VARIANTS),
         "talishar_eval_episodes": args.talishar_eval_episodes,
         "final_eval_episodes": args.talishar_eval_episodes,
         "final_eval_max_steps": args.max_eval_steps,

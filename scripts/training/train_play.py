@@ -93,6 +93,9 @@ from runtime_defaults import (  # noqa: E402
     RUNTIME,
 )
 
+# Sentinel seat policy for C++ fast eval (Talishar default/heuristic policy).
+LOGIC_POLICY = "__logic_policy__"
+
 try:
     from train_dual_agent_common import (  # noqa: E402
         make_agent,
@@ -1642,6 +1645,36 @@ def _softmax_logits(logits: np.ndarray) -> np.ndarray:
     return exp / total
 
 
+def _is_logic_policy(policy: Any) -> bool:
+    return policy is LOGIC_POLICY or str(policy) == LOGIC_POLICY
+
+
+def _policy_label(policy: Any) -> str:
+    return "logic" if _is_logic_policy(policy) else "agent"
+
+
+def _fast_logic_policy_action_index(env: Any) -> int:
+    if hasattr(env, "fast_logic_policy_action_index"):
+        return int(env.fast_logic_policy_action_index())
+    cpp_env = getattr(env, "_cpp_env", None)
+    if cpp_env is not None and hasattr(cpp_env, "logic_policy_action_index"):
+        return int(cpp_env.logic_policy_action_index())
+    raise RuntimeError("logic policy fast eval requires a C++ engine")
+
+
+def _fast_action_for_policy(
+    policy: Any,
+    env: Any,
+    *,
+    obs_vec: np.ndarray,
+    n_legal: int,
+    rng: np.random.Generator,
+) -> int:
+    if _is_logic_policy(policy):
+        return _fast_logic_policy_action_index(env)
+    return _fast_sample_action_index(policy, obs_vec, n_legal, rng)
+
+
 def _fast_sample_action_index(
     agent: Any,
     obs_vec: np.ndarray,
@@ -1775,17 +1808,18 @@ def _record_eval_outcome(
     return wins, losses, draws, timeouts, errors
 
 
-def _evaluate_fast_p1_vs_fixed_opponent(
+def _evaluate_fast_policy_matchup(
     env: Any,
-    p1_agent: Any,
+    p1_policy: Any,
     *,
-    p2_agent: Any,
+    p2_policy: Any,
     max_steps: int,
     episodes: int,
     seed: Optional[int] = None,
     eval_label: str = "Eval",
     live_progress_path: Optional[Path] = None,
     progress_interval: int = 100,
+    live_phase: str = "cpp_checkpoint",
 ) -> Optional[dict[str, Any]]:
     if not _env_supports_fast_training(env):
         return None
@@ -1802,10 +1836,16 @@ def _evaluate_fast_p1_vs_fixed_opponent(
 
         while steps < max_steps:
             acting = int(state.get("acting_player_id", 1) or 1)
-            agent = p1_agent if acting == 1 else p2_agent
+            seat_policy = p1_policy if acting == 1 else p2_policy
             obs_vec = np.asarray(state["obs_vec"], dtype=np.float64)
             n_legal = max(1, int(state.get("legal_count", 1) or 1))
-            action = _fast_sample_action_index(agent, obs_vec, n_legal, episode_rng)
+            action = _fast_action_for_policy(
+                seat_policy,
+                env,
+                obs_vec=obs_vec,
+                n_legal=n_legal,
+                rng=episode_rng,
+            )
             state = env.fast_step_index(action)
             terminated = bool(state.get("terminated", False))
             truncated = bool(state.get("truncated", False))
@@ -1854,7 +1894,7 @@ def _evaluate_fast_p1_vs_fixed_opponent(
             live_progress_path.write_text(
                 json.dumps(
                     {
-                        "phase": "cpp_checkpoint",
+                        "phase": live_phase,
                         "episodes_completed": completed,
                         "target_episodes": episodes,
                         "wins": wins,
@@ -1862,6 +1902,8 @@ def _evaluate_fast_p1_vs_fixed_opponent(
                         "draws": draws,
                         "timeouts": timeouts,
                         "errors": errors,
+                        "p1_policy": _policy_label(p1_policy),
+                        "p2_policy": _policy_label(p2_policy),
                         "runtime_backend": "C++ engine fast sampled eval",
                         "updated_at": datetime.now().isoformat(),
                     },
@@ -1903,7 +1945,34 @@ def _evaluate_fast_p1_vs_fixed_opponent(
         "timeout_rate": (timeouts + errors) / total,
         "runtime_backend": "C++ engine fast sampled eval",
         "eval_anomalies": anomalies[:20],
+        "p1_policy": _policy_label(p1_policy),
+        "p2_policy": _policy_label(p2_policy),
     }
+
+
+def _evaluate_fast_p1_vs_fixed_opponent(
+    env: Any,
+    p1_agent: Any,
+    *,
+    p2_agent: Any,
+    max_steps: int,
+    episodes: int,
+    seed: Optional[int] = None,
+    eval_label: str = "Eval",
+    live_progress_path: Optional[Path] = None,
+    progress_interval: int = 100,
+) -> Optional[dict[str, Any]]:
+    return _evaluate_fast_policy_matchup(
+        env,
+        p1_agent,
+        p2_policy=p2_agent,
+        max_steps=max_steps,
+        episodes=episodes,
+        seed=seed,
+        eval_label=eval_label,
+        live_progress_path=live_progress_path,
+        progress_interval=progress_interval,
+    )
 
 
 def _evaluate_p1_vs_fixed_opponent(
@@ -1945,6 +2014,10 @@ def _evaluate_p1_vs_fixed_opponent(
     backend = str(backend or "auto").lower()
     if backend not in {"auto", "cpp", "http"}:
         backend = "auto"
+    if _is_logic_policy(p1_agent) or _is_logic_policy(p2_agent):
+        if backend == "http":
+            raise RuntimeError("logic policy evaluation requires C++ backend")
+        backend = "cpp"
 
     use_cpp = backend != "http"
     env = make_env(
@@ -1956,10 +2029,10 @@ def _evaluate_p1_vs_fixed_opponent(
         require_fast_training=(backend == "cpp"),
     )
     if backend in {"auto", "cpp"}:
-        fast_metrics = _evaluate_fast_p1_vs_fixed_opponent(
+        fast_metrics = _evaluate_fast_policy_matchup(
             env,
             p1_agent,
-            p2_agent=p2_agent,
+            p2_policy=p2_agent,
             max_steps=max_steps,
             episodes=episodes,
             seed=seed,
@@ -2166,6 +2239,36 @@ def _evaluate_p1_vs_fixed_opponent(
         "timeout_rate": (timeouts + errors) / total,
         "runtime_backend": runtime_backend or "HTTP Talishar",
     }
+
+
+def evaluate_policy_matchup(
+    matchup: "Matchup",
+    p1_policy: Any,
+    p2_policy: Any,
+    *,
+    base_url: str,
+    game_format: str,
+    max_steps: int,
+    episodes: int,
+    seed: Optional[int] = None,
+    backend: str = "cpp",
+    eval_label: str = "Eval",
+    live_progress_path: Optional[Path] = None,
+) -> dict[str, Any]:
+    """Evaluate arbitrary P1/P2 seat policies (PPO agent or ``LOGIC_POLICY``)."""
+    return _evaluate_p1_vs_fixed_opponent(
+        matchup,
+        p1_policy,
+        p2_agent=p2_policy,
+        base_url=base_url,
+        game_format=game_format,
+        max_steps=max_steps,
+        episodes=episodes,
+        seed=seed,
+        backend=backend,
+        eval_label=eval_label,
+        live_progress_path=live_progress_path,
+    )
 
 
 def evaluate_fixed_matchup(

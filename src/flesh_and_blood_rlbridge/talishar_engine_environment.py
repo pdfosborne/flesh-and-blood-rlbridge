@@ -460,6 +460,18 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             )
         return result
 
+    def fast_logic_policy_action_index(self) -> int:
+        if not self._using_cpp or not hasattr(self._cpp_env, "logic_policy_action_index"):
+            raise RuntimeError(
+                "fast_logic_policy_action_index requires a C++ engine with fast training support"
+            )
+        return int(
+            self._cpp_env.logic_policy_action_index(  # type: ignore[union-attr]
+                max_pitch_value=self._block_max_pitch_value,
+                min_resource_cost=self._block_min_resource_cost,
+            )
+        )
+
     def _tracker_state_snapshot(
         self,
         state: dict[str, Any],
