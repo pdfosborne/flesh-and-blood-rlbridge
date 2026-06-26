@@ -14,6 +14,7 @@ from eval_phase3_checkpoint import (  # noqa: E402
     is_sideboard_compare_dir,
     list_sideboard_candidate_ids,
 )
+from fab_tui.results import _label_for_results_dir  # noqa: E402
 
 
 def _write_checkpoint(
@@ -161,3 +162,55 @@ def test_resolve_parity_deck_names_prefers_eval_decks() -> None:
     assert err == ""
     assert deck1 == "eval_p1_1bd9b946"
     assert deck2 == "DorintheSAGEPrecon"
+
+
+def test_latest_checkpoint_prefers_highest_episode_over_mtime(tmp_path: Path) -> None:
+    results_dir = tmp_path / "run"
+    results_dir.mkdir()
+    seeds_root = results_dir / "parallel_seeds"
+    seed0 = seeds_root / "seed_0"
+    seed1 = seeds_root / "seed_1"
+    (results_dir / "parallel_seeds_summary.json").write_text(
+        json.dumps({"best_p1_seed_index": 0, "best_p2_seed_index": 0}),
+        encoding="utf-8",
+    )
+
+    low_ep = seed0 / "p3_a-vs-b" / "p1" / "episode_000095"
+    high_mtime_low_ep = seed1 / "p3_c-vs-d" / "p1" / "episode_000005"
+
+    for ckpt_dir, episode, mtime_offset in (
+        (low_ep, 95, 0),
+        (high_mtime_low_ep, 5, 10_000),
+    ):
+        ckpt_dir.mkdir(parents=True)
+        (ckpt_dir / "weights").mkdir(parents=True)
+        (ckpt_dir / "weights" / "agent_weights.json").write_text("{}", encoding="utf-8")
+        (ckpt_dir / "metadata.json").write_text(
+            json.dumps({"matchup": ckpt_dir.parents[1].name, "episodes_completed": episode}),
+            encoding="utf-8",
+        )
+        meta_path = ckpt_dir / "metadata.json"
+        meta_path.touch()
+        ts = meta_path.stat().st_mtime + mtime_offset
+        import os
+
+        os.utime(meta_path, (ts, ts))
+
+    bundle = _latest_checkpoint(results_dir, "p1")
+    assert bundle is not None
+    assert bundle.episodes_completed == 95
+
+
+def test_label_for_results_dir_uses_deck_state_active_decks(tmp_path: Path) -> None:
+    run_dir = tmp_path / "briar_vs_briar"
+    run_dir.mkdir()
+    (run_dir / "deck_state.json").write_text(
+        json.dumps(
+            {
+                "p1": {"active_decks": {"briar": {}}},
+                "p2": {"active_decks": {"briar": {}}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert _label_for_results_dir(run_dir) == "briar vs briar"

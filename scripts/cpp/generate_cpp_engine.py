@@ -60,6 +60,27 @@ import requests
 
 from flesh_and_blood_rlbridge.card_db.talishar_card_ids import TalisharCardIdResolver
 from flesh_and_blood_rlbridge.talishar_deck_assets import resolve_talishar_deck_stem
+from flesh_and_blood_rlbridge.player_observation import (  # noqa: E402
+    ACTION_CAPACITY,
+    COMBAT_CHAIN_SLOTS,
+    COMBAT_CHAIN_SLOT_DIM,
+    COMBAT_SCALAR_COUNT,
+    CONTEXT_DIM,
+    DECK_SLOTS,
+    HAND_SLOT_DIM,
+    HAND_SLOTS,
+    PLAYER_OBS_DIM,
+    SCALAR_COUNT,
+    ZONE_SLOT_DIM,
+    ZONE_SPECS,
+)
+from flesh_and_blood_rlbridge.card_vocab import (  # noqa: E402
+    _build_card_index,
+    _build_hero_index,
+    card_index_normalized,
+    hero_index_normalized,
+    vocab_size,
+)
 
 # ── Card metadata ──────────────────────────────────────────────────────────────
 
@@ -452,6 +473,214 @@ def scan_php_sources(
     return metas
 
 
+def _deck_indices_cpp_lines(deck_counts: dict[str, int], var: str) -> str:
+    """Emit C++ lines that fill a std::array<double, kDeckSlots>."""
+    slots: list[float] = []
+    for cid, cnt in sorted(deck_counts.items()):
+        for _ in range(int(cnt)):
+            if len(slots) >= DECK_SLOTS:
+                break
+            slots.append(float(card_index_normalized(cid)))
+    while len(slots) < DECK_SLOTS:
+        slots.append(0.0)
+    lines = [f"    {var}.fill(0.0);"]
+    for i, val in enumerate(slots[:DECK_SLOTS]):
+        lines.append(f"    {var}[static_cast<size_t>({i})] = {val:.17g};")
+    return "\n".join(lines)
+
+
+def _cpp_norm_card_map_entries() -> str:
+    vs = max(vocab_size(), 1)
+    lines: list[str] = []
+    for token, idx in sorted(_build_card_index().items()):
+        norm = float(idx) / float(vs)
+        safe = token.replace("\\", "\\\\").replace('"', '\\"')
+        lines.append(f'        {{"{safe}", {norm:.17g}}},')
+    return "\n".join(lines)
+
+
+def _cpp_norm_hero_map_entries() -> str:
+    heroes = _build_hero_index()
+    size = max(len(heroes) + 1, 1)
+    lines: list[str] = []
+    for token, idx in sorted(heroes.items()):
+        norm = float(idx) / float(size)
+        safe = token.replace("\\", "\\\\").replace('"', '\\"')
+        lines.append(f'        {{"{safe}", {norm:.17g}}},')
+    return "\n".join(lines)
+
+
+def _render_player_obs_cpp_impl() -> str:
+    zones_per_player = sum(n for _, n in ZONE_SPECS)
+    hand_off = CONTEXT_DIM + SCALAR_COUNT
+    zone_off = hand_off + HAND_SLOTS * HAND_SLOT_DIM
+    combat_off = zone_off + 2 * zones_per_player * ZONE_SLOT_DIM
+    zone_specs = ", ".join(str(n) for _, n in ZONE_SPECS)
+
+    return f"""
+namespace {{
+constexpr int kPlayerObsDim = {PLAYER_OBS_DIM};
+constexpr int kContextDim = {CONTEXT_DIM};
+constexpr int kScalarCount = {SCALAR_COUNT};
+constexpr int kHandSlots = {HAND_SLOTS};
+constexpr int kHandSlotDim = {HAND_SLOT_DIM};
+constexpr int kZoneSlotDim = {ZONE_SLOT_DIM};
+constexpr int kDeckSlots = {DECK_SLOTS};
+constexpr int kHandOff = {hand_off};
+constexpr int kZoneOff = {zone_off};
+constexpr int kCombatOff = {combat_off};
+constexpr int kActionCapacity = {ACTION_CAPACITY};
+constexpr int kZoneMaxSlots[] = {{ {zone_specs} }};
+
+double _scaled(int value, double denom) {{
+    return static_cast<double>(value) / denom;
+}}
+
+std::string _lower_copy(std::string value) {{
+    for (char& ch : value) {{
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }}
+    return value;
+}}
+
+double _norm_card_id(const std::string& raw) {{
+    static const std::unordered_map<std::string, double> kMap = {{
+{_cpp_norm_card_map_entries()}
+    }};
+    const auto it = kMap.find(_lower_copy(raw));
+    return it != kMap.end() ? it->second : 0.0;
+}}
+
+double _norm_hero_id(const std::string& raw) {{
+    static const std::unordered_map<std::string, double> kMap = {{
+{_cpp_norm_hero_map_entries()}
+    }};
+    const auto it = kMap.find(_lower_copy(raw));
+    return it != kMap.end() ? it->second : 0.0;
+}}
+
+void _write_zone_block(
+    std::vector<double>& out,
+    int& offset,
+    const std::vector<Card>& cards,
+    int max_slots
+) {{
+    for (int slot = 0; slot < max_slots; ++slot) {{
+        if (slot < static_cast<int>(cards.size())) {{
+            out[static_cast<size_t>(offset++)] = _norm_card_id(cards[static_cast<size_t>(slot)].card_id);
+            out[static_cast<size_t>(offset++)] = 0.0;
+            out[static_cast<size_t>(offset++)] = 0.0;
+            out[static_cast<size_t>(offset++)] = 0.0;
+        }} else {{
+            offset += kZoneSlotDim;
+        }}
+    }}
+}}
+
+const int kZoneCount = static_cast<int>(sizeof(kZoneMaxSlots) / sizeof(kZoneMaxSlots[0]));
+}}  // namespace
+
+std::vector<double> GameState::player_observation_vector(int legal_count) const {{
+    if (legal_count < 0) legal_count = fast_legal_count();
+    std::vector<double> out(static_cast<size_t>(kPlayerObsDim), 0.0);
+
+    const int self_idx = priority;
+    const int opp_idx = 1 - priority;
+    const auto& self = players[static_cast<size_t>(self_idx)];
+    const auto& opp = players[static_cast<size_t>(opp_idx)];
+
+    // Context block (POV-relative)
+    out[0] = _norm_hero_id(self.hero_card_id);
+    out[1] = _norm_hero_id(opp.hero_card_id);
+    out[2] = _scaled(format_idx, 10.0);
+    out[3] = first_player == 1 ? 1.0 : 2.0;
+    const auto& deck_ctx = self_idx == 0 ? deck_indices_p1 : deck_indices_p2;
+    for (int i = 0; i < kDeckSlots; ++i) {{
+        out[static_cast<size_t>(4 + i)] = deck_ctx[static_cast<size_t>(i)];
+    }}
+
+    int scalar = kContextDim;
+    const int acting = priority + 1;
+    out[static_cast<size_t>(scalar++)] = static_cast<double>(acting) / 2.0;
+    out[static_cast<size_t>(scalar++)] = _scaled(self.health, 40.0);
+    out[static_cast<size_t>(scalar++)] = _scaled(opp.health, 40.0);
+    out[static_cast<size_t>(scalar++)] = _scaled(players[0].health, 40.0);
+    out[static_cast<size_t>(scalar++)] = _scaled(players[1].health, 40.0);
+    out[static_cast<size_t>(scalar++)] = _scaled(turn_no, 100.0);
+    out[static_cast<size_t>(scalar++)] = _scaled(static_cast<int>(phase), 10.0);
+    out[static_cast<size_t>(scalar++)] = _scaled(static_cast<int>(self.hand.size()), 10.0);
+    out[static_cast<size_t>(scalar++)] = _scaled(static_cast<int>(opp.hand.size()), 10.0);
+    out[static_cast<size_t>(scalar++)] = _scaled(static_cast<int>(self.deck.size()), 80.0);
+    out[static_cast<size_t>(scalar++)] = _scaled(static_cast<int>(opp.deck.size()), 80.0);
+    out[static_cast<size_t>(scalar++)] = _scaled(static_cast<int>(self.pitch_zone.size()), 20.0);
+    out[static_cast<size_t>(scalar++)] = _scaled(static_cast<int>(opp.pitch_zone.size()), 20.0);
+    out[static_cast<size_t>(scalar++)] = 0.0;  // resources_available (TODO: pitch prompt)
+    out[static_cast<size_t>(scalar++)] = 0.0;  // resources_required
+    out[static_cast<size_t>(scalar++)] = 0.0;  // playerAP
+    out[static_cast<size_t>(scalar++)] = 0.0;  // opponentAP
+    out[static_cast<size_t>(scalar++)] = static_cast<double>(legal_count) / static_cast<double>(kActionCapacity);
+    out[static_cast<size_t>(scalar++)] = _scaled(consecutive_passes, 20.0);
+    out[static_cast<size_t>(scalar++)] = game_over ? 1.0 : 0.0;
+    out[static_cast<size_t>(scalar++)] = _scaled(winner + 1, 3.0);
+    out[static_cast<size_t>(scalar++)] = 1.0;  // canPassPhase
+    out[static_cast<size_t>(scalar++)] = 0.0;  // popup_type
+    out[static_cast<size_t>(scalar++)] = 1.0;  // amIActivePlayer
+    out[static_cast<size_t>(scalar++)] = 1.0;  // havePriority
+    out[static_cast<size_t>(scalar++)] = 1.0;  // selfPlay
+
+    int hand = kHandOff;
+    for (int slot = 0; slot < kHandSlots; ++slot) {{
+        if (slot < static_cast<int>(self.hand.size())) {{
+            const auto& c = self.hand[static_cast<size_t>(slot)];
+            int avail = 0;
+            for (size_t j = 0; j < self.hand.size(); ++j) {{
+                if (static_cast<int>(j) != slot) avail += self.hand[j].pitch;
+            }}
+            const bool playable = c.cost <= avail;
+            out[static_cast<size_t>(hand++)] = _norm_card_id(c.card_id);
+            out[static_cast<size_t>(hand++)] = _scaled(c.cost, 10.0);
+            out[static_cast<size_t>(hand++)] = _scaled(c.pitch, 4.0);
+            out[static_cast<size_t>(hand++)] = _scaled(c.power, 12.0);
+            out[static_cast<size_t>(hand++)] = _scaled(c.defense, 5.0);
+            out[static_cast<size_t>(hand++)] = playable ? 1.0 : 0.0;
+        }} else {{
+            hand += kHandSlotDim;
+        }}
+    }}
+
+    int zone = kZoneOff;
+    const std::array<const std::vector<Card>*, 8> self_zones = {{
+        &self.equipment, &self.arsenal, &self.discard, &self.pitch_zone,
+        nullptr, nullptr, nullptr, nullptr,
+    }};
+    const std::array<const std::vector<Card>*, 8> opp_zones = {{
+        &opp.equipment, &opp.arsenal, &opp.discard, &opp.pitch_zone,
+        nullptr, nullptr, nullptr, nullptr,
+    }};
+    for (int side = 0; side < 2; ++side) {{
+        for (int z = 0; z < kZoneCount; ++z) {{
+            const int max_slots = kZoneMaxSlots[z];
+            if (side == 0 && self_zones[static_cast<size_t>(z)] != nullptr) {{
+                _write_zone_block(out, zone, *self_zones[static_cast<size_t>(z)], max_slots);
+            }} else if (side == 1 && opp_zones[static_cast<size_t>(z)] != nullptr) {{
+                _write_zone_block(out, zone, *opp_zones[static_cast<size_t>(z)], max_slots);
+            }} else {{
+                zone += max_slots * kZoneSlotDim;
+            }}
+        }}
+    }}
+
+    // Combat block left zero-padded (chain logic not implemented in C++ MVP).
+    (void)kCombatOff;
+    return out;
+}}
+
+std::vector<double> GameState::fast_observation_vector(int legal_count) const {{
+    return player_observation_vector(legal_count);
+}}
+"""
+
+
 # ── C++ template strings ───────────────────────────────────────────────────────
 
 _GAMESTATE_H = """\
@@ -463,6 +692,7 @@ _GAMESTATE_H = """\
 #include <array>
 #include <cstdint>
 #include <cstddef>
+#include <cctype>
 #include <functional>
 #include <random>
 #include <stdexcept>
@@ -542,6 +772,10 @@ struct GameState {{
     // Python max-turn truncation handles no-progress loops.
     int         consecutive_passes     = 0;
     int         max_consecutive_passes = 20;
+    int         format_idx = 0;
+    int         first_player = 1;
+    std::array<double, 80> deck_indices_p1{{}};
+    std::array<double, 80> deck_indices_p2{{}};
     std::mt19937 rng = std::mt19937(0xFAB123u);
 
     using EffectFn = std::function<void(GameState&, int /*player_idx*/)>;
@@ -551,6 +785,7 @@ struct GameState {{
     std::vector<LegalAction> get_legal_actions() const;
     void apply_action(const LegalAction& action);
     int fast_legal_count() const;
+    std::vector<double> player_observation_vector(int legal_count = -1) const;
     std::vector<double> fast_observation_vector(int legal_count = -1) const;
     FastStepResult fast_step_index(int action_index);
     int fast_action_capacity() const;
@@ -574,14 +809,9 @@ _GAMESTATE_CPP = """\
 #include "gamestate.h"
 #include "cards.h"
 #include <algorithm>
+#include <cctype>
 
-namespace {{
-constexpr int kFastHandSlots = 8;
-
-double _scaled(int value, double denom) {{
-    return static_cast<double>(value) / denom;
-}}
-}}  // namespace
+__PLAYER_OBS_IMPL__
 
 std::vector<LegalAction> GameState::get_legal_actions() const {{
     std::vector<LegalAction> actions;
@@ -618,52 +848,11 @@ int GameState::fast_legal_count() const {{
 }}
 
 int GameState::fast_action_capacity() const {{
-    return 32;
+    return {action_capacity};
 }}
 
 void GameState::seed_rng(uint32_t seed) {{
     rng.seed(seed);
-}}
-
-std::vector<double> GameState::fast_observation_vector(int legal_count) const {{
-    if (legal_count < 0) legal_count = fast_legal_count();
-    const auto& self = players[priority];
-    const auto& opp = players[1 - priority];
-
-    std::vector<double> out;
-    out.reserve(16 + kFastHandSlots * 4);
-    out.push_back(priority == 0 ? 1.0 : 2.0);
-    out.push_back(_scaled(self.health, 40.0));
-    out.push_back(_scaled(opp.health, 40.0));
-    out.push_back(_scaled(players[0].health, 40.0));
-    out.push_back(_scaled(players[1].health, 40.0));
-    out.push_back(_scaled(turn_no, 100.0));
-    out.push_back(_scaled(static_cast<int>(phase), 10.0));
-    out.push_back(_scaled(static_cast<int>(self.hand.size()), 10.0));
-    out.push_back(_scaled(static_cast<int>(opp.hand.size()), 10.0));
-    out.push_back(_scaled(static_cast<int>(self.deck.size()), 80.0));
-    out.push_back(_scaled(static_cast<int>(opp.deck.size()), 80.0));
-    out.push_back(_scaled(static_cast<int>(self.pitch_zone.size()), 20.0));
-    out.push_back(_scaled(static_cast<int>(legal_count), 32.0));
-    out.push_back(_scaled(consecutive_passes, 20.0));
-    out.push_back(game_over ? 1.0 : 0.0);
-    out.push_back(_scaled(winner + 1, 3.0));
-
-    for (int slot = 0; slot < kFastHandSlots; ++slot) {{
-        if (slot < static_cast<int>(self.hand.size())) {{
-            const auto& c = self.hand[static_cast<size_t>(slot)];
-            out.push_back(_scaled(c.cost, 10.0));
-            out.push_back(_scaled(c.pitch, 4.0));
-            out.push_back(_scaled(c.power, 12.0));
-            out.push_back(_scaled(c.defense, 5.0));
-        }} else {{
-            out.push_back(0.0);
-            out.push_back(0.0);
-            out.push_back(0.0);
-            out.push_back(0.0);
-        }}
-    }}
-    return out;
 }}
 
 void GameState::_apply_pass() {{
@@ -756,7 +945,7 @@ FastStepResult GameState::fast_step_index(int action_index) {{
 
     FastStepResult result;
     result.legal_count = fast_legal_count();
-    result.obs_vec = fast_observation_vector(result.legal_count);
+    result.obs_vec = player_observation_vector(result.legal_count);
     result.acting_player_id = priority + 1;
     result.reward = reward;
     result.terminated = terminated;
@@ -944,6 +1133,11 @@ void GameState::init_standard_decks() {{
     // Deal starting hands from Talishar character intellect.
     _draw_cards(0, players[0].intellect);
     _draw_cards(1, players[1].intellect);
+
+    format_idx = {format_idx};
+    first_player = 1;
+{p1_deck_indices}
+{p2_deck_indices}
 }}
 """
 
@@ -1013,6 +1207,9 @@ PYBIND11_MODULE(fab_engine, m) {{
              py::call_guard<py::gil_scoped_release>())
         .def("fast_legal_count", &GameState::fast_legal_count,
              py::call_guard<py::gil_scoped_release>())
+        .def("player_observation_vector", &GameState::player_observation_vector,
+             py::arg("legal_count") = -1,
+             py::call_guard<py::gil_scoped_release>())
         .def("fast_observation_vector", &GameState::fast_observation_vector,
              py::arg("legal_count") = -1,
              py::call_guard<py::gil_scoped_release>())
@@ -1048,6 +1245,28 @@ PYBIND11_MODULE(fab_engine, m) {{
             [](const GameState& g) {{ return (int)g.players[0].pitch_zone.size(); }})
         .def_property_readonly("p2_pitch_size",
             [](const GameState& g) {{ return (int)g.players[1].pitch_zone.size(); }})
+        .def_property_readonly("p1_equipment",
+            [](const GameState& g) {{ return g.players[0].equipment; }})
+        .def_property_readonly("p2_equipment",
+            [](const GameState& g) {{ return g.players[1].equipment; }})
+        .def_property_readonly("p1_arsenal",
+            [](const GameState& g) {{ return g.players[0].arsenal; }})
+        .def_property_readonly("p2_arsenal",
+            [](const GameState& g) {{ return g.players[1].arsenal; }})
+        .def_property_readonly("p1_pitch",
+            [](const GameState& g) {{ return g.players[0].pitch_zone; }})
+        .def_property_readonly("p2_pitch",
+            [](const GameState& g) {{ return g.players[1].pitch_zone; }})
+        .def_property_readonly("p1_discard",
+            [](const GameState& g) {{ return g.players[0].discard; }})
+        .def_property_readonly("p2_discard",
+            [](const GameState& g) {{ return g.players[1].discard; }})
+        .def_property_readonly("p1_hero_id",
+            [](const GameState& g) {{ return g.players[0].hero_card_id; }})
+        .def_property_readonly("p2_hero_id",
+            [](const GameState& g) {{ return g.players[1].hero_card_id; }})
+        .def_property_readonly("first_player",
+            [](const GameState& g) {{ return g.first_player; }})
         .def_property_readonly("consecutive_passes",
             [](const GameState& g) {{ return g.consecutive_passes; }})
         .def_readwrite("max_consecutive_passes", &GameState::max_consecutive_passes);
@@ -1203,7 +1422,9 @@ def generate(
     )
 
     # gamestate.cpp  (template uses {{ / }} escapes — call .format() to render)
-    (out_dir / "gamestate.cpp").write_text(_GAMESTATE_CPP.format(), encoding="utf-8")
+    gamestate_cpp = _GAMESTATE_CPP.format(action_capacity=ACTION_CAPACITY)
+    gamestate_cpp = gamestate_cpp.replace("__PLAYER_OBS_IMPL__", _render_player_obs_cpp_impl())
+    (out_dir / "gamestate.cpp").write_text(gamestate_cpp, encoding="utf-8")
 
     # cards.h
     cards_h = _CARDS_H_HEADER.format(
@@ -1273,6 +1494,8 @@ def generate(
     )
     p1_setup_lines = _setup_init_lines(p1_asset_info, "players[0].equipment")
     p2_setup_lines = _setup_init_lines(p2_asset_info, "players[1].equipment")
+    p1_deck_idx_lines = _deck_indices_cpp_lines(p1_counts, "deck_indices_p1")
+    p2_deck_idx_lines = _deck_indices_cpp_lines(p2_counts, "deck_indices_p2")
     (out_dir / "init_decks.cpp").write_text(
         _INIT_DECKS_CPP.format(
             deck1=deck1, deck2=deck2,
@@ -1286,6 +1509,9 @@ def generate(
             p2_setup=p2_setup_lines or "    // (no setup cards)",
             p1_cards=p1_lines or "    // (no cards)",
             p2_cards=p2_lines or "    // (no cards)",
+            format_idx=0,
+            p1_deck_indices=p1_deck_idx_lines,
+            p2_deck_indices=p2_deck_idx_lines,
         ),
         encoding="utf-8",
     )

@@ -1,4 +1,4 @@
-"""Tests for agent cache fingerprints and convergence registry."""
+"""Tests for unified agent cache fingerprints and training history."""
 
 from __future__ import annotations
 
@@ -12,10 +12,10 @@ sys.path.insert(0, str(_REPO / "scripts" / "training"))
 from agent_cache import (  # noqa: E402
     AgentCacheStore,
     MatchupTrainingRecord,
-    PlayerCacheContext,
     deck_content_fingerprint,
     deck_matchup_key,
 )
+from rl_agents.ppo import PPOAgent  # noqa: E402
 
 
 def test_deck_content_fingerprint_is_stable() -> None:
@@ -33,19 +33,7 @@ def test_deck_matchup_key_orders_p1_then_p2() -> None:
     assert deck_matchup_key("aaa", "bbb") == "aaa__vs__bbb"
 
 
-def test_tier1_key_uses_content_fingerprints() -> None:
-    ctx = PlayerCacheContext(
-        player_deck="runtime_uuid",
-        player_hero="briar",
-        opponent_deck="DorintheSAGEPrecon",
-        opponent_hero="dorinthea",
-        player_deck_fingerprint="p1fp",
-        opponent_deck_fingerprint="p2fp",
-    )
-    assert ctx.tier_keys()[0] == "p1fp__vs__p2fp"
-
-
-def test_convergence_registry_skips_when_agent_exists(tmp_path: Path) -> None:
+def test_training_history_in_meta(tmp_path: Path) -> None:
     cache_root = tmp_path / "agent_cache"
     store = AgentCacheStore(cache_root, "silver_age")
 
@@ -53,28 +41,26 @@ def test_convergence_registry_skips_when_agent_exists(tmp_path: Path) -> None:
     p2_fp = "opponent_precon_fp"
     matchup_key = deck_matchup_key(p1_fp, p2_fp)
 
-    ctx = PlayerCacheContext(
-        player_deck="cached",
-        player_hero="briar",
-        opponent_deck="cached",
-        opponent_hero="dorinthea",
-        player_deck_fingerprint=p1_fp,
-        opponent_deck_fingerprint=p2_fp,
-    )
-    agent = store.bootstrap_player(ctx, lambda: __import__("rl_agents.ppo", fromlist=["PPOAgent"]).PPOAgent()).agents[0]
+    agent = PPOAgent()
     agent.obs_dim = 4
     agent.n_actions = 8
     agent._init_nets(4)
-    store.save(1, ctx.tier_keys()[0], agent)
 
-    store.mark_matchup_converged(
-        p1_fingerprint=p1_fp,
-        p2_fingerprint=p2_fp,
-        p1_hero="briar",
-        p2_hero="dorinthea",
-        episodes_completed=1000,
-        target_episodes=1000,
-        p1_win_rate=0.55,
+    store.persist(
+        agent,
+        episodes_delta=1000,
+        training_summary={
+            "matchup_name": "briar_vs_kayo",
+            "p1_fingerprint": p1_fp,
+            "p2_fingerprint": p2_fp,
+            "p1_hero": "briar",
+            "p2_hero": "kayo",
+            "episodes_completed": 1000,
+            "target_episodes": 1000,
+            "p1_win_rate": 0.55,
+            "p2_win_rate": 0.45,
+            "training_stats": {"timeouts": 2, "episodes": 1000},
+        },
     )
 
     record = store.should_skip_training(
@@ -85,6 +71,8 @@ def test_convergence_registry_skips_when_agent_exists(tmp_path: Path) -> None:
     assert record is not None
     assert record.matchup_key == matchup_key
     assert record.converged is True
+    assert record.p1_win_rate == 0.55
+    assert record.training_stats == {"timeouts": 2, "episodes": 1000}
 
     assert store.should_skip_training(
         p1_fingerprint=p1_fp,
@@ -92,8 +80,9 @@ def test_convergence_registry_skips_when_agent_exists(tmp_path: Path) -> None:
         target_episodes=2000,
     ) is None
 
-    registry_path = cache_root / "silver_age" / "deck_matchup_registry.json"
-    assert registry_path.is_file()
-    payload = json.loads(registry_path.read_text(encoding="utf-8"))
-    assert matchup_key in payload
-    assert MatchupTrainingRecord.from_dict(payload[matchup_key]).p1_win_rate == 0.55
+    meta_path = cache_root / "silver_age" / "unified_agent.meta.json"
+    assert meta_path.is_file()
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert len(meta["training_history"]) == 1
+    assert meta["training_history"][0]["matchup_name"] == "briar_vs_kayo"
+    assert MatchupTrainingRecord.from_dict(meta["training_history"][0]).p1_win_rate == 0.55

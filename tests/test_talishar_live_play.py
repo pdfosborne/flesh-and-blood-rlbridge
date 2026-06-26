@@ -17,6 +17,7 @@ from talishar_live_play import (  # noqa: E402
     prepare_live_play_context,
     resolve_checkpoint_bundles,
 )
+from eval_phase3_checkpoint import CheckpointBundle  # noqa: E402
 
 
 def _write_checkpoint(
@@ -158,3 +159,26 @@ def test_outcome_from_human_perspective_flips_for_p2() -> None:
     assert _outcome_from_human_perspective("win", 2) == "loss"
     assert _outcome_from_human_perspective("loss", 2) == "win"
     assert _outcome_from_human_perspective("draw", 2) == "draw"
+
+
+def test_deck_labels_dual_mode_ignores_stale_preset_name() -> None:
+    p1 = CheckpointBundle(
+        role="p1",
+        checkpoint_dir=Path("/tmp/ep"),
+        metadata={
+            "p1_hero": "briar",
+            "p2_hero": "briar",
+            "opponent_mode": "dual",
+            "opponent_deck_name": "Ira",
+        },
+        weights_path=Path("/tmp/ep/weights/agent_weights.json"),
+    )
+    p2 = CheckpointBundle(
+        role="p2",
+        checkpoint_dir=Path("/tmp/ep2"),
+        metadata={"p2_hero": "briar"},
+        weights_path=Path("/tmp/ep2/weights/agent_weights.json"),
+    )
+    trained, opponent = deck_labels_from_bundle(p1, p2)
+    assert trained == "briar"
+    assert opponent == "briar"

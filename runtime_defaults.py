@@ -31,7 +31,7 @@ class MetaRuntime:
     eval_parallel_workers: int = 4
 
     # ── Training budget (episodes) ───────────────────────────────────────────
-    play_episodes: int = 10_000  # Phase 3 play training (all workflows)
+    play_episodes: int = 100  # Phase 3 play training (all workflows)
 
     # ── Checkpoints during training ──────────────────────────────────────────
     checkpoint_interval_pct: float = 5.0

@@ -120,11 +120,11 @@ def _live_play_deck_labels(
     )
 
     try:
-        p1_bundle, _ = resolve_checkpoint_bundles(
+        p1_bundle, p2_bundle = resolve_checkpoint_bundles(
             Path(results_dir).expanduser().resolve(),
             candidate_id=candidate_id,
         )
-        return deck_labels_from_bundle(p1_bundle)
+        return deck_labels_from_bundle(p1_bundle, p2_bundle)
     except Exception:
         return "Trained deck", "Opponent deck"
 

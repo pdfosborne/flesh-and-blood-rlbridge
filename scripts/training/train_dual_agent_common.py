@@ -50,6 +50,10 @@ from flesh_and_blood_rlbridge.talishar_engine_environment import (  # noqa: E402
     TalisharEngineEnvironment,
     run_talishar_eval_episode,
 )
+from flesh_and_blood_rlbridge.player_observation import (  # noqa: E402
+    ACTION_CAPACITY,
+    PLAYER_OBS_SCHEMA_VERSION,
+)
 from rl_agents.ppo import (  # noqa: E402
     PPOAgent,
     _gae,
@@ -205,6 +209,44 @@ def make_agent(seed: Optional[int] = None) -> PPOAgent:
         mini_batch_size=DEFAULT_MINI_BATCH,
         seed=seed,
     )
+
+
+def _probe_training_dims(
+    env: Any,
+    seed: Optional[int] = None,
+) -> tuple[int, int, bool]:
+    """Return (obs_dim, n_actions, mask_actions) from a live environment."""
+    if _env_supports_fast_training(env):
+        reset_info = env.fast_reset(seed=seed)
+        obs_vec = np.asarray(reset_info["obs_vec"], dtype=np.float64)
+        return int(obs_vec.shape[0]), int(env.fast_action_capacity()), True
+    reset_out = env.reset(seed=seed)
+    obs = _get(reset_out, "observation", reset_out)
+    n_actions, mask_actions = _infer_action_capacity(env, seed=seed)
+    probe = make_agent(seed=seed)
+    obs_dim = int(probe._obs_to_vec(obs).shape[0])
+    return obs_dim, int(n_actions), bool(mask_actions)
+
+
+def _bootstrap_unified_policy(
+    cache_store: "AgentCacheStore",
+    env: Any,
+    seed: Optional[int],
+) -> "UnifiedPolicyBundle":
+    from agent_cache import UnifiedPolicyBundle  # noqa: PLC0415
+
+    obs_dim, n_actions, mask_actions = _probe_training_dims(env, seed=seed)
+
+    def _make() -> PPOAgent:
+        return make_agent(seed=seed)
+
+    policy, init_src = cache_store.load_or_create(
+        _make,
+        obs_dim=obs_dim,
+        n_actions=n_actions,
+        mask_actions=mask_actions,
+    )
+    return UnifiedPolicyBundle(policy=policy, init_sources=[init_src])
 
 
 def _ppo_update(agent: PPOAgent, buf: dict, next_obs_vec: np.ndarray) -> None:
@@ -1105,6 +1147,65 @@ def _announce_training_backend(
     )
 
 
+def _merge_episode_transitions(
+    p1_trans: list[dict[str, Any]],
+    p2_trans: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    merged = list(p1_trans) + list(p2_trans)
+    merged.sort(key=lambda t: int(t.get("step_order", 0)))
+    return merged
+
+
+def _flush_unified_ppo_buffers(
+    policy: PPOAgent,
+    p1_trans: list[dict[str, Any]],
+    p2_trans: list[dict[str, Any]],
+) -> None:
+    merged = _merge_episode_transitions(p1_trans, p2_trans)
+    if merged:
+        buf = _transitions_to_buf(merged)
+        _ppo_update(policy, buf, merged[-1]["next_obs_vec"])
+
+
+def _flush_unified_warmup_buffers(
+    policy: PPOAgent,
+    p1_trans: list[dict[str, Any]],
+    p2_trans: list[dict[str, Any]],
+) -> None:
+    merged = _merge_episode_transitions(p1_trans, p2_trans)
+    if merged:
+        buf = _transitions_to_buf(merged)
+        _bc_update(policy, buf, merged[-1]["next_obs_vec"])
+
+
+def _uses_unified_policy(p1_tiers: list[PPOAgent], p2_tiers: list[PPOAgent]) -> bool:
+    return bool(p1_tiers and p2_tiers and p1_tiers[0] is p2_tiers[0])
+
+
+def _flush_ppo_buffers_auto(
+    p1_tiers: list[PPOAgent],
+    p2_tiers: list[PPOAgent],
+    p1_trans: list[dict[str, Any]],
+    p2_trans: list[dict[str, Any]],
+) -> None:
+    if _uses_unified_policy(p1_tiers, p2_tiers):
+        _flush_unified_ppo_buffers(p1_tiers[0], p1_trans, p2_trans)
+    else:
+        _flush_ppo_buffers(p1_tiers, p2_tiers, p1_trans, p2_trans)
+
+
+def _flush_warmup_buffers_auto(
+    p1_tiers: list[PPOAgent],
+    p2_tiers: list[PPOAgent],
+    p1_trans: list[dict[str, Any]],
+    p2_trans: list[dict[str, Any]],
+) -> None:
+    if _uses_unified_policy(p1_tiers, p2_tiers):
+        _flush_unified_warmup_buffers(p1_tiers[0], p1_trans, p2_trans)
+    else:
+        _flush_warmup_buffers(p1_tiers, p2_tiers, p1_trans, p2_trans)
+
+
 def _flush_ppo_buffers(
     p1_tiers: list[PPOAgent],
     p2_tiers: list[PPOAgent],
@@ -1183,6 +1284,7 @@ def _run_one_fast_episode(
     final_p1_deck = _int_state(state, "p1_deck", 0)
     final_p2_deck = _int_state(state, "p2_deck", 0)
     final_turn_no = _int_state(state, "turn_no", 0)
+    step_order = 0
 
     for _ in range(max_steps):
         acting = int(state["acting_player_id"])
@@ -1223,7 +1325,9 @@ def _run_one_fast_episode(
             "done": float(done),
             "n_legal": n_legal,
             "next_obs_vec": next_obs_vec,
+            "step_order": step_order,
         }
+        step_order += 1
         if acting == 1:
             p1_trans.append(trans)
             cur_p1_r += env_reward
@@ -1323,6 +1427,7 @@ def _run_one_episode(
     steps_taken = 0
     final_p1_hp = final_p2_hp = final_turn_no = None
     final_p1_deck = final_p2_deck = None
+    step_order = 0
 
     for _ in range(max_steps):
         acting = env._acting_player_id
@@ -1382,7 +1487,9 @@ def _run_one_episode(
             "done":        float(done),
             "n_legal":     n_legal if n_legal is not None else policy.n_actions,
             "next_obs_vec": next_obs_vec,
+            "step_order": step_order,
         }
+        step_order += 1
         if acting == 1:
             p1_trans.append(trans)
             cur_p1_r += env_reward
@@ -1500,6 +1607,18 @@ def warm_start_from_episode_cache(
     )
     if not episodes:
         return 0
+
+    if _uses_unified_policy(p1_tiers, p2_tiers):
+        policy = p1_tiers[0]
+        for ep in episodes:
+            merged = _merge_episode_transitions(
+                ep.get("p1_transitions", []),
+                ep.get("p2_transitions", []),
+            )
+            if merged:
+                buf = _transitions_to_buf(merged)
+                _bc_update(policy, buf, merged[-1]["next_obs_vec"])
+        return len(episodes)
 
     replayed = 0
     for ep in episodes:
@@ -1908,7 +2027,7 @@ def train_agents_from_both_perspectives_parallel(
                             f"  [warmup] behavioural-cloning update from "
                             f"{len(warmup_p1_accum) + len(warmup_p2_accum)} transitions"
                         )
-                        _flush_warmup_buffers(
+                        _flush_warmup_buffers_auto(
                             p1_tiers, p2_tiers, warmup_p1_accum, warmup_p2_accum,
                         )
                         warmup_p1_accum.clear()
@@ -1923,7 +2042,7 @@ def train_agents_from_both_perspectives_parallel(
                         or completed >= n_episodes
                     )
                     if rollout_ready:
-                        _flush_ppo_buffers(
+                        _flush_ppo_buffers_auto(
                             p1_tiers, p2_tiers, ppo_p1_accum, ppo_p2_accum,
                         )
                         ppo_p1_accum.clear()
@@ -1958,9 +2077,9 @@ def train_agents_from_both_perspectives_parallel(
                     )
     finally:
         if not warmup_bc_applied and (warmup_p1_accum or warmup_p2_accum):
-            _flush_warmup_buffers(p1_tiers, p2_tiers, warmup_p1_accum, warmup_p2_accum)
+            _flush_warmup_buffers_auto(p1_tiers, p2_tiers, warmup_p1_accum, warmup_p2_accum)
         if ppo_p1_accum or ppo_p2_accum:
-            _flush_ppo_buffers(p1_tiers, p2_tiers, ppo_p1_accum, ppo_p2_accum)
+            _flush_ppo_buffers_auto(p1_tiers, p2_tiers, ppo_p1_accum, ppo_p2_accum)
         for env in envs:
             try:
                 env.close()
@@ -2013,6 +2132,7 @@ def train_agents_from_both_perspectives(
     p1_outcomes: list[str] = []
     p1_buf = _empty_buf()
     p2_buf = _empty_buf()
+    unified_buf = p1_buf
 
     ep_seed = seed
     if _env_supports_fast_training(env):
@@ -2070,12 +2190,16 @@ def train_agents_from_both_perspectives(
     warmup_p2_trans: list[dict[str, Any]] = []
     warmup_bc_applied = warmup_episodes <= 0
     step_info = _get(reset_out, "info", {})
+    step_order = 0
 
     while completed < n_episodes and global_step < total_steps:
         acting = env._acting_player_id
         policy = p1_policy if acting == 1 else p2_policy
         tier_agents = p1_tiers if acting == 1 else p2_tiers
-        buf = p1_buf if acting == 1 else p2_buf
+        if _uses_unified_policy(p1_tiers, p2_tiers):
+            buf = unified_buf
+        else:
+            buf = p1_buf if acting == 1 else p2_buf
         in_warmup = completed < warmup_episodes
 
         obs_vec = _resolve_obs_vec(obs, step_info, policy)
@@ -2126,7 +2250,9 @@ def train_agents_from_both_perspectives(
             "done": float(done),
             "n_legal": n_legal if n_legal is not None else policy.n_actions,
             "next_obs_vec": next_obs_vec,
+            "step_order": step_order,
         }
+        step_order += 1
 
         if in_warmup:
             if acting == 1:
@@ -2180,7 +2306,7 @@ def train_agents_from_both_perspectives(
                     f"  [warmup] behavioural-cloning update from "
                     f"{len(warmup_p1_trans) + len(warmup_p2_trans)} transitions"
                 )
-                _flush_warmup_buffers(p1_tiers, p2_tiers, warmup_p1_trans, warmup_p2_trans)
+                _flush_warmup_buffers_auto(p1_tiers, p2_tiers, warmup_p1_trans, warmup_p2_trans)
                 warmup_p1_trans.clear()
                 warmup_p2_trans.clear()
                 warmup_bc_applied = True
@@ -2234,6 +2360,7 @@ def train_agents_from_both_perspectives(
 
             cur_p1_r = cur_p2_r = 0.0
             episode_step = 0
+            step_order = 0
             ep_seed = (seed + completed) if seed is not None else None
             reset_out = env.reset(seed=ep_seed)
             obs = _get(reset_out, "observation", reset_out)
@@ -2241,17 +2368,28 @@ def train_agents_from_both_perspectives(
         else:
             obs = _get(step_out, "observation", obs)
 
-        for tiers, buf_ref in [(p1_tiers, p1_buf), (p2_tiers, p2_buf)]:
-            if not in_warmup and len(buf_ref["obs"]) >= DEFAULT_PPO_ROLLOUT_BATCH:
-                next_vec = next_obs_vec
-                _ppo_update_all_tiers(tiers, buf_ref, next_vec)
-                buf_ref.clear()
-                buf_ref.update(_empty_buf())
+        if not in_warmup:
+            if _uses_unified_policy(p1_tiers, p2_tiers):
+                if len(unified_buf["obs"]) >= DEFAULT_PPO_ROLLOUT_BATCH:
+                    _ppo_update(p1_tiers[0], unified_buf, next_obs_vec)
+                    unified_buf.clear()
+                    unified_buf.update(_empty_buf())
+            else:
+                for tiers, buf_ref in [(p1_tiers, p1_buf), (p2_tiers, p2_buf)]:
+                    if len(buf_ref["obs"]) >= DEFAULT_PPO_ROLLOUT_BATCH:
+                        _ppo_update_all_tiers(tiers, buf_ref, next_obs_vec)
+                        buf_ref.clear()
+                        buf_ref.update(_empty_buf())
 
-    for tiers, buf_ref in [(p1_tiers, p1_buf), (p2_tiers, p2_buf)]:
-        if len(buf_ref["obs"]) > 0:
-            next_vec = tiers[0]._obs_to_vec(obs)
-            _ppo_update_all_tiers(tiers, buf_ref, next_vec)
+    if _uses_unified_policy(p1_tiers, p2_tiers):
+        if len(unified_buf["obs"]) > 0:
+            next_vec = p1_tiers[0]._obs_to_vec(obs)
+            _ppo_update(p1_tiers[0], unified_buf, next_vec)
+    else:
+        for tiers, buf_ref in [(p1_tiers, p1_buf), (p2_tiers, p2_buf)]:
+            if len(buf_ref["obs"]) > 0:
+                next_vec = tiers[0]._obs_to_vec(obs)
+                _ppo_update_all_tiers(tiers, buf_ref, next_vec)
 
     total_eps = len(p1_ep_rewards)
     outcome_summary = summarize_p1_outcomes(p1_outcomes, episodes=total_eps)
@@ -2432,34 +2570,6 @@ def _save_warmup_handoff_checkpoint(
     return ckpt_dir
 
 
-def _player_context(
-    matchup: Matchup,
-    *,
-    as_p1: bool,
-    p1_deck_fingerprint: Optional[str] = None,
-    p2_deck_fingerprint: Optional[str] = None,
-) -> "PlayerCacheContext":
-    from agent_cache import PlayerCacheContext
-
-    if as_p1:
-        return PlayerCacheContext(
-            player_deck=matchup.p1_deck,
-            player_hero=matchup.p1_hero,
-            opponent_deck=matchup.p2_deck,
-            opponent_hero=matchup.p2_hero,
-            player_deck_fingerprint=p1_deck_fingerprint,
-            opponent_deck_fingerprint=p2_deck_fingerprint,
-        )
-    return PlayerCacheContext(
-        player_deck=matchup.p2_deck,
-        player_hero=matchup.p2_hero,
-        opponent_deck=matchup.p1_deck,
-        opponent_hero=matchup.p1_hero,
-        player_deck_fingerprint=p2_deck_fingerprint,
-        opponent_deck_fingerprint=p1_deck_fingerprint,
-    )
-
-
 def _train_matchup_parallel_seeds(
     matchup: Matchup,
     *,
@@ -2608,14 +2718,19 @@ def _train_matchup_parallel_seeds(
         assets = talishar_assets_path()
         p1_deck_fp = talishar_asset_deck_fingerprint(str(assets), matchup.p1_deck)
         p2_deck_fp = talishar_asset_deck_fingerprint(str(assets), matchup.p2_deck)
-        cache_store.mark_matchup_converged(
-            p1_fingerprint=p1_deck_fp,
-            p2_fingerprint=p2_deck_fp,
-            p1_hero=matchup.p1_hero,
-            p2_hero=matchup.p2_hero,
-            episodes_completed=n_episodes,
-            target_episodes=n_episodes,
-            p1_win_rate=summary.avg_p1_win_rate,
+        cache_store.persist(
+            best_p1,
+            training_summary={
+                "matchup_name": matchup.name,
+                "p1_fingerprint": p1_deck_fp,
+                "p2_fingerprint": p2_deck_fp,
+                "p1_hero": matchup.p1_hero,
+                "p2_hero": matchup.p2_hero,
+                "episodes_completed": n_episodes,
+                "target_episodes": n_episodes,
+                "p1_win_rate": summary.avg_p1_win_rate,
+                "p2_win_rate": summary.avg_p2_win_rate,
+            },
         )
 
     print(
@@ -2678,68 +2793,50 @@ def train_matchup(
     print(f"{'=' * 60}")
 
     if cache_store is None:
-        cache_store = AgentCacheStore(REPO_ROOT / "results" / "agent_cache", game_format)
+        cache_store = AgentCacheStore(
+            REPO_ROOT / "results" / "agent_cache",
+            game_format,
+            obs_schema_version=PLAYER_OBS_SCHEMA_VERSION,
+        )
 
     assets = talishar_assets_path()
     p1_deck_fp = talishar_asset_deck_fingerprint(str(assets), matchup.p1_deck)
     p2_deck_fp = talishar_asset_deck_fingerprint(str(assets), matchup.p2_deck)
-    p2_cache_ctx = _player_context(
-        matchup,
-        as_p1=False,
-        p1_deck_fingerprint=p1_deck_fp,
-        p2_deck_fingerprint=p2_deck_fp,
-    )
-
-    def _make_p1() -> PPOAgent:
-        return make_agent(seed=seed)
-
-    def _make_p2() -> PPOAgent:
-        return make_agent(seed=(seed + 1) if seed is not None else None)
 
     cached_record = cache_store.should_skip_training(
         p1_fingerprint=p1_deck_fp,
         p2_fingerprint=p2_deck_fp,
         target_episodes=n_episodes,
-        require_p2_agent=True,
-        p2_context=p2_cache_ctx,
     )
     if cached_record is not None and not _force_train:
-        p1_bundle = cache_store.bootstrap_player(
-            _player_context(
-                matchup,
-                as_p1=True,
-                p1_deck_fingerprint=p1_deck_fp,
-                p2_deck_fingerprint=p2_deck_fp,
-            ),
-            _make_p1,
-        )
-        p2_bundle = cache_store.bootstrap_player(p2_cache_ctx, _make_p2)
-        print(
-            f"  Cache hit — converged deck-vs-deck matchup "
-            f"({cached_record.episodes_completed}/{cached_record.target_episodes} ep) "
-            f"— skipping training"
-        )
-        return {
-            "p1": {
-                "matchup": matchup.name,
-                "cached": True,
-                "avg_reward": 0.0,
-                "best_reward": 0.0,
-                "elapsed_secs": 0.0,
-                "agent_id": "cached",
-                "package_dir": str(out_dir / matchup.name / "cached_p1"),
-            },
-            "p2": {
-                "matchup": matchup.name,
-                "cached": True,
-                "avg_reward": 0.0,
-                "best_reward": 0.0,
-                "elapsed_secs": 0.0,
-                "agent_id": "cached",
-                "package_dir": str(out_dir / matchup.name / "cached_p2"),
-            },
-            "skipped_training": True,
-        }
+        cached_policy = cache_store.load_if_exists()
+        if cached_policy is not None:
+            print(
+                f"  Cache hit — converged deck-vs-deck matchup "
+                f"({cached_record.episodes_completed}/{cached_record.target_episodes} ep) "
+                f"— skipping training (unified agent v{PLAYER_OBS_SCHEMA_VERSION})"
+            )
+            return {
+                "p1": {
+                    "matchup": matchup.name,
+                    "cached": True,
+                    "avg_reward": 0.0,
+                    "best_reward": 0.0,
+                    "elapsed_secs": 0.0,
+                    "agent_id": "cached_unified",
+                    "package_dir": str(out_dir / matchup.name / "cached_unified"),
+                },
+                "p2": {
+                    "matchup": matchup.name,
+                    "cached": True,
+                    "avg_reward": 0.0,
+                    "best_reward": 0.0,
+                    "elapsed_secs": 0.0,
+                    "agent_id": "cached_unified",
+                    "package_dir": str(out_dir / matchup.name / "cached_unified"),
+                },
+                "skipped_training": True,
+            }
 
     # Create a persistent episode cache for this game format.  Completed
     # (non-truncated) episodes are stored per deck matchup and replayed as PPO
@@ -2755,19 +2852,55 @@ def train_matchup(
         f"(skip threshold: {episode_cache.warmup_skip_threshold})"
     )
 
-    p1_bundle = cache_store.bootstrap_player(
-        _player_context(
+    # Probe environment once to bootstrap the unified shared policy.
+    probe_env = None
+    for attempt in range(2):
+        probe_env = make_env(
             matchup,
-            as_p1=True,
-            p1_deck_fingerprint=p1_deck_fp,
-            p2_deck_fingerprint=p2_deck_fp,
-        ),
-        _make_p1,
-    )
-    p2_bundle = cache_store.bootstrap_player(p2_cache_ctx, _make_p2)
+            base_url=base_url,
+            game_format=game_format,
+            max_turns=max_steps,
+            show_frontend=False,
+            frontend_url=frontend_url,
+        )
+        try:
+            if _env_supports_fast_training(probe_env):
+                probe_env.fast_reset(seed=seed)
+            else:
+                probe_env.reset(seed=seed)
+            break
+        except Exception as exc:
+            if attempt == 0:
+                print(f"  CreateGame failed ({exc}), restarting Talishar Docker...")
+                subprocess.run(
+                    ["docker", "compose", "restart"],
+                    cwd=REPO_ROOT / "Talishar",
+                    capture_output=True,
+                    check=False,
+                )
+                time.sleep(5)
+            else:
+                raise
 
-    print("  P1 cache init:", ", ".join(p1_bundle.init_sources))
-    print("  P2 cache init:", ", ".join(p2_bundle.init_sources))
+    unified_bundle = _bootstrap_unified_policy(cache_store, probe_env, seed)
+    p1_bundle = p2_bundle = unified_bundle
+    print("  Unified policy init:", ", ".join(unified_bundle.init_sources))
+    print(
+        f"  obs_schema={PLAYER_OBS_SCHEMA_VERSION} "
+        f"obs_dim={unified_bundle.policy.obs_dim} "
+        f"n_actions={unified_bundle.policy.n_actions}"
+    )
+
+    if n_workers <= 1 and probe_env is not None:
+        env = probe_env
+    elif probe_env is not None:
+        try:
+            probe_env.close()
+        except Exception:
+            pass
+        env = None
+    else:
+        env = None
 
     t0 = time.time()
     warmup_baseline: Optional[dict[str, Any]] = None
@@ -2834,31 +2967,32 @@ def train_matchup(
             warmup_baseline = {**baseline, "checkpoint_dir": str(ckpt_dir)}
 
     else:
-        # ── serial path (original) ─────────────────────────────────────────
-        for attempt in range(2):
-            env = make_env(
-                matchup,
-                base_url=base_url,
-                game_format=game_format,
-                max_turns=max_steps,
-                show_frontend=show_frontend,
-                frontend_url=frontend_url,
-            )
-            try:
-                env.reset()
-                break
-            except Exception as exc:
-                if attempt == 0:
-                    print(f"  CreateGame failed ({exc}), restarting Talishar Docker...")
-                    subprocess.run(
-                        ["docker", "compose", "restart"],
-                        cwd=REPO_ROOT / "Talishar",
-                        capture_output=True,
-                        check=False,
-                    )
-                    time.sleep(5)
-                else:
-                    raise
+        # ── serial path (reuse probed env when available) ───────────────────
+        if env is None:
+            for attempt in range(2):
+                env = make_env(
+                    matchup,
+                    base_url=base_url,
+                    game_format=game_format,
+                    max_turns=max_steps,
+                    show_frontend=show_frontend,
+                    frontend_url=frontend_url,
+                )
+                try:
+                    env.reset()
+                    break
+                except Exception as exc:
+                    if attempt == 0:
+                        print(f"  CreateGame failed ({exc}), restarting Talishar Docker...")
+                        subprocess.run(
+                            ["docker", "compose", "restart"],
+                            cwd=REPO_ROOT / "Talishar",
+                            capture_output=True,
+                            check=False,
+                        )
+                        time.sleep(5)
+                    else:
+                        raise
 
         if warmup_count > 0:
             print(f"  Warmup  : training first {warmup_count} episode(s) with Talishar default policy")
@@ -2941,21 +3075,29 @@ def train_matchup(
 
     elapsed = time.time() - t0
 
-    cache_store.persist_player(p1_bundle)
-    cache_store.persist_player(p2_bundle)
-
     p1_wr = float(np.mean([1.0 if r > 0 else 0.0 for r in p1_rewards])) if p1_rewards else None
     p2_wr = float(np.mean([1.0 if r > 0 else 0.0 for r in p2_rewards])) if p2_rewards else None
-    if len(p1_rewards) >= n_episodes and not _skip_cache_converge:
-        cache_store.mark_matchup_converged(
-            p1_fingerprint=p1_deck_fp,
-            p2_fingerprint=p2_deck_fp,
-            p1_hero=matchup.p1_hero,
-            p2_hero=matchup.p2_hero,
-            episodes_completed=len(p1_rewards),
-            target_episodes=n_episodes,
-            p1_win_rate=p1_wr,
-        )
+
+    cache_store.persist(
+        unified_bundle.policy,
+        episodes_delta=len(p1_rewards),
+        training_summary=(
+            {
+                "matchup_name": matchup.name,
+                "p1_fingerprint": p1_deck_fp,
+                "p2_fingerprint": p2_deck_fp,
+                "p1_hero": matchup.p1_hero,
+                "p2_hero": matchup.p2_hero,
+                "episodes_completed": len(p1_rewards),
+                "target_episodes": n_episodes,
+                "p1_win_rate": p1_wr,
+                "p2_win_rate": p2_wr,
+                "training_stats": overall_stats,
+            }
+            if len(p1_rewards) >= n_episodes and not _skip_cache_converge
+            else None
+        ),
+    )
 
     print(
         f"  Done in {elapsed:.1f}s — "
@@ -3063,7 +3205,11 @@ def run_matchup_training(
     from agent_cache import AgentCacheStore
 
     cache_root = cache_dir or (REPO_ROOT / "results" / "agent_cache")
-    cache_store = AgentCacheStore(cache_root, game_format)
+    cache_store = AgentCacheStore(
+        cache_root,
+        game_format,
+        obs_schema_version=PLAYER_OBS_SCHEMA_VERSION,
+    )
 
     summary: list[dict] = []
     failed: list[str] = []

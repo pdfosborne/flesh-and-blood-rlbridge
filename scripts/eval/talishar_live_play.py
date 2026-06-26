@@ -40,6 +40,7 @@ from scripts.eval.eval_phase3_checkpoint import (  # noqa: E402
     _load_checkpoint,
     _paired_checkpoint,
     _resolve_p2_preset_deck_name,
+    deck_labels_from_checkpoints,
     is_sideboard_compare_dir,
 )
 from scripts.training.play_outcome_stats import (  # noqa: E402
@@ -74,24 +75,12 @@ class LivePlayContext:
     opponent_deck_label: str = ""
 
 
-def deck_labels_from_bundle(bundle: CheckpointBundle) -> tuple[str, str]:
+def deck_labels_from_bundle(
+    bundle: CheckpointBundle,
+    p2_bundle: Optional[CheckpointBundle] = None,
+) -> tuple[str, str]:
     """Return display labels for the trained and opponent decks."""
-    trained = str(
-        bundle.metadata.get("p1_hero")
-        or bundle.metadata.get("hero_id")
-        or ""
-    ).replace("_", " ").strip()
-    if not trained and "-vs-" in bundle.matchup:
-        trained = bundle.matchup.split("-vs-", 1)[0].replace("_", " ").strip()
-    if not trained:
-        trained = "trained deck"
-
-    opponent = str(bundle.metadata.get("opponent_deck_name") or "").strip()
-    if not opponent and "-vs-" in bundle.matchup:
-        opponent = bundle.matchup.split("-vs-", 1)[1].replace("_", " ").strip()
-    if not opponent:
-        opponent = "opponent deck"
-    return trained, opponent
+    return deck_labels_from_checkpoints(bundle, p2_bundle)
 
 
 def resolve_checkpoint_bundles(
@@ -179,7 +168,7 @@ def prepare_live_play_context(
     else:
         p2_agent = None
 
-    trained_label, opponent_label_name = deck_labels_from_bundle(p1_bundle)
+    trained_label, opponent_label_name = deck_labels_from_bundle(p1_bundle, p2_bundle)
     if opponent_mode == "mirror":
         opponent_label_name = trained_label
 

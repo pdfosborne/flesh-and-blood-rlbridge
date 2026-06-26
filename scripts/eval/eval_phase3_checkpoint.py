@@ -119,6 +119,75 @@ class CheckpointBundle:
             return ""
         return name
 
+    @property
+    def opponent_mode(self) -> str:
+        return str(self.metadata.get("opponent_mode", "preset") or "preset")
+
+
+def _hero_display(hero_id: str) -> str:
+    return hero_id.replace("_", " ").replace("-", " ").strip()
+
+
+def deck_labels_from_checkpoints(
+    p1_bundle: CheckpointBundle,
+    p2_bundle: Optional[CheckpointBundle] = None,
+) -> tuple[str, str]:
+    """Return human-readable trained/opponent deck labels for TUI and live play."""
+    trained = _hero_display(p1_bundle.p1_hero) or _hero_display(p1_bundle.own_hero)
+    if not trained and "-vs-" in p1_bundle.matchup:
+        trained = _hero_display(p1_bundle.matchup.split("-vs-", 1)[0])
+    if not trained:
+        trained = "trained deck"
+
+    mode = p1_bundle.opponent_mode
+    if mode == "mirror":
+        return trained, trained
+    if mode == "dual":
+        hero = p2_bundle.p2_hero if p2_bundle is not None else p1_bundle.p2_hero
+        opponent = _hero_display(hero) or "opponent deck"
+        return trained, opponent
+
+    preset = p1_bundle.preset_opponent_deck_name
+    if preset:
+        opponent = preset.replace("SAGEPrecon", "").replace("_", " ").strip() or preset
+    else:
+        opponent = _hero_display(p1_bundle.p2_hero) or "opponent deck"
+    return trained, opponent
+
+
+def _load_json_dict(path: Path) -> dict[str, Any]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, TypeError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _expand_checkpoint_roots(root: Path, role: str) -> list[Path]:
+    """Expand a results root to concrete checkpoint search directories.
+
+    When ``parallel_seeds/`` exists, prefer the best seed recorded in
+    ``parallel_seeds_summary.json`` for *role* (P1 vs P2 may differ).
+    """
+    seeds_root = root / "parallel_seeds"
+    if not seeds_root.is_dir():
+        return [root]
+
+    summary = _load_json_dict(root / "parallel_seeds_summary.json")
+    if summary:
+        key = "best_p1_seed_index" if role == "p1" else "best_p2_seed_index"
+        seed_idx = summary.get(key)
+        if seed_idx is not None:
+            seed_dir = seeds_root / f"seed_{int(seed_idx)}"
+            if seed_dir.is_dir():
+                return [seed_dir]
+
+    seed_dirs = sorted(
+        path for path in seeds_root.iterdir()
+        if path.is_dir() and path.name.startswith("seed_")
+    )
+    return seed_dirs or [root]
+
 
 def _load_checkpoint(checkpoint_dir: Path, role: str) -> Optional[CheckpointBundle]:
     meta_path = checkpoint_dir / "metadata.json"
@@ -159,12 +228,10 @@ def _iter_checkpoint_metadata_paths(
     paths: list[Path] = []
 
     def add_from_root(root: Path) -> None:
-        paths.extend(root.glob(f"p3_*/{role}/episode_*/metadata.json"))
-        paths.extend(
-            root.glob(
-                f"parallel_seeds/seed_*/p3_*/{role}/episode_*/metadata.json"
+        for search_root in _expand_checkpoint_roots(root, role):
+            paths.extend(
+                search_root.glob(f"p3_*/{role}/episode_*/metadata.json")
             )
-        )
 
     if is_sideboard_compare_dir(results_dir):
         candidates_root = results_dir / _SIDEBOARD_CANDIDATES_DIR
@@ -218,7 +285,7 @@ def _latest_checkpoint(
         bundle = _load_checkpoint(meta_path.parent, role)
         if bundle is None:
             continue
-        score = (meta_path.stat().st_mtime, bundle.episodes_completed)
+        score = (bundle.episodes_completed, meta_path.stat().st_mtime)
         if best is None or score > (best[0], best[1]):
             best = (score[0], score[1], bundle)
     return best[2] if best is not None else None
@@ -246,7 +313,7 @@ def _paired_checkpoint(bundle: CheckpointBundle, role: str) -> Optional[Checkpoi
         candidate = _load_checkpoint(meta_path.parent, role)
         if candidate is None:
             continue
-        score = (meta_path.stat().st_mtime, candidate.episodes_completed)
+        score = (candidate.episodes_completed, meta_path.stat().st_mtime)
         if best is None or score > (best[0], best[1]):
             best = (score[0], score[1], candidate)
     return best[2] if best is not None else None

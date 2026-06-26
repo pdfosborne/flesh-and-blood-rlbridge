@@ -160,9 +160,9 @@ def _flat_obs(obs: Any) -> list[float]:
         except json.JSONDecodeError:
             parsed = None
         if isinstance(parsed, dict):
-            fast_vec = parsed.get("fastObservationVec")
-            if isinstance(fast_vec, list) and fast_vec:
-                return _flat_obs(fast_vec)
+            obs_vec = parsed.get("observationVec")
+            if isinstance(obs_vec, list) and obs_vec:
+                return _flat_obs(obs_vec)
         # Deterministic hash → float in [0, 1) via simple FNV-style fold
         h = 0
         for ch in obs.encode():

@@ -100,7 +100,6 @@ try:
         _env_supports_fast_training,
         _announce_training_backend,
         _mask_logits_to_legal,
-        _player_context,
         _save_warmup_handoff_checkpoint,
         DEFAULT_N_EPISODES,
         DEFAULT_WARMUP_EPISODES,
@@ -108,8 +107,14 @@ try:
     )
     from agent_cache import (  # noqa: E402
         AgentCacheStore,
+        UnifiedPolicyBundle,
         deck_content_fingerprint,
         talishar_asset_deck_fingerprint,
+    )
+    from flesh_and_blood_rlbridge.player_observation import (  # noqa: E402
+        ACTION_CAPACITY,
+        PLAYER_OBS_DIM,
+        PLAYER_OBS_SCHEMA_VERSION,
     )
     from episode_cache import EpisodeCache  # noqa: E402
     _DUAL_AGENT_AVAILABLE = True
@@ -170,20 +175,13 @@ def _load_converged_play_agent(
     p2_deck_fingerprint: str,
     seed: Optional[int],
 ) -> tuple[Any, Any]:
-    """Bootstrap P1 tiers from converged deck-vs-deck cache."""
-    def _make_p1() -> Any:
-        return make_agent(seed=seed)
-
-    p1_bundle = cache_store.bootstrap_player(
-        _player_context(
-            matchup,
-            as_p1=True,
-            p1_deck_fingerprint=p1_deck_fingerprint,
-            p2_deck_fingerprint=p2_deck_fingerprint,
-        ),
-        _make_p1,
-    )
-    return p1_bundle.agents[0], p1_bundle
+    """Load the shared unified policy for a converged deck-vs-deck matchup."""
+    del matchup, p1_deck_fingerprint, p2_deck_fingerprint, seed
+    policy = cache_store.load_if_exists()
+    if policy is None:
+        raise RuntimeError("Agent cache hit but weights file is missing")
+    bundle = UnifiedPolicyBundle(policy=policy, init_sources=["cache"])
+    return policy, bundle
 
 
 def _write_play_cache_hit(
@@ -832,7 +830,11 @@ def _run_phase3_play_parallel_seeds(
         )
 
     if cache_dir is not None and p1.play is not None:
-        cache_store = AgentCacheStore(cache_dir, game_format)
+        cache_store = AgentCacheStore(
+            cache_dir,
+            game_format,
+            obs_schema_version=PLAYER_OBS_SCHEMA_VERSION,
+        )
         p1_deck_fp = best_p1_row.get("p1_deck_fingerprint")
         p2_deck_fp = best_p1_row.get("p2_deck_fingerprint")
         if p1_deck_fp and p2_deck_fp:
@@ -841,15 +843,20 @@ def _run_phase3_play_parallel_seeds(
                 if checkpoint_eval_log
                 else None
             )
-            cache_store.mark_matchup_converged(
-                p1_fingerprint=str(p1_deck_fp),
-                p2_fingerprint=str(p2_deck_fp),
-                p1_hero=p1_hero_id.replace("_", "-"),
-                p2_hero=(p2_hero_id or p1_opponent_hero_id).replace("_", "-"),
-                episodes_completed=n_episodes,
-                target_episodes=n_episodes,
-                p1_win_rate=summary.avg_p1_win_rate,
-                checkpoint_eval_win_rate=latest_ckpt_wr,
+            cache_store.persist(
+                p1.play,
+                training_summary={
+                    "matchup_name": "parallel_seeds",
+                    "p1_fingerprint": str(p1_deck_fp),
+                    "p2_fingerprint": str(p2_deck_fp),
+                    "p1_hero": p1_hero_id.replace("_", "-"),
+                    "p2_hero": (p2_hero_id or p1_opponent_hero_id).replace("_", "-"),
+                    "episodes_completed": n_episodes,
+                    "target_episodes": n_episodes,
+                    "p1_win_rate": summary.avg_p1_win_rate,
+                    "p2_win_rate": summary.avg_p2_win_rate,
+                    "checkpoint_eval_win_rate": latest_ckpt_wr,
+                },
             )
 
     for row in summary.seed_rows:
@@ -1001,7 +1008,11 @@ def run_phase3_play(
     )
 
     cache_root = cache_dir or DEFAULT_AGENT_CACHE_DIR
-    cache_store = AgentCacheStore(cache_root, game_format)
+    cache_store = AgentCacheStore(
+        cache_root,
+        game_format,
+        obs_schema_version=PLAYER_OBS_SCHEMA_VERSION,
+    )
 
     if p1.play is None and not _force_train:
         cached_record = cache_store.should_skip_training(
@@ -1030,6 +1041,8 @@ def run_phase3_play(
                 seed=seed,
             )
             p1.play = p1_agent
+            if opponent_mode == "dual" and p2 is not None:
+                p2.play = p1_agent
             p1_wr = float(cached_record.p1_win_rate or 0.0)
             out_dir.mkdir(parents=True, exist_ok=True)
             _write_play_cache_hit(
@@ -1147,7 +1160,7 @@ def run_phase3_play(
         f"(skip threshold: {episode_cache.warmup_skip_threshold})"
     )
 
-    # ── create / reuse play agents (four-tier cache when bootstrapping) ───────
+    # ── create / reuse play agents (unified cache) ────────────────────────────
     p1_bundle = None
     p2_bundle = None
     p2_seed = (seed + 1) if seed is not None else None
@@ -1156,20 +1169,18 @@ def run_phase3_play(
         p1_agent = p1.play
         p1_tiers: list[Any] = [p1_agent]
     else:
-        def _make_p1() -> Any:
+        def _make_unified() -> Any:
             return make_agent(seed=seed)
 
-        p1_bundle = cache_store.bootstrap_player(
-            _player_context(
-                matchup,
-                as_p1=True,
-                p1_deck_fingerprint=p1_deck_fp,
-                p2_deck_fingerprint=p2_deck_fp,
-            ),
-            _make_p1,
+        policy, init_src = cache_store.load_or_create(
+            _make_unified,
+            obs_dim=PLAYER_OBS_DIM,
+            n_actions=ACTION_CAPACITY,
+            mask_actions=True,
         )
-        print("  P1 cache init:", ", ".join(p1_bundle.init_sources))
-        p1_agent = p1_bundle.agents[0]
+        p1_bundle = UnifiedPolicyBundle(policy=policy, init_sources=[init_src])
+        print("  Unified policy init:", ", ".join(p1_bundle.init_sources))
+        p1_agent = p1_bundle.policy
         p1_tiers = p1_bundle.agents
 
     if opponent_mode == "dual" and p2 is not None:
@@ -1177,21 +1188,9 @@ def run_phase3_play(
             p2_agent = p2.play
             p2_tiers: list[Any] = [p2_agent]
         else:
-            def _make_p2() -> Any:
-                return make_agent(seed=p2_seed)
-
-            p2_bundle = cache_store.bootstrap_player(
-                _player_context(
-                    matchup,
-                    as_p1=False,
-                    p1_deck_fingerprint=p1_deck_fp,
-                    p2_deck_fingerprint=p2_deck_fp,
-                ),
-                _make_p2,
-            )
-            print("  P2 cache init:", ", ".join(p2_bundle.init_sources))
-            p2_agent = p2_bundle.agents[0]
-            p2_tiers = p2_bundle.agents
+            p2_agent = p1_agent
+            p2_tiers = p1_tiers
+            print("  P2 uses shared unified policy (same weights as P1)")
     else:
         p2_agent = make_agent(seed=p2_seed)
         p2_tiers = [p2_agent]
@@ -1528,12 +1527,6 @@ def run_phase3_play(
                 except Exception:
                     pass
 
-    # ── persist shared agent cache + update in-memory agents ─────────────────
-    if p1_bundle is not None:
-        cache_store.persist_player(p1_bundle)
-    if p2_bundle is not None:
-        cache_store.persist_player(p2_bundle)
-
     p1.play = p1_agent
     if opponent_mode == "dual" and p2 is not None:
         p2.play = p2_agent
@@ -1571,16 +1564,27 @@ def run_phase3_play(
     if checkpoint_eval_log:
         latest_ckpt_wr = float(checkpoint_eval_log[-1].get("p1_win_rate", 0.0))
 
-    if p1_bundle is not None and len(p1_rewards) >= n_episodes and not _skip_cache_converge:
-        cache_store.mark_matchup_converged(
-            p1_fingerprint=p1_deck_fp,
-            p2_fingerprint=p2_deck_fp,
-            p1_hero=p1_hero_id.replace("_", "-"),
-            p2_hero=(p2_hero_id or p1_opponent_hero_id).replace("_", "-"),
-            episodes_completed=len(p1_rewards),
-            target_episodes=n_episodes,
-            p1_win_rate=p1_wr,
-            checkpoint_eval_win_rate=latest_ckpt_wr,
+    if p1_bundle is not None:
+        cache_store.persist(
+            p1_bundle.policy,
+            episodes_delta=len(p1_rewards),
+            training_summary=(
+                {
+                    "matchup_name": matchup.name,
+                    "p1_fingerprint": p1_deck_fp,
+                    "p2_fingerprint": p2_deck_fp,
+                    "p1_hero": p1_hero_id.replace("_", "-"),
+                    "p2_hero": (p2_hero_id or p1_opponent_hero_id).replace("_", "-"),
+                    "episodes_completed": len(p1_rewards),
+                    "target_episodes": n_episodes,
+                    "p1_win_rate": p1_wr,
+                    "p2_win_rate": p2_wr,
+                    "checkpoint_eval_win_rate": latest_ckpt_wr,
+                    "training_stats": train_summary,
+                }
+                if len(p1_rewards) >= n_episodes and not _skip_cache_converge
+                else None
+            ),
         )
 
     if _seed_run_capture is not None:
@@ -2119,6 +2123,16 @@ def _save_phase3_play_checkpoints(
     _p1_header = _ensure_hero_in_header(p1_equipment_header, matchup.p1_hero)
     _p2_header = _ensure_hero_in_header(p2_equipment_header, matchup.p2_hero)
 
+    if opponent_mode == "dual":
+        p1_opponent_label = matchup.p2_hero
+        p2_opponent_label = matchup.p1_hero
+    elif opponent_mode == "mirror":
+        p1_opponent_label = matchup.p1_hero
+        p2_opponent_label = matchup.p2_hero
+    else:
+        p1_opponent_label = p1_opponent_deck_name
+        p2_opponent_label = p1_opponent_deck_name
+
     p1_ckpt = _save_play_checkpoint_package(
         agent=p1_agent,
         out_dir=out_dir,
@@ -2131,7 +2145,7 @@ def _save_phase3_play_checkpoints(
         deck_cards=p1_deck_cards,
         equipment_header=_p1_header,
         opponent_mode=opponent_mode,
-        opponent_deck_name=p1_opponent_deck_name,
+        opponent_deck_name=p1_opponent_label,
         p1_outcomes=p1_outcomes,
         runtime_backend=runtime_backend,
     )
@@ -2150,7 +2164,7 @@ def _save_phase3_play_checkpoints(
         deck_cards=p2_deck_cards or {},
         equipment_header=_p2_header,
         opponent_mode=opponent_mode,
-        opponent_deck_name=(matchup.p1_deck if opponent_mode == "dual" else p1_opponent_deck_name),
+        opponent_deck_name=p2_opponent_label,
     )
     if p2_ckpt is not None:
         print(f"  [p2] Phase-3 checkpoint → {p2_ckpt}")

@@ -1,16 +1,7 @@
-"""Four-tier PPO agent cache for dual-agent Talishar training.
+"""Unified PPO agent cache — one shared policy per (game_format, obs_schema_version).
 
-Tiers (highest priority first for warm-starting the policy agent):
-  1. deck_vs_deck     — player deck + opponent deck (content fingerprint)
-  2. deck_vs_opp_hero — player deck + opponent hero (any opponent list)
-  3. hero_vs_hero     — player hero vs opponent hero
-  4. hero             — player hero only
-
-During a matchup, tier-1 agents drive actions.  Each PPO update is applied to
-all four tier agents for that player.  Weights are persisted under *cache_root*.
-
-Exact deck-vs-deck matchups are tracked in ``deck_matchup_registry.json`` so
-fully trained pairings can skip re-training on subsequent runs.
+Weights: ``{cache_root}/{format}/unified_agent_v{schema}.json``
+Metadata: ``{cache_root}/{format}/unified_agent.meta.json`` including ``training_history``.
 """
 
 from __future__ import annotations
@@ -18,24 +9,15 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import threading
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
 from rl_agents.ppo import PPOAgent
 
-TIER_NAMES = ("deck_vs_deck", "deck_vs_opp_hero", "hero_vs_hero", "hero")
-REGISTRY_FILENAME = "deck_matchup_registry.json"
-
-# (lr_scale, clip_eps_scale, entropy_scale) by how many tiers below the best cache hit
-_SOFT_RESET_BY_GAP: list[tuple[float, float, float]] = [
-    (1.0, 1.0, 1.0),
-    (0.5, 0.85, 1.15),
-    (0.25, 0.7, 1.3),
-    (0.1, 0.55, 1.45),
-]
+UNIFIED_META_FILENAME = "unified_agent.meta.json"
+LEGACY_REGISTRY_FILENAME = "deck_matchup_registry.json"
 
 
 def _safe_key(part: str) -> str:
@@ -69,13 +51,12 @@ def talishar_asset_deck_fingerprint(assets_path: str, deck_stem: str) -> str:
 
 
 def deck_matchup_key(p1_fingerprint: str, p2_fingerprint: str) -> str:
-    """Registry / tier-1 key for P1 deck content vs P2 deck content."""
     return f"{p1_fingerprint}__vs__{p2_fingerprint}"
 
 
 @dataclass(frozen=True)
 class MatchupTrainingRecord:
-    """Training status for an exact deck-vs-deck pairing (P1 perspective)."""
+    """One converged (or in-progress) deck-vs-deck training session."""
 
     matchup_key: str
     p1_deck_fingerprint: str
@@ -86,11 +67,15 @@ class MatchupTrainingRecord:
     episodes_completed: int
     target_episodes: int
     p1_win_rate: Optional[float] = None
+    p2_win_rate: Optional[float] = None
     checkpoint_eval_win_rate: Optional[float] = None
     trained_at: str = ""
+    matchup_name: str = ""
+    training_stats: Optional[dict[str, Any]] = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> MatchupTrainingRecord:
+        stats = data.get("training_stats")
         return cls(
             matchup_key=str(data.get("matchup_key", "")),
             p1_deck_fingerprint=str(data.get("p1_deck_fingerprint", "")),
@@ -105,127 +90,32 @@ class MatchupTrainingRecord:
                 if data.get("p1_win_rate") is not None
                 else None
             ),
+            p2_win_rate=(
+                float(data["p2_win_rate"])
+                if data.get("p2_win_rate") is not None
+                else None
+            ),
             checkpoint_eval_win_rate=(
                 float(data["checkpoint_eval_win_rate"])
                 if data.get("checkpoint_eval_win_rate") is not None
                 else None
             ),
             trained_at=str(data.get("trained_at", "")),
-        )
-
-
-class MatchupConvergenceRegistry:
-    """Persistent hashmap of exact deck-vs-deck training outcomes."""
-
-    def __init__(self, cache_root: Path, game_format: str) -> None:
-        self._path = cache_root / _safe_key(game_format) / REGISTRY_FILENAME
-        self._lock = threading.Lock()
-        self._entries: dict[str, dict[str, Any]] = {}
-        self._load()
-
-    def _load(self) -> None:
-        if not self._path.is_file():
-            return
-        try:
-            raw = json.loads(self._path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return
-        if isinstance(raw, dict):
-            self._entries = raw
-
-    def _save(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(json.dumps(self._entries, indent=2), encoding="utf-8")
-
-    def lookup(self, matchup_key: str) -> Optional[MatchupTrainingRecord]:
-        row = self._entries.get(matchup_key)
-        if not row:
-            return None
-        return MatchupTrainingRecord.from_dict(row)
-
-    def is_converged(
-        self,
-        matchup_key: str,
-        *,
-        min_episodes: int,
-    ) -> bool:
-        record = self.lookup(matchup_key)
-        if record is None or not record.converged:
-            return False
-        return record.episodes_completed >= min_episodes
-
-    def record_training(
-        self,
-        record: MatchupTrainingRecord,
-        *,
-        converged: bool,
-    ) -> None:
-        payload = asdict(record)
-        payload["converged"] = converged
-        if not payload.get("trained_at"):
-            payload["trained_at"] = datetime.now(timezone.utc).isoformat()
-        with self._lock:
-            self._entries[record.matchup_key] = payload
-            self._save()
-
-
-@dataclass(frozen=True)
-class PlayerCacheContext:
-    player_deck: str
-    player_hero: str
-    opponent_deck: str
-    opponent_hero: str
-    player_deck_fingerprint: Optional[str] = None
-    opponent_deck_fingerprint: Optional[str] = None
-
-    def tier_keys(self) -> tuple[str, str, str, str]:
-        p1_fp = self.player_deck_fingerprint
-        p2_fp = self.opponent_deck_fingerprint
-        if p1_fp and p2_fp:
-            deck_vs_deck = deck_matchup_key(p1_fp, p2_fp)
-        else:
-            deck_vs_deck = (
-                f"{_safe_key(self.player_deck)}__vs__{_safe_key(self.opponent_deck)}"
-            )
-
-        if p1_fp:
-            deck_vs_opp_hero = (
-                f"{p1_fp}__vs_hero__{_safe_key(self.opponent_hero)}"
-            )
-        else:
-            deck_vs_opp_hero = (
-                f"{_safe_key(self.player_deck)}__vs_hero__{_safe_key(self.opponent_hero)}"
-            )
-
-        return (
-            deck_vs_deck,
-            deck_vs_opp_hero,
-            f"{_safe_key(self.player_hero)}__vs__{_safe_key(self.opponent_hero)}",
-            _safe_key(self.player_hero),
+            matchup_name=str(data.get("matchup_name", "")),
+            training_stats=stats if isinstance(stats, dict) else None,
         )
 
 
 @dataclass
-class PlayerTierAgents:
-    """Four cached agents for one player; index 0 is tier 1 (policy)."""
+class UnifiedPolicyBundle:
+    """Single shared policy used for both seats in self-play."""
 
-    context: PlayerCacheContext
-    agents: list[PPOAgent]  # length 4, tier 1 .. 4
-    init_sources: list[str]  # human-readable init description per tier
+    policy: PPOAgent
+    init_sources: list[str]
 
     @property
-    def policy(self) -> PPOAgent:
-        return self.agents[0]
-
-
-def apply_soft_reset(agent: PPOAgent, specificity_gap: int) -> None:
-    """Scale learning hyperparameters after loading a less-specific cache tier."""
-    gap = min(max(specificity_gap, 0), len(_SOFT_RESET_BY_GAP) - 1)
-    lr_s, clip_s, ent_s = _SOFT_RESET_BY_GAP[gap]
-    agent.lr_actor *= lr_s
-    agent.lr_critic *= lr_s
-    agent.clip_eps = min(0.5, agent.clip_eps * clip_s)
-    agent.c_ent *= ent_s
+    def agents(self) -> list[PPOAgent]:
+        return [self.policy]
 
 
 def clone_agent_weights(src: PPOAgent, dst: PPOAgent) -> None:
@@ -240,19 +130,90 @@ def clone_agent_weights(src: PPOAgent, dst: PPOAgent) -> None:
 
 
 class AgentCacheStore:
-    def __init__(self, cache_root: Path, game_format: str) -> None:
+    """Single unified agent cache per (game_format, obs_schema_version)."""
+
+    def __init__(
+        self,
+        cache_root: Path,
+        game_format: str,
+        *,
+        obs_schema_version: int = 1,
+    ) -> None:
         self.user_cache_root = cache_root
         self.cache_root = cache_root / _safe_key(game_format)
         self.game_format = game_format
-        for name in TIER_NAMES:
-            (self.cache_root / name).mkdir(parents=True, exist_ok=True)
-        self.matchup_registry = MatchupConvergenceRegistry(cache_root, game_format)
+        self.obs_schema_version = int(obs_schema_version)
+        self.cache_root.mkdir(parents=True, exist_ok=True)
 
-    def _tier_path(self, tier: int, key: str) -> Path:
-        return self.cache_root / TIER_NAMES[tier - 1] / f"{key}.json"
+    def _weights_path(self) -> Path:
+        return self.cache_root / f"unified_agent_v{self.obs_schema_version}.json"
 
-    def load_if_exists(self, tier: int, key: str) -> Optional[PPOAgent]:
-        path = self._tier_path(tier, key)
+    def _meta_path(self) -> Path:
+        return self.cache_root / UNIFIED_META_FILENAME
+
+    def _legacy_registry_path(self) -> Path:
+        return self.cache_root / LEGACY_REGISTRY_FILENAME
+
+    def load_meta(self) -> dict[str, Any]:
+        path = self._meta_path()
+        if not path.is_file():
+            meta: dict[str, Any] = {}
+            self._migrate_legacy_registry(meta)
+            return meta
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return {}
+        meta = raw if isinstance(raw, dict) else {}
+        self._migrate_legacy_registry(meta)
+        return meta
+
+    def save_meta(self, meta: dict[str, Any]) -> None:
+        history = meta.get("training_history")
+        if not isinstance(history, list):
+            meta["training_history"] = []
+        self._meta_path().write_text(json.dumps(meta, indent=2), encoding="utf-8")
+
+    def _migrate_legacy_registry(self, meta: dict[str, Any]) -> None:
+        """Import old deck_matchup_registry.json into training_history once."""
+        if meta.get("training_history"):
+            return
+        legacy_path = self._legacy_registry_path()
+        if not legacy_path.is_file():
+            return
+        try:
+            raw = json.loads(legacy_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return
+        if not isinstance(raw, dict):
+            return
+        history: list[dict[str, Any]] = []
+        for row in raw.values():
+            if isinstance(row, dict):
+                history.append(dict(row))
+        if history:
+            meta["training_history"] = history
+            self.save_meta(meta)
+
+    def _training_history(self, meta: Optional[dict[str, Any]] = None) -> list[dict[str, Any]]:
+        if meta is None:
+            meta = self.load_meta()
+        history = meta.get("training_history", [])
+        return list(history) if isinstance(history, list) else []
+
+    def _lookup_history(
+        self,
+        matchup_key: str,
+        *,
+        meta: Optional[dict[str, Any]] = None,
+    ) -> Optional[dict[str, Any]]:
+        for row in reversed(self._training_history(meta)):
+            if str(row.get("matchup_key", "")) == matchup_key:
+                return row
+        return None
+
+    def load_if_exists(self) -> Optional[PPOAgent]:
+        path = self._weights_path()
         if not path.is_file():
             return None
         agent = PPOAgent()
@@ -262,16 +223,8 @@ class AgentCacheStore:
         except (json.JSONDecodeError, KeyError, OSError):
             return None
 
-    def save(self, tier: int, key: str, agent: PPOAgent) -> None:
-        if agent._actor is None:
-            return
-        path = self._tier_path(tier, key)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        agent.save(path)
-
-    def has_tier1_agent(self, ctx: PlayerCacheContext) -> bool:
-        tier1_key = ctx.tier_keys()[0]
-        return self.load_if_exists(1, tier1_key) is not None
+    def has_agent(self) -> bool:
+        return self.load_if_exists() is not None
 
     def should_skip_training(
         self,
@@ -279,45 +232,135 @@ class AgentCacheStore:
         p1_fingerprint: str,
         p2_fingerprint: str,
         target_episodes: int,
-        require_p2_agent: bool = False,
-        p2_context: Optional[PlayerCacheContext] = None,
     ) -> Optional[MatchupTrainingRecord]:
-        """Return cached record when this exact matchup need not be re-trained."""
-        matchup_key = deck_matchup_key(p1_fingerprint, p2_fingerprint)
-        record = self.matchup_registry.lookup(matchup_key)
-        if record is None or not self.matchup_registry.is_converged(
-            matchup_key,
-            min_episodes=target_episodes,
-        ):
+        if not self.has_agent():
             return None
-
-        p1_ctx = PlayerCacheContext(
-            player_deck="cached",
-            player_hero="",
-            opponent_deck="cached",
-            opponent_hero="",
-            player_deck_fingerprint=p1_fingerprint,
-            opponent_deck_fingerprint=p2_fingerprint,
-        )
-        if not self.has_tier1_agent(p1_ctx):
+        key = deck_matchup_key(p1_fingerprint, p2_fingerprint)
+        row = self._lookup_history(key)
+        if row is None:
             return None
-
-        if require_p2_agent:
-            if p2_context is None:
-                p2_context = PlayerCacheContext(
-                    player_deck="cached",
-                    player_hero="",
-                    opponent_deck="cached",
-                    opponent_hero="",
-                    player_deck_fingerprint=p2_fingerprint,
-                    opponent_deck_fingerprint=p1_fingerprint,
-                )
-            if not self.has_tier1_agent(p2_context):
-                return None
-
+        record = MatchupTrainingRecord.from_dict(row)
+        if not record.converged:
+            return None
+        if record.episodes_completed < target_episodes:
+            return None
         return record
 
-    def mark_matchup_converged(
+    def load_or_create(
+        self,
+        make_agent: Callable[[], PPOAgent],
+        *,
+        obs_dim: int,
+        n_actions: int,
+        mask_actions: bool,
+    ) -> tuple[PPOAgent, str]:
+        agent = self.load_if_exists()
+        meta = self.load_meta()
+        if agent is not None and agent._actor is not None:
+            if int(meta.get("obs_schema_version", -1)) not in (-1, self.obs_schema_version):
+                agent = None
+            elif int(meta.get("obs_dim", agent.obs_dim)) not in (0, obs_dim):
+                agent = None
+        if agent is not None:
+            agent.n_actions = n_actions
+            agent._mask_actions = mask_actions
+            if agent.obs_dim != obs_dim:
+                agent.obs_dim = obs_dim
+                agent._init_nets(obs_dim)
+            return agent, "cache"
+
+        agent = make_agent()
+        agent.n_actions = n_actions
+        agent._mask_actions = mask_actions
+        agent.obs_dim = obs_dim
+        agent._init_nets(obs_dim)
+        return agent, "fresh"
+
+    def persist(
+        self,
+        agent: PPOAgent,
+        *,
+        episodes_delta: int = 0,
+        training_summary: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Save weights and update meta, optionally appending a training_history entry."""
+        if agent._actor is None:
+            return
+        path = self._weights_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        agent.save(path)
+
+        meta = self.load_meta()
+        meta.update(
+            {
+                "obs_schema_version": self.obs_schema_version,
+                "obs_dim": agent.obs_dim,
+                "n_actions": agent.n_actions,
+                "game_format": self.game_format,
+                "total_episodes_trained": int(meta.get("total_episodes_trained", 0))
+                + int(episodes_delta),
+                "last_updated": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        if training_summary:
+            self._append_training_history(meta, training_summary)
+            meta["last_matchup"] = str(
+                training_summary.get("matchup_name")
+                or meta.get("last_matchup", "")
+            )
+        self.save_meta(meta)
+
+    def _append_training_history(
+        self,
+        meta: dict[str, Any],
+        summary: dict[str, Any],
+    ) -> None:
+        p1_fp = str(summary.get("p1_fingerprint", "") or summary.get("p1_deck_fingerprint", ""))
+        p2_fp = str(summary.get("p2_fingerprint", "") or summary.get("p2_deck_fingerprint", ""))
+        if not p1_fp or not p2_fp:
+            return
+
+        episodes_completed = int(summary.get("episodes_completed", 0))
+        target_episodes = int(summary.get("target_episodes", episodes_completed))
+        entry: dict[str, Any] = {
+            "matchup_key": deck_matchup_key(p1_fp, p2_fp),
+            "matchup_name": str(summary.get("matchup_name", "")),
+            "p1_deck_fingerprint": p1_fp,
+            "p2_deck_fingerprint": p2_fp,
+            "p1_hero": str(summary.get("p1_hero", "")),
+            "p2_hero": str(summary.get("p2_hero", "")),
+            "converged": bool(summary.get("converged", episodes_completed >= target_episodes)),
+            "episodes_completed": episodes_completed,
+            "target_episodes": target_episodes,
+            "trained_at": str(
+                summary.get("trained_at")
+                or datetime.now(timezone.utc).isoformat()
+            ),
+        }
+        for key in (
+            "p1_win_rate",
+            "p2_win_rate",
+            "checkpoint_eval_win_rate",
+        ):
+            if summary.get(key) is not None:
+                entry[key] = summary[key]
+        stats = summary.get("training_stats")
+        if isinstance(stats, dict) and stats:
+            entry["training_stats"] = stats
+
+        history = self._training_history(meta)
+        key = entry["matchup_key"]
+        replaced = False
+        for idx, row in enumerate(history):
+            if str(row.get("matchup_key", "")) == key:
+                history[idx] = entry
+                replaced = True
+                break
+        if not replaced:
+            history.append(entry)
+        meta["training_history"] = history
+
+    def record_matchup_training(
         self,
         *,
         p1_fingerprint: str,
@@ -327,70 +370,37 @@ class AgentCacheStore:
         episodes_completed: int,
         target_episodes: int,
         p1_win_rate: Optional[float] = None,
+        p2_win_rate: Optional[float] = None,
         checkpoint_eval_win_rate: Optional[float] = None,
+        matchup_name: str = "",
+        training_stats: Optional[dict[str, Any]] = None,
     ) -> None:
-        matchup_key = deck_matchup_key(p1_fingerprint, p2_fingerprint)
-        record = MatchupTrainingRecord(
-            matchup_key=matchup_key,
-            p1_deck_fingerprint=p1_fingerprint,
-            p2_deck_fingerprint=p2_fingerprint,
-            p1_hero=p1_hero,
-            p2_hero=p2_hero,
-            converged=episodes_completed >= target_episodes,
-            episodes_completed=episodes_completed,
-            target_episodes=target_episodes,
-            p1_win_rate=p1_win_rate,
-            checkpoint_eval_win_rate=checkpoint_eval_win_rate,
-            trained_at=datetime.now(timezone.utc).isoformat(),
+        """Append or update a training_history entry without saving weights."""
+        meta = self.load_meta()
+        self._append_training_history(
+            meta,
+            {
+                "p1_fingerprint": p1_fingerprint,
+                "p2_fingerprint": p2_fingerprint,
+                "p1_hero": p1_hero,
+                "p2_hero": p2_hero,
+                "episodes_completed": episodes_completed,
+                "target_episodes": target_episodes,
+                "p1_win_rate": p1_win_rate,
+                "p2_win_rate": p2_win_rate,
+                "checkpoint_eval_win_rate": checkpoint_eval_win_rate,
+                "matchup_name": matchup_name,
+                "training_stats": training_stats,
+            },
         )
-        self.matchup_registry.record_training(
-            record,
-            converged=record.converged,
-        )
+        if matchup_name:
+            meta["last_matchup"] = matchup_name
+        meta["last_updated"] = datetime.now(timezone.utc).isoformat()
+        self.save_meta(meta)
 
-    def bootstrap_player(
-        self,
-        ctx: PlayerCacheContext,
-        make_agent: Callable[[], PPOAgent],
-    ) -> PlayerTierAgents:
-        keys = ctx.tier_keys()
-        loaded: dict[int, PPOAgent] = {}
-        for tier in range(1, 5):
-            agent = self.load_if_exists(tier, keys[tier - 1])
-            if agent is not None:
-                loaded[tier] = agent
+    def training_history(self) -> list[MatchupTrainingRecord]:
+        return [MatchupTrainingRecord.from_dict(row) for row in self._training_history()]
 
-        best_tier = min(loaded) if loaded else None
-        agents: list[PPOAgent] = []
-        init_sources: list[str] = []
 
-        for tier in range(1, 5):
-            if tier in loaded:
-                agent = loaded[tier]
-                gap = abs(tier - best_tier) if best_tier is not None else 0
-                apply_soft_reset(agent, gap)
-                init_sources.append(f"tier{tier}:cache({TIER_NAMES[tier - 1]},gap={gap})")
-            elif tier == 1 or not agents:
-                agent = make_agent()
-                if best_tier is not None:
-                    clone_agent_weights(loaded[best_tier], agent)
-                    gap = abs(tier - best_tier)
-                    apply_soft_reset(agent, gap)
-                    init_sources.append(
-                        f"tier{tier}:clone(tier{best_tier},{TIER_NAMES[best_tier - 1]},gap={gap})"
-                    )
-                else:
-                    init_sources.append(f"tier{tier}:fresh")
-            else:
-                agent = make_agent()
-                clone_agent_weights(agents[0], agent)
-                apply_soft_reset(agent, tier - 1)
-                init_sources.append(f"tier{tier}:clone(policy,gap={tier - 1})")
-            agents.append(agent)
-
-        return PlayerTierAgents(context=ctx, agents=agents, init_sources=init_sources)
-
-    def persist_player(self, bundle: PlayerTierAgents) -> None:
-        keys = bundle.context.tier_keys()
-        for tier, agent in enumerate(bundle.agents, start=1):
-            self.save(tier, keys[tier - 1], agent)
+# Backward-compatible alias
+UnifiedAgentStore = AgentCacheStore

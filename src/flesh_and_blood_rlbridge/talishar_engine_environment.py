@@ -88,7 +88,12 @@ from .frontend_action_overlay import (
     overlay_hints_payload,
     playwright_update_overlay_script,
 )
-from .fast_observation import fast_observation_payload, fast_observation_vector
+from .deck_context import load_episode_context
+from .player_observation import (
+    PLAYER_OBS_SCHEMA_VERSION,
+    player_observation_payload,
+    player_observation_vector,
+)
 from .legal_action_filter import filter_legal_actions
 from .talishar_default_policy import (
     choose_talishar_action_index,
@@ -334,6 +339,8 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         self._multi_select_inputs: list[str] = []
         self._pending_chk_inputs: Optional[list[str]] = None
         self._last_observation_vec: Optional[np.ndarray] = None
+        self._p1_episode_context: Optional[Any] = None
+        self._p2_episode_context: Optional[Any] = None
 
         # Persistent Playwright worker thread for rgb_array rendering
         self._pw_page: Any = None
@@ -1367,6 +1374,40 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             return ordered
         return legal_actions
 
+    def _refresh_episode_contexts(self, *, first_player: int = 1) -> None:
+        opp = self._opponent_deck_name or self._local_deck_name or "Ira"
+        local = self._local_deck_name or "Ira"
+        fp = 2 if int(first_player) == 2 else 1
+        self._p1_episode_context = load_episode_context(
+            self_deck_name=local,
+            opponent_deck_name=opp,
+            game_format=self._format,
+            first_player=fp,
+        )
+        self._p2_episode_context = load_episode_context(
+            self_deck_name=opp,
+            opponent_deck_name=local,
+            game_format=self._format,
+            first_player=fp,
+        )
+
+    def _episode_context_for_acting_player(self, state: dict[str, Any]) -> Any:
+        ctx = (
+            self._p1_episode_context
+            if self._acting_player_id == 1
+            else self._p2_episode_context
+        )
+        if ctx is None:
+            self._refresh_episode_contexts(
+                first_player=_dp_to_int(state.get("firstPlayer"), 1),
+            )
+            ctx = (
+                self._p1_episode_context
+                if self._acting_player_id == 1
+                else self._p2_episode_context
+            )
+        return ctx
+
     def _encode_observation(
         self,
         state: dict[str, Any],
@@ -1383,7 +1424,6 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             for c in state.get("playerHand", [])
             if isinstance(c, dict)
         ]
-        fast_legal_actions = self._fast_compatible_legal_actions(state, legal_actions)
         obs: dict[str, Any] = {
             "actingPlayerID": self._acting_player_id,
             "selfPlay": self._self_play,
@@ -1400,13 +1440,16 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             "playerHand": hand,
             "legalActions": [
                 {"index": i, "label": a["label"], "zone": a["zone"]}
-                for i, a in enumerate(fast_legal_actions)
+                for i, a in enumerate(legal_actions)
             ],
-            "legal_actions": fast_legal_actions,
+            "legal_actions": legal_actions,
+            "obsSchemaVersion": PLAYER_OBS_SCHEMA_VERSION,
         }
-        self._last_observation_vec = fast_observation_vector(
+        episode_ctx = self._episode_context_for_acting_player(state)
+        self._last_observation_vec = player_observation_vector(
             obs,
-            fast_legal_actions,
+            legal_actions,
+            episode_context=episode_ctx,
             acting_player_id=self._acting_player_id,
             p1_health=(
                 _dp_to_int(obs["playerHealth"])
@@ -1419,8 +1462,9 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                 else _dp_to_int(obs["playerHealth"])
             ),
             game_over=self._is_game_over(state),
+            raw_talishar_state=state,
         )
-        obs["fastObservationVec"] = fast_observation_payload(self._last_observation_vec)
+        obs["observationVec"] = player_observation_payload(self._last_observation_vec)
         return json.dumps(obs, separators=(",", ":"))
 
     def _render_player_id(self) -> int:
@@ -1749,6 +1793,9 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         self._reset_repeat_tracking(
             turn_no=int(self._last_state.get("turnNo", 0) or 0),
             acting_player_id=self._acting_player_id,
+        )
+        self._refresh_episode_contexts(
+            first_player=_dp_to_int(self._last_state.get("firstPlayer"), 1),
         )
         self._initialized = True
         self._opened_frontend_url = None

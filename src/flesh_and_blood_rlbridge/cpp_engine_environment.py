@@ -64,7 +64,14 @@ from rlbridge.environments.base import rlbridgeEnvironment
 from rlbridge.protocol.messages import RenderResult, ResetResult, StepResult, TextSpace
 
 from .combat_log_tracker import CombatTurnTracker
-from .fast_observation import fast_observation_payload, fast_observation_vector
+from .deck_context import EpisodeContext, load_episode_context, hero_from_equipment
+from .player_observation import (
+    ACTION_CAPACITY,
+    PLAYER_OBS_DIM,
+    PLAYER_OBS_SCHEMA_VERSION,
+    player_observation_payload,
+    player_observation_vector,
+)
 from .legal_action_filter import align_filtered_actions, filter_legal_actions
 from .obs_encoding import observation_fingerprint
 from .talishar_default_policy import (
@@ -281,17 +288,119 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         self._acting_player: int = 1  # 1-indexed to match Talishar convention
         self._repeat_tracker = RepeatActionTracker()
         self._last_observation_vec: Optional[np.ndarray] = None
+        self._p1_episode_context: Optional[EpisodeContext] = None
+        self._p2_episode_context: Optional[EpisodeContext] = None
+        if deck1 and deck2:
+            self._p1_episode_context = load_episode_context(
+                self_deck_name=deck1,
+                opponent_deck_name=deck2,
+            )
+            self._p2_episode_context = load_episode_context(
+                self_deck_name=deck2,
+                opponent_deck_name=deck1,
+            )
 
     def _obs_vec_for_json(self, obs_json: str) -> np.ndarray:
         vec = observation_fingerprint(obs_json)
         self._last_observation_vec = vec
         return vec
 
+    def _episode_context_for_acting_player(self) -> Optional[EpisodeContext]:
+        if self._acting_player == 1:
+            return self._p1_episode_context
+        return self._p2_episode_context
+
+    def _card_dict_from_cpp(self, card: Any) -> dict[str, Any]:
+        return {
+            "cardNumber": str(getattr(card, "card_id", "") or ""),
+            "cardID": str(getattr(card, "card_id", "") or ""),
+            "cost": int(getattr(card, "cost", 0) or 0),
+            "pitch": int(getattr(card, "pitch", 0) or 0),
+            "power": int(getattr(card, "power", 0) or 0),
+            "defense": int(getattr(card, "defense", 0) or 0),
+        }
+
+    def _zone_cards_from_cpp(self, cards: Any) -> list[dict[str, Any]]:
+        if not isinstance(cards, list):
+            return []
+        return [self._card_dict_from_cpp(card) for card in cards]
+
+    def _cpp_zone_cards(self, player_id: int, zone: str) -> list[dict[str, Any]]:
+        """Read a public zone from pybind11 GameState (p1_* / p2_* accessors)."""
+        gs = self._gs
+        if gs is None:
+            return []
+        prefix = "p1" if int(player_id) == 1 else "p2"
+        attr = f"{prefix}_{zone}"
+        cards = getattr(gs, attr, None)
+        if cards is None:
+            return []
+        return self._zone_cards_from_cpp(list(cards))
+
+    def _raw_state_from_gs(self) -> dict[str, Any]:
+        gs = self._gs
+        if gs is None:
+            return {}
+
+        acting = int(self._acting_player)
+        opp = 2 if acting == 1 else 1
+        self_pitch = int(
+            getattr(gs, "p1_pitch_size" if acting == 1 else "p2_pitch_size", 0) or 0
+        )
+        opp_pitch = int(
+            getattr(gs, "p1_pitch_size" if opp == 1 else "p2_pitch_size", 0) or 0
+        )
+
+        return {
+            "playerEquipment": self._cpp_zone_cards(acting, "equipment"),
+            "opponentEquipment": self._cpp_zone_cards(opp, "equipment"),
+            "playerArse": self._cpp_zone_cards(acting, "arsenal"),
+            "opponentArse": self._cpp_zone_cards(opp, "arsenal"),
+            "playerPitch": self._cpp_zone_cards(acting, "pitch"),
+            "opponentPitch": self._cpp_zone_cards(opp, "pitch"),
+            "playerDiscard": self._cpp_zone_cards(acting, "discard"),
+            "opponentDiscard": self._cpp_zone_cards(opp, "discard"),
+            "playerBanish": [],
+            "opponentBanish": [],
+            "playerAuras": [],
+            "opponentAuras": [],
+            "playerAllies": [],
+            "opponentAllies": [],
+            "playerItems": [],
+            "opponentItems": [],
+            "opponentPitchCount": opp_pitch,
+            "playerPitchCount": self_pitch,
+            "playerAP": 0,
+            "opponentAP": 0,
+            "canPassPhase": True,
+            "firstPlayer": int(getattr(gs, "first_player", 1) or 1),
+        }
+
+    def _obs_vec_from_cpp(self, legal_count: Optional[int] = None) -> Optional[np.ndarray]:
+        """Use native C++ player_observation_vector when the engine provides it."""
+        gs = self._gs
+        if gs is None:
+            return None
+        fn = getattr(gs, "player_observation_vector", None)
+        if fn is None:
+            return None
+        if legal_count is None:
+            legal_count = len(self._filter_legal_actions(self._legal_actions()))
+        try:
+            raw = fn(int(legal_count))
+            vec = np.asarray(raw, dtype=np.float64).reshape(-1)
+        except Exception:
+            return None
+        if vec.shape[0] != PLAYER_OBS_DIM:
+            return None
+        return vec
+
     def _obs_vec_for_state(self, obs: dict[str, Any], legal: list[Any]) -> np.ndarray:
         winner = int(getattr(self._gs, "winner", -1) or -1) if self._gs is not None else -1
-        vec = fast_observation_vector(
+        vec = player_observation_vector(
             obs,
             self._legal_to_dicts(legal),
+            episode_context=self._episode_context_for_acting_player(),
             acting_player_id=int(obs.get("actingPlayerID", self._acting_player) or self._acting_player),
             p1_health=int(getattr(self._gs, "p1_health", 0) or 0) if self._gs is not None else None,
             p2_health=int(getattr(self._gs, "p2_health", 0) or 0) if self._gs is not None else None,
@@ -300,6 +409,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             consecutive_passes=int(getattr(self._gs, "consecutive_passes", 0) or 0)
             if self._gs is not None
             else 0,
+            raw_talishar_state=self._raw_state_from_gs(),
         )
         self._last_observation_vec = vec
         return vec
@@ -813,17 +923,22 @@ class CppEngineEnvironment(rlbridgeEnvironment):
                 "engine module missing fast_step_index (rebuild with "
                 "scripts/cpp/build_cpp_engine_for_matchup.py)"
             )
-        if not hasattr(gs, "fast_observation_vector"):
-            reasons.append(
-                "engine module missing fast_observation_vector (rebuild with "
-                "scripts/cpp/build_cpp_engine_for_matchup.py)"
-            )
         return reasons
 
+    def _obs_vec_for_fast_path(self) -> np.ndarray:
+        legal = self._filter_legal_actions(self._legal_actions())
+        legal_count = len(legal)
+        vec = self._obs_vec_from_cpp(legal_count)
+        if vec is None:
+            obs_json = self._encode_observation(legal)
+            vec = self._last_observation_vec
+            if vec is None:
+                vec = observation_fingerprint(obs_json)
+        self._last_observation_vec = np.asarray(vec, dtype=np.float64)
+        return self._last_observation_vec
+
     def fast_action_capacity(self) -> int:
-        if self._gs is not None and hasattr(self._gs, "fast_action_capacity"):
-            return int(self._gs.fast_action_capacity())
-        return 32
+        return ACTION_CAPACITY
 
     def fast_reset(
         self,
@@ -847,8 +962,8 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             turn_no=int(getattr(self._gs, "turn_no", 0) or 0),
             acting_player_id=int(self._acting_player),
         )
-        legal_count = int(self._gs.fast_legal_count())
-        obs_vec = np.asarray(self._gs.fast_observation_vector(legal_count), dtype=np.float64)
+        legal_count = len(self._filter_legal_actions(self._legal_actions()))
+        obs_vec = self._obs_vec_for_fast_path()
         self._last_observation_vec = obs_vec
         return {
             "obs_vec": obs_vec,
@@ -878,11 +993,11 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         self._acting_player = int(result.acting_player_id)
         self._p1_hp = int(result.p1_health)
         self._p2_hp = int(result.p2_health)
-        obs_vec = np.asarray(result.obs_vec, dtype=np.float64)
+        obs_vec = self._obs_vec_for_fast_path()
         self._last_observation_vec = obs_vec
         return {
             "obs_vec": obs_vec,
-            "legal_count": int(result.legal_count),
+            "legal_count": len(self._filter_legal_actions(self._legal_actions())),
             "acting_player_id": self._acting_player,
             "reward": reward,
             "terminated": terminated,
@@ -1183,7 +1298,8 @@ class CppEngineEnvironment(rlbridgeEnvironment):
                 "legal_actions": self._legal_to_dicts(legal),
             }
             obs_vec = self._obs_vec_for_state(obs, legal)
-            obs["fastObservationVec"] = fast_observation_payload(obs_vec)
+            obs["obsSchemaVersion"] = PLAYER_OBS_SCHEMA_VERSION
+            obs["observationVec"] = player_observation_payload(obs_vec)
             obs_json = json.dumps(obs, separators=(",", ":"))
             return obs_json
 
@@ -1209,8 +1325,13 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             "legalActions": legal_entries,
             "legal_actions": self._legal_to_dicts(legal),
         }
-        obs_vec = self._obs_vec_for_state(obs, legal)
-        obs["fastObservationVec"] = fast_observation_payload(obs_vec)
+        cpp_vec = self._obs_vec_from_cpp(len(legal))
+        if cpp_vec is not None:
+            obs_vec = cpp_vec
+        else:
+            obs_vec = self._obs_vec_for_state(obs, legal)
+        obs["obsSchemaVersion"] = PLAYER_OBS_SCHEMA_VERSION
+        obs["observationVec"] = player_observation_payload(obs_vec)
         obs_json = json.dumps(obs, separators=(",", ":"))
         return obs_json
 
