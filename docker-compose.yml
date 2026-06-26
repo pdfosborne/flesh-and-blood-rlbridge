@@ -28,6 +28,8 @@ services:
   # Clone Talishar-FE into the repo checkout on first compose up
   talishar-fe-clone:
     image: alpine/git:2.49.0
+    profiles:
+      - full
     volumes:
       - ./:/repo
     working_dir: /repo
@@ -42,6 +44,8 @@ services:
     restart: "no"
 
   talishar-fe:
+    profiles:
+      - full
     build:
       context: .
       dockerfile: docker/talishar-fe/Dockerfile
@@ -99,6 +103,8 @@ services:
 
   # Prints the ready message after the full stack is up (visible in `docker compose up` logs)
   setup-complete:
+    profiles:
+      - full
     image: curlimages/curl:8.12.0
     volumes:
       - ./docker/ready-message.txt:/ready-message.txt:ro

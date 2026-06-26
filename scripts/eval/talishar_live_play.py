@@ -234,21 +234,10 @@ def _resolve_opponent_agent(trained_agent: Any, opponent_policy: str) -> Any:
     return trained_agent
 
 
-def unified_agent_cache_format(game_format: str) -> str:
-    """Map deck/Talishar format labels to unified agent cache directory names."""
-    from fab_tui.config import normalize_pipeline_format  # noqa: PLC0415
-
-    return normalize_pipeline_format(game_format)
-
-
-def unified_agent_weights_path(cache_dir: Path, game_format: str) -> Path:
-    from flesh_and_blood_rlbridge.player_observation import (  # noqa: PLC0415
-        PLAYER_OBS_SCHEMA_VERSION,
-    )
-
-    cache_format = unified_agent_cache_format(game_format)
-    store_root = Path(cache_dir) / cache_format
-    return store_root / f"unified_agent_v{PLAYER_OBS_SCHEMA_VERSION}.json"
+from fab_bridge.agents import (  # noqa: E402
+    unified_agent_cache_format,
+    unified_agent_weights_path,
+)
 
 
 def prepare_unified_live_play_context(

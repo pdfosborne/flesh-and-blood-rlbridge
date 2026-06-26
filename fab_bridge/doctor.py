@@ -9,6 +9,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from fab_bridge.agents import agent_cache_dir, agent_status, load_manifest, gh_auth_ok
 from fab_bridge.paths import repo_root, talishar_assets_dir, talishar_dir
 
 
@@ -66,6 +67,13 @@ def run_doctor(*, require_docker: bool = True) -> DoctorReport:
     for mod in ("numpy", "rich", "rlbridge", "fab_tui", "fab_gui"):
         report.add(f"import:{mod}", _module_available(mod), mod)
 
+    report.add(
+        "import:torch",
+        _module_available("torch"),
+        "required for unified agent inference",
+        required=False,
+    )
+
     assets = talishar_assets_dir()
     assets_ok = assets.is_dir() and any(assets.glob("*.txt"))
     report.add(
@@ -95,6 +103,44 @@ def run_doctor(*, require_docker: bool = True) -> DoctorReport:
         "Card database",
         cards_db.is_file(),
         str(cards_db) if cards_db.is_file() else f"Missing: {cards_db}",
+    )
+
+    try:
+        manifest = load_manifest()
+        default_fmt = str(manifest.get("default_format", "silver_age"))
+        status = agent_status(agent_cache_dir(), default_fmt)
+        agent_ok = bool(status.get("exists"))
+        release = status.get("release_id") or "not installed"
+        manifest_has_entry = any(
+            isinstance(row, dict) and str(row.get("format", "")) == status.get("cache_format")
+            for row in manifest.get("agents", [])
+        )
+        report.add(
+            f"Unified agent ({default_fmt})",
+            agent_ok,
+            f"{status.get('weights_path')} — release: {release}"
+            if agent_ok
+            else (
+                f"Missing — run: fab-bridge agents sync"
+                if manifest_has_entry
+                else "No published agent in manifest yet"
+            ),
+            required=require_docker and manifest_has_entry,
+        )
+    except Exception as exc:  # noqa: BLE001
+        report.add(
+            "Unified agent",
+            False,
+            f"Could not check agent cache: {exc}",
+            required=require_docker,
+        )
+
+    gh_ok, gh_detail = gh_auth_ok()
+    report.add(
+        "GitHub CLI (optional)",
+        gh_ok,
+        gh_detail + " — needed for fab-bridge agents publish",
+        required=False,
     )
 
     cmake = shutil.which("cmake")

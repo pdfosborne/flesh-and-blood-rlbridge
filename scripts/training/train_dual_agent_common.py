@@ -3528,12 +3528,15 @@ def _build_assets_hero_map(assets_path: Path) -> dict[str, str]:
         return result
     for txt_file in sorted(assets_path.glob("*.txt")):
         try:
-            first_line = txt_file.read_text(encoding="utf-8").splitlines()[0].strip()
+            lines = txt_file.read_text(encoding="utf-8").splitlines()
+            if not lines:
+                continue
+            first_line = lines[0].strip()
             if not first_line:
                 continue
             hero_id = first_line.split()[0]
             result[hero_id] = first_line
-        except OSError:
+        except (OSError, IndexError):
             continue
     return result
 

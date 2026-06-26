@@ -74,3 +74,16 @@ def test_training_history_stores_checkpoint_win_rates(tmp_path: Path) -> None:
     record = store.training_history()[0]
     assert record.first_checkpoint_win_rate == 0.41
     assert record.final_checkpoint_win_rate == 0.55
+
+
+def test_build_assets_hero_map_skips_empty_txt_files(tmp_path: Path) -> None:
+    from train_dual_agent_common import _build_assets_hero_map  # noqa: PLC0415
+
+    assets = tmp_path / "Assets"
+    assets.mkdir()
+    (assets / "empty.txt").write_text("", encoding="utf-8")
+    (assets / "valid.txt").write_text("aurora AuroraText\naurora_red", encoding="utf-8")
+
+    hero_map = _build_assets_hero_map(assets)
+    assert "aurora" in hero_map
+    assert hero_map["aurora"] == "aurora AuroraText"

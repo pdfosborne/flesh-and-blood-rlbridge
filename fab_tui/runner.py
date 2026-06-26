@@ -686,7 +686,5 @@ def run_unified_random_matchups(
         cmd.append("--skip-converged")
     else:
         cmd.append("--no-skip-converged")
-    if not spec.build_cpp_engine:
-        cmd.append("--no-build-cpp-engine")
-        cmd.append("--no-require-cpp-engine")
+    cmd.append("--require-cpp-engine")
     return run_streaming(cmd)

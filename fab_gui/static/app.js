@@ -20,6 +20,7 @@ const state = {
   livePlayPollTimer: null,
   livePlayFrameUrl: "",
   livePlayChromiumError: "",
+  unifiedAgentStatus: null,
 };
 
 const MIN_DECK_SIZES = {
@@ -1373,7 +1374,7 @@ async function setDeck(payload) {
   renderDeck();
   renderEquipment();
   renderEvalCandidates();
-  renderTrainReview();
+  await refreshUnifiedAgentStatus(state.deck.game_format);
   await maybeAutoGuideAndContinue();
 }
 
@@ -1875,6 +1876,16 @@ document.getElementById("btn-save-eval").onclick = () => saveForEvaluation();
   document.getElementById(id)?.addEventListener("input", () => renderTrainReview());
 });
 
+async function refreshUnifiedAgentStatus(gameFormat) {
+  const fmt = gameFormat || state.deck?.game_format || "silver_age";
+  try {
+    state.unifiedAgentStatus = await api(`/api/agents/status?format=${encodeURIComponent(fmt)}`);
+  } catch {
+    state.unifiedAgentStatus = { exists: false, format: fmt };
+  }
+  renderTrainReview();
+}
+
 function renderTrainReview() {
   const el = document.getElementById("train-review");
   if (!state.deck || !state.opponent) {
@@ -1888,12 +1899,26 @@ function renderTrainReview() {
     state.opponent.source === "fabrary"
       ? `${state.opponent.label || state.opponent.opponent_deck} (FaBrary)`
       : state.opponent.opponent_deck;
+  const agent = state.unifiedAgentStatus;
+  let agentLine = "";
+  if (agent) {
+    if (agent.exists) {
+      const release = agent.release_id ? ` (${agent.release_id})` : "";
+      agentLine = `<div><strong>Unified agent:</strong> installed${escapeHtml(release)}</div>`;
+    } else {
+      const cacheFmt = agent.cache_format && agent.cache_format !== agent.format
+        ? ` (cache key ${agent.cache_format})`
+        : "";
+      agentLine = `<div><strong>Unified agent:</strong> <span style="color:var(--warn,#c90)">missing for ${escapeHtml(agent.format || state.deck.game_format)}${escapeHtml(cacheFmt)}</span> — run <code>fab-bridge agents sync</code></div>`;
+    }
+  }
   el.innerHTML = `
     <div><strong>Hero:</strong> ${state.deck.hero_id}</div>
     <div><strong>Opponent:</strong> ${state.opponent.opponent_hero_id} (${oppDisplay})</div>
     <div><strong>Baseline:</strong> ${state.deck.baseline_label || "Baseline"}</div>
     <div><strong>Lists:</strong> 1 baseline + ${state.evalCandidates.length} saved alternate(s)</div>
     <div><strong>Deck:</strong> ${count} / ${required} cards${deckOk ? "" : " — complete the deck in the editor"}</div>
+    ${agentLine}
     <div><strong>Evaluation:</strong> ${document.getElementById("cpp-eval-episodes")?.value || "?"} C++ games × 4 matchups, ${document.getElementById("talishar-eval-episodes")?.value || "?"} Talishar games per list</div>`;
 }
 
@@ -1908,6 +1933,13 @@ document.getElementById("btn-start-evaluation").onclick = async () => {
   const oppCount = opponentDeckCount();
   if (oppCount !== oppRequired) {
     return toast(`Opponent deck must be exactly ${oppRequired} cards (currently ${oppCount})`, true);
+  }
+  await refreshUnifiedAgentStatus(state.deck.game_format);
+  if (state.unifiedAgentStatus && !state.unifiedAgentStatus.exists) {
+    return toast(
+      `No unified agent for ${state.deck.game_format}. Run: fab-bridge agents sync`,
+      true,
+    );
   }
   const btn = document.getElementById("btn-start-evaluation");
   btn.disabled = true;
@@ -2545,6 +2577,7 @@ async function init() {
   await loadPrecons();
   await loadSavedDecks();
   await loadSavedOpponents();
+  await refreshUnifiedAgentStatus("silver_age");
   if (state.opponent) doOpponentCardSearch("");
   refreshLivePlayMatchup();
   const livePlayMode = document.getElementById("liveplay-human-deck");

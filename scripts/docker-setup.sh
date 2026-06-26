@@ -6,6 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 FOLLOW_LOGS=false
+EVAL_ONLY=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -f|--foreground)
@@ -13,6 +14,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --logs)
       FOLLOW_LOGS=true
+      shift
+      ;;
+    --eval)
+      EVAL_ONLY=true
       shift
       ;;
     *)
@@ -24,6 +29,9 @@ done
 chmod +x bin/fab-* 2>/dev/null || true
 
 _ensure_talishar_fe() {
+  if $EVAL_ONLY; then
+    return 0
+  fi
   if [[ ! -f Talishar-FE/package.json ]]; then
     echo "[setup] Cloning Talishar-FE..."
     git clone --depth 1 https://github.com/Talishar/Talishar-FE Talishar-FE
@@ -55,6 +63,17 @@ _wait_for_stack() {
   echo "[setup] Waiting for all services (Talishar-FE can take several minutes on first run)..."
   echo ""
 
+  if $EVAL_ONLY; then
+    total=3
+    _wait_for_url "http://localhost:8080/" "Step 1/${total}: Talishar backend" 120 || true
+    _wait_for_url "http://localhost:8765/" "Step 2/${total}: Web GUI (fab-bridge)" 120 || true
+    echo -n "[setup] Step 3/${total}: CLI wrappers..."
+    docker compose wait fab-cli-setup 2>/dev/null || true
+    echo " OK"
+    echo ""
+    return
+  fi
+
   echo "[setup] Step ${step}/${total}: Talishar-FE clone"
   step=$((step + 1))
   docker compose wait talishar-fe-clone 2>/dev/null || true
@@ -76,6 +95,10 @@ _wait_for_stack() {
 }
 
 _print_ready_banner() {
+  if $EVAL_ONLY && [[ -f "$ROOT/docker/ready-message-eval.txt" ]]; then
+    cat "$ROOT/docker/ready-message-eval.txt"
+    return
+  fi
   if [[ -f "$ROOT/docker/ready-message.txt" ]]; then
     cat "$ROOT/docker/ready-message.txt"
   else
@@ -92,8 +115,20 @@ source "$ROOT/scripts/docker-gpu-compose.sh"
 fab_docker_gpu_compose_init
 fab_docker_gpu_compose_note
 
+if $EVAL_ONLY; then
+  export FAB_DOCKER_STACK=eval
+  # shellcheck source=scripts/docker-eval-compose.sh
+  source "$ROOT/scripts/docker-eval-compose.sh"
+  fab_docker_eval_compose_init
+  fab_docker_eval_compose_note
+  COMPOSE_PROFILES="eval"
+else
+  export FAB_DOCKER_STACK=full
+  COMPOSE_PROFILES="full"
+fi
+
 echo "[setup] Building and starting Docker stack..."
-docker compose up --build -d "$@"
+docker compose ${COMPOSE_PROFILES:+--profile "$COMPOSE_PROFILES"} up --build -d "$@"
 
 _wait_for_stack
 _print_ready_banner

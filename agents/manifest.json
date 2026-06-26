@@ -1,0 +1,7 @@
+{
+  "manifest_version": 1,
+  "obs_schema_version": 1,
+  "repository": "pdfosborne/flesh-and-blood-rlbridge",
+  "default_format": "silver_age",
+  "agents": []
+}

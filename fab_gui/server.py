@@ -101,6 +101,7 @@ class GuiRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         path = parsed.path
+        query = parse_qs(parsed.query)
 
         if path in {"/", "/index.html"}:
             return _serve_file(self, STATIC_DIR / "index.html")
@@ -133,14 +134,15 @@ class GuiRequestHandler(BaseHTTPRequestHandler):
                     "agent_cache_dir": str(gui_api.AGENT_CACHE_DIR),
                 },
             )
+        if path == "/api/agents/status":
+            fmt = (query.get("format") or ["silver_age"])[0]
+            return _json_response(self, gui_api.get_unified_agent_status(str(fmt)))
         if path == "/api/precons":
             return _json_response(self, {"precons": gui_api.list_precons(self.env)})
         if path == "/api/saved-decks":
             return _json_response(self, {"decks": gui_api.list_saved_decks_api()})
         if path == "/api/saved-opponents":
             return _json_response(self, {"opponents": gui_api.list_saved_opponents_api()})
-
-        query = parse_qs(parsed.query)
 
         if path == "/api/deck/load":
             deck_path = Path((query.get("path") or [""])[0]).expanduser()

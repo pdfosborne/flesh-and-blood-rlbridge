@@ -7,8 +7,10 @@ import sys
 from pathlib import Path
 
 _REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_REPO))
 sys.path.insert(0, str(_REPO / "scripts" / "eval"))
 
+from fab_bridge.agents import unified_agent_cache_format, unified_agent_weights_path  # noqa: E402
 from talishar_live_play import (  # noqa: E402
     LivePlayContext,
     _gui_human_deck_to_trained_opponent,
@@ -19,7 +21,6 @@ from talishar_live_play import (  # noqa: E402
     prepare_live_play_context,
     prepare_unified_live_play_context,
     resolve_checkpoint_bundles,
-    unified_agent_weights_path,
 )
 from eval_phase3_checkpoint import CheckpointBundle  # noqa: E402
 
@@ -200,8 +201,6 @@ def test_unified_agent_weights_path(tmp_path: Path) -> None:
 
 
 def test_unified_agent_weights_path_maps_sage_to_silver_age(tmp_path: Path) -> None:
-    from talishar_live_play import unified_agent_cache_format  # noqa: PLC0415
-
     assert unified_agent_cache_format("sage") == "silver_age"
     path = unified_agent_weights_path(tmp_path / "cache", "sage")
     assert path.parent.name == "silver_age"

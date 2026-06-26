@@ -127,12 +127,17 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-build-cpp-engine",
         action="store_true",
-        help="Do not build a C++ engine when one is missing",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--require-cpp-engine",
+        action="store_true",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--no-require-cpp-engine",
         action="store_true",
-        help="Allow HTTP Talishar fallback when no C++ engine is available",
+        help=argparse.SUPPRESS,
     )
     return parser.parse_args()
 

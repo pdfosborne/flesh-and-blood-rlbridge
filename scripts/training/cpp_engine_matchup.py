@@ -227,7 +227,7 @@ def ensure_cpp_engine_for_matchup(
         cache_dir=cache_dir,
     )
     if rc != 0:
-        print(f"  [cpp] WARNING: engine build failed (exit {rc}) — HTTP Talishar fallback")
+        print(f"  [cpp] ERROR: engine build failed (exit {rc})")
         return None
 
     built = discover_cpp_engine_dir(

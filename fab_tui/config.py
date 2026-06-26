@@ -21,7 +21,16 @@ SCRIPTS_CPP = SCRIPTS_ROOT / "cpp"
 SCRIPTS_DECK = SCRIPTS_ROOT / "deck"
 RUNSCRIPTS_ROOT = REPO_ROOT / "runscripts"
 RESULTS_ROOT = REPO_ROOT / "results"
-AGENT_CACHE_DIR = RESULTS_ROOT / "agent_cache"
+
+
+def _resolve_agent_cache_dir() -> Path:
+    override = os.environ.get("FAB_AGENT_CACHE_DIR", "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+    return RESULTS_ROOT / "agent_cache"
+
+
+AGENT_CACHE_DIR = _resolve_agent_cache_dir()
 CARDS_DB_DIR = REPO_ROOT / "src" / "flesh_and_blood_rlbridge" / "card_db"
 CARDS_DB_PATH = CARDS_DB_DIR / "cards.json"
 FABRARY_DECKS_PATH = CARDS_DB_DIR / "fabrary_decks.json"

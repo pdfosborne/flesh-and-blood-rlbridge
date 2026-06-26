@@ -13,6 +13,11 @@ from pathlib import Path
 from typing import Any
 
 from fab_tui.card_search import CardHit, CardSearchIndex
+from fab_bridge.agents import (  # noqa: E402
+    agent_status as unified_agent_status,
+    unified_agent_cache_format,
+    unified_agent_weights_path,
+)
 from fab_tui.config import (
     AGENT_CACHE_DIR,
     REPO_ROOT,
@@ -1626,6 +1631,10 @@ class LivePlayRegistry:
 LIVE_PLAY = LivePlayRegistry()
 
 
+def get_unified_agent_status(game_format: str) -> dict[str, Any]:
+    return unified_agent_status(AGENT_CACHE_DIR, game_format)
+
+
 def live_play_status(session_id: str | None = None) -> dict[str, Any]:
     session = LIVE_PLAY.get(session_id) if session_id else LIVE_PLAY.active()
     if session is None:
@@ -1672,8 +1681,6 @@ def start_live_play(
     from runtime_defaults import RUNTIME  # noqa: PLC0415
     from talishar_live_play import (  # noqa: PLC0415
         run_embedded_unified_live_play_session,
-        unified_agent_cache_format,
-        unified_agent_weights_path,
         _verify_frontend_reachable,
         _verify_talishar_reachable,
     )

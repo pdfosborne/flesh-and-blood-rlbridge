@@ -241,12 +241,7 @@ def _parse_cmd_set_output(text: str) -> dict[str, str]:
     return parsed
 
 
-def _windows_msvc_build_env(base: dict[str, str] | None = None) -> dict[str, str]:
-    """Load vcvars64 so CMake can compile with MSVC outside a Developer shell."""
-    env = dict(base or os.environ)
-    if sys.platform != "win32":
-        return env
-
+def _find_windows_vcvars() -> Path | None:
     vswhere_candidates = [
         Path(os.environ.get("ProgramFiles(x86)", "")) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe",
         Path(os.environ.get("ProgramFiles", "")) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe",
@@ -264,20 +259,91 @@ def _windows_msvc_build_env(base: dict[str, str] | None = None) -> dict[str, str
         if not install_path:
             continue
         vcvars = Path(install_path) / "VC" / "Auxiliary" / "Build" / "vcvars64.bat"
-        if not vcvars.is_file():
+        if vcvars.is_file():
+            return vcvars
+    return None
+
+
+def _run_cmd_in_vcvars(vcvars: Path, cmd: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+    cmdline = subprocess.list2cmdline(cmd)
+    script = f'call "{vcvars}" >nul 2>&1 && {cmdline}'
+    return subprocess.run(
+        ["cmd", "/c", script],
+        cwd=str(cwd),
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+
+_WINDOWS_MSVC_PROBE = (
+    Path("build")
+    / "CMakeFiles"
+    / "CMakeScratch"
+    / "TryCompile-probe"
+    / "cmTC_90069.dir"
+    / "Debug"
+    / "cmTC_90069.tlog"
+    / "ParallelCustomBuild.command.1.tlog"
+)
+
+
+def _windows_short_build_dir(input_hash: str) -> Path:
+    base = Path(os.environ.get("LOCALAPPDATA", tempfile.gettempdir())) / "fab-bridge" / "cpp_build"
+    return base / input_hash
+
+
+def _needs_short_windows_build_dir(engine_dir: Path) -> bool:
+    if sys.platform != "win32":
+        return False
+    resolved = engine_dir.resolve()
+    return len(str(resolved / _WINDOWS_MSVC_PROBE)) >= 240
+
+
+def _visual_studio_generator_name() -> str:
+    vswhere_candidates = [
+        Path(os.environ.get("ProgramFiles(x86)", "")) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe",
+        Path(os.environ.get("ProgramFiles", "")) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe",
+    ]
+    for vswhere in vswhere_candidates:
+        if not vswhere.is_file():
             continue
-        boot = subprocess.run(
-            ["cmd", "/c", f'call "{vcvars}" >nul 2>&1 && set'],
+        completed = subprocess.run(
+            [str(vswhere), "-latest", "-property", "installationVersion"],
             check=False,
             text=True,
             capture_output=True,
-            env=env,
         )
-        if boot.returncode == 0 and boot.stdout:
-            env.update(_parse_cmd_set_output(boot.stdout))
-            if _which_in_env("cl", env):
-                _ok("MSVC environment loaded (vcvars64)")
-                return env
+        version = (completed.stdout or "").strip().split(".")[0]
+        return {
+            "17": "Visual Studio 17 2022",
+            "16": "Visual Studio 16 2019",
+            "15": "Visual Studio 15 2017",
+        }.get(version, "Visual Studio 17 2022")
+    return "Visual Studio 17 2022"
+
+
+def _windows_msvc_build_env(base: dict[str, str] | None = None) -> dict[str, str]:
+    """Load vcvars64 so CMake can compile with MSVC outside a Developer shell."""
+    env = dict(base or os.environ)
+    if sys.platform != "win32":
+        return env
+
+    vcvars = _find_windows_vcvars()
+    if vcvars is None:
+        return env
+    boot = subprocess.run(
+        ["cmd", "/c", f'call "{vcvars}" >nul 2>&1 && set'],
+        check=False,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+    if boot.returncode == 0 and boot.stdout:
+        env.update(_parse_cmd_set_output(boot.stdout))
+        if _which_in_env("cl", env):
+            _ok("MSVC environment loaded (vcvars64)")
+            return env
     return env
 
 
@@ -420,9 +486,20 @@ def build_engine(engine_dir: Path, input_hash: str, pybind11_dir: str) -> None:
     print("  Locating pybind11 cmake dir...")
     _ok(f"pybind11 cmake dir: {pybind11_dir}")
 
-    build_env = _windows_msvc_build_env()
-    generator_args = cmake_generator_args(engine_dir, pybind11_dir, env=build_env)
-    build_dir = engine_dir / "build"
+    use_short_build = _needs_short_windows_build_dir(engine_dir)
+    if use_short_build:
+        build_dir = _windows_short_build_dir(input_hash)
+        build_dir.mkdir(parents=True, exist_ok=True)
+        _ok(f"Short build dir (Windows MAX_PATH): {build_dir}")
+        configure_paths = ["-B", str(build_dir), "-S", str(engine_dir)]
+        build_target = str(build_dir)
+        cmd_cwd = REPO_ROOT
+    else:
+        build_dir = engine_dir / "build"
+        configure_paths = ["-B", "build", "."]
+        build_target = "build"
+        cmd_cwd = engine_dir
+
     if (build_dir / "CMakeCache.txt").is_file():
         print("  Clearing stale CMake cache...")
         shutil.rmtree(build_dir, ignore_errors=True)
@@ -431,44 +508,85 @@ def build_engine(engine_dir: Path, input_hash: str, pybind11_dir: str) -> None:
         if path.is_file() and path.suffix in MODULE_EXTENSIONS:
             path.unlink(missing_ok=True)
 
+    vcvars = _find_windows_vcvars() if sys.platform == "win32" else None
+    build_env = _windows_msvc_build_env() if sys.platform == "win32" else os.environ
+    if sys.platform == "win32" and vcvars is not None:
+        generator_name = _visual_studio_generator_name()
+        generator_args = ["-G", generator_name, "-A", "x64"]
+        _ok(f"Generator: {generator_name} (vcvars64)")
+    else:
+        build_env = _windows_msvc_build_env()
+        generator_args = cmake_generator_args(engine_dir, pybind11_dir, env=build_env)
+
     configure_cmd = [
         cmake,
-        "-B",
-        "build",
+        *configure_paths,
         "-DCMAKE_BUILD_TYPE=Release",
         f"-Dpybind11_DIR={pybind11_dir}",
         *generator_args,
-        ".",
     ]
     print("  Configuring...")
-    configure = subprocess.run(
-        configure_cmd,
-        cwd=str(engine_dir),
-        check=False,
-        text=True,
-        capture_output=True,
-        env=build_env,
-    )
+    if vcvars is not None:
+        configure = _run_cmd_in_vcvars(vcvars, configure_cmd, cwd=cmd_cwd)
+    else:
+        configure = subprocess.run(
+            configure_cmd,
+            cwd=str(cmd_cwd),
+            check=False,
+            text=True,
+            capture_output=True,
+            env=build_env,
+        )
     for line in (configure.stdout or configure.stderr or "").splitlines():
         print(f"    {line}")
     if configure.returncode != 0:
         _fail("cmake configure failed")
+        if sys.platform == "win32":
+            if use_short_build:
+                print(
+                    "  Hint: install Visual Studio Build Tools with the "
+                    "'Desktop development with C++' workload."
+                )
+            else:
+                print(
+                    "  Hint: engine path may exceed Windows MAX_PATH (260 chars). "
+                    "Re-run; the builder will use a short external build directory."
+                )
+                print(
+                    "  Or install Visual Studio Build Tools with the "
+                    "'Desktop development with C++' workload."
+                )
         raise SystemExit(1)
 
     print("  Compiling...")
-    build = subprocess.run(
-        [cmake, "--build", "build", "--config", "Release", "--parallel"],
-        cwd=str(engine_dir),
-        check=False,
-        text=True,
-        capture_output=True,
-        env=build_env,
-    )
+    build_cmd = [cmake, "--build", build_target, "--config", "Release", "--parallel"]
+    if vcvars is not None:
+        build = _run_cmd_in_vcvars(vcvars, build_cmd, cwd=cmd_cwd)
+    else:
+        build = subprocess.run(
+            build_cmd,
+            cwd=str(cmd_cwd),
+            check=False,
+            text=True,
+            capture_output=True,
+            env=build_env,
+        )
     for line in (build.stdout or build.stderr or "").splitlines():
         print(f"    {line}")
     if build.returncode != 0:
         _fail("cmake build failed - check errors above")
         raise SystemExit(1)
+
+    if find_compiled_module(engine_dir) is None:
+        for ext in MODULE_EXTENSIONS:
+            for candidate in build_dir.rglob(f"fab_engine*{ext}"):
+                if candidate.is_file():
+                    dest = engine_dir / candidate.name
+                    shutil.copy2(candidate, dest)
+                    _ok(f"Copied module to {dest}")
+                    break
+            if find_compiled_module(engine_dir) is not None:
+                break
 
     hash_file = engine_dir / "engine_input_hash.txt"
     hash_file.write_text(input_hash, encoding="utf-8")

@@ -11,7 +11,7 @@ from fab_bridge.paths import configure_import_paths, repo_root, talishar_assets_
 configure_import_paths()
 
 
-def run_init(*, start_talishar: bool = True, backend_only: bool = True) -> int:
+def run_init(*, start_talishar: bool = True, backend_only: bool = True, sync_agents: bool = True) -> int:
     root = repo_root()
     print(f"FAB RL Bridge root: {root}")
 
@@ -19,6 +19,19 @@ def run_init(*, start_talishar: bool = True, backend_only: bool = True) -> int:
         path = root / sub
         path.mkdir(parents=True, exist_ok=True)
         print(f"  ensured {path}")
+
+    if sync_agents:
+        print()
+        print("Syncing official unified agent weights (best-effort)…")
+        from fab_bridge.agents import agent_cache_dir, default_manifest_url, sync_agents as do_sync  # noqa: PLC0415
+
+        try:
+            results = do_sync(manifest_url=default_manifest_url(), cache_dir=agent_cache_dir())
+            for row in results:
+                print(f"  [{row.action}] {row.format}: {row.detail}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"  WARNING: agent sync skipped ({exc})")
+            print("  Run later: fab-bridge agents sync")
 
     assets = talishar_assets_dir()
     if not assets.is_dir() or not any(assets.glob("*.txt")):
