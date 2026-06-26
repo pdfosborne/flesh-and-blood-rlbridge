@@ -1,0 +1,20 @@
+{
+  "manifest_version": 1,
+  "obs_schema_version": 1,
+  "repository": "pdfosborne/flesh-and-blood-rlbridge",
+  "default_format": "silver_age",
+  "agents": [
+    {
+      "format": "silver_age",
+      "release": "agents-2026.06.1",
+      "obs_schema_version": 1,
+      "obs_dim": 524,
+      "weights_filename": "silver_age-unified_agent_v1.json",
+      "meta_filename": "silver_age-unified_agent_v1.meta.json",
+      "weights_url": "https://github.com/pdfosborne/flesh-and-blood-rlbridge/releases/download/agents-2026.06.1/silver_age-unified_agent_v1.json",
+      "meta_url": "https://github.com/pdfosborne/flesh-and-blood-rlbridge/releases/download/agents-2026.06.1/silver_age-unified_agent_v1.meta.json",
+      "sha256": "d390c017bf43f23ec1e22b2a0a06acdb0f6bfdf1a4772342ec77c92af13f973f",
+      "min_package_version": "0.1.0"
+    }
+  ]
+}

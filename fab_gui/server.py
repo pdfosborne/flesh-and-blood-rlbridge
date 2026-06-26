@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
-from fab_tui.config import EnvironmentSettings, REPO_ROOT
+from fab_tui.config import EnvironmentSettings, REPO_ROOT, browser_talishar_fe_url
 
 from fab_gui import api as gui_api
 
@@ -64,7 +64,7 @@ def _serve_bytes(
     _write_body(handler, data)
 
 
-def _serve_file(handler: BaseHTTPRequestHandler, path: Path) -> None:
+def _serve_file(handler: BaseHTTPRequestHandler, path: Path, *, no_cache: bool = False) -> None:
     if not path.is_file():
         handler.send_error(HTTPStatus.NOT_FOUND)
         return
@@ -73,8 +73,16 @@ def _serve_file(handler: BaseHTTPRequestHandler, path: Path) -> None:
     handler.send_response(HTTPStatus.OK)
     handler.send_header("Content-Type", mime or "application/octet-stream")
     handler.send_header("Content-Length", str(len(content)))
+    if no_cache:
+        handler.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+        handler.send_header("Pragma", "no-cache")
     handler.end_headers()
     _write_body(handler, content)
+
+
+def _page_hostname(handler: BaseHTTPRequestHandler) -> str:
+    host = str(handler.headers.get("Host") or "localhost:8765")
+    return host.split(":", 1)[0] or "localhost"
 
 
 class GuiRequestHandler(BaseHTTPRequestHandler):
@@ -93,6 +101,7 @@ class GuiRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         path = parsed.path
+        query = parse_qs(parsed.query)
 
         if path in {"/", "/index.html"}:
             return _serve_file(self, STATIC_DIR / "index.html")
@@ -111,22 +120,29 @@ class GuiRequestHandler(BaseHTTPRequestHandler):
             return _serve_bytes(self, data, content_type=mime)
 
         if path == "/api/config":
+            page_host = _page_hostname(self)
             return _json_response(
                 self,
                 {
                     "talishar_url": self.env.talishar_url,
                     "talishar_fe_url": self.env.talishar_fe_url,
+                    "talishar_fe_browser_url": browser_talishar_fe_url(
+                        self.env.talishar_fe_url,
+                        page_host=page_host,
+                    ),
                     "assets_path": self.env.assets_path,
+                    "agent_cache_dir": str(gui_api.AGENT_CACHE_DIR),
                 },
             )
+        if path == "/api/agents/status":
+            fmt = (query.get("format") or ["silver_age"])[0]
+            return _json_response(self, gui_api.get_unified_agent_status(str(fmt)))
         if path == "/api/precons":
             return _json_response(self, {"precons": gui_api.list_precons(self.env)})
         if path == "/api/saved-decks":
             return _json_response(self, {"decks": gui_api.list_saved_decks_api()})
         if path == "/api/saved-opponents":
             return _json_response(self, {"opponents": gui_api.list_saved_opponents_api()})
-
-        query = parse_qs(parsed.query)
 
         if path == "/api/deck/load":
             deck_path = Path((query.get("path") or [""])[0]).expanduser()
@@ -208,7 +224,7 @@ class GuiRequestHandler(BaseHTTPRequestHandler):
             html_path = gui_api.dashboard_path(run_id)
             if html_path is None or not html_path.is_file():
                 return _json_response(self, {"error": "Dashboard not ready"}, status=404)
-            return _serve_file(self, html_path)
+            return _serve_file(self, html_path, no_cache=True)
 
         match = re.fullmatch(r"/api/runs/([^/]+)/status", path)
         if match:
@@ -252,6 +268,14 @@ class GuiRequestHandler(BaseHTTPRequestHandler):
             if status is None:
                 return _json_response(self, {"error": "Run not found"}, status=404)
             return _json_response(self, status)
+
+        if path == "/api/live-play/status":
+            session_id = (query.get("session_id") or [None])[0]
+            return _json_response(self, gui_api.live_play_status(session_id))
+
+        match = re.fullmatch(r"/api/live-play/([^/]+)/status", path)
+        if match:
+            return _json_response(self, gui_api.live_play_status(match.group(1)))
 
         self.send_error(HTTPStatus.NOT_FOUND)
 
@@ -400,6 +424,53 @@ class GuiRequestHandler(BaseHTTPRequestHandler):
             except Exception as exc:  # noqa: BLE001
                 return _json_response(self, {"error": str(exc)}, status=400)
 
+        if path == "/api/evaluation/start":
+            try:
+                opponent_deck = str(body.get("opponent_deck") or "")
+                opponent_game_deck = body.get("opponent_game_deck")
+                if opponent_deck and isinstance(opponent_game_deck, dict) and opponent_game_deck:
+                    gui_api.sync_opponent_deck_api(
+                        self.env,
+                        opponent_deck=opponent_deck,
+                        game_deck={
+                            str(k): int(v) for k, v in opponent_game_deck.items() if int(v) > 0
+                        },
+                        equipment_header=str(body.get("opponent_equipment_header") or ""),
+                    )
+                session_path = gui_api.persist_session_deck(body)
+                variants = body.get("variants") or []
+                spec_kwargs = {
+                    "max_parallel": int(body.get("max_parallel", 0)),
+                    "build_cpp_engine": bool(body.get("build_cpp_engine", True)),
+                    "workers": body.get("workers"),
+                }
+                if spec_kwargs["workers"] is not None:
+                    spec_kwargs["workers"] = int(spec_kwargs["workers"])
+                run = gui_api.start_evaluation(
+                    env=self.env,
+                    starting_deck_path=session_path,
+                    opponent_hero_id=str(body.get("opponent_hero_id") or ""),
+                    opponent_deck=str(body.get("opponent_deck") or ""),
+                    baseline_deck={str(k): int(v) for k, v in (body.get("deck") or {}).items()},
+                    card_pool={str(k): int(v) for k, v in (body.get("card_pool") or {}).items()},
+                    equipment_header=str(body.get("equipment_header") or ""),
+                    baseline_label=str(body.get("baseline_label") or "Baseline"),
+                    variants=variants,
+                    spec_kwargs={
+                        **spec_kwargs,
+                        "cpp_eval_episodes": int(body.get("cpp_eval_episodes", 1000)),
+                        "talishar_eval_episodes": int(body.get("talishar_eval_episodes", 10)),
+                    },
+                )
+                manifest_path = run.out_dir / "candidates_manifest.json"
+                if manifest_path.is_file():
+                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    manifest["gui_run_id"] = run.run_id
+                    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+                return _json_response(self, run.to_dict())
+            except Exception as exc:  # noqa: BLE001
+                return _json_response(self, {"error": str(exc)}, status=500)
+
         if path == "/api/training/start":
             try:
                 opponent_deck = str(body.get("opponent_deck") or "")
@@ -454,10 +525,36 @@ class GuiRequestHandler(BaseHTTPRequestHandler):
             except Exception as exc:  # noqa: BLE001
                 return _json_response(self, {"error": str(exc)}, status=400)
 
+        if path == "/api/live-play/start":
+            try:
+                return _json_response(
+                    self,
+                    gui_api.start_live_play(self.env, body, page_host=_page_hostname(self)),
+                )
+            except FileNotFoundError as exc:
+                return _json_response(self, {"error": str(exc)}, status=400)
+            except RuntimeError as exc:
+                return _json_response(self, {"error": str(exc)}, status=409)
+            except Exception as exc:  # noqa: BLE001
+                return _json_response(self, {"error": str(exc)}, status=500)
+
+        if path == "/api/live-play/stop":
+            session_id = str(body.get("session_id") or "").strip() or None
+            return _json_response(self, gui_api.stop_live_play(session_id))
+
+        if path == "/api/live-play/open-chromium":
+            try:
+                session_id = str(body.get("session_id") or "").strip() or None
+                return _json_response(self, gui_api.open_live_play_chromium(session_id))
+            except RuntimeError as exc:
+                return _json_response(self, {"error": str(exc)}, status=409)
+            except Exception as exc:  # noqa: BLE001
+                return _json_response(self, {"error": str(exc)}, status=500)
+
         return _json_response(self, {"error": "Not found"}, status=404)
 
 
-def run_gui(*, host: str = "127.0.0.1", port: int = DEFAULT_PORT, open_browser: bool = True) -> int:
+def run_gui(*, host: str = "localhost", port: int = DEFAULT_PORT, open_browser: bool = True) -> int:
     """Start the web GUI and block until interrupted."""
     if str(REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(REPO_ROOT))

@@ -17,7 +17,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "training"))
 
 from flesh_and_blood_rlbridge.cpp_engine_environment import CppEngineEnvironment
-from flesh_and_blood_rlbridge.fast_observation import FAST_OBS_DIM
+from flesh_and_blood_rlbridge.player_observation import ACTION_CAPACITY, PLAYER_OBS_DIM
 from rl_agents.ppo import PPOAgent
 from runtime_defaults import DEFAULT_HIDDEN_SIZE
 from train_dual_agent_common import (
@@ -57,7 +57,7 @@ def main() -> None:
     print("=" * 72)
     print(f"  Fast-step runtime benchmark — Ira vs Ira")
     print(f"  Engine: {ENGINE_DIR.name}")
-    print(f"  Warmup={WARMUP}  microbench_iters={ITERS}  obs_dim={FAST_OBS_DIM}")
+    print(f"  Warmup={WARMUP}  microbench_iters={ITERS}  obs_dim={PLAYER_OBS_DIM}")
     print("=" * 72)
 
     # ── C++ raw (no Python env wrapper) ─────────────────────────────────────
@@ -149,9 +149,9 @@ def main() -> None:
     t_tracked = _bench("step() + combat tracker", tracked_step, iters=200)
 
     # ── PPO inference ───────────────────────────────────────────────────────
-    print("\n[PPO inference — hidden_size=%d, n_actions=32]" % DEFAULT_HIDDEN_SIZE)
-    policy = PPOAgent(hidden_size=DEFAULT_HIDDEN_SIZE, n_actions=32, obs_dim=FAST_OBS_DIM)
-    policy._init_nets(FAST_OBS_DIM)
+    print("\n[PPO inference — hidden_size=%d, n_actions=%d]" % (DEFAULT_HIDDEN_SIZE, ACTION_CAPACITY))
+    policy = PPOAgent(hidden_size=DEFAULT_HIDDEN_SIZE, n_actions=ACTION_CAPACITY, obs_dim=PLAYER_OBS_DIM)
+    policy._init_nets(PLAYER_OBS_DIM)
     obs_vec = np.asarray(state["obs_vec"], dtype=np.float64)
     n_legal = max(1, int(state["legal_count"]))
 
@@ -227,10 +227,10 @@ def main() -> None:
 
     # ── Episode throughput ────────────────────────────────────────────────────
     print("\n[End-to-end episode throughput]")
-    policy_p1 = PPOAgent(hidden_size=DEFAULT_HIDDEN_SIZE, n_actions=32, obs_dim=FAST_OBS_DIM)
-    policy_p1._init_nets(FAST_OBS_DIM)
-    policy_p2 = PPOAgent(hidden_size=DEFAULT_HIDDEN_SIZE, n_actions=32, obs_dim=FAST_OBS_DIM)
-    policy_p2._init_nets(FAST_OBS_DIM)
+    policy_p1 = PPOAgent(hidden_size=DEFAULT_HIDDEN_SIZE, n_actions=ACTION_CAPACITY, obs_dim=PLAYER_OBS_DIM)
+    policy_p1._init_nets(PLAYER_OBS_DIM)
+    policy_p2 = PPOAgent(hidden_size=DEFAULT_HIDDEN_SIZE, n_actions=ACTION_CAPACITY, obs_dim=PLAYER_OBS_DIM)
+    policy_p2._init_nets(PLAYER_OBS_DIM)
     from flesh_and_blood_rlbridge.talishar_engine_environment import TalisharEngineEnvironment
 
     tal_env = TalisharEngineEnvironment(
@@ -265,13 +265,13 @@ def main() -> None:
         for _ in range(parallel_workers)
     ]
     parallel_p1 = PPOAgent(
-        hidden_size=DEFAULT_HIDDEN_SIZE, n_actions=32, obs_dim=FAST_OBS_DIM
+        hidden_size=DEFAULT_HIDDEN_SIZE, n_actions=ACTION_CAPACITY, obs_dim=PLAYER_OBS_DIM
     )
     parallel_p2 = PPOAgent(
-        hidden_size=DEFAULT_HIDDEN_SIZE, n_actions=32, obs_dim=FAST_OBS_DIM
+        hidden_size=DEFAULT_HIDDEN_SIZE, n_actions=ACTION_CAPACITY, obs_dim=PLAYER_OBS_DIM
     )
-    parallel_p1._init_nets(FAST_OBS_DIM)
-    parallel_p2._init_nets(FAST_OBS_DIM)
+    parallel_p1._init_nets(PLAYER_OBS_DIM)
+    parallel_p2._init_nets(PLAYER_OBS_DIM)
 
     def _run_threaded_rollouts() -> int:
         total_steps_local = 0

@@ -21,7 +21,16 @@ SCRIPTS_CPP = SCRIPTS_ROOT / "cpp"
 SCRIPTS_DECK = SCRIPTS_ROOT / "deck"
 RUNSCRIPTS_ROOT = REPO_ROOT / "runscripts"
 RESULTS_ROOT = REPO_ROOT / "results"
-AGENT_CACHE_DIR = RESULTS_ROOT / "agent_cache"
+
+
+def _resolve_agent_cache_dir() -> Path:
+    override = os.environ.get("FAB_AGENT_CACHE_DIR", "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+    return RESULTS_ROOT / "agent_cache"
+
+
+AGENT_CACHE_DIR = _resolve_agent_cache_dir()
 CARDS_DB_DIR = REPO_ROOT / "src" / "flesh_and_blood_rlbridge" / "card_db"
 CARDS_DB_PATH = CARDS_DB_DIR / "cards.json"
 FABRARY_DECKS_PATH = CARDS_DB_DIR / "fabrary_decks.json"
@@ -46,6 +55,51 @@ def normalize_pipeline_format(fmt: str) -> PipelineFormat:
 def slugify(value: str) -> str:
     token = re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")
     return token or "experiment"
+
+
+_DOCKER_FE_HOSTS = frozenset(
+    {"talishar-fe", "web-server", "fab-bridge", "host.docker.internal"}
+)
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0"})
+
+
+def _is_loopback_host(host: str | None) -> bool:
+    if not host:
+        return False
+    token = host.lower().strip("[]")
+    return token in _LOOPBACK_HOSTS or token.startswith("127.")
+
+
+def _loopback_fe_browser_host(*, fe_host: str, page_host: str | None) -> str:
+    """Browser host for Talishar-FE when both GUI and FE are on loopback."""
+    if page_host and not _is_loopback_host(page_host):
+        return page_host
+    # Vite on Windows often binds [::1] only — localhost works, 127.0.0.1 may not.
+    if _is_loopback_host(fe_host) or fe_host in {"", "localhost"}:
+        return "localhost"
+    return fe_host or "localhost"
+
+
+def browser_talishar_fe_url(fe_url: str, *, page_host: str | None = None) -> str:
+    """Map docker-internal Talishar-FE URLs to a host the browser can reach."""
+    override = os.environ.get("TALISHAR_FE_BROWSER_URL", "").strip()
+    if override:
+        return override.rstrip("/")
+    from urllib.parse import urlparse
+
+    parsed = urlparse(fe_url)
+    host = (parsed.hostname or "").lower()
+    port = parsed.port or 5173
+    scheme = parsed.scheme or "http"
+    if host in _DOCKER_FE_HOSTS:
+        browser_host = (page_host or "127.0.0.1").strip() or "127.0.0.1"
+    elif _is_loopback_host(host):
+        browser_host = _loopback_fe_browser_host(fe_host=host, page_host=page_host)
+    else:
+        browser_host = host or "localhost"
+    if browser_host in {"0.0.0.0", "[::]", "::"}:
+        browser_host = "localhost"
+    return f"{scheme}://{browser_host}:{port}"
 
 
 @dataclass
@@ -273,5 +327,38 @@ class SideboardCompareSpec:
         opp = slugify(self.opponent_hero_id or "opponent")
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         path = RESULTS_ROOT / "sideboard_compare" / f"{hero}_vs_{opp}_{stamp}"
+        self.out_dir = str(path)
+        return path
+
+
+@dataclass
+class UnifiedRandomMatchupSpec:
+    """Random fabrary deck matchups for unified agent training."""
+
+    game_format: PipelineFormat = "silver_age"
+    matchups: int = 3
+    episodes: int = RUNTIME.dual_matchup.episodes
+    max_steps: int = RUNTIME.dual_matchup.max_steps
+    warmup_episodes: int = RUNTIME.play.warmup_episodes
+    checkpoint_interval_pct: float = DEFAULT_CHECKPOINT_INTERVAL_PCT
+    checkpoint_eval_episodes: int = DEFAULT_CHECKPOINT_EVAL_EPISODES
+    workers: int = RUNTIME.dual_matchup.workers
+    skip_converged: bool = True
+    build_cpp_engine: bool = True
+    require_cpp_engine: bool = True
+    seed: int | None = None
+    cache_dir: str | None = None
+    out_dir: str | None = None
+
+    def resolved_out_dir(self) -> Path:
+        if self.out_dir:
+            return Path(self.out_dir)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = (
+            RESULTS_ROOT
+            / "unified_random_matchups"
+            / normalize_pipeline_format(self.game_format)
+            / stamp
+        )
         self.out_dir = str(path)
         return path

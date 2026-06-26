@@ -34,7 +34,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-gui = []
+gui = ["torch"]
+eval = ["torch", "pybind11"]
 train = ["torch"]
 cpp = ["pybind11"]
 dev = [
@@ -42,7 +43,7 @@ dev = [
     "ruff>=0.4.0",
 ]
 all = [
-    "flesh-and-blood-rlbridge[gui,train,cpp]",
+    "flesh-and-blood-rlbridge[gui,train,cpp,eval]",
 ]
 
 [project.scripts]
@@ -75,6 +76,7 @@ packages = [
 "scripts" = "scripts"
 "runscripts" = "runscripts"
 "start_talishar.py" = "start_talishar.py"
+"agents/manifest.json" = "agents/manifest.json"
 
 [tool.hatch.build.targets.sdist]
 include = [
@@ -89,6 +91,8 @@ include = [
     "start_talishar.py",
     "docker/",
     "docker-compose.yml",
+    "docker-compose.eval.yml",
+    "agents/",
     "README.md",
     "pyproject.toml",
 ]

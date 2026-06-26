@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -12,7 +13,21 @@ from rich.panel import Panel
 from rich.prompt import Confirm, IntPrompt, Prompt
 from rich.table import Table
 
+from fab_bridge.agents import (
+    LocalAgentInfo,
+    default_manifest_url,
+    gh_auth_ok,
+    list_local_agents,
+    load_manifest,
+    manifest_path,
+    publish_local_agent,
+    suggest_next_release_tag,
+    summarize_public_agent_sync,
+    sync_agents,
+    unified_agent_cache_format,
+)
 from fab_tui.config import (
+    AGENT_CACHE_DIR,
     RESULTS_ROOT,
     EnvironmentSettings,
     EvalSpec,
@@ -20,6 +35,7 @@ from fab_tui.config import (
     MatchupSimSpec,
     RUNTIME,
     SideboardCompareSpec,
+    UnifiedRandomMatchupSpec,
     slugify,
 )
 from fab_tui.decks import (
@@ -56,6 +72,7 @@ from fab_tui.runner import (
     run_live_talishar_play,
     run_matchup_simulation,
     run_sideboard_compare,
+    run_unified_random_matchups,
 )
 from fab_tui.card_search import CARDS_DB_PATH, clear_card_db_caches
 
@@ -82,6 +99,13 @@ def _player_deck_choices() -> dict[str, tuple[str, str]]:
 EVAL_MODE_CHOICES = {
     "1": ("eval", "Run evaluation (win-rate episodes + GIF replay)"),
     "2": ("render", "Render optimal policy only (GIF replay, no eval episodes)"),
+}
+
+UNIFIED_FORMAT_CHOICES = {
+    "1": ("silver_age", "Silver Age"),
+    "2": ("classic_constructed", "Classic Constructed (CC)"),
+    "3": ("blitz", "Blitz"),
+    "4": ("upf", "Ultimate Pit Fight"),
 }
 
 
@@ -120,11 +144,11 @@ def _live_play_deck_labels(
     )
 
     try:
-        p1_bundle, _ = resolve_checkpoint_bundles(
+        p1_bundle, p2_bundle = resolve_checkpoint_bundles(
             Path(results_dir).expanduser().resolve(),
             candidate_id=candidate_id,
         )
-        return deck_labels_from_bundle(p1_bundle)
+        return deck_labels_from_bundle(p1_bundle, p2_bundle)
     except Exception:
         return "Trained deck", "Opponent deck"
 
@@ -549,6 +573,80 @@ def wizard_simulate_decks(env: EnvironmentSettings) -> None:
     _pause()
 
 
+def wizard_unified_random_matchups(env: EnvironmentSettings) -> None:
+    _header(
+        "Unified random matchups",
+        "Train the shared unified agent on random fabrary deck pairs",
+    )
+
+    console.print("\n[bold]Format[/bold]")
+    for key, (_, label) in UNIFIED_FORMAT_CHOICES.items():
+        console.print(f"  [{key}] {label}")
+    fmt_choice = Prompt.ask(
+        "Select format",
+        choices=list(UNIFIED_FORMAT_CHOICES.keys()),
+        default="1",
+    )
+    game_format = UNIFIED_FORMAT_CHOICES[fmt_choice][0]  # type: ignore[assignment]
+
+    spec = UnifiedRandomMatchupSpec(game_format=game_format)  # type: ignore[arg-type]
+    spec.matchups = IntPrompt.ask("Random matchups this run", default=spec.matchups)
+    spec.episodes = IntPrompt.ask("Episodes per matchup", default=spec.episodes)
+    spec.max_steps = IntPrompt.ask("Max steps per episode", default=spec.max_steps)
+    spec.warmup_episodes = IntPrompt.ask("Warmup episodes", default=spec.warmup_episodes)
+    spec.checkpoint_interval_pct = IntPrompt.ask(
+        "Checkpoint interval (% of episodes)",
+        default=int(spec.checkpoint_interval_pct),
+    )
+    spec.checkpoint_eval_episodes = IntPrompt.ask(
+        "Eval games per checkpoint",
+        default=spec.checkpoint_eval_episodes,
+    )
+    spec.workers = IntPrompt.ask("Parallel workers", default=spec.workers)
+    spec.skip_converged = Confirm.ask(
+        "Skip already-converged deck pairs in cache?",
+        default=spec.skip_converged,
+    )
+    console.print(
+        "[dim]C++ engine is required for training and checkpoint eval "
+        "(no HTTP Talishar fallback).[/dim]"
+    )
+    if Confirm.ask("Set a random seed?", default=False):
+        spec.seed = IntPrompt.ask("Seed", default=0)
+
+    out_dir = spec.resolved_out_dir()
+    table = Table(title="Review", box=box.ROUNDED)
+    table.add_column("Setting", style="cyan")
+    table.add_column("Value")
+    for key, value in [
+        ("Format", spec.game_format),
+        ("Matchups", str(spec.matchups)),
+        ("Episodes / matchup", str(spec.episodes)),
+        ("Max steps", str(spec.max_steps)),
+        ("Warmup episodes", str(spec.warmup_episodes)),
+        ("Checkpoint interval", f"{spec.checkpoint_interval_pct:g}%"),
+        ("Checkpoint eval games", str(spec.checkpoint_eval_episodes)),
+        ("Workers", str(spec.workers)),
+        ("C++ engine", "required"),
+        ("Skip converged", str(spec.skip_converged)),
+        ("Seed", str(spec.seed) if spec.seed is not None else "random"),
+        ("Output", str(out_dir)),
+    ]:
+        table.add_row(key, value)
+    console.print(table)
+
+    if not Confirm.ask("\nStart unified random matchup training?", default=True):
+        return
+
+    console.print("\n[bold]Running unified random matchup training…[/bold]\n")
+    rc = run_unified_random_matchups(spec, env)
+    _header("Unified random matchups finished", f"Exit code {rc}")
+    summary_path = out_dir / "training_summary.json"
+    if summary_path.is_file():
+        console.print(f"[dim]Summary: {summary_path}[/dim]")
+    _pause()
+
+
 def _show_results_summary(results_path: Path) -> None:
     if not results_path.is_file():
         console.print(f"[yellow]No results at {results_path}[/yellow]")
@@ -840,6 +938,249 @@ def wizard_realtime_talishar_play(env: EnvironmentSettings) -> None:
     _pause()
 
 
+def wizard_sync_unified_agent(env: EnvironmentSettings) -> None:
+    _header(
+        "Sync unified agent",
+        "Download official unified agent weights from the public manifest / GitHub Releases",
+    )
+    del env
+
+    manifest_url = default_manifest_url()
+    console.print(f"[dim]Manifest: {manifest_url}[/dim]\n")
+
+    try:
+        manifest = load_manifest(manifest_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]Could not load agent manifest: {exc}[/red]")
+        _pause()
+        return
+
+    rows = summarize_public_agent_sync(manifest=manifest, cache_dir=AGENT_CACHE_DIR)
+    if not rows:
+        console.print(
+            "[yellow]No published agents listed in the manifest yet.[/yellow]\n"
+            "[dim]After a maintainer publishes via menu [8], run this again.[/dim]"
+        )
+        _pause()
+        return
+
+    table = Table(title="Public unified agents", box=box.SIMPLE)
+    table.add_column("#", style="cyan", justify="right")
+    table.add_column("Format")
+    table.add_column("Public release", style="dim")
+    table.add_column("Local release", style="dim")
+    table.add_column("Status")
+    for index, row in enumerate(rows, start=1):
+        style = "green" if row["state"] == "up to date" else ("yellow" if row["state"] == "outdated" else "red")
+        table.add_row(
+            str(index),
+            row["format"],
+            row["public_release"] or "—",
+            row["local_release"] or "—",
+            f"[{style}]{row['state']}[/{style}]",
+        )
+    console.print(table)
+
+    console.print("\n[bold]Sync scope[/bold]")
+    console.print("  [a] All formats in manifest")
+    for index, row in enumerate(rows, start=1):
+        console.print(f"  [{index}] {row['format']} only")
+
+    default_choice = "a"
+    if len(rows) == 1:
+        default_choice = "1"
+    choice = Prompt.ask("Formats to sync", default=default_choice).strip().lower()
+
+    selected_formats: list[str]
+    if choice in {"a", "all", ""}:
+        selected_formats = [row["format"] for row in rows]
+    elif choice.isdigit():
+        idx = int(choice)
+        if not 1 <= idx <= len(rows):
+            console.print("[red]Invalid selection.[/red]")
+            _pause()
+            return
+        selected_formats = [rows[idx - 1]["format"]]
+    else:
+        selected_formats = [unified_agent_cache_format(part) for part in choice.split(",") if part.strip()]
+
+    needs_download = any(
+        row["state"] in {"missing", "outdated"} for row in rows if row["format"] in selected_formats
+    )
+    force = False
+    if not needs_download:
+        force = Confirm.ask(
+            "Local copies already match the public release. Re-download anyway?",
+            default=False,
+        )
+        if not force:
+            console.print("[dim]Nothing to sync.[/dim]")
+            _pause()
+            return
+    else:
+        force = Confirm.ask("Force re-download even if SHA256 already matches?", default=False)
+
+    console.print("\n[bold]Syncing…[/bold]")
+    try:
+        results = sync_agents(
+            manifest_url=manifest_url,
+            cache_dir=AGENT_CACHE_DIR,
+            formats=selected_formats,
+            force=force,
+        )
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]Sync failed: {exc}[/red]")
+        _pause()
+        return
+
+    for row in results:
+        console.print(f"  [{row.action}] {row.format}: {row.detail}")
+
+    updated = summarize_public_agent_sync(manifest=manifest, cache_dir=AGENT_CACHE_DIR)
+    updated_rows = [row for row in updated if row["format"] in selected_formats]
+    if updated_rows:
+        console.print("\n[bold]After sync[/bold]")
+        for row in updated_rows:
+            console.print(
+                f"  {row['format']}: {row['state']} "
+                f"(public {row['public_release'] or '—'}, local {row['local_release'] or '—'})"
+            )
+            console.print(f"    {row['weights_path']}")
+
+    _pause()
+
+
+def wizard_publish_unified_agent(env: EnvironmentSettings) -> None:
+    _header(
+        "Publish unified agent",
+        "Upload local unified agent weights to GitHub Releases and update agents/manifest.json",
+    )
+    del env  # settings not required for publish
+
+    local_agents = list_local_agents(AGENT_CACHE_DIR)
+    if not local_agents:
+        console.print(
+            "[red]No unified agent weights found in the agent cache.[/red]\n"
+            f"[dim]Expected under {AGENT_CACHE_DIR}/<format>/unified_agent_v*.json[/dim]\n"
+            "Train first via menu [6] Train unified agent with random matchups."
+        )
+        _pause()
+        return
+
+    table = Table(title="Local unified agents", box=box.SIMPLE)
+    table.add_column("#", style="cyan", justify="right")
+    table.add_column("Format")
+    table.add_column("Episodes", justify="right")
+    table.add_column("Release", style="dim")
+    for index, row in enumerate(local_agents, start=1):
+        table.add_row(
+            str(index),
+            row.format,
+            str(row.total_episodes_trained),
+            row.release_id or "—",
+        )
+    console.print(table)
+
+    choice = Prompt.ask(
+        "Format to publish (number or name)",
+        default="1",
+    ).strip()
+    selected: LocalAgentInfo | None = None
+    if choice.isdigit():
+        idx = int(choice)
+        if 1 <= idx <= len(local_agents):
+            selected = local_agents[idx - 1]
+    else:
+        for row in local_agents:
+            if row.format == choice:
+                selected = row
+                break
+    if selected is None:
+        console.print("[red]Invalid format selection.[/red]")
+        _pause()
+        return
+
+    manifest = load_manifest()
+    default_tag = suggest_next_release_tag(manifest)
+    release_tag = Prompt.ask("GitHub release tag", default=default_tag).strip()
+    if not release_tag:
+        console.print("[red]Release tag is required.[/red]")
+        _pause()
+        return
+
+    console.print(
+        "\n[bold]Review[/bold]\n"
+        f"  Format: {selected.format}\n"
+        f"  obs_dim: {selected.obs_dim}\n"
+        f"  schema: v{selected.obs_schema_version}\n"
+        f"  episodes trained: {selected.total_episodes_trained}\n"
+        f"  weights: {selected.weights_path}\n"
+        f"  release tag: {release_tag}\n"
+    )
+
+    gh_ok, gh_detail = gh_auth_ok()
+    if not gh_ok:
+        console.print(
+            f"[red]GitHub CLI not ready: {gh_detail}[/red]\n"
+            "[dim]Install gh and run: gh auth login[/dim]"
+        )
+        _pause()
+        return
+
+    if not Confirm.ask(
+        "Create a public GitHub Release with these weights?",
+        default=False,
+    ):
+        _pause()
+        return
+
+    notes = Prompt.ask("Release notes (optional)", default="").strip()
+    try:
+        manifest, bundle = publish_local_agent(
+            selected.format,
+            release_id=release_tag,
+            notes=notes,
+            cache_dir=AGENT_CACHE_DIR,
+        )
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]Publish failed: {exc}[/red]")
+        _pause()
+        return
+
+    console.print(
+        f"\n[green]Published {bundle.format} as {bundle.release_id}[/green]\n"
+        f"  SHA256: {bundle.sha256}\n"
+        f"  Manifest: {manifest_path()}\n"
+    )
+
+    if Confirm.ask("Commit agents/manifest.json now?", default=True):
+        commit_msg = f"chore(agents): publish {release_tag} {bundle.format}"
+        proc = subprocess.run(  # noqa: S603
+            ["git", "add", str(manifest_path())],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            console.print(f"[red]git add failed: {proc.stderr or proc.stdout}[/red]")
+        else:
+            proc = subprocess.run(  # noqa: S603
+                ["git", "commit", "-m", commit_msg],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if proc.returncode == 0:
+                console.print(f"[green]Committed: {commit_msg}[/green]")
+            else:
+                console.print(f"[yellow]git commit: {proc.stderr or proc.stdout}[/yellow]")
+
+    console.print(
+        "\n[dim]Next: push the commit and tag, then users can run: fab-bridge agents sync[/dim]"
+    )
+    _pause()
+
+
 def wizard_settings(env: EnvironmentSettings) -> EnvironmentSettings:
     _header("Settings", "Talishar, FaBrary, and card database maintenance")
 
@@ -917,7 +1258,10 @@ def run_tui() -> int:
         "3": ("Evaluate checkpoints", wizard_evaluate),
         "4": ("Evaluate trained agent", wizard_evaluate_trained_agent),
         "5": ("Real-time Talishar play", wizard_realtime_talishar_play),
-        "6": ("Settings", wizard_settings),
+        "6": ("Train unified agent with random matchups", wizard_unified_random_matchups),
+        "7": ("Settings", wizard_settings),
+        "8": ("Publish unified agent", wizard_publish_unified_agent),
+        "9": ("Sync unified agent from public release", wizard_sync_unified_agent),
         "q": ("Quit", None),
     }
 

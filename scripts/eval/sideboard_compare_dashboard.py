@@ -150,6 +150,77 @@ def _live_final_eval_progress(candidate_dir: Path) -> Optional[dict[str, Any]]:
     return None
 
 
+def _live_eval_only_progress(candidate_dir: Path) -> Optional[dict[str, Any]]:
+    live_path = candidate_dir / "eval_live.json"
+    if live_path.is_file():
+        data = _read_json(live_path)
+        if isinstance(data, dict):
+            return data
+    return None
+
+
+_CPP_EVAL_VARIANT_ORDER = (
+    "logic_vs_logic",
+    "agent_vs_logic",
+    "logic_vs_agent",
+    "agent_vs_agent",
+)
+
+_CPP_EVAL_VARIANT_LABELS = {
+    "logic_vs_logic": "Logic vs logic",
+    "agent_vs_logic": "Agent vs logic",
+    "logic_vs_agent": "Logic vs agent",
+    "agent_vs_agent": "Agent vs agent",
+}
+
+
+def _load_cpp_eval_variants(
+    candidate_dir: Path,
+    result: Optional[dict[str, Any]],
+) -> dict[str, Any]:
+    if result and isinstance(result.get("cpp_eval_variants"), dict):
+        return {
+            str(key): value
+            for key, value in result["cpp_eval_variants"].items()
+            if isinstance(value, dict)
+        }
+    variants: dict[str, Any] = {}
+    cpp_eval_dir = candidate_dir / "cpp_eval"
+    if cpp_eval_dir.is_dir():
+        for key in _CPP_EVAL_VARIANT_ORDER:
+            path = cpp_eval_dir / f"{key}.json"
+            if path.is_file():
+                data = _read_json(path)
+                if isinstance(data, dict):
+                    variants[key] = data
+    return variants
+
+
+def _cpp_eval_aggregate_progress(
+    candidate_dir: Path,
+    *,
+    cpp_eval_episodes: int,
+    variant_count: int,
+    live_eval: Optional[dict[str, Any]],
+) -> tuple[int, int, Optional[str]]:
+    per_variant = max(0, int(cpp_eval_episodes))
+    target = per_variant * max(1, int(variant_count))
+    done = 0
+    active_variant: Optional[str] = None
+    cpp_eval_dir = candidate_dir / "cpp_eval"
+    for key in _CPP_EVAL_VARIANT_ORDER[: max(0, int(variant_count))]:
+        if (cpp_eval_dir / f"{key}.json").is_file():
+            done += per_variant
+    if live_eval and isinstance(live_eval, dict):
+        active_variant = str(live_eval.get("variant") or "").strip() or None
+        live_done = int(live_eval.get("episodes_completed", 0) or 0)
+        if active_variant and not (cpp_eval_dir / f"{active_variant}.json").is_file():
+            done += min(live_done, per_variant)
+        elif not active_variant and done < target:
+            done = min(target, done + live_done)
+    return min(done, target), target, active_variant
+
+
 def _resolve_final_eval_eta_weight(manifest: dict[str, Any]) -> float:
     raw = manifest.get("final_eval_eta_weight")
     if raw is not None:
@@ -360,7 +431,10 @@ def _candidate_status(
     result: Optional[dict[str, Any]],
     training_meta: Optional[dict[str, Any]],
     skip_final_eval: bool,
+    eval_only: bool = False,
 ) -> str:
+    if eval_only:
+        return "pending"
     if result is not None:
         if skip_final_eval or result.get("final_eval_win_rate") is not None:
             return "complete"
@@ -374,6 +448,117 @@ def _candidate_status(
         if done > 0:
             return "training"
     return "pending"
+
+
+def _candidate_status_eval_only(
+    *,
+    result: Optional[dict[str, Any]],
+    skip_final_eval: bool,
+    cpp_done: int,
+    cpp_target: int,
+    talishar_done: int,
+    talishar_target: int,
+) -> str:
+    cpp_complete = cpp_target <= 0 or cpp_done >= cpp_target
+    if result and result.get("final_eval_win_rate") is not None:
+        return "complete"
+    if skip_final_eval and cpp_complete and result and result.get("play_win_rate") is not None:
+        return "complete"
+    if not cpp_complete:
+        return "cpp_eval" if cpp_done > 0 else "pending"
+    if skip_final_eval or talishar_target <= 0:
+        return "complete"
+    if talishar_done < talishar_target:
+        return "talishar_eval"
+    return "complete"
+
+
+def _eval_only_progress(
+    *,
+    cpp_eval_episodes: int,
+    talishar_eval_episodes: int,
+    skip_final_eval: bool,
+    live_eval: Optional[dict[str, Any]],
+    live_final: Optional[dict[str, Any]],
+    result: Optional[dict[str, Any]],
+) -> dict[str, Any]:
+    cpp_target = max(0, int(cpp_eval_episodes))
+    talishar_target = 0 if skip_final_eval else max(0, int(talishar_eval_episodes))
+
+    cpp_done = 0
+    cpp_wins = cpp_losses = cpp_draws = cpp_timeouts = cpp_errors = None
+    if live_eval is not None:
+        cpp_done = int(live_eval.get("episodes_completed", 0) or 0)
+        live_target = int(live_eval.get("target_episodes", 0) or 0)
+        if live_target > 0:
+            cpp_target = live_target
+        cpp_wins = int(live_eval.get("wins", 0) or 0)
+        cpp_losses = int(live_eval.get("losses", 0) or 0)
+        cpp_draws = int(live_eval.get("draws", 0) or 0)
+        cpp_timeouts = int(live_eval.get("timeouts", 0) or 0)
+        if live_eval.get("errors") is not None:
+            cpp_errors = int(live_eval.get("errors", 0) or 0)
+    elif result and result.get("play_win_rate") is not None:
+        cpp_done = cpp_target
+
+    talishar_done = 0
+    talishar_wins = talishar_losses = talishar_draws = talishar_timeouts = talishar_errors = None
+    if live_final is not None:
+        talishar_done = int(live_final.get("episodes_completed", 0) or 0)
+        live_final_target = int(live_final.get("target_episodes", 0) or 0)
+        if live_final_target > 0:
+            talishar_target = live_final_target
+        talishar_wins = int(live_final.get("wins", 0) or 0)
+        talishar_losses = int(live_final.get("losses", 0) or 0)
+        talishar_draws = int(live_final.get("draws", 0) or 0)
+        talishar_timeouts = int(live_final.get("timeouts", 0) or 0)
+        if live_final.get("errors") is not None:
+            talishar_errors = int(live_final.get("errors", 0) or 0)
+    elif result and result.get("final_eval_win_rate") is not None:
+        talishar_done = talishar_target
+
+    cpp_done = min(max(0, cpp_done), cpp_target) if cpp_target else max(0, cpp_done)
+    talishar_done = (
+        min(max(0, talishar_done), talishar_target) if talishar_target else max(0, talishar_done)
+    )
+
+    cpp_win_rate = None
+    if result and result.get("cpp_eval_win_rate") is not None:
+        cpp_win_rate = float(result["cpp_eval_win_rate"])
+    elif result and result.get("play_win_rate") is not None:
+        cpp_win_rate = float(result["play_win_rate"])
+    elif live_eval and cpp_done > 0 and cpp_wins is not None:
+        cpp_win_rate = cpp_wins / cpp_done
+
+    talishar_win_rate = None
+    if result and result.get("final_eval_win_rate") is not None:
+        talishar_win_rate = float(result["final_eval_win_rate"])
+    elif live_final and talishar_done > 0 and talishar_wins is not None:
+        talishar_win_rate = talishar_wins / talishar_done
+
+    cpp_pct = (cpp_done / cpp_target * 100.0) if cpp_target else 0.0
+    talishar_pct = (talishar_done / talishar_target * 100.0) if talishar_target else 0.0
+
+    return {
+        "cpp_done": cpp_done,
+        "cpp_target": cpp_target,
+        "cpp_pct": cpp_pct,
+        "cpp_wins": cpp_wins,
+        "cpp_losses": cpp_losses,
+        "cpp_draws": cpp_draws,
+        "cpp_timeouts": cpp_timeouts,
+        "cpp_errors": cpp_errors,
+        "cpp_win_rate": cpp_win_rate,
+        "talishar_done": talishar_done,
+        "talishar_target": talishar_target,
+        "talishar_pct": talishar_pct,
+        "talishar_wins": talishar_wins,
+        "talishar_losses": talishar_losses,
+        "talishar_draws": talishar_draws,
+        "talishar_timeouts": talishar_timeouts,
+        "talishar_errors": talishar_errors,
+        "talishar_win_rate": talishar_win_rate,
+    }
 
 
 def _format_duration(seconds: float) -> str:
@@ -502,7 +687,23 @@ def collect_sideboard_compare_state(out_dir: Path) -> dict[str, Any]:
         summary = None
 
     play_episodes = int(manifest.get("play_episodes", 0) or 0)
-    final_eval_episodes = int(manifest.get("final_eval_episodes", 0) or 0)
+    eval_only = bool(manifest.get("eval_only"))
+    cpp_eval_episodes = int(
+        manifest.get("cpp_eval_episodes")
+        or manifest.get("checkpoint_eval_episodes")
+        or 0
+    )
+    cpp_eval_variant_count = int(manifest.get("cpp_eval_variant_count", 1) or 1)
+    talishar_eval_episodes = int(
+        manifest.get("talishar_eval_episodes")
+        or manifest.get("final_eval_episodes", 0)
+        or 0
+    )
+    if eval_only:
+        play_episodes = 0
+    elif play_episodes <= 0 and cpp_eval_episodes > 0:
+        play_episodes = cpp_eval_episodes
+    final_eval_episodes = talishar_eval_episodes
     default_checkpoint_eval_episodes = int(
         manifest.get("checkpoint_eval_episodes", 0) or 0
     )
@@ -541,6 +742,8 @@ def collect_sideboard_compare_state(out_dir: Path) -> dict[str, Any]:
         result: Optional[dict[str, Any]] = None
         training_meta: Optional[dict[str, Any]] = None
         live_training: Optional[dict[str, Any]] = None
+        live_eval_only: Optional[dict[str, Any]] = None
+        live_final_eval: Optional[dict[str, Any]] = None
         eval_series: list[dict[str, Any]] = []
         train_series: list[dict[str, Any]] = []
         if candidate_dir and candidate_dir.is_dir():
@@ -551,27 +754,93 @@ def collect_sideboard_compare_state(out_dir: Path) -> dict[str, Any]:
                     result = loaded
             training_meta = _latest_training_metadata(candidate_dir)
             live_training = _live_training_progress(candidate_dir)
+            live_eval_only = _live_eval_only_progress(candidate_dir)
+            live_final_eval = _live_final_eval_progress(candidate_dir)
             eval_series = _checkpoint_eval_series(candidate_dir)
             train_series = _training_win_series(candidate_dir)
 
-        training_progress = _staged_training_progress(
-            candidate_dir,
-            manifest=manifest,
-            play_episodes=play_episodes,
-            parallel_seeds=parallel_seeds,
-            live_training=live_training,
-            training_meta=training_meta,
-            result=result,
-        )
-        train_done = int(training_progress["done"])
-        train_target = int(training_progress["target"])
-        status = _candidate_status(
-            result=result,
-            training_meta=training_meta,
-            skip_final_eval=skip_final_eval,
-        )
-        if train_target > 0 and 0 < train_done < train_target:
-            status = "training"
+        eval_progress: Optional[dict[str, Any]] = None
+        cpp_eval_variants: dict[str, Any] = {}
+        if eval_only and candidate_dir is not None:
+            cpp_eval_variants = _load_cpp_eval_variants(candidate_dir, result)
+        if eval_only:
+            agg_done, agg_target, active_cpp_variant = (
+                _cpp_eval_aggregate_progress(
+                    candidate_dir,
+                    cpp_eval_episodes=cpp_eval_episodes,
+                    variant_count=cpp_eval_variant_count,
+                    live_eval=live_eval_only,
+                )
+                if candidate_dir is not None
+                else (0, cpp_eval_episodes * cpp_eval_variant_count, None)
+            )
+            eval_progress = _eval_only_progress(
+                cpp_eval_episodes=cpp_eval_episodes,
+                talishar_eval_episodes=talishar_eval_episodes,
+                skip_final_eval=skip_final_eval,
+                live_eval=live_eval_only,
+                live_final=live_final_eval,
+                result=result,
+            )
+            if eval_progress is not None:
+                eval_progress["cpp_done"] = agg_done
+                eval_progress["cpp_target"] = agg_target
+                eval_progress["cpp_pct"] = (
+                    (agg_done / agg_target * 100.0) if agg_target else 0.0
+                )
+                eval_progress["active_cpp_variant"] = active_cpp_variant
+                eval_progress["cpp_eval_variants"] = cpp_eval_variants
+            train_done = int(eval_progress["cpp_done"])
+            train_target = int(eval_progress["cpp_target"])
+            stage = "C++ checkpoint eval"
+            if active_cpp_variant := eval_progress.get("active_cpp_variant"):
+                stage = (
+                    f"C++ eval — "
+                    f"{_CPP_EVAL_VARIANT_LABELS.get(str(active_cpp_variant), active_cpp_variant)}"
+                )
+            status = _candidate_status_eval_only(
+                result=result,
+                skip_final_eval=skip_final_eval,
+                cpp_done=train_done,
+                cpp_target=train_target,
+                talishar_done=int(eval_progress["talishar_done"]),
+                talishar_target=int(eval_progress["talishar_target"]),
+            )
+            training_progress = {
+                "done": train_done,
+                "target": train_target,
+                "pct": float(eval_progress["cpp_pct"]),
+                "stage": stage,
+                "plan": progress_plan,
+            }
+        else:
+            training_progress = _staged_training_progress(
+                candidate_dir,
+                manifest=manifest,
+                play_episodes=play_episodes,
+                parallel_seeds=parallel_seeds,
+                live_training=live_training,
+                training_meta=training_meta,
+                result=result,
+            )
+            train_done = int(training_progress["done"])
+            train_target = int(training_progress["target"])
+            if live_eval_only is not None:
+                cpp_done = int(live_eval_only.get("episodes_completed", 0) or 0)
+                cpp_target = int(
+                    live_eval_only.get("target_episodes", 0) or cpp_eval_episodes
+                )
+                if cpp_target > 0:
+                    train_done = min(cpp_done, cpp_target)
+                    train_target = cpp_target
+            status = _candidate_status(
+                result=result,
+                training_meta=training_meta,
+                skip_final_eval=skip_final_eval,
+                eval_only=False,
+            )
+            if train_target > 0 and 0 < train_done < train_target:
+                status = "training"
 
         train_done_clamped = min(train_done, train_target)
         train_done_total += train_done_clamped
@@ -579,7 +848,15 @@ def collect_sideboard_compare_state(out_dir: Path) -> dict[str, Any]:
 
         candidate_final_done = 0.0
         live_final: Optional[dict[str, Any]] = None
-        if not skip_final_eval:
+        if eval_only and eval_progress is not None:
+            candidate_final_done = float(eval_progress["talishar_done"])
+            if not skip_final_eval:
+                final_total_episodes += float(eval_progress["talishar_target"])
+                final_done_episodes += candidate_final_done
+                if status == "talishar_eval" and live_final_eval:
+                    in_final_eval_phase = True
+                    active_final_lives.append(live_final_eval)
+        elif not skip_final_eval:
             final_total_episodes += final_eval_episodes
             if result and result.get("final_eval_win_rate") is not None:
                 candidate_final_done = float(final_eval_episodes)
@@ -594,11 +871,18 @@ def collect_sideboard_compare_state(out_dir: Path) -> dict[str, Any]:
             final_done_episodes += candidate_final_done
 
         candidate_units = train_target
-        if not skip_final_eval:
+        if eval_only and eval_progress is not None:
+            candidate_units = float(eval_progress["cpp_target"])
+            if not skip_final_eval:
+                candidate_units += float(eval_progress["talishar_target"]) * final_eval_weight
+        elif not skip_final_eval:
             candidate_units += final_eval_episodes * final_eval_weight
         total_units += candidate_units
 
-        done_units = train_done_clamped + candidate_final_done * final_eval_weight
+        if eval_only and eval_progress is not None:
+            done_units = float(eval_progress["cpp_done"]) + candidate_final_done * final_eval_weight
+        else:
+            done_units = train_done_clamped + candidate_final_done * final_eval_weight
         completed_units += done_units
 
         swaps_raw = raw.get("swaps") or []
@@ -689,7 +973,16 @@ def collect_sideboard_compare_state(out_dir: Path) -> dict[str, Any]:
                 live_train_wr_decided = float(train_chart_points[-1]["win_rate_decided"])
 
         play_win_rate = None
-        if result and result.get("play_win_rate") is not None:
+        final_eval_wr = result.get("final_eval_win_rate") if result else None
+        if eval_only and eval_progress is not None:
+            play_win_rate = eval_progress.get("cpp_win_rate")
+            if eval_progress.get("talishar_win_rate") is not None:
+                final_eval_wr = eval_progress.get("talishar_win_rate")
+            train_wins = eval_progress.get("cpp_wins")
+            train_losses = eval_progress.get("cpp_losses")
+            train_draws = eval_progress.get("cpp_draws")
+            train_timeouts = eval_progress.get("cpp_timeouts")
+        elif result and result.get("play_win_rate") is not None:
             play_win_rate = float(result["play_win_rate"])
         elif live_train_wr is not None:
             play_win_rate = live_train_wr
@@ -709,6 +1002,7 @@ def collect_sideboard_compare_state(out_dir: Path) -> dict[str, Any]:
             "candidate_id": cid,
             "label": label,
             "status": status,
+            "eval_only": eval_only,
             "swaps": swaps,
             "guide_margin": raw.get("guide_margin"),
             "train_done": train_done,
@@ -716,6 +1010,8 @@ def collect_sideboard_compare_state(out_dir: Path) -> dict[str, Any]:
             "train_pct": float(training_progress["pct"]),
             "training_stage": training_progress["stage"],
             "training_plan": training_progress["plan"],
+            "eval_progress": eval_progress,
+            "cpp_eval_variants": cpp_eval_variants,
             "play_win_rate": play_win_rate,
             "play_win_rate_decided": live_train_wr_decided,
             "train_wins": train_wins,
@@ -739,9 +1035,7 @@ def collect_sideboard_compare_state(out_dir: Path) -> dict[str, Any]:
                 if eval_series and parallel_seeds > 1
                 else None
             ),
-            "final_eval_win_rate": (
-                result.get("final_eval_win_rate") if result else None
-            ),
+            "final_eval_win_rate": final_eval_wr,
             "final_eval_delta": (
                 result.get("final_eval_delta_vs_baseline") if result else None
             ),
@@ -795,6 +1089,10 @@ def collect_sideboard_compare_state(out_dir: Path) -> dict[str, Any]:
         "opponent_deck": manifest.get("opponent_deck", ""),
         "format": manifest.get("format", ""),
         "play_episodes": play_episodes,
+        "eval_only": eval_only,
+        "cpp_eval_episodes": cpp_eval_episodes,
+        "cpp_eval_variant_count": cpp_eval_variant_count,
+        "talishar_eval_episodes": talishar_eval_episodes,
         "final_eval_episodes": final_eval_episodes,
         "skip_final_eval": skip_final_eval,
         "max_parallel": int(manifest.get("max_parallel", 1) or 1),
@@ -817,6 +1115,8 @@ def collect_sideboard_compare_state(out_dir: Path) -> dict[str, Any]:
 _STATUS_LABELS = {
     "pending": "Queued",
     "training": "Training",
+    "cpp_eval": "C++ eval",
+    "talishar_eval": "Talishar eval",
     "final_eval": "Final eval",
     "complete": "Complete",
 }
@@ -1074,7 +1374,155 @@ def _render_swaps(swaps: list[dict[str, str]]) -> str:
     return "\n".join(rows)
 
 
+def _record_summary(
+    *,
+    wins: Optional[int] = None,
+    losses: Optional[int] = None,
+    draws: Optional[int] = None,
+    timeouts: Optional[int] = None,
+    errors: Optional[int] = None,
+) -> str:
+    bits: list[str] = []
+    if wins is not None:
+        bits.append(f"{int(wins)}W")
+    if losses is not None:
+        bits.append(f"{int(losses)}L")
+    if draws is not None:
+        bits.append(f"{int(draws)}D")
+    if timeouts is not None:
+        bits.append(f"{int(timeouts)}T")
+    if errors is not None and int(errors) > 0:
+        bits.append(f"{int(errors)}E")
+    return " · ".join(bits)
+
+
+def _render_eval_only_candidate_card(row: dict[str, Any]) -> str:
+    status = str(row.get("status", "pending"))
+    status_label = _STATUS_LABELS.get(status, status.title())
+    winner = row.get("is_winner", False)
+    card_class = "candidate-card"
+    if winner:
+        card_class += " winner"
+    if status in {"cpp_eval", "talishar_eval"}:
+        card_class += " active"
+
+    margin = row.get("guide_margin")
+    margin_html = ""
+    if margin is not None:
+        margin_html = f'<span class="meta-pill">guide margin {float(margin):.2f}</span>'
+
+    progress = row.get("eval_progress") or {}
+    cpp_done = int(progress.get("cpp_done", row.get("train_done", 0)) or 0)
+    cpp_target = int(progress.get("cpp_target", row.get("train_target", 0)) or 0)
+    talishar_done = int(progress.get("talishar_done", 0) or 0)
+    talishar_target = int(progress.get("talishar_target", 0) or 0)
+    cpp_pct = float(progress.get("cpp_pct", row.get("train_pct", 0)) or 0)
+    talishar_pct = float(progress.get("talishar_pct", 0) or 0)
+    cpp_complete = cpp_target <= 0 or cpp_done >= cpp_target
+
+    cpp_record = _record_summary(
+        wins=progress.get("cpp_wins"),
+        losses=progress.get("cpp_losses"),
+        draws=progress.get("cpp_draws"),
+        timeouts=progress.get("cpp_timeouts"),
+        errors=progress.get("cpp_errors"),
+    )
+    talishar_record = _record_summary(
+        wins=progress.get("talishar_wins"),
+        losses=progress.get("talishar_losses"),
+        draws=progress.get("talishar_draws"),
+        timeouts=progress.get("talishar_timeouts"),
+        errors=progress.get("talishar_errors"),
+    )
+    cpp_record_html = (
+        f'<span class="train-record">{html.escape(cpp_record)}</span>'
+        if cpp_record else ""
+    )
+    talishar_record_html = (
+        f'<span class="train-record">{html.escape(talishar_record)}</span>'
+        if talishar_record else ""
+    )
+
+    delta = _delta_text(row.get("final_eval_delta"))
+    delta_html = f'<span class="delta">{html.escape(delta)}</span>' if delta else ""
+
+    talishar_block_class = "progress-block"
+    if not cpp_complete and talishar_target > 0:
+        talishar_block_class += " progress-block-muted"
+
+    talishar_section = ""
+    if talishar_target > 0:
+        talishar_section = f"""
+  <section class="{talishar_block_class}">
+    <div class="progress-label">
+      <span>Talishar final eval</span>
+      <span>{talishar_done}/{talishar_target} games</span>
+    </div>
+    <div class="progress-bar"><div class="progress-fill progress-fill-talishar" style="width:{talishar_pct:.1f}%"></div></div>
+  </section>"""
+
+    variant_rows: list[str] = []
+    variants = row.get("cpp_eval_variants") or progress.get("cpp_eval_variants") or {}
+    active_variant = str(progress.get("active_cpp_variant") or "")
+    if isinstance(variants, dict):
+        for key in _CPP_EVAL_VARIANT_ORDER:
+            metrics = variants.get(key)
+            if not isinstance(metrics, dict):
+                continue
+            label = _CPP_EVAL_VARIANT_LABELS.get(key, key)
+            wr = _pct_text(metrics.get("p1_win_rate"))
+            active_mark = " · running" if key == active_variant else ""
+            variant_rows.append(
+                f"<div class=\"variant-row\">"
+                f"<span>{html.escape(label)}</span>"
+                f"<span>{wr}{html.escape(active_mark)}</span>"
+                f"</div>"
+            )
+    variants_html = ""
+    if variant_rows:
+        variants_html = (
+            '<section class="cpp-variants">'
+            '<h4>C++ policy matchups</h4>'
+            + "\n".join(variant_rows)
+            + "</section>"
+        )
+
+    agent_vs_agent_wr = None
+    if isinstance(variants, dict) and isinstance(variants.get("agent_vs_agent"), dict):
+        agent_vs_agent_wr = variants["agent_vs_agent"].get("p1_win_rate")
+    cpp_win_display = _pct_text(agent_vs_agent_wr or row.get("play_win_rate"))
+
+    return f"""
+<article class="{card_class}">
+  <header class="candidate-head">
+    <div>
+      <h3>{html.escape(str(row.get("label", "")))}</h3>
+      <p class="candidate-id">{html.escape(str(row.get("candidate_id", "")))}</p>
+    </div>
+    <span class="status status-{html.escape(status)}">{html.escape(status_label)}</span>
+  </header>
+  <section class="swaps">
+    <h4>Sideboard changes</h4>
+    {_render_swaps(row.get("swaps") or [])}
+    {margin_html}
+  </section>
+  <section class="progress-block">
+    <div class="progress-label">
+      <span>{html.escape(str(row.get("training_stage", "C++ checkpoint eval")))}</span>
+      <span>{cpp_done}/{cpp_target} games</span>
+    </div>
+    <div class="progress-bar"><div class="progress-fill" style="width:{cpp_pct:.1f}%"></div></div>
+  </section>{variants_html}{talishar_section}
+  <section class="metrics metrics-eval-only">
+    <div><span class="metric-label">C++ agent vs agent</span><span class="metric-value">{cpp_win_display}</span>{cpp_record_html}</div>
+    <div><span class="metric-label">Talishar agent vs agent</span><span class="metric-value">{_pct_text(row.get("final_eval_win_rate"))} {delta_html}</span>{talishar_record_html}</div>
+  </section>
+</article>"""
+
+
 def _render_candidate_card(row: dict[str, Any], *, play_episodes: int) -> str:
+    if row.get("eval_only"):
+        return _render_eval_only_candidate_card(row)
     status = str(row.get("status", "pending"))
     status_label = _STATUS_LABELS.get(status, status.title())
     winner = row.get("is_winner", False)
@@ -1212,10 +1660,15 @@ def render_sideboard_compare_html(
     generated = html.escape(str(state.get("generated_at", "")))
     out_dir = html.escape(str(state.get("out_dir", "")))
     play_episodes = int(state.get("play_episodes", 0) or 0)
+    eval_only = bool(state.get("eval_only"))
+    cpp_eval_episodes = int(state.get("cpp_eval_episodes", 0) or 0)
+    talishar_eval_episodes = int(state.get("talishar_eval_episodes", 0) or 0)
 
     winner_id = state.get("winner_id")
     complete = bool(state.get("complete"))
     status_banner = "Complete" if complete else "In progress"
+    if eval_only:
+        status_banner = "Evaluating" if not complete else "Evaluation complete"
     if winner_id:
         status_banner += f" — winner: {html.escape(str(winner_id))}"
 
@@ -1246,9 +1699,21 @@ def render_sideboard_compare_html(
         and bool(state.get("parallel_seeds_until_first_checkpoint"))
     )
     staged_info = " · best seed continues after first checkpoint" if staged_parallel else ""
-    run_config = f"{play_episodes} policy episodes/candidate{staged_info}"
-    if ckpt_info:
-        run_config = f"{run_config} · {ckpt_info}"
+    if eval_only:
+        talishar_part = (
+            f" · {talishar_eval_episodes} Talishar eval games/candidate"
+            if talishar_eval_episodes > 0
+            else ""
+        )
+        variant_count = int(state.get("cpp_eval_variant_count", 1) or 1)
+        run_config = (
+            f"{cpp_eval_episodes} C++ games × {variant_count} policy matchups/candidate"
+            f"{talishar_part}"
+        )
+    else:
+        run_config = f"{play_episodes} policy episodes/candidate{staged_info}"
+        if ckpt_info:
+            run_config = f"{run_config} · {ckpt_info}"
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -1256,7 +1721,7 @@ def render_sideboard_compare_html(
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   {refresh_meta}
-  <title>Sideboard Compare — {hero} vs {opponent}</title>
+  <title>{"Sideboard Eval" if eval_only else "Sideboard Compare"} — {hero} vs {opponent}</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -1341,6 +1806,31 @@ def render_sideboard_compare_html(
       border-radius: 2px;
       transition: width 0.35s cubic-bezier(0.4, 0, 0.2, 1);
     }}
+    .progress-fill-talishar {{
+      background: var(--warn);
+    }}
+    .progress-block-muted {{
+      opacity: 0.55;
+    }}
+    .metrics-eval-only {{
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    }}
+    .cpp-variants {{
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }}
+    .variant-row {{
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      font-size: 0.82rem;
+      color: var(--muted);
+    }}
+    .variant-row span:last-child {{
+      color: var(--text);
+      font-weight: 500;
+    }}
     .progress-label {{
       display: flex;
       justify-content: space-between;
@@ -1384,6 +1874,8 @@ def render_sideboard_compare_html(
       white-space: nowrap;
     }}
     .status-training {{ color: var(--primary); background: var(--primary-light); }}
+    .status-cpp_eval {{ color: var(--primary); background: var(--primary-light); }}
+    .status-talishar_eval {{ color: var(--warn); background: var(--warn-light); }}
     .status-final_eval {{ color: var(--warn); background: var(--warn-light); }}
     .status-complete {{ color: var(--good); background: var(--good-light); }}
     .status-pending {{ color: var(--muted); background: var(--surface-variant); }}
@@ -1474,7 +1966,7 @@ def render_sideboard_compare_html(
 </head>
 <body>
   <div class="wrap">
-    <h1>Sideboard comparison dashboard</h1>
+    <h1>{"Sideboard evaluation dashboard" if eval_only else "Sideboard comparison dashboard"}</h1>
     <p class="sub">{hero} vs {opponent} ({opp_deck}) · {game_format} · {html.escape(status_banner)}<br>{html.escape(run_config)}</p>
 
     <div class="summary">

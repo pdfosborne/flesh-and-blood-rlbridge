@@ -129,7 +129,10 @@ def _load_play_agent_for_candidate(
     if not (p1_fp and p2_fp):
         return None
 
-    cache_store = AgentCacheStore(cache_dir or DEFAULT_AGENT_CACHE_DIR, game_format)
+    cache_store = AgentCacheStore(
+        cache_dir or DEFAULT_AGENT_CACHE_DIR,
+        game_format,
+    )
     stub_matchup = Matchup(
         name="cached",
         p1_deck="cached",

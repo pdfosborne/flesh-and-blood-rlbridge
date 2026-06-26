@@ -1,0 +1,23 @@
+
+================================================================
+  FAB RL Bridge — eval setup complete / ready to use
+================================================================
+
+  >>> Open the web GUI in your browser:  http://localhost:8765 <<<
+
+  Decks tab  → pick a deck
+  Editor tab → tune sideboard swaps and start evaluation
+  Dashboard  → live evaluation progress
+  Results    → rankings and damage breakdown
+
+  Also running:
+    Talishar backend   http://localhost:8080
+
+  Official unified agents are synced at image build (fab-bridge agents sync).
+  To refresh weights: fab-bridge agents sync
+
+  For live play and replay GIFs, use the full stack:
+    ./scripts/docker-setup.sh
+
+  Stop everything:  docker compose down
+================================================================

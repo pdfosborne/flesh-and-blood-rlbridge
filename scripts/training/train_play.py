@@ -11,6 +11,7 @@ import os
 import statistics
 import sys
 import threading
+import time
 import uuid
 from collections import defaultdict
 from datetime import datetime
@@ -30,6 +31,7 @@ if str(_RL_SRC) not in sys.path:
 
 from flesh_and_blood_rlbridge import TalisharEngineEnvironment  # noqa: E402
 from flesh_and_blood_rlbridge.opponent_deck import normalize_talishar_asset_name  # noqa: E402
+from flesh_and_blood_rlbridge.talishar_oracle import TalisharConnectionError  # noqa: E402
 
 from eval_damage_stats import EvalDamageAccumulator, merge_damage_breakdowns  # noqa: E402
 from train_pipeline_common import (  # noqa: E402
@@ -75,11 +77,13 @@ from checkpoint_eval_async import (  # noqa: E402
     wait_for_checkpoint_evals,
 )
 from play_outcome_stats import (  # noqa: E402
+    OUTCOME_ERROR,
     absolute_p1_p2_deck_from_env,
     absolute_p1_p2_deck_from_obs,
     absolute_p1_p2_hp_from_env,
     absolute_p1_p2_hp_from_obs,
     classify_p1_episode_outcome,
+    classify_p1_fast_episode_outcome,
     compute_eval_stability,
     summarize_p1_outcomes,
 )
@@ -88,6 +92,9 @@ from runtime_defaults import (  # noqa: E402
     DEFAULT_CHECKPOINT_INTERVAL_PCT,
     RUNTIME,
 )
+
+# Sentinel seat policy for C++ fast eval (Talishar default/heuristic policy).
+LOGIC_POLICY = "__logic_policy__"
 
 try:
     from train_dual_agent_common import (  # noqa: E402
@@ -100,7 +107,6 @@ try:
         _env_supports_fast_training,
         _announce_training_backend,
         _mask_logits_to_legal,
-        _player_context,
         _save_warmup_handoff_checkpoint,
         DEFAULT_N_EPISODES,
         DEFAULT_WARMUP_EPISODES,
@@ -108,8 +114,14 @@ try:
     )
     from agent_cache import (  # noqa: E402
         AgentCacheStore,
+        UnifiedPolicyBundle,
         deck_content_fingerprint,
         talishar_asset_deck_fingerprint,
+    )
+    from flesh_and_blood_rlbridge.player_observation import (  # noqa: E402
+        ACTION_CAPACITY,
+        PLAYER_OBS_DIM,
+        PLAYER_OBS_SCHEMA_VERSION,
     )
     from episode_cache import EpisodeCache  # noqa: E402
     _DUAL_AGENT_AVAILABLE = True
@@ -170,20 +182,13 @@ def _load_converged_play_agent(
     p2_deck_fingerprint: str,
     seed: Optional[int],
 ) -> tuple[Any, Any]:
-    """Bootstrap P1 tiers from converged deck-vs-deck cache."""
-    def _make_p1() -> Any:
-        return make_agent(seed=seed)
-
-    p1_bundle = cache_store.bootstrap_player(
-        _player_context(
-            matchup,
-            as_p1=True,
-            p1_deck_fingerprint=p1_deck_fingerprint,
-            p2_deck_fingerprint=p2_deck_fingerprint,
-        ),
-        _make_p1,
-    )
-    return p1_bundle.agents[0], p1_bundle
+    """Load the shared unified policy for a converged deck-vs-deck matchup."""
+    del matchup, p1_deck_fingerprint, p2_deck_fingerprint, seed
+    policy = cache_store.load_if_exists()
+    if policy is None:
+        raise RuntimeError("Agent cache hit but weights file is missing")
+    bundle = UnifiedPolicyBundle(policy=policy, init_sources=["cache"])
+    return policy, bundle
 
 
 def _write_play_cache_hit(
@@ -832,7 +837,11 @@ def _run_phase3_play_parallel_seeds(
         )
 
     if cache_dir is not None and p1.play is not None:
-        cache_store = AgentCacheStore(cache_dir, game_format)
+        cache_store = AgentCacheStore(
+            cache_dir,
+            game_format,
+            obs_schema_version=PLAYER_OBS_SCHEMA_VERSION,
+        )
         p1_deck_fp = best_p1_row.get("p1_deck_fingerprint")
         p2_deck_fp = best_p1_row.get("p2_deck_fingerprint")
         if p1_deck_fp and p2_deck_fp:
@@ -841,15 +850,20 @@ def _run_phase3_play_parallel_seeds(
                 if checkpoint_eval_log
                 else None
             )
-            cache_store.mark_matchup_converged(
-                p1_fingerprint=str(p1_deck_fp),
-                p2_fingerprint=str(p2_deck_fp),
-                p1_hero=p1_hero_id.replace("_", "-"),
-                p2_hero=(p2_hero_id or p1_opponent_hero_id).replace("_", "-"),
-                episodes_completed=n_episodes,
-                target_episodes=n_episodes,
-                p1_win_rate=summary.avg_p1_win_rate,
-                checkpoint_eval_win_rate=latest_ckpt_wr,
+            cache_store.persist(
+                p1.play,
+                training_summary={
+                    "matchup_name": "parallel_seeds",
+                    "p1_fingerprint": str(p1_deck_fp),
+                    "p2_fingerprint": str(p2_deck_fp),
+                    "p1_hero": p1_hero_id.replace("_", "-"),
+                    "p2_hero": (p2_hero_id or p1_opponent_hero_id).replace("_", "-"),
+                    "episodes_completed": n_episodes,
+                    "target_episodes": n_episodes,
+                    "p1_win_rate": summary.avg_p1_win_rate,
+                    "p2_win_rate": summary.avg_p2_win_rate,
+                    "checkpoint_eval_win_rate": latest_ckpt_wr,
+                },
             )
 
     for row in summary.seed_rows:
@@ -1001,7 +1015,11 @@ def run_phase3_play(
     )
 
     cache_root = cache_dir or DEFAULT_AGENT_CACHE_DIR
-    cache_store = AgentCacheStore(cache_root, game_format)
+    cache_store = AgentCacheStore(
+        cache_root,
+        game_format,
+        obs_schema_version=PLAYER_OBS_SCHEMA_VERSION,
+    )
 
     if p1.play is None and not _force_train:
         cached_record = cache_store.should_skip_training(
@@ -1030,6 +1048,8 @@ def run_phase3_play(
                 seed=seed,
             )
             p1.play = p1_agent
+            if opponent_mode == "dual" and p2 is not None:
+                p2.play = p1_agent
             p1_wr = float(cached_record.p1_win_rate or 0.0)
             out_dir.mkdir(parents=True, exist_ok=True)
             _write_play_cache_hit(
@@ -1147,7 +1167,7 @@ def run_phase3_play(
         f"(skip threshold: {episode_cache.warmup_skip_threshold})"
     )
 
-    # ── create / reuse play agents (four-tier cache when bootstrapping) ───────
+    # ── create / reuse play agents (unified cache) ────────────────────────────
     p1_bundle = None
     p2_bundle = None
     p2_seed = (seed + 1) if seed is not None else None
@@ -1156,20 +1176,18 @@ def run_phase3_play(
         p1_agent = p1.play
         p1_tiers: list[Any] = [p1_agent]
     else:
-        def _make_p1() -> Any:
+        def _make_unified() -> Any:
             return make_agent(seed=seed)
 
-        p1_bundle = cache_store.bootstrap_player(
-            _player_context(
-                matchup,
-                as_p1=True,
-                p1_deck_fingerprint=p1_deck_fp,
-                p2_deck_fingerprint=p2_deck_fp,
-            ),
-            _make_p1,
+        policy, init_src = cache_store.load_or_create(
+            _make_unified,
+            obs_dim=PLAYER_OBS_DIM,
+            n_actions=ACTION_CAPACITY,
+            mask_actions=True,
         )
-        print("  P1 cache init:", ", ".join(p1_bundle.init_sources))
-        p1_agent = p1_bundle.agents[0]
+        p1_bundle = UnifiedPolicyBundle(policy=policy, init_sources=[init_src])
+        print("  Unified policy init:", ", ".join(p1_bundle.init_sources))
+        p1_agent = p1_bundle.policy
         p1_tiers = p1_bundle.agents
 
     if opponent_mode == "dual" and p2 is not None:
@@ -1177,21 +1195,9 @@ def run_phase3_play(
             p2_agent = p2.play
             p2_tiers: list[Any] = [p2_agent]
         else:
-            def _make_p2() -> Any:
-                return make_agent(seed=p2_seed)
-
-            p2_bundle = cache_store.bootstrap_player(
-                _player_context(
-                    matchup,
-                    as_p1=False,
-                    p1_deck_fingerprint=p1_deck_fp,
-                    p2_deck_fingerprint=p2_deck_fp,
-                ),
-                _make_p2,
-            )
-            print("  P2 cache init:", ", ".join(p2_bundle.init_sources))
-            p2_agent = p2_bundle.agents[0]
-            p2_tiers = p2_bundle.agents
+            p2_agent = p1_agent
+            p2_tiers = p1_tiers
+            print("  P2 uses shared unified policy (same weights as P1)")
     else:
         p2_agent = make_agent(seed=p2_seed)
         p2_tiers = [p2_agent]
@@ -1241,6 +1247,8 @@ def run_phase3_play(
                 max_steps=max_play_steps,
                 episodes=checkpoint_eval_episodes,
                 seed=(seed + completed) if seed is not None else None,
+                backend="cpp",
+                eval_label="Checkpoint eval",
             )
             eval_record = {
                 "episodes_completed": completed,
@@ -1528,12 +1536,6 @@ def run_phase3_play(
                 except Exception:
                     pass
 
-    # ── persist shared agent cache + update in-memory agents ─────────────────
-    if p1_bundle is not None:
-        cache_store.persist_player(p1_bundle)
-    if p2_bundle is not None:
-        cache_store.persist_player(p2_bundle)
-
     p1.play = p1_agent
     if opponent_mode == "dual" and p2 is not None:
         p2.play = p2_agent
@@ -1571,16 +1573,27 @@ def run_phase3_play(
     if checkpoint_eval_log:
         latest_ckpt_wr = float(checkpoint_eval_log[-1].get("p1_win_rate", 0.0))
 
-    if p1_bundle is not None and len(p1_rewards) >= n_episodes and not _skip_cache_converge:
-        cache_store.mark_matchup_converged(
-            p1_fingerprint=p1_deck_fp,
-            p2_fingerprint=p2_deck_fp,
-            p1_hero=p1_hero_id.replace("_", "-"),
-            p2_hero=(p2_hero_id or p1_opponent_hero_id).replace("_", "-"),
-            episodes_completed=len(p1_rewards),
-            target_episodes=n_episodes,
-            p1_win_rate=p1_wr,
-            checkpoint_eval_win_rate=latest_ckpt_wr,
+    if p1_bundle is not None:
+        cache_store.persist(
+            p1_bundle.policy,
+            episodes_delta=len(p1_rewards),
+            training_summary=(
+                {
+                    "matchup_name": matchup.name,
+                    "p1_fingerprint": p1_deck_fp,
+                    "p2_fingerprint": p2_deck_fp,
+                    "p1_hero": p1_hero_id.replace("_", "-"),
+                    "p2_hero": (p2_hero_id or p1_opponent_hero_id).replace("_", "-"),
+                    "episodes_completed": len(p1_rewards),
+                    "target_episodes": n_episodes,
+                    "p1_win_rate": p1_wr,
+                    "p2_win_rate": p2_wr,
+                    "checkpoint_eval_win_rate": latest_ckpt_wr,
+                    "training_stats": train_summary,
+                }
+                if len(p1_rewards) >= n_episodes and not _skip_cache_converge
+                else None
+            ),
         )
 
     if _seed_run_capture is not None:
@@ -1632,6 +1645,36 @@ def _softmax_logits(logits: np.ndarray) -> np.ndarray:
     return exp / total
 
 
+def _is_logic_policy(policy: Any) -> bool:
+    return policy is LOGIC_POLICY or str(policy) == LOGIC_POLICY
+
+
+def _policy_label(policy: Any) -> str:
+    return "logic" if _is_logic_policy(policy) else "agent"
+
+
+def _fast_logic_policy_action_index(env: Any) -> int:
+    if hasattr(env, "fast_logic_policy_action_index"):
+        return int(env.fast_logic_policy_action_index())
+    cpp_env = getattr(env, "_cpp_env", None)
+    if cpp_env is not None and hasattr(cpp_env, "logic_policy_action_index"):
+        return int(cpp_env.logic_policy_action_index())
+    raise RuntimeError("logic policy fast eval requires a C++ engine")
+
+
+def _fast_action_for_policy(
+    policy: Any,
+    env: Any,
+    *,
+    obs_vec: np.ndarray,
+    n_legal: int,
+    rng: np.random.Generator,
+) -> int:
+    if _is_logic_policy(policy):
+        return _fast_logic_policy_action_index(env)
+    return _fast_sample_action_index(policy, obs_vec, n_legal, rng)
+
+
 def _fast_sample_action_index(
     agent: Any,
     obs_vec: np.ndarray,
@@ -1649,6 +1692,281 @@ def _fast_sample_action_index(
     return action
 
 
+def _maybe_refresh_sideboard_dashboard(
+    live_progress_path: Path,
+    *,
+    completed: int,
+    total: int,
+    progress_interval: int,
+) -> None:
+    """Regenerate sideboard HTML from live eval files (throttled)."""
+    if (
+        progress_interval > 0
+        and completed % progress_interval != 0
+        and completed != total
+    ):
+        return
+    out_dir = live_progress_path.parent.parent.parent
+    if not (out_dir / "candidates_manifest.json").is_file():
+        return
+    eval_root = _SCRIPTS_ROOT / "eval"
+    if str(eval_root) not in sys.path:
+        sys.path.insert(0, str(eval_root))
+    try:
+        from sideboard_compare_dashboard import write_sideboard_compare_dashboard  # noqa: PLC0415
+
+        write_sideboard_compare_dashboard(out_dir, auto_refresh_seconds=5.0)
+    except Exception:
+        pass
+
+
+def _reset_talishar_http_session(env: Any) -> None:
+    reset = getattr(env, "_reset_http_session", None)
+    if callable(reset):
+        reset()
+
+
+def _env_reset_with_retries(
+    env: Any,
+    *,
+    seed: Optional[int],
+    options: dict[str, Any],
+    eval_label: str,
+    ep: int,
+    max_attempts: int = 4,
+) -> Any:
+    last_exc: Optional[Exception] = None
+    for attempt in range(max_attempts):
+        try:
+            return env.reset(seed=seed, options=options)
+        except TalisharConnectionError as exc:
+            last_exc = exc
+            if attempt >= max_attempts - 1:
+                break
+            wait = min(8.0, 0.75 * (2 ** attempt))
+            print(
+                f"  WARNING: {eval_label} ep {ep + 1} reset: "
+                f"Talishar connection error "
+                f"(retry {attempt + 1}/{max_attempts - 1} in {wait:.1f}s): {exc!r}"
+            )
+            _reset_talishar_http_session(env)
+            time.sleep(wait)
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError(f"{eval_label} reset failed")
+
+
+def _env_step_with_retries(
+    env: Any,
+    action: Any,
+    *,
+    eval_label: str,
+    ep: int,
+    step: int,
+    max_attempts: int = 5,
+) -> Any:
+    last_exc: Optional[Exception] = None
+    for attempt in range(max_attempts):
+        try:
+            return env.step(action)
+        except TalisharConnectionError as exc:
+            last_exc = exc
+            if attempt >= max_attempts - 1:
+                break
+            wait = min(8.0, 0.75 * (2 ** attempt))
+            print(
+                f"  WARNING: {eval_label} ep {ep + 1} step {step}: "
+                f"Talishar connection error "
+                f"(retry {attempt + 1}/{max_attempts - 1} in {wait:.1f}s): {exc!r}"
+            )
+            _reset_talishar_http_session(env)
+            time.sleep(wait)
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError(f"{eval_label} step failed")
+
+
+def _record_eval_outcome(
+    outcome: str,
+    *,
+    wins: int,
+    losses: int,
+    draws: int,
+    timeouts: int,
+    errors: int,
+) -> tuple[int, int, int, int, int]:
+    if outcome == "win":
+        wins += 1
+    elif outcome == "loss":
+        losses += 1
+    elif outcome == "draw":
+        draws += 1
+    elif outcome == OUTCOME_ERROR:
+        errors += 1
+    else:
+        timeouts += 1
+    return wins, losses, draws, timeouts, errors
+
+
+def _evaluate_fast_policy_matchup(
+    env: Any,
+    p1_policy: Any,
+    *,
+    p2_policy: Any,
+    max_steps: int,
+    episodes: int,
+    seed: Optional[int] = None,
+    eval_label: str = "Eval",
+    live_progress_path: Optional[Path] = None,
+    progress_interval: int = 100,
+    live_phase: str = "cpp_checkpoint",
+    p1_deck_card_ids: Optional[set[str]] = None,
+) -> Optional[dict[str, Any]]:
+    if not _env_supports_fast_training(env):
+        return None
+
+    wins = losses = draws = timeouts = errors = 0
+    anomalies: list[str] = []
+    end_state_keys: set[tuple[Any, ...]] = set()
+    episode_damage_breakdowns: list[dict[str, Any]] = []
+    deck_card_ids = set(p1_deck_card_ids or ())
+    cpp_env = getattr(env, "_cpp_env", None) if hasattr(env, "_cpp_env") else env
+    trace_env = cpp_env if hasattr(cpp_env, "get_combat_trace") else env
+    for ep in range(episodes):
+        ep_seed = (seed + ep) if seed is not None else ep
+        episode_rng = np.random.default_rng(ep_seed)
+        state = env.fast_reset(seed=ep_seed, starting_player_id=1 + (ep % 2))
+        terminated = truncated = False
+        steps = 0
+
+        while steps < max_steps:
+            acting = int(state.get("acting_player_id", 1) or 1)
+            seat_policy = p1_policy if acting == 1 else p2_policy
+            obs_vec = np.asarray(state["obs_vec"], dtype=np.float64)
+            n_legal = max(1, int(state.get("legal_count", 1) or 1))
+            action = _fast_action_for_policy(
+                seat_policy,
+                env,
+                obs_vec=obs_vec,
+                n_legal=n_legal,
+                rng=episode_rng,
+            )
+            state = env.fast_step_index(action)
+            terminated = bool(state.get("terminated", False))
+            truncated = bool(state.get("truncated", False))
+            steps += 1
+            if terminated or truncated:
+                break
+
+        max_steps_reached = not terminated and not truncated and steps >= max_steps
+        outcome, anomaly = classify_p1_fast_episode_outcome(
+            state,
+            max_steps_reached=max_steps_reached,
+        )
+        if anomaly:
+            msg = f"ep {ep + 1}: {anomaly}"
+            anomalies.append(msg)
+            if len(anomalies) <= 5:
+                print(f"  WARNING: {eval_label} {msg}")
+        end_state_keys.add(
+            (
+                outcome,
+                state.get("p1_health"),
+                state.get("p2_health"),
+                state.get("winner"),
+                1 + (ep % 2),
+            )
+        )
+        wins, losses, draws, timeouts, errors = _record_eval_outcome(
+            outcome,
+            wins=wins,
+            losses=losses,
+            draws=draws,
+            timeouts=timeouts,
+            errors=errors,
+        )
+        if hasattr(trace_env, "get_combat_trace"):
+            damage_acc = EvalDamageAccumulator(deck_card_ids=deck_card_ids)
+            damage_acc.ingest_trace(trace_env.get_combat_trace())
+            episode_damage_breakdowns.append(damage_acc.to_dict())
+
+        completed = ep + 1
+        if progress_interval > 0 and (
+            completed % progress_interval == 0 or completed == episodes
+        ):
+            print(
+                f"  {eval_label}: {completed}/{episodes} games "
+                f"(W={wins} L={losses} D={draws} T={timeouts} E={errors})"
+            )
+        if live_progress_path is not None:
+            live_progress_path.parent.mkdir(parents=True, exist_ok=True)
+            live_progress_path.write_text(
+                json.dumps(
+                    {
+                        "phase": live_phase,
+                        "episodes_completed": completed,
+                        "target_episodes": episodes,
+                        "wins": wins,
+                        "losses": losses,
+                        "draws": draws,
+                        "timeouts": timeouts,
+                        "errors": errors,
+                        "p1_policy": _policy_label(p1_policy),
+                        "p2_policy": _policy_label(p2_policy),
+                        "runtime_backend": "C++ engine fast sampled eval",
+                        "updated_at": datetime.now().isoformat(),
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            _maybe_refresh_sideboard_dashboard(
+                live_progress_path,
+                completed=completed,
+                total=episodes,
+                progress_interval=progress_interval,
+            )
+
+    if episodes > 1 and len(end_state_keys) <= 2 and (wins == 0 or losses == 0):
+        print(
+            f"  WARNING: {eval_label}: only {len(end_state_keys)} unique end state(s) "
+            f"across {episodes} episodes — results may be degenerate (check eval seed)"
+        )
+    if errors:
+        print(f"  WARNING: {eval_label}: {errors} episode(s) ended with classification errors")
+    if anomalies and len(anomalies) > 5:
+        print(f"  WARNING: {eval_label}: {len(anomalies)} engine/HP anomalies (first 5 shown)")
+
+    total = max(1, episodes)
+    decided = max(1, wins + losses + draws)
+    damage_breakdown = (
+        merge_damage_breakdowns(episode_damage_breakdowns)
+        if episode_damage_breakdowns
+        else None
+    )
+    metrics: dict[str, Any] = {
+        "episodes": episodes,
+        "p1_wins": wins,
+        "p2_wins": losses,
+        "draws": draws,
+        "timeouts": timeouts,
+        "errors": errors,
+        "losses": losses,
+        "p1_win_rate": wins / total,
+        "p2_win_rate": losses / total,
+        "win_rate_decided": wins / decided,
+        "draw_rate": draws / total,
+        "timeout_rate": (timeouts + errors) / total,
+        "runtime_backend": "C++ engine fast sampled eval",
+        "eval_anomalies": anomalies[:20],
+        "p1_policy": _policy_label(p1_policy),
+        "p2_policy": _policy_label(p2_policy),
+    }
+    if damage_breakdown is not None:
+        metrics["damage_breakdown"] = damage_breakdown
+    return metrics
+
+
 def _evaluate_fast_p1_vs_fixed_opponent(
     env: Any,
     p1_agent: Any,
@@ -1657,75 +1975,21 @@ def _evaluate_fast_p1_vs_fixed_opponent(
     max_steps: int,
     episodes: int,
     seed: Optional[int] = None,
+    eval_label: str = "Eval",
+    live_progress_path: Optional[Path] = None,
+    progress_interval: int = 100,
 ) -> Optional[dict[str, Any]]:
-    if not _env_supports_fast_training(env):
-        return None
-
-    wins = losses = draws = timeouts = 0
-    eval_rng = np.random.default_rng(seed)
-    for ep in range(episodes):
-        ep_seed = (seed + ep) if seed is not None else None
-        state = env.fast_reset(seed=ep_seed, starting_player_id=1 + (ep % 2))
-        terminated = truncated = False
-        steps = 0
-        p1_hp = int(state.get("p1_health", 0) or 0)
-        p2_hp = int(state.get("p2_health", 0) or 0)
-        p1_deck = int(state.get("p1_deck", 0) or 0)
-        p2_deck = int(state.get("p2_deck", 0) or 0)
-
-        while steps < max_steps:
-            acting = int(state.get("acting_player_id", 1) or 1)
-            agent = p1_agent if acting == 1 else p2_agent
-            obs_vec = np.asarray(state["obs_vec"], dtype=np.float64)
-            n_legal = max(1, int(state.get("legal_count", 1) or 1))
-            action = _fast_sample_action_index(agent, obs_vec, n_legal, eval_rng)
-            state = env.fast_step_index(action)
-            terminated = bool(state.get("terminated", False))
-            truncated = bool(state.get("truncated", False))
-            steps += 1
-            p1_hp = int(state.get("p1_health", p1_hp))
-            p2_hp = int(state.get("p2_health", p2_hp))
-            p1_deck = int(state.get("p1_deck", p1_deck))
-            p2_deck = int(state.get("p2_deck", p2_deck))
-            if terminated or truncated:
-                break
-
-        if not terminated and not truncated and steps >= max_steps:
-            truncated = True
-
-        outcome = classify_p1_episode_outcome(
-            p1_hp=p1_hp,
-            p2_hp=p2_hp,
-            p1_deck=p1_deck,
-            p2_deck=p2_deck,
-            terminated=terminated,
-            truncated=truncated,
-        )
-        if outcome == "win":
-            wins += 1
-        elif outcome == "loss":
-            losses += 1
-        elif outcome == "draw":
-            draws += 1
-        else:
-            timeouts += 1
-
-    total = max(1, episodes)
-    decided = max(1, wins + losses + draws)
-    return {
-        "episodes": episodes,
-        "p1_wins": wins,
-        "p2_wins": losses,
-        "draws": draws,
-        "timeouts": timeouts,
-        "losses": losses,
-        "p1_win_rate": wins / total,
-        "p2_win_rate": losses / total,
-        "win_rate_decided": wins / decided,
-        "draw_rate": draws / total,
-        "timeout_rate": timeouts / total,
-        "runtime_backend": "C++ engine fast sampled eval",
-    }
+    return _evaluate_fast_policy_matchup(
+        env,
+        p1_agent,
+        p2_policy=p2_agent,
+        max_steps=max_steps,
+        episodes=episodes,
+        seed=seed,
+        eval_label=eval_label,
+        live_progress_path=live_progress_path,
+        progress_interval=progress_interval,
+    )
 
 
 def _evaluate_p1_vs_fixed_opponent(
@@ -1738,8 +2002,18 @@ def _evaluate_p1_vs_fixed_opponent(
     max_steps: int,
     episodes: int,
     seed: Optional[int] = None,
+    backend: str = "auto",
+    eval_label: str = "Eval",
+    live_progress_path: Optional[Path] = None,
+    p1_deck_card_ids: Optional[set[str]] = None,
 ) -> dict[str, Any]:
-    """Evaluate frozen P1/P2 policies against each other (C++ when available)."""
+    """Evaluate frozen P1/P2 policies against each other.
+
+    *backend*:
+    - ``auto`` — C++ fast path when available, else HTTP Talishar
+    - ``cpp`` — C++ fast path only (raises if unavailable)
+    - ``http`` — HTTP Talishar only
+    """
     empty = {
         "episodes": 0,
         "p1_wins": 0,
@@ -1755,60 +2029,151 @@ def _evaluate_p1_vs_fixed_opponent(
     if not _DUAL_AGENT_AVAILABLE or episodes <= 0:
         return empty
 
+    backend = str(backend or "auto").lower()
+    if backend not in {"auto", "cpp", "http"}:
+        backend = "auto"
+    if _is_logic_policy(p1_agent) or _is_logic_policy(p2_agent):
+        if backend == "http":
+            raise RuntimeError("logic policy evaluation requires C++ backend")
+        backend = "cpp"
+
+    use_cpp = backend != "http"
     env = make_env(
         matchup,
         base_url=base_url,
         game_format=game_format,
         max_turns=max_steps,
+        use_cpp_engine=use_cpp,
+        require_fast_training=(backend == "cpp"),
+        enable_combat_tracker=True,
     )
-    fast_metrics = _evaluate_fast_p1_vs_fixed_opponent(
-        env,
-        p1_agent,
-        p2_agent=p2_agent,
-        max_steps=max_steps,
-        episodes=episodes,
-        seed=seed,
-    )
-    if fast_metrics is not None:
+    if backend in {"auto", "cpp"}:
+        fast_metrics = _evaluate_fast_policy_matchup(
+            env,
+            p1_agent,
+            p2_policy=p2_agent,
+            max_steps=max_steps,
+            episodes=episodes,
+            seed=seed,
+            eval_label=eval_label,
+            live_progress_path=live_progress_path,
+            p1_deck_card_ids=p1_deck_card_ids,
+        )
+        if fast_metrics is not None:
+            env.close()
+            print(f"  {eval_label} backend: C++ engine fast sampled eval")
+            return fast_metrics
+        if backend == "cpp":
+            env.close()
+            raise RuntimeError(
+                f"C++ fast eval required for {matchup.name} but unavailable"
+            )
+
+    if backend == "cpp":
         env.close()
-        print("  Checkpoint eval backend: C++ engine fast sampled eval")
-        return fast_metrics
+        return empty
+
+    if backend == "http":
+        try:
+            env.close()
+        except Exception:
+            pass
+        env = make_env(
+            matchup,
+            base_url=base_url,
+            game_format=game_format,
+            max_turns=max_steps,
+            use_cpp_engine=False,
+            require_fast_training=False,
+            request_timeout=60.0,
+            enable_combat_tracker=True,
+        )
 
     wins = 0
     losses = 0
     draws = 0
     timeouts = 0
+    errors = 0
+    episode_damage_breakdowns: list[dict[str, Any]] = []
+    deck_card_ids = set(p1_deck_card_ids or ())
     runtime_backend: Optional[str] = None
     backend_printed = False
     try:
         for ep in range(episodes):
-            ep_seed = (seed + ep) if seed is not None else None
-            result = env.reset(
-                seed=ep_seed,
-                options={"acting_player_id": 1 + (ep % 2)},
-            )
+            ep_seed = (seed + ep) if seed is not None else ep
+            try:
+                result = _env_reset_with_retries(
+                    env,
+                    seed=ep_seed,
+                    options={"acting_player_id": 1 + (ep % 2)},
+                    eval_label=eval_label,
+                    ep=ep,
+                )
+            except TalisharConnectionError as exc:
+                errors += 1
+                print(
+                    f"  WARNING: {eval_label} ep {ep + 1}/{episodes} "
+                    f"reset failed after retries: {exc!r}"
+                )
+                continue
+            except Exception as exc:
+                errors += 1
+                print(
+                    f"  WARNING: {eval_label} ep {ep + 1}/{episodes} "
+                    f"reset failed: {exc!r}"
+                )
+                continue
             obs = result.observation
             if not backend_printed:
                 runtime_backend = _runtime_backend_label(env)
-                print(f"  Checkpoint eval backend: {runtime_backend}")
+                print(f"  {eval_label} backend: {runtime_backend}")
                 backend_printed = True
             done = False
             steps = 0
             terminated = False
             truncated = False
+            episode_error = False
             while not done and steps < max_steps:
-                obs_data = json.loads(obs) if isinstance(obs, str) else (obs or {})
-                acting = int(obs_data.get("actingPlayerID", 1) or 1)
-                if acting == 1:
-                    action = _agent_action_for_eval(p1_agent, obs)
-                else:
-                    action = _agent_action_for_eval(p2_agent, obs)
-                step = env.step(action)
-                obs = step.observation
-                terminated = bool(step.terminated)
-                truncated = bool(step.truncated)
-                done = terminated or truncated
-                steps += 1
+                try:
+                    obs_data = json.loads(obs) if isinstance(obs, str) else (obs or {})
+                    acting = int(obs_data.get("actingPlayerID", 1) or 1)
+                    if acting == 1:
+                        action = _agent_action_for_eval(p1_agent, obs)
+                    else:
+                        action = _agent_action_for_eval(p2_agent, obs)
+                    step = _env_step_with_retries(
+                        env,
+                        action,
+                        eval_label=eval_label,
+                        ep=ep,
+                        step=steps + 1,
+                    )
+                    obs = step.observation
+                    terminated = bool(step.terminated)
+                    truncated = bool(step.truncated)
+                    done = terminated or truncated
+                    steps += 1
+                except TalisharConnectionError as exc:
+                    errors += 1
+                    episode_error = True
+                    print(
+                        f"  WARNING: {eval_label} ep {ep + 1}/{episodes} "
+                        f"step {steps + 1} failed after retries: {exc!r}"
+                    )
+                    break
+                except Exception as exc:
+                    errors += 1
+                    episode_error = True
+                    print(
+                        f"  WARNING: {eval_label} ep {ep + 1}/{episodes} "
+                        f"step {steps + 1} failed: {exc!r}"
+                    )
+                    break
+
+            if episode_error:
+                if ep + 1 < episodes:
+                    time.sleep(1.5)
+                continue
 
             if not terminated and not truncated and steps >= max_steps:
                 truncated = True
@@ -1822,6 +2187,13 @@ def _evaluate_p1_vs_fixed_opponent(
                 p2_hp = int(p2_hp_f) if p2_hp_f is not None else None
             if p1_deck is None or p2_deck is None:
                 p1_deck, p2_deck = absolute_p1_p2_deck_from_obs(obs_data)
+            if p1_hp is None or p2_hp is None:
+                errors += 1
+                print(
+                    f"  WARNING: {eval_label} ep {ep + 1}/{episodes} "
+                    "missing HP — counted as error, not loss"
+                )
+                continue
             outcome = classify_p1_episode_outcome(
                 p1_hp=p1_hp,
                 p2_hp=p2_hp,
@@ -1830,31 +2202,146 @@ def _evaluate_p1_vs_fixed_opponent(
                 terminated=terminated,
                 truncated=truncated,
             )
-            if outcome == "win":
-                wins += 1
-            elif outcome == "loss":
-                losses += 1
-            elif outcome == "draw":
-                draws += 1
-            else:
-                timeouts += 1
+            wins, losses, draws, timeouts, errors = _record_eval_outcome(
+                outcome,
+                wins=wins,
+                losses=losses,
+                draws=draws,
+                timeouts=timeouts,
+                errors=errors,
+            )
+            if hasattr(env, "get_combat_trace"):
+                damage_acc = EvalDamageAccumulator(deck_card_ids=deck_card_ids)
+                damage_acc.ingest_trace(env.get_combat_trace())
+                episode_damage_breakdowns.append(damage_acc.to_dict())
+
+            completed = ep + 1
+            print(
+                f"  {eval_label}: {completed}/{episodes} games "
+                f"(W={wins} L={losses} D={draws} T={timeouts} E={errors})"
+            )
+            if live_progress_path is not None:
+                live_progress_path.parent.mkdir(parents=True, exist_ok=True)
+                live_progress_path.write_text(
+                    json.dumps(
+                        {
+                            "phase": "final_eval",
+                            "episodes_completed": completed,
+                            "target_episodes": episodes,
+                            "wins": wins,
+                            "losses": losses,
+                            "draws": draws,
+                            "timeouts": timeouts,
+                            "errors": errors,
+                            "runtime_backend": runtime_backend or "HTTP Talishar",
+                            "updated_at": datetime.now().isoformat(),
+                        },
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+                _maybe_refresh_sideboard_dashboard(
+                    live_progress_path,
+                    completed=completed,
+                    total=episodes,
+                    progress_interval=1,
+                )
+            if ep + 1 < episodes:
+                time.sleep(1.0)
     finally:
         env.close()
 
+    damage_breakdown = (
+        merge_damage_breakdowns(episode_damage_breakdowns)
+        if episode_damage_breakdowns
+        else None
+    )
     total = max(1, episodes)
-    return {
+    result = {
         "episodes": episodes,
         "p1_wins": wins,
         "p2_wins": losses,
         "draws": draws,
         "timeouts": timeouts,
+        "errors": errors,
         "losses": losses,
         "p1_win_rate": wins / total,
         "p2_win_rate": losses / total,
         "draw_rate": draws / total,
-        "timeout_rate": timeouts / total,
+        "timeout_rate": (timeouts + errors) / total,
         "runtime_backend": runtime_backend or "HTTP Talishar",
     }
+    if damage_breakdown is not None:
+        result["damage_breakdown"] = damage_breakdown
+    return result
+
+
+def evaluate_policy_matchup(
+    matchup: "Matchup",
+    p1_policy: Any,
+    p2_policy: Any,
+    *,
+    base_url: str,
+    game_format: str,
+    max_steps: int,
+    episodes: int,
+    seed: Optional[int] = None,
+    backend: str = "cpp",
+    eval_label: str = "Eval",
+    live_progress_path: Optional[Path] = None,
+    p1_deck_card_ids: Optional[set[str]] = None,
+) -> dict[str, Any]:
+    """Evaluate arbitrary P1/P2 seat policies (PPO agent or ``LOGIC_POLICY``)."""
+    return _evaluate_p1_vs_fixed_opponent(
+        matchup,
+        p1_policy,
+        p2_agent=p2_policy,
+        base_url=base_url,
+        game_format=game_format,
+        max_steps=max_steps,
+        episodes=episodes,
+        seed=seed,
+        backend=backend,
+        eval_label=eval_label,
+        live_progress_path=live_progress_path,
+        p1_deck_card_ids=p1_deck_card_ids,
+    )
+
+
+def evaluate_fixed_matchup(
+    matchup: "Matchup",
+    agent: Any,
+    *,
+    base_url: str,
+    game_format: str,
+    max_steps: int,
+    episodes: int,
+    seed: Optional[int] = None,
+    backend: str = "auto",
+    eval_label: str = "Eval",
+    live_progress_path: Optional[Path] = None,
+    p1_deck_card_ids: Optional[set[str]] = None,
+) -> dict[str, Any]:
+    """Evaluate a unified/sampled policy on both seats for a fixed deck matchup."""
+    from agent_cache import clone_agent_weights  # noqa: PLC0415
+    from rl_agents.ppo import PPOAgent  # noqa: PLC0415
+
+    p2_agent = PPOAgent()
+    clone_agent_weights(agent, p2_agent)
+    return _evaluate_p1_vs_fixed_opponent(
+        matchup,
+        agent,
+        p2_agent=p2_agent,
+        base_url=base_url,
+        game_format=game_format,
+        max_steps=max_steps,
+        episodes=episodes,
+        seed=seed,
+        backend=backend,
+        eval_label=eval_label,
+        live_progress_path=live_progress_path,
+        p1_deck_card_ids=p1_deck_card_ids,
+    )
 
 
 def _run_warmup_baseline(
@@ -2150,6 +2637,16 @@ def _save_phase3_play_checkpoints(
     _p1_header = _ensure_hero_in_header(p1_equipment_header, matchup.p1_hero)
     _p2_header = _ensure_hero_in_header(p2_equipment_header, matchup.p2_hero)
 
+    if opponent_mode == "dual":
+        p1_opponent_label = matchup.p2_hero
+        p2_opponent_label = matchup.p1_hero
+    elif opponent_mode == "mirror":
+        p1_opponent_label = matchup.p1_hero
+        p2_opponent_label = matchup.p2_hero
+    else:
+        p1_opponent_label = p1_opponent_deck_name
+        p2_opponent_label = p1_opponent_deck_name
+
     p1_ckpt = _save_play_checkpoint_package(
         agent=p1_agent,
         out_dir=out_dir,
@@ -2162,7 +2659,7 @@ def _save_phase3_play_checkpoints(
         deck_cards=p1_deck_cards,
         equipment_header=_p1_header,
         opponent_mode=opponent_mode,
-        opponent_deck_name=p1_opponent_deck_name,
+        opponent_deck_name=p1_opponent_label,
         p1_outcomes=p1_outcomes,
         runtime_backend=runtime_backend,
     )
@@ -2181,7 +2678,7 @@ def _save_phase3_play_checkpoints(
         deck_cards=p2_deck_cards or {},
         equipment_header=_p2_header,
         opponent_mode=opponent_mode,
-        opponent_deck_name=(matchup.p1_deck if opponent_mode == "dual" else p1_opponent_deck_name),
+        opponent_deck_name=p2_opponent_label,
     )
     if p2_ckpt is not None:
         print(f"  [p2] Phase-3 checkpoint → {p2_ckpt}")

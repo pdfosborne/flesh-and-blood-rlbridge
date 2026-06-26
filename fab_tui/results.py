@@ -183,17 +183,44 @@ def _label_for_results_dir(path: Path) -> str:
                 return f"{hero} vs {opponent}{deck}"
         except (json.JSONDecodeError, OSError):
             pass
+
+    deck_state_path = path / "deck_state.json"
+    if deck_state_path.is_file():
+        try:
+            data = json.loads(deck_state_path.read_text(encoding="utf-8"))
+            p1_hero = _first_active_deck_hero(data.get("p1") or {})
+            p2_hero = _first_active_deck_hero(data.get("p2") or {})
+            if p1_hero and p2_hero:
+                return f"{p1_hero} vs {p2_hero}"
+        except (json.JSONDecodeError, OSError, TypeError):
+            pass
+
     results_json = path / "results.json"
     if results_json.is_file():
         try:
             data = json.loads(results_json.read_text(encoding="utf-8"))
-            p1_deck = str(data.get("p1", {}).get("deck_asset_name") or "").strip()
-            p2_deck = str(data.get("p2", {}).get("deck_asset_name") or "").strip()
+            p1 = data.get("p1") or {}
+            p2 = data.get("p2") or {}
+            p1_deck = str(p1.get("deck_asset_name") or "").strip()
+            p2_deck = str(p2.get("deck_asset_name") or "").strip()
             if p1_deck and p2_deck:
                 return f"{p1_deck} vs {p2_deck}"
+            p1_hero = _first_active_deck_hero(p1)
+            p2_hero = _first_active_deck_hero(p2)
+            if p1_hero and p2_hero:
+                return f"{p1_hero} vs {p2_hero}"
         except (json.JSONDecodeError, OSError):
             pass
     return path.name
+
+
+def _first_active_deck_hero(player_block: dict) -> str:
+    if not isinstance(player_block, dict):
+        return ""
+    active = player_block.get("active_decks") or {}
+    if isinstance(active, dict) and active:
+        return str(next(iter(active.keys())) or "").strip()
+    return ""
 
 
 def _read_json(path: Path) -> dict:

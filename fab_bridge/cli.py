@@ -40,7 +40,7 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("tui", help="Launch the interactive terminal menu (default)")
 
     gui = sub.add_parser("gui", help="Launch the web GUI for sideboard comparison")
-    gui.add_argument("--host", default="127.0.0.1")
+    gui.add_argument("--host", default="localhost")
     gui.add_argument("--port", type=int, default=8765)
     gui.add_argument("--no-browser", action="store_true", help="Do not open a browser tab")
 
@@ -62,6 +62,28 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Also start Talishar-FE (Node) for live play / GIF rendering",
     )
+    init.add_argument(
+        "--no-agents",
+        action="store_true",
+        help="Skip downloading official unified agent weights",
+    )
+
+    agents = sub.add_parser("agents", help="Official unified agent manifest sync and publish")
+    agents_sub = agents.add_subparsers(dest="agents_command", required=True)
+
+    agents_sync = agents_sub.add_parser("sync", help="Download official agent weights from manifest")
+    agents_sync.add_argument("--format", action="append", dest="formats", metavar="FORMAT")
+    agents_sync.add_argument("--force", action="store_true", help="Re-download even if SHA256 matches")
+    agents_sync.add_argument("--manifest", default=None, help="Manifest URL or path")
+
+    agents_status = agents_sub.add_parser("status", help="Show local unified agent cache status")
+    agents_status.add_argument("--format", default=None, help="Game format (default: manifest default)")
+
+    agents_publish = agents_sub.add_parser("publish", help="Publish local weights to GitHub Releases")
+    agents_publish.add_argument("--format", required=True, help="Game format to publish")
+    agents_publish.add_argument("--tag", required=True, help="Release tag (e.g. agents-2026.06.1)")
+    agents_publish.add_argument("--notes", default=None, help="Release notes text or path to file")
+    agents_publish.add_argument("--draft", action="store_true", help="Create as draft release")
 
     talishar = sub.add_parser("talishar", help="Start or stop the Talishar stack")
     talishar.add_argument("--backend-only", action="store_true")
@@ -205,7 +227,13 @@ def _dispatch(args: argparse.Namespace, raw_argv: list[str]) -> int:
         return run_init(
             start_talishar=not args.no_talishar,
             backend_only=not args.with_fe,
+            sync_agents=not args.no_agents,
         )
+
+    if args.command == "agents":
+        from fab_bridge.agents_cli import run_agents_command
+
+        return run_agents_command(args)
 
     if args.command == "talishar":
         from start_talishar import run as start_talishar_run

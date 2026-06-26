@@ -5,19 +5,18 @@ Reinforcement learning simulation for [Flesh and Blood](https://fabtcg.com/) TCG
 
 *Example usage: play against AI agents with guidance for optimal play based on millions of simulated matches.*
 
-**NOTE: This work trains AI agents by playing thousands of games and therefore requires powerful hardware.**
 
-With limited resources you can test the interface and play against pre-trained agents. By sharing this work I hope we can pool resources to train and share AI agents to practice against and learn from.
-
-**This is a personal project and is in alpha development and will likely have bugs.**
+**This project is in alpha development and will likely have bugs.**
 
 ---
 
-## Quick start (GUI)
+## Quick start
 
-**Prerequisites:** [Docker Desktop](https://www.docker.com/products/docker-desktop/) and **Python 3.10+**.
+**Option A** needs [Docker Desktop](https://www.docker.com/products/docker-desktop/) only. 
 
-### Option A - Docker (simplest: Talishar + GUI together)
+### Option A - Docker GUI + Talishar-FE (live play)
+
+Recommended if you want the web GUI, pre-trained unified agents, sideboard evaluation, replay GIFs, and **live play** in Talishar-FE (watch or play against the agent).
 
 ```bash
 git clone https://github.com/pdfosborne/flesh-and-blood-rlbridge.git
@@ -25,9 +24,13 @@ cd flesh-and-blood-rlbridge
 ./scripts/docker-setup.sh
 ```
 
-When setup finishes (~10mins), the terminal prints a **“setup complete / ready to use”** banner.
+```powershell
+.\scripts\docker-setup.ps1
+```
 
-Then open **http://localhost:8765** in your browser.
+When setup finishes, open **http://localhost:8765** (GUI) and **http://localhost:5173** (Talishar-FE for live play). Official agent weights are synced during the image build; refresh with `fab-bridge agents sync`.
+
+**Sideboard-only (no live play):** use `./scripts/docker-setup.sh --eval` (or `.\scripts\docker-setup.ps1 -Eval`) for a slimmer stack without Talishar-FE or Playwright.
 
 ![GUI-Demo-1](./docs/_images/GUI-demo-img-1.png)
 *GUI demo - select player deck (precons or import from Fabrary), you can edit equipment as needed.*
@@ -49,7 +52,8 @@ Then open **http://localhost:8765** in your browser.
 To start the stack again later (inside the repo directory), use a compose wrapper so GPU is picked up automatically when available:
 
 ```bash
-./scripts/docker-compose.sh up      # macOS / Linux / Git Bash
+./scripts/docker-compose.sh --profile full up   # GUI + Talishar-FE (same as Option A)
+./scripts/docker-setup.sh --eval                # sideboard eval only (no Talishar-FE)
 ```
 
 ```powershell
@@ -79,7 +83,11 @@ Stop everything with `Ctrl+C`, then:
 .\scripts\docker-compose.ps1 down
 ```
 
-### Option B - Local Python (recommended for development)
+### Option B - Local Python full build (train custom agents)
+
+Use this when you want to **train your own agents** (`fab-tui`, PPO pipelines, C++ fast simulation). **Option B** needs [Docker Desktop](https://www.docker.com/products/docker-desktop/) and **Python 3.10+** (and CMake plus a C++ compiler for fast C++ training). Heavier setup than Option A; recommended for development and long training runs.
+
+NOTE: Training AI agents (reinforcement learning) by playing thousands of games requires powerful hardware. By sharing this work I hope we can pool resources to collaboratively train AI agents to improve Flesh & Blood resources for players.
 
 **Windows (PowerShell):**
 
@@ -128,7 +136,7 @@ source scripts/docker-env.sh   # once per shell; then fab-tui / fab-gui / fab-br
 
 #### Talishar-FE
 
-If you use [Option B](#option-b---local-python-recommended-for-development) without the root Docker stack, clone and start Talishar-FE from your `flesh-and-blood-rlbridge` checkout:
+If you use [Option B](#option-b---local-python-full-build-train-custom-agents) without the root Docker stack, clone and start Talishar-FE from your `flesh-and-blood-rlbridge` checkout:
 
 ```bash
 git clone https://github.com/Talishar/Talishar-FE
@@ -141,7 +149,9 @@ python start_talishar.py --fe-only
 |---------|----------------|
 | `fab-gui` | Web GUI for sideboard comparison (http://localhost:8765) |
 | `fab-tui` | Interactive terminal menu |
-| `fab-bridge init` | First-time setup: dirs + Talishar backend |
+| `fab-bridge init` | First-time setup: dirs + Talishar backend + agent sync |
+| `fab-bridge agents sync` | Download official unified agent weights |
+| `fab-bridge agents publish` | Publish local weights to GitHub Releases (maintainers) |
 | `fab-bridge doctor` | Check Python, Docker, Assets, card DB |
 | `fab-bridge talishar --down` | Stop Talishar Docker containers |
 | `python start_talishar.py --backend-only` | Start Talishar only (cross-platform) |

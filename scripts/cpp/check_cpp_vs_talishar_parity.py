@@ -29,6 +29,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from flesh_and_blood_rlbridge.talishar_engine_environment import TalisharEngineEnvironment
 from flesh_and_blood_rlbridge.cpp_engine_environment import get_engine_dir
+from flesh_and_blood_rlbridge.player_observation import (
+    CONTEXT_DIM,
+    HAND_SLOT_DIM,
+    HAND_SLOTS,
+    PLAYER_OBS_DIM,
+    SCALAR_COUNT,
+)
 
 
 OBSERVATION_KEYS = (
@@ -262,6 +269,44 @@ def compare_legal_actions(
     return True, ""
 
 
+OBS_VEC_TOLERANCE = 0.05
+OBS_VEC_HAND_OFF = CONTEXT_DIM + SCALAR_COUNT
+OBS_VEC_HAND_END = OBS_VEC_HAND_OFF + HAND_SLOTS * HAND_SLOT_DIM
+
+
+def _compare_observation_vec_slices(tal: dict[str, Any], cpp: dict[str, Any]) -> tuple[bool, str]:
+    """Compare player-fair vector slices where C++ implements zone data."""
+    tal_vec = tal.get("observationVec")
+    cpp_vec = cpp.get("observationVec")
+    if not isinstance(tal_vec, list) or not isinstance(cpp_vec, list):
+        return True, "skipped: observationVec missing (cpp_not_implemented)"
+    if len(tal_vec) != PLAYER_OBS_DIM or len(cpp_vec) != PLAYER_OBS_DIM:
+        return (
+            False,
+            f"observationVec dim mismatch: Talishar={len(tal_vec)}, C++={len(cpp_vec)}, "
+            f"expected={PLAYER_OBS_DIM}",
+        )
+
+    mismatches: list[str] = []
+    for idx in range(min(CONTEXT_DIM + SCALAR_COUNT, OBS_VEC_HAND_OFF)):
+        tal_v = float(tal_vec[idx])
+        cpp_v = float(cpp_vec[idx])
+        if abs(tal_v - cpp_v) > OBS_VEC_TOLERANCE:
+            mismatches.append(f"vec[{idx}]: Talishar={tal_v:.4f}, C++={cpp_v:.4f}")
+
+    for idx in range(OBS_VEC_HAND_OFF, OBS_VEC_HAND_END):
+        tal_v = float(tal_vec[idx])
+        cpp_v = float(cpp_vec[idx])
+        if abs(tal_v - cpp_v) > OBS_VEC_TOLERANCE:
+            mismatches.append(f"hand_vec[{idx}]: Talishar={tal_v:.4f}, C++={cpp_v:.4f}")
+            break
+
+    if mismatches:
+        shown = "; ".join(mismatches[:8])
+        return False, f"observationVec slice mismatch: {shown}"
+    return True, ""
+
+
 def compare_observations(obs_tal: Any, obs_cpp: Any) -> tuple[bool, str]:
     tal, msg = _parse_observation("Talishar", obs_tal)
     if tal is None:
@@ -273,11 +318,11 @@ def compare_observations(obs_tal: Any, obs_cpp: Any) -> tuple[bool, str]:
     expected_keys = set(OBSERVATION_KEYS)
     for label, obs in (("Talishar", tal), ("C++", cpp)):
         actual_keys = set(obs.keys())
-        if actual_keys != expected_keys:
+        missing = expected_keys - actual_keys
+        if missing:
             return (
                 False,
-                f"{label} keys mismatch: missing={sorted(expected_keys - actual_keys)}, "
-                f"extra={sorted(actual_keys - expected_keys)}",
+                f"{label} keys missing required fields: {sorted(missing)}",
             )
 
     mismatches: list[str] = []
@@ -318,7 +363,11 @@ def compare_observations(obs_tal: Any, obs_cpp: Any) -> tuple[bool, str]:
         if len(mismatches) > 10:
             shown += f"; ... {len(mismatches) - 10} more"
         return False, shown
-    return True, ""
+
+    vec_ok, vec_msg = _compare_observation_vec_slices(tal, cpp)
+    if not vec_ok:
+        return False, vec_msg
+    return True, vec_msg or ""
 
 
 def compare_rewards(reward_tal: float, reward_cpp: float) -> tuple[bool, str]:

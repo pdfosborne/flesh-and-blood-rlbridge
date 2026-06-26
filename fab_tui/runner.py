@@ -25,6 +25,7 @@ from fab_tui.config import (
     LivePlaySpec,
     MatchupSimSpec,
     SideboardCompareSpec,
+    UnifiedRandomMatchupSpec,
     normalize_pipeline_format,
 )
 
@@ -582,3 +583,108 @@ def run_sideboard_compare(
             from runscripts._common import stop_background_process  # noqa: PLC0415
 
             stop_background_process(dashboard_proc)
+
+
+def run_eval_sideboard_compare(
+    spec: SideboardCompareSpec,
+    env: EnvironmentSettings,
+    *,
+    starting_deck: Path,
+    candidates_json: Path,
+    cpp_eval_episodes: int = 1000,
+    talishar_eval_episodes: int = 10,
+) -> int:
+    """Evaluate sideboard candidates via unified agent (no training)."""
+    from runscripts._common import read_deck_meta  # noqa: PLC0415
+
+    env.apply_to_environ()
+    deck_meta = read_deck_meta(starting_deck, spec.game_format)
+    out_dir = spec.resolved_out_dir()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    cmd = [
+        _python(),
+        str(SCRIPTS_EVAL / "eval_sideboard_compare.py"),
+        "--format",
+        normalize_pipeline_format(spec.game_format),
+        "--hero-id",
+        spec.hero_id or deck_meta.hero_id,
+        "--hero-class",
+        spec.hero_class or deck_meta.hero_class,
+        "--equipment-header",
+        spec.equipment_header or deck_meta.equipment_header,
+        "--opponent-hero-id",
+        spec.opponent_hero_id,
+        "--opponent-deck",
+        spec.opponent_deck,
+        "--starting-deck",
+        str(starting_deck),
+        "--candidates-json",
+        str(candidates_json),
+        "--out-dir",
+        str(out_dir),
+        "--cache-dir",
+        str(REPO_ROOT / "results" / "agent_cache"),
+        "--cpp-eval-episodes",
+        str(cpp_eval_episodes),
+        "--talishar-eval-episodes",
+        str(talishar_eval_episodes),
+        "--max-eval-steps",
+        str(spec.final_eval_max_steps),
+        "--max-parallel",
+        str(spec.max_parallel),
+        "--talishar-url",
+        env.talishar_url,
+        "--assets-path",
+        env.assets_path,
+        "--no-require-cpp-engine",
+    ]
+    if not spec.build_cpp_engine:
+        cmd.append("--no-build-cpp-engine")
+    return run_streaming(cmd)
+
+
+def run_unified_random_matchups(
+    spec: UnifiedRandomMatchupSpec,
+    env: EnvironmentSettings,
+) -> int:
+    """Train unified agent on random fabrary deck matchups."""
+    env.apply_to_environ()
+    out_dir = spec.resolved_out_dir()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cache_dir = spec.cache_dir or str(RESULTS_ROOT / "agent_cache")
+
+    cmd = [
+        _python(),
+        str(SCRIPTS_TRAINING / "train_unified_random_matchups.py"),
+        "--format",
+        normalize_pipeline_format(spec.game_format),
+        "--matchups",
+        str(spec.matchups),
+        "--episodes",
+        str(spec.episodes),
+        "--max-steps",
+        str(spec.max_steps),
+        "--warmup-episodes",
+        str(spec.warmup_episodes),
+        "--checkpoint-interval-pct",
+        str(spec.checkpoint_interval_pct),
+        "--checkpoint-eval-episodes",
+        str(spec.checkpoint_eval_episodes),
+        "--workers",
+        str(spec.workers),
+        "--run-dir",
+        str(out_dir),
+        "--cache-dir",
+        cache_dir,
+        "--talishar-url",
+        env.talishar_url,
+    ]
+    if spec.seed is not None:
+        cmd.extend(["--seed", str(spec.seed)])
+    if spec.skip_converged:
+        cmd.append("--skip-converged")
+    else:
+        cmd.append("--no-skip-converged")
+    cmd.append("--require-cpp-engine")
+    return run_streaming(cmd)

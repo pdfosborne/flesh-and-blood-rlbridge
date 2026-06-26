@@ -12,6 +12,7 @@ def _event(
     acting: int = 1,
     action_class: str = "other",
     card_id: str = "",
+    zone: str = "hand",
 ) -> dict:
     return {
         "before": {
@@ -26,7 +27,12 @@ def _event(
             "opponent_health": after_hp[1] if acting == 1 else after_hp[0],
             "turn_no": 1,
         },
-        "action": {"card_id": card_id, "action_code": 27, "label": "", "zone": "hand"},
+        "action": {
+            "card_id": card_id,
+            "action_code": 27,
+            "label": card_id,
+            "zone": zone,
+        },
         "action_class": action_class,
         "combat_log_delta": log_lines or [],
     }
@@ -42,7 +48,9 @@ def test_player_took_damage_attributes_to_last_attack() -> None:
     )
     result = acc.to_dict()
     assert result["total_dealt"] == 4
-    assert result["cards_dealt"] == [{"card_id": "sink_below_surge_red", "damage": 4}]
+    assert result["cards_dealt"] == [
+        {"card_id": "sink_below_surge_red", "damage": 4, "avg_damage": 4.0}
+    ]
 
 
 def test_opponent_attack_counted_as_damage_taken() -> None:
@@ -55,10 +63,48 @@ def test_opponent_attack_counted_as_damage_taken() -> None:
     )
     result = acc.to_dict()
     assert result["total_taken"] == 3
-    assert result["cards_taken_from"] == [{"card_id": "enigma_chimera_red", "damage": 3}]
+    assert result["cards_taken_from"] == [
+        {"card_id": "enigma_chimera_red", "damage": 3, "avg_damage": 3.0}
+    ]
 
 
-def test_merge_damage_breakdowns_sums_episodes() -> None:
+def test_merge_damage_breakdowns_adds_unattributed_bucket() -> None:
+    merged = merge_damage_breakdowns(
+        [
+            {
+                "total_dealt": 10,
+                "total_taken": 4,
+                "cards_dealt": [],
+                "cards_taken_from": [],
+            }
+        ]
+    )
+    assert merged["cards_dealt"] == [
+        {"card_id": "(unattributed)", "damage": 10, "avg_damage": 10.0}
+    ]
+    assert merged["cards_taken_from"] == [
+        {"card_id": "(unattributed)", "damage": 4, "avg_damage": 4.0}
+    ]
+
+
+def test_cpp_hp_log_line_attributes_to_last_card() -> None:
+    acc = EvalDamageAccumulator(deck_card_ids={"lightning_surge_red"})
+    acc.ingest_trace(
+        [
+            _event(
+                acting=1,
+                action_class="other",
+                card_id="lightning_surge_red",
+                zone="hand",
+            ),
+            _event(log_lines=["HP P1 20->20 | P2 20->16"]),
+        ]
+    )
+    result = acc.to_dict()
+    assert result["total_dealt"] == 4
+    assert result["cards_dealt"] == [
+        {"card_id": "lightning_surge_red", "damage": 4, "avg_damage": 4.0}
+    ]
     merged = merge_damage_breakdowns(
         [
             {
@@ -78,5 +124,5 @@ def test_merge_damage_breakdowns_sums_episodes() -> None:
     assert merged["episodes"] == 2
     assert merged["total_dealt"] == 10
     assert merged["total_taken"] == 3
-    assert merged["cards_dealt"][0] == {"card_id": "a", "damage": 7}
-    assert merged["cards_taken_from"][0] == {"card_id": "b", "damage": 3}
+    assert merged["cards_dealt"][0] == {"card_id": "a", "damage": 7, "avg_damage": 3.5}
+    assert merged["cards_taken_from"][0] == {"card_id": "b", "damage": 3, "avg_damage": 1.5}

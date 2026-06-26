@@ -13,11 +13,18 @@ from pathlib import Path
 from typing import Any
 
 from fab_tui.card_search import CardHit, CardSearchIndex
+from fab_bridge.agents import (  # noqa: E402
+    agent_status as unified_agent_status,
+    unified_agent_cache_format,
+    unified_agent_weights_path,
+)
 from fab_tui.config import (
+    AGENT_CACHE_DIR,
     REPO_ROOT,
     SCRIPTS_EVAL,
     EnvironmentSettings,
     SideboardCompareSpec,
+    browser_talishar_fe_url,
     slugify,
 )
 from fab_tui.decks import (
@@ -1059,6 +1066,112 @@ def start_replay_render(run_id: str, env: EnvironmentSettings) -> dict[str, Any]
     return {"run_id": run_id, "status": "running"}
 
 
+def start_evaluation(
+    *,
+    env: EnvironmentSettings,
+    starting_deck_path: Path,
+    opponent_hero_id: str,
+    opponent_deck: str,
+    baseline_deck: dict[str, int],
+    card_pool: dict[str, int],
+    equipment_header: str,
+    baseline_label: str,
+    variants: list[dict[str, Any]],
+    spec_kwargs: dict[str, Any],
+) -> TrainingRun:
+    """Run unified-agent deck evaluation (C++ + Talishar) without PPO training."""
+    player_info = read_deck_hero_info(starting_deck_path)
+    game_format = read_deck_format(starting_deck_path)
+    cpp_eval_episodes = int(spec_kwargs.pop("cpp_eval_episodes", 1000))
+    talishar_eval_episodes = int(spec_kwargs.pop("talishar_eval_episodes", 10))
+    spec_kwargs.pop("render_replay_gif", None)
+    spec_kwargs.pop("play_episodes", None)
+    spec_kwargs.pop("final_eval_episodes", None)
+    spec = SideboardCompareSpec(
+        starting_deck=str(starting_deck_path),
+        opponent_hero_id=opponent_hero_id,
+        opponent_deck=opponent_deck,
+        hero_id=player_info.hero_id if player_info else "",
+        hero_class=player_info.hero_class if player_info else "",
+        equipment_header=equipment_header,
+        game_format=game_format,  # type: ignore[arg-type]
+        play_episodes=0,
+        final_eval_episodes=talishar_eval_episodes,
+        skip_final_eval=talishar_eval_episodes <= 0,
+        no_render_gif=True,
+        **spec_kwargs,
+    )
+    out_dir = spec.resolved_out_dir()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    manual_variants: list[ManualSwapVariant] = []
+    for index, row in enumerate(variants, start=1):
+        swaps = [tuple(pair) for pair in row.get("swaps") or []]
+        manual_variants.append(
+            ManualSwapVariant(
+                candidate_id=str(row.get("candidate_id") or f"manual_{index:02d}"),
+                label=str(row.get("label") or f"Manual variant {index}"),
+                game_deck={str(k): int(v) for k, v in (row.get("game_deck") or {}).items()},
+                swaps=swaps,  # type: ignore[arg-type]
+            )
+        )
+
+    candidates_path = write_candidates_manifest(
+        out_dir / "candidates_manifest.json",
+        baseline_deck=baseline_deck,
+        card_pool=card_pool,
+        variants=manual_variants,
+        baseline_label=baseline_label,
+        equipment_header=equipment_header,
+    )
+    spec.candidates_json = str(candidates_path)
+    spec.num_options = 1 + len(manual_variants)
+    if equipment_header:
+        spec.equipment_header = equipment_header
+
+    run_id = uuid.uuid4().hex[:12]
+    manifest = json.loads(candidates_path.read_text(encoding="utf-8"))
+    manifest["gui_run_id"] = run_id
+    manifest["eval_only"] = True
+    manifest["play_episodes"] = 0
+    manifest["cpp_eval_episodes"] = cpp_eval_episodes
+    manifest["cpp_eval_variant_count"] = 4
+    manifest["talishar_eval_episodes"] = talishar_eval_episodes
+    manifest["final_eval_episodes"] = talishar_eval_episodes
+    candidates_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+    run = TrainingRun(run_id=run_id, out_dir=out_dir)
+    RUNS.add(run)
+
+    def _worker() -> None:
+        from fab_tui.runner import run_eval_sideboard_compare  # noqa: PLC0415
+
+        run.status = "running"
+        try:
+            rc = run_eval_sideboard_compare(
+                spec,
+                env,
+                starting_deck=starting_deck_path,
+                candidates_json=candidates_path,
+                cpp_eval_episodes=cpp_eval_episodes,
+                talishar_eval_episodes=talishar_eval_episodes,
+            )
+            run.exit_code = rc
+            run.status = "completed" if rc == 0 else "failed"
+        except Exception:
+            run.exit_code = 1
+            run.status = "failed"
+            raise
+        finally:
+            run.finished_at = datetime.now(timezone.utc).isoformat()
+            _write_dashboard_once(out_dir)
+
+    thread = threading.Thread(target=_worker, name=f"sideboard-eval-{run_id}", daemon=True)
+    run._thread = thread
+    thread.start()
+    return run
+
+
 def start_training(
     *,
     env: EnvironmentSettings,
@@ -1222,6 +1335,40 @@ def _status_from_disk(out_dir: Path, run_id: str) -> dict[str, Any]:
     }
 
 
+def _normalize_damage_breakdown(breakdown: dict[str, Any]) -> dict[str, Any]:
+    """Ensure per-card averages are present for results display."""
+    episodes = max(1, int(breakdown.get("episodes", 0) or 0))
+    normalized = dict(breakdown)
+    for key in ("cards_dealt", "cards_taken_from"):
+        rows = normalized.get(key)
+        if not isinstance(rows, list):
+            continue
+        normalized[key] = [
+            {
+                **row,
+                "avg_damage": round(
+                    float(
+                        row.get("avg_damage")
+                        if row.get("avg_damage") is not None
+                        else int(row.get("damage", 0) or 0) / episodes
+                    ),
+                    2,
+                ),
+            }
+            for row in rows
+            if isinstance(row, dict)
+        ]
+    training_root = REPO_ROOT / "scripts" / "training"
+    if str(training_root) not in sys.path:
+        sys.path.insert(0, str(training_root))
+    try:
+        from eval_damage_stats import _ensure_unattributed_damage_rows  # noqa: PLC0415
+
+        return _ensure_unattributed_damage_rows(normalized)
+    except Exception:
+        return normalized
+
+
 def _load_final_eval_damage_breakdown(out_dir: Path, candidate_id: str) -> dict[str, Any] | None:
     final_eval = out_dir / "candidates" / candidate_id / "final_eval" / "p1_final_eval.json"
     if not final_eval.is_file():
@@ -1231,18 +1378,58 @@ def _load_final_eval_damage_breakdown(out_dir: Path, candidate_id: str) -> dict[
     except (OSError, json.JSONDecodeError):
         return None
     breakdown = (payload.get("analysis") or {}).get("damage_breakdown")
-    return breakdown if isinstance(breakdown, dict) else None
+    if not isinstance(breakdown, dict):
+        return None
+    return _normalize_damage_breakdown(breakdown)
+
+
+_CPP_DAMAGE_VARIANTS = ("logic_vs_logic", "agent_vs_logic", "agent_vs_agent")
+
+
+def _load_cpp_variant_metrics(out_dir: Path, candidate_id: str, variant_key: str) -> dict[str, Any] | None:
+    path = out_dir / "candidates" / candidate_id / "cpp_eval" / f"{variant_key}.json"
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _enrich_cpp_eval_variants(row: dict[str, Any], out_dir: Path, candidate_id: str) -> None:
+    variants = row.get("cpp_eval_variants")
+    if not isinstance(variants, dict):
+        variants = {}
+        row["cpp_eval_variants"] = variants
+    for variant_key in _CPP_DAMAGE_VARIANTS:
+        variant = variants.get(variant_key)
+        if not isinstance(variant, dict):
+            loaded = _load_cpp_variant_metrics(out_dir, candidate_id, variant_key)
+            if loaded is None:
+                continue
+            variant = loaded
+            variants[variant_key] = variant
+        breakdown = variant.get("damage_breakdown")
+        if isinstance(breakdown, dict):
+            variant["damage_breakdown"] = _normalize_damage_breakdown(breakdown)
 
 
 def _enrich_results_damage_breakdown(data: dict[str, Any], out_dir: Path) -> None:
     for row in data.get("ranking") or []:
+        candidate_id = str(row.get("candidate_id") or "")
+        if candidate_id:
+            _enrich_cpp_eval_variants(row, out_dir, candidate_id)
+
         final_eval = row.get("final_eval")
         if not isinstance(final_eval, dict):
             final_eval = {}
             row["final_eval"] = final_eval
         if final_eval.get("damage_breakdown"):
+            final_eval["damage_breakdown"] = _normalize_damage_breakdown(
+                final_eval["damage_breakdown"]
+            )
             continue
-        candidate_id = str(row.get("candidate_id") or "")
         if not candidate_id:
             continue
         breakdown = _load_final_eval_damage_breakdown(out_dir, candidate_id)
@@ -1281,22 +1468,27 @@ def run_results(run_id: str) -> dict[str, Any] | None:
 
 
 def dashboard_path(run_id: str) -> Path | None:
+    """Return dashboard HTML path, regenerating from live eval files on each call."""
     run = RUNS.get(run_id)
     out_dir = run.out_dir if run else _resolve_run_dir(run_id)
     if out_dir is None:
         return None
-    html_path = out_dir / "sideboard_compare_dashboard.html"
-    if html_path.is_file():
-        return html_path
-    _write_dashboard_once(out_dir)
-    if html_path.is_file():
-        return html_path
+    active = run is not None and run.status == "running"
+    if not active:
+        active = not (out_dir / "sideboard_compare_results.json").is_file()
     try:
         from sideboard_compare_dashboard import write_sideboard_compare_dashboard  # noqa: PLC0415
 
-        return write_sideboard_compare_dashboard(out_dir, auto_refresh_seconds=5.0)
+        return write_sideboard_compare_dashboard(
+            out_dir,
+            auto_refresh_seconds=5.0 if active else None,
+        )
     except Exception:
-        return None
+        html_path = out_dir / "sideboard_compare_dashboard.html"
+        if html_path.is_file():
+            return html_path
+        _write_dashboard_once(out_dir)
+        return html_path if html_path.is_file() else None
 
 
 def save_deck_api(
@@ -1352,3 +1544,278 @@ def _sideboard_from_pool(card_pool: dict[str, int], game_deck: dict[str, int]) -
         if remaining > 0:
             sideboard[card_id] = remaining
     return sideboard
+
+
+@dataclass
+class LivePlaySession:
+    session_id: str
+    status: str = "starting"
+    frontend_url: str = ""
+    human_player_id: int = 1
+    human_deck_label: str = ""
+    matchup_summary: str = ""
+    coach_hints: list[dict[str, Any]] = field(default_factory=list)
+    coach_rollouts: int = 0
+    coach_cpp_ready: bool = False
+    your_turn: bool = False
+    prefer_chromium: bool = False
+    chromium_opened: bool = False
+    chromium_error: str = ""
+    record: dict[str, int] = field(default_factory=lambda: {"wins": 0, "losses": 0, "draws": 0, "timeouts": 0})
+    error: str = ""
+    started_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    finished_at: str | None = None
+    cancel_event: threading.Event = field(default_factory=threading.Event)
+    _thread: threading.Thread | None = field(default=None, repr=False)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "session_id": self.session_id,
+            "status": self.status,
+            "frontend_url": self.frontend_url,
+            "human_player_id": self.human_player_id,
+            "human_deck_label": self.human_deck_label,
+            "matchup_summary": self.matchup_summary,
+            "coach_hints": list(self.coach_hints),
+            "coach_rollouts": self.coach_rollouts,
+            "coach_cpp_ready": self.coach_cpp_ready,
+            "your_turn": self.your_turn,
+            "prefer_chromium": self.prefer_chromium,
+            "chromium_opened": self.chromium_opened,
+            "chromium_error": self.chromium_error,
+            "record": dict(self.record),
+            "error": self.error,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+            "status_url": f"/api/live-play/{self.session_id}/status",
+        }
+
+
+class LivePlayRegistry:
+    def __init__(self) -> None:
+        self._sessions: dict[str, LivePlaySession] = {}
+        self._active_id: str | None = None
+        self._lock = threading.Lock()
+
+    def get(self, session_id: str) -> LivePlaySession | None:
+        with self._lock:
+            return self._sessions.get(session_id)
+
+    def active(self) -> LivePlaySession | None:
+        with self._lock:
+            if self._active_id is None:
+                return None
+            session = self._sessions.get(self._active_id)
+            if session is None or session.status in {"finished", "failed", "cancelled"}:
+                self._active_id = None
+                return None
+            return session
+
+    def add(self, session: LivePlaySession) -> None:
+        with self._lock:
+            if self._active_id is not None:
+                active = self._sessions.get(self._active_id)
+                if active is not None and active.status in {"starting", "playing"}:
+                    raise RuntimeError("A live play session is already running")
+            self._sessions[session.session_id] = session
+            self._active_id = session.session_id
+
+    def clear_active_if_done(self, session_id: str) -> None:
+        with self._lock:
+            if self._active_id == session_id:
+                session = self._sessions.get(session_id)
+                if session is None or session.status in {"finished", "failed", "cancelled"}:
+                    self._active_id = None
+
+
+LIVE_PLAY = LivePlayRegistry()
+
+
+def get_unified_agent_status(game_format: str) -> dict[str, Any]:
+    return unified_agent_status(AGENT_CACHE_DIR, game_format)
+
+
+def live_play_status(session_id: str | None = None) -> dict[str, Any]:
+    session = LIVE_PLAY.get(session_id) if session_id else LIVE_PLAY.active()
+    if session is None:
+        return {"active": False}
+    return {"active": True, **session.to_dict()}
+
+
+def open_live_play_chromium(session_id: str | None = None) -> dict[str, Any]:
+    if str(SCRIPTS_EVAL) not in sys.path:
+        sys.path.insert(0, str(SCRIPTS_EVAL))
+
+    from talishar_live_play import open_frontend_in_chromium  # noqa: PLC0415
+
+    session = LIVE_PLAY.get(session_id) if session_id else LIVE_PLAY.active()
+    if session is None:
+        raise RuntimeError("No active live play session")
+    if not session.frontend_url:
+        raise RuntimeError("Game URL not ready yet — wait a moment and try again")
+    result = open_frontend_in_chromium(session.frontend_url)
+    session.chromium_opened = True
+    session.chromium_error = ""
+    return result
+
+
+def stop_live_play(session_id: str | None = None) -> dict[str, Any]:
+    session = LIVE_PLAY.get(session_id) if session_id else LIVE_PLAY.active()
+    if session is None:
+        return {"stopped": False, "error": "No active live play session"}
+    if session.status in {"finished", "failed", "cancelled"}:
+        return {"stopped": False, "status": session.status}
+    session.cancel_event.set()
+    return {"stopped": True, "session_id": session.session_id}
+
+
+def start_live_play(
+    env: EnvironmentSettings,
+    body: dict[str, Any],
+    *,
+    page_host: str | None = None,
+) -> dict[str, Any]:
+    if str(SCRIPTS_EVAL) not in sys.path:
+        sys.path.insert(0, str(SCRIPTS_EVAL))
+
+    from runtime_defaults import RUNTIME  # noqa: PLC0415
+    from talishar_live_play import (  # noqa: PLC0415
+        run_embedded_unified_live_play_session,
+        _verify_frontend_reachable,
+        _verify_talishar_reachable,
+    )
+
+    deck = {str(k): int(v) for k, v in (body.get("deck") or {}).items() if int(v) > 0}
+    if not deck:
+        raise ValueError("Import your deck before starting live play")
+
+    opponent_deck_stem = str(body.get("opponent_deck") or "").strip()
+    opponent_game_deck = body.get("opponent_game_deck")
+    if not opponent_deck_stem:
+        raise ValueError("Select an opponent before starting live play")
+    if not isinstance(opponent_game_deck, dict) or not opponent_game_deck:
+        raise ValueError("Opponent deck cards are missing")
+
+    game_format = str(body.get("game_format") or "silver_age")
+    cache_dir = Path(body.get("cache_dir") or AGENT_CACHE_DIR)
+    cache_format = unified_agent_cache_format(game_format)
+    weights_path = unified_agent_weights_path(cache_dir, game_format)
+    if not weights_path.is_file():
+        hint = (
+            f" (deck format {game_format!r} uses agent cache key {cache_format!r})"
+            if cache_format != game_format
+            else ""
+        )
+        raise FileNotFoundError(
+            f"No unified agent trained for {game_format!r}{hint}. "
+            f"Expected weights at {weights_path}"
+        )
+
+    _verify_talishar_reachable(env.talishar_url)
+
+    browser_fe_url = browser_talishar_fe_url(env.talishar_fe_url, page_host=page_host)
+    _verify_frontend_reachable(browser_fe_url)
+
+    sync_opponent_deck_api(
+        env,
+        opponent_deck=opponent_deck_stem,
+        game_deck={str(k): int(v) for k, v in opponent_game_deck.items() if int(v) > 0},
+        equipment_header=str(body.get("opponent_equipment_header") or ""),
+    )
+
+    player_label = str(body.get("deck_name") or body.get("name") or "Your deck")
+    opponent_label = str(body.get("opponent_label") or opponent_deck_stem)
+    human_deck = str(body.get("human_deck") or "opponent")
+    watch_only = human_deck == "watch"
+    opponent_policy = str(body.get("opponent_policy") or "agent").strip().lower()
+    if opponent_policy not in {"agent", "logic"}:
+        raise ValueError("opponent_policy must be 'agent' or 'logic'")
+    if watch_only:
+        opponent_policy = "agent"
+    enable_action_coach = bool(body.get("enable_action_coach", True)) and not watch_only
+    coach_rollouts = max(0, int(body.get("coach_rollouts_per_action", 0)))
+    max_steps = int(
+        body.get("max_steps")
+        or RUNTIME.meta.eval_max_steps
+        or RUNTIME.meta.max_play_steps
+        or 60
+    )
+
+    session_id = uuid.uuid4().hex[:12]
+    if watch_only:
+        human_label = "Watch agent"
+        human_pid = 0
+    else:
+        human_label = player_label if human_deck == "player" else opponent_label
+        human_pid = 1 if human_deck == "player" else 2
+    prefer_chromium = bool(body.get("prefer_chromium", True))
+    session = LivePlaySession(
+        session_id=session_id,
+        human_player_id=human_pid,
+        human_deck_label=human_label,
+        matchup_summary=f"{player_label} vs {opponent_label}",
+        coach_rollouts=coach_rollouts,
+        prefer_chromium=prefer_chromium,
+    )
+    LIVE_PLAY.add(session)
+
+    def _worker() -> None:
+        session.status = "playing"
+
+        def _on_hints(hints: list[dict[str, Any]]) -> None:
+            session.coach_hints = hints
+
+        def _on_your_turn(active: bool) -> None:
+            session.your_turn = active
+
+        def _on_frontend_url(url: str) -> None:
+            session.frontend_url = url
+            if session.prefer_chromium:
+                session.chromium_opened = True
+                session.chromium_error = ""
+
+        def _on_coach_ready(ready: bool) -> None:
+            session.coach_cpp_ready = ready
+
+        try:
+            summary = run_embedded_unified_live_play_session(
+                player_deck=deck,
+                opponent_asset_stem=opponent_deck_stem,
+                player_equipment_header=str(body.get("equipment_header") or ""),
+                game_format=game_format,
+                assets_path=env.assets_path,
+                cache_dir=cache_dir,
+                base_url=env.talishar_url,
+                fe_url=browser_fe_url,
+                human_deck=human_deck,
+                player_deck_label=player_label,
+                opponent_deck_label=opponent_label,
+                opponent_policy=opponent_policy,
+                max_steps=max_steps,
+                enable_action_coach=enable_action_coach,
+                coach_rollouts_per_action=coach_rollouts,
+                on_coach_hints=_on_hints if enable_action_coach else None,
+                on_your_turn=_on_your_turn,
+                on_frontend_url=_on_frontend_url,
+                on_coach_ready=_on_coach_ready,
+                cancel_event=session.cancel_event,
+                use_chromium_browser=prefer_chromium,
+            )
+            session.record = dict(summary.get("record") or session.record)
+            if summary.get("cancelled") or session.cancel_event.is_set():
+                session.status = "cancelled"
+            else:
+                session.status = "finished"
+        except Exception as exc:  # noqa: BLE001
+            session.status = "failed"
+            session.error = str(exc)
+        finally:
+            session.finished_at = datetime.now(timezone.utc).isoformat()
+            session.your_turn = False
+            session.coach_hints = []
+            LIVE_PLAY.clear_active_if_done(session_id)
+
+    thread = threading.Thread(target=_worker, name=f"live-play-{session_id}", daemon=True)
+    session._thread = thread
+    thread.start()
+    return session.to_dict()

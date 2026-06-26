@@ -1,0 +1,50 @@
+# Eval-only overlay — GUI + Talishar backend without Talishar-FE / Playwright.
+# Use: scripts/docker-setup.sh --eval  (or COMPOSE_FILE merge via docker-eval-compose.sh)
+name: fab-rl-bridge-eval
+
+services:
+  fab-bridge:
+    build:
+      dockerfile: docker/fab-bridge/Dockerfile.eval
+      args:
+        TORCH_CUDA: "0"
+    depends_on:
+      web-server:
+        condition: service_started
+
+  talishar-fe-clone:
+    profiles:
+      - full
+
+  talishar-fe:
+    profiles:
+      - full
+
+  setup-complete:
+    profiles:
+      - eval
+    volumes:
+      - ./docker/ready-message-eval.txt:/ready-message.txt:ro
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        for url in \
+          http://host.docker.internal:8080/ \
+          http://host.docker.internal:8765/; do
+          ok=0
+          for _ in $$(seq 1 120); do
+            if curl -fsS --max-time 2 "$$url" >/dev/null 2>&1; then
+              ok=1
+              break
+            fi
+            sleep 2
+          done
+          if [ "$$ok" -eq 0 ]; then
+            echo "[setup-complete] warning: $$url not reachable yet"
+          fi
+        done
+        cat /ready-message.txt
+    depends_on:
+      fab-bridge:
+        condition: service_started

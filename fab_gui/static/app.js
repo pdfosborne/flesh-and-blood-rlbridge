@@ -16,6 +16,11 @@ const state = {
   activeRun: null,
   pollTimer: null,
   lastResultsRanking: null,
+  livePlaySession: null,
+  livePlayPollTimer: null,
+  livePlayFrameUrl: "",
+  livePlayChromiumError: "",
+  unifiedAgentStatus: null,
 };
 
 const MIN_DECK_SIZES = {
@@ -54,6 +59,10 @@ function switchTab(name) {
   if (name === "results" && state.activeRun) loadResults(state.activeRun.run_id);
   if (name === "opponent") {
     updateOpponentSummary();
+  }
+  if (name === "liveplay") {
+    refreshLivePlayMatchup();
+    syncLivePlayModeControls();
   }
 }
 
@@ -1365,7 +1374,7 @@ async function setDeck(payload) {
   renderDeck();
   renderEquipment();
   renderEvalCandidates();
-  renderTrainReview();
+  await refreshUnifiedAgentStatus(state.deck.game_format);
   await maybeAutoGuideAndContinue();
 }
 
@@ -1863,14 +1872,24 @@ function saveForEvaluation() {
 
 document.getElementById("btn-save-eval").onclick = () => saveForEvaluation();
 
-["play-episodes", "final-eval-episodes"].forEach((id) => {
+["cpp-eval-episodes", "talishar-eval-episodes"].forEach((id) => {
   document.getElementById(id)?.addEventListener("input", () => renderTrainReview());
 });
+
+async function refreshUnifiedAgentStatus(gameFormat) {
+  const fmt = gameFormat || state.deck?.game_format || "silver_age";
+  try {
+    state.unifiedAgentStatus = await api(`/api/agents/status?format=${encodeURIComponent(fmt)}`);
+  } catch {
+    state.unifiedAgentStatus = { exists: false, format: fmt };
+  }
+  renderTrainReview();
+}
 
 function renderTrainReview() {
   const el = document.getElementById("train-review");
   if (!state.deck || !state.opponent) {
-    el.textContent = "Import your deck and select an opponent before training.";
+    el.textContent = "Import your deck and select an opponent before evaluation.";
     return;
   }
   const required = requiredDeckSize(state.deck.game_format);
@@ -1880,16 +1899,30 @@ function renderTrainReview() {
     state.opponent.source === "fabrary"
       ? `${state.opponent.label || state.opponent.opponent_deck} (FaBrary)`
       : state.opponent.opponent_deck;
+  const agent = state.unifiedAgentStatus;
+  let agentLine = "";
+  if (agent) {
+    if (agent.exists) {
+      const release = agent.release_id ? ` (${agent.release_id})` : "";
+      agentLine = `<div><strong>Unified agent:</strong> installed${escapeHtml(release)}</div>`;
+    } else {
+      const cacheFmt = agent.cache_format && agent.cache_format !== agent.format
+        ? ` (cache key ${agent.cache_format})`
+        : "";
+      agentLine = `<div><strong>Unified agent:</strong> <span style="color:var(--warn,#c90)">missing for ${escapeHtml(agent.format || state.deck.game_format)}${escapeHtml(cacheFmt)}</span> — run <code>fab-bridge agents sync</code></div>`;
+    }
+  }
   el.innerHTML = `
     <div><strong>Hero:</strong> ${state.deck.hero_id}</div>
     <div><strong>Opponent:</strong> ${state.opponent.opponent_hero_id} (${oppDisplay})</div>
     <div><strong>Baseline:</strong> ${state.deck.baseline_label || "Baseline"}</div>
     <div><strong>Lists:</strong> 1 baseline + ${state.evalCandidates.length} saved alternate(s)</div>
     <div><strong>Deck:</strong> ${count} / ${required} cards${deckOk ? "" : " — complete the deck in the editor"}</div>
-    <div><strong>Training:</strong> ${document.getElementById("play-episodes")?.value || "?"} play episodes, ${document.getElementById("final-eval-episodes")?.value || "?"} final eval games per list</div>`;
+    ${agentLine}
+    <div><strong>Evaluation:</strong> ${document.getElementById("cpp-eval-episodes")?.value || "?"} C++ games × 4 matchups, ${document.getElementById("talishar-eval-episodes")?.value || "?"} Talishar games per list</div>`;
 }
 
-document.getElementById("btn-start-training").onclick = async () => {
+document.getElementById("btn-start-evaluation").onclick = async () => {
   if (!state.deck || !state.opponent) return toast("Deck and opponent required", true);
   const required = requiredDeckSize(state.deck.game_format);
   const count = deckCardCount();
@@ -1901,7 +1934,14 @@ document.getElementById("btn-start-training").onclick = async () => {
   if (oppCount !== oppRequired) {
     return toast(`Opponent deck must be exactly ${oppRequired} cards (currently ${oppCount})`, true);
   }
-  const btn = document.getElementById("btn-start-training");
+  await refreshUnifiedAgentStatus(state.deck.game_format);
+  if (state.unifiedAgentStatus && !state.unifiedAgentStatus.exists) {
+    return toast(
+      `No unified agent for ${state.deck.game_format}. Run: fab-bridge agents sync`,
+      true,
+    );
+  }
+  const btn = document.getElementById("btn-start-evaluation");
   btn.disabled = true;
   try {
     const variants = state.evalCandidates.map(({ candidate_id, label, game_deck, swaps, equipment_header }) => ({
@@ -1911,7 +1951,7 @@ document.getElementById("btn-start-training").onclick = async () => {
       swaps,
       equipment_header: equipment_header || "",
     }));
-    const run = await api("/api/training/start", {
+    const run = await api("/api/evaluation/start", {
       method: "POST",
       body: JSON.stringify({
         session_id: crypto.randomUUID?.() || String(Date.now()),
@@ -1928,8 +1968,8 @@ document.getElementById("btn-start-training").onclick = async () => {
         opponent_game_deck: state.opponent.deck,
         opponent_equipment_header: state.opponent.equipment_header || state.opponent.opponent_hero_id || "",
         variants,
-        play_episodes: +document.getElementById("play-episodes").value,
-        final_eval_episodes: +document.getElementById("final-eval-episodes").value,
+        cpp_eval_episodes: +document.getElementById("cpp-eval-episodes").value,
+        talishar_eval_episodes: +document.getElementById("talishar-eval-episodes").value,
         max_parallel: 0,
         build_cpp_engine: true,
       }),
@@ -1938,7 +1978,7 @@ document.getElementById("btn-start-training").onclick = async () => {
     updateRunStatus(run);
     startPolling();
     switchTab("dashboard");
-    toast("Training started");
+    toast("Evaluation started");
   } catch (e) {
     toast(e.message, true);
   } finally {
@@ -1990,148 +2030,138 @@ function startPolling() {
   }, 5000);
 }
 
-let replayPollTimer = null;
-
-function replayPreviewMeta(status) {
-  if (status.status === "encoding") {
-    return `Building GIF from ${status.frames_saved || 0} frames…`;
-  }
-  if (status.frames_saved) {
-    return `Capturing frame ${status.frames_saved}…`;
-  }
-  return "Capturing Talishar FE replay (one full game)…";
-}
-
-function applyReplayPreview(status) {
-  const empty = document.getElementById("results-replay-empty");
-  const panel = document.getElementById("results-replay-panel");
-  const img = document.getElementById("results-replay-gif");
-  const meta = document.getElementById("results-replay-meta");
-  const btn = document.getElementById("btn-render-replay");
-  if (!empty || !panel || !img || !meta || !btn) return;
-
-  if (status.latest_frame_url) {
-    empty.hidden = true;
-    panel.hidden = false;
-    img.src = `${status.latest_frame_url}?t=${Date.now()}`;
-    meta.textContent = replayPreviewMeta(status);
-    btn.hidden = false;
-    btn.disabled = true;
-    btn.textContent = status.status === "encoding" ? "Building GIF…" : "Rendering replay…";
-  }
-}
-
-function renderReplayPanel(data, runId) {
-  const empty = document.getElementById("results-replay-empty");
-  const panel = document.getElementById("results-replay-panel");
-  const img = document.getElementById("results-replay-gif");
-  const meta = document.getElementById("results-replay-meta");
-  const btn = document.getElementById("btn-render-replay");
-  if (!empty || !panel || !img || !meta || !btn) return;
-
-  const replayUrl = data.replay_gif_url;
-  const replayStatus = data.replay_render_status || data.replay_render || {};
-  const isRunning = replayStatus.status === "running" || replayStatus.status === "encoding";
-
-  if (replayUrl) {
-    empty.hidden = true;
-    panel.hidden = false;
-    btn.hidden = true;
-    img.src = `${replayUrl}?t=${Date.now()}`;
-    const outcome = replayStatus.outcome || data.replay_render?.outcome;
-    const frames = replayStatus.frames_saved ?? data.replay_render?.frames_saved;
-    meta.textContent = [
-      outcome ? `Outcome: ${outcome}` : "",
-      frames != null ? `${frames} frames` : "",
-    ]
-      .filter(Boolean)
-      .join(" · ");
-    if (replayPollTimer) {
-      clearInterval(replayPollTimer);
-      replayPollTimer = null;
-    }
-    return;
-  }
-
-  btn.hidden = false;
-  btn.disabled = isRunning;
-  btn.textContent =
-    replayStatus.status === "encoding"
-      ? "Building GIF…"
-      : isRunning
-        ? "Rendering replay…"
-        : "Generate replay GIF";
-
-  if (isRunning) {
-    if (replayStatus.latest_frame_url) {
-      applyReplayPreview(replayStatus);
-    } else {
-      panel.hidden = true;
-      empty.hidden = false;
-      empty.textContent = replayPreviewMeta(replayStatus);
-    }
-    if (!replayPollTimer && runId) startReplayPolling(runId);
-    return;
-  }
-
-  panel.hidden = true;
-  if (replayStatus.status === "failed") {
-    empty.hidden = false;
-    empty.textContent = replayStatus.error || "Replay render failed. Ensure Talishar-FE is running.";
-    return;
-  }
-  empty.hidden = false;
-  empty.textContent =
-    "No replay GIF yet. Start Talishar-FE on port 5173, then generate a replay for the winning list.";
-}
-
-function startReplayPolling(runId) {
-  if (replayPollTimer) clearInterval(replayPollTimer);
-  const poll = async () => {
-    try {
-      const status = await api(`/api/runs/${runId}/replay-status`);
-      if (!status.ready && (status.status === "running" || status.status === "encoding")) {
-        applyReplayPreview(status);
-      }
-      if (status.ready) {
-        clearInterval(replayPollTimer);
-        replayPollTimer = null;
-        await loadResults(runId);
-        toast("Replay GIF ready");
-        return;
-      }
-      if (status.status === "failed") {
-        clearInterval(replayPollTimer);
-        replayPollTimer = null;
-        await loadResults(runId);
-        toast(status.error || "Replay render failed", true);
-      }
-    } catch {
-      /* ignore transient poll errors */
-    }
-  };
-  poll();
-  replayPollTimer = setInterval(poll, 1500);
-}
-
 function formatCardIdLabel(cardId) {
   return String(cardId || "?").replace(/_/g, " ");
 }
 
-function renderResultsDamageList(container, entries, emptyHint) {
-  if (!container) return;
-  if (!entries?.length) {
-    container.innerHTML = `<div class="hint">${escapeHtml(emptyHint)}</div>`;
+const CPP_DAMAGE_VARIANTS = [
+  { key: "logic_vs_logic", label: "C++ L/L" },
+  { key: "agent_vs_logic", label: "C++ A/L" },
+  { key: "agent_vs_agent", label: "C++ A/A" },
+];
+
+function damageBreakdownForRow(row, source) {
+  if (source === "talishar") {
+    return row.final_eval?.damage_breakdown ?? null;
+  }
+  return row.cpp_eval_variants?.[source]?.damage_breakdown ?? null;
+}
+
+function cardAvgMap(breakdown, field) {
+  const map = new Map();
+  if (!breakdown) return map;
+  for (const entry of breakdown[field] || []) {
+    const cardId = entry?.card_id;
+    if (!cardId) continue;
+    const avg =
+      entry.avg_damage ??
+      (breakdown.episodes
+        ? Number(entry.damage || 0) / Number(breakdown.episodes)
+        : Number(entry.damage || 0));
+    map.set(cardId, avg);
+  }
+  return map;
+}
+
+function rowHasAnyDamageBreakdown(row) {
+  if (row.final_eval?.damage_breakdown) return true;
+  return CPP_DAMAGE_VARIANTS.some(({ key }) => damageBreakdownForRow(row, key));
+}
+
+function formatDamageCell(value) {
+  if (value == null || Number.isNaN(value)) return "—";
+  return Number(value).toFixed(2);
+}
+
+function renderDamageComparisonHead(thead) {
+  if (!thead) return;
+  thead.innerHTML = `<tr><th>Card</th><th>Talishar</th>${CPP_DAMAGE_VARIANTS.map(
+    ({ label }) => `<th>${escapeHtml(label)}</th>`
+  ).join("")}</tr>`;
+}
+
+function renderDamageComparisonTable(tbody, row, field) {
+  if (!tbody) return;
+  const sources = ["talishar", ...CPP_DAMAGE_VARIANTS.map(({ key }) => key)];
+  const maps = Object.fromEntries(
+    sources.map((source) => [source, cardAvgMap(damageBreakdownForRow(row, source), field)])
+  );
+  const totals = new Map();
+  for (const source of sources) {
+    for (const [cardId, avg] of maps[source].entries()) {
+      totals.set(cardId, (totals.get(cardId) || 0) + avg);
+    }
+  }
+  const cards = [...totals.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 12)
+    .map(([cardId]) => cardId);
+  if (!cards.length) {
+    tbody.innerHTML = `<tr><td colspan="${sources.length + 1}" class="hint">No card-attributed damage recorded.</td></tr>`;
     return;
   }
-  container.innerHTML = entries
+  tbody.innerHTML = cards
     .map(
-      (row, index) => `<div class="results-damage-row">
-      <span class="results-damage-rank">${index + 1}</span>
-      <span class="results-damage-name" title="${escapeHtml(formatCardIdLabel(row.card_id))}">${escapeHtml(formatCardIdLabel(row.card_id))}</span>
-      <span class="results-damage-value">${row.damage}</span>
-    </div>`
+      (cardId) => `<tr>
+      <td title="${escapeHtml(formatCardIdLabel(cardId))}">${escapeHtml(formatCardIdLabel(cardId))}</td>
+      <td>${formatDamageCell(maps.talishar.get(cardId))}</td>
+      ${CPP_DAMAGE_VARIANTS.map(
+        ({ key }) => `<td>${formatDamageCell(maps[key].get(cardId))}</td>`
+      ).join("")}
+    </tr>`
     )
+    .join("");
+}
+
+function damageSummaryLine(label, breakdown) {
+  if (!breakdown) return null;
+  const episodes = breakdown.episodes ?? "?";
+  return `${label}: ${episodes} games · ${breakdown.avg_dealt_per_episode ?? "?"} dealt · ${breakdown.avg_taken_per_episode ?? "?"} taken`;
+}
+
+function variantMetrics(row, key) {
+  const variants = row.cpp_eval_variants;
+  if (variants?.[key]) return variants[key];
+  return null;
+}
+
+function agentWinRateLogicVsAgent(row) {
+  const metrics = variantMetrics(row, "logic_vs_agent");
+  if (!metrics) return null;
+  if (metrics.p2_win_rate != null) return metrics.p2_win_rate;
+  const total =
+    (metrics.p1_wins ?? 0) + (metrics.losses ?? 0) + (metrics.draws ?? 0) + (metrics.timeouts ?? 0);
+  if (total > 0) return (metrics.losses ?? 0) / total;
+  return null;
+}
+
+function renderResultsLogicSummary(ranking) {
+  const panel = document.getElementById("results-logic-summary");
+  const tbody = document.getElementById("results-logic-tbody");
+  if (!panel || !tbody) return;
+
+  const rows = (ranking || [])
+    .map((row) => {
+      const metrics = variantMetrics(row, "logic_vs_agent");
+      const agentWr = agentWinRateLogicVsAgent(row);
+      return { row, metrics, agentWr };
+    })
+    .filter((entry) => entry.metrics && entry.agentWr != null);
+
+  if (!rows.length) {
+    panel.hidden = true;
+    tbody.innerHTML = "";
+    return;
+  }
+
+  rows.sort((a, b) => b.agentWr - a.agentWr);
+  panel.hidden = false;
+  tbody.innerHTML = rows
+    .map(({ row, metrics, agentWr }) => {
+      const logicWr = metrics.p1_win_rate != null ? metrics.p1_win_rate : 1 - agentWr;
+      const record = `${metrics.p1_wins ?? 0} logic W · ${metrics.losses ?? 0} agent W · ${metrics.draws ?? 0} D`;
+      return `<tr><td>${escapeHtml(row.label || row.candidate_id)}</td><td>${(agentWr * 100).toFixed(1)}%</td><td>${(logicWr * 100).toFixed(1)}%</td><td>${record}</td></tr>`;
+    })
     .join("");
 }
 
@@ -2139,11 +2169,13 @@ function renderResultsDamagePanel(ranking, candidateId) {
   const panel = document.getElementById("results-damage-panel");
   const select = document.getElementById("results-damage-candidate");
   const summary = document.getElementById("results-damage-summary");
-  const dealtEl = document.getElementById("results-damage-dealt");
-  const takenEl = document.getElementById("results-damage-taken");
-  if (!panel || !select || !summary || !dealtEl || !takenEl) return;
+  const dealtHead = document.getElementById("results-damage-dealt-head");
+  const dealtBody = document.getElementById("results-damage-dealt");
+  const takenHead = document.getElementById("results-damage-taken-head");
+  const takenBody = document.getElementById("results-damage-taken");
+  if (!panel || !select || !summary || !dealtBody || !takenBody) return;
 
-  const withBreakdown = (ranking || []).filter((row) => row.final_eval?.damage_breakdown);
+  const withBreakdown = (ranking || []).filter((row) => rowHasAnyDamageBreakdown(row));
   if (!withBreakdown.length) {
     panel.hidden = true;
     select.innerHTML = "";
@@ -2151,6 +2183,9 @@ function renderResultsDamagePanel(ranking, candidateId) {
   }
 
   panel.hidden = false;
+  renderDamageComparisonHead(dealtHead);
+  renderDamageComparisonHead(takenHead);
+
   const selectedId = candidateId || select.value || withBreakdown[0].candidate_id;
   if (select.options.length !== withBreakdown.length) {
     select.innerHTML = withBreakdown
@@ -2163,17 +2198,26 @@ function renderResultsDamagePanel(ranking, candidateId) {
   select.value = selectedId;
 
   const row = withBreakdown.find((entry) => entry.candidate_id === selectedId) || withBreakdown[0];
-  const breakdown = row.final_eval.damage_breakdown;
-  summary.textContent =
-    `${row.label || row.candidate_id} · ${breakdown.episodes || "?"} eval games · ` +
-    `${breakdown.total_dealt ?? 0} dealt (${breakdown.avg_dealt_per_episode ?? "?"} avg) · ` +
-    `${breakdown.total_taken ?? 0} taken (${breakdown.avg_taken_per_episode ?? "?"} avg)`;
-  renderResultsDamageList(dealtEl, breakdown.cards_dealt, "No card-attributed damage dealt recorded.");
-  renderResultsDamageList(
-    takenEl,
-    breakdown.cards_taken_from,
-    "No card-attributed damage taken recorded."
-  );
+  const summaryParts = [
+    damageSummaryLine("Talishar", damageBreakdownForRow(row, "talishar")),
+    ...CPP_DAMAGE_VARIANTS.map(({ key, label }) =>
+      damageSummaryLine(label, damageBreakdownForRow(row, key))
+    ),
+  ].filter(Boolean);
+  summary.textContent = `${row.label || row.candidate_id} · ${summaryParts.join(" · ")}`;
+  renderDamageComparisonTable(dealtBody, row, "cards_dealt");
+  renderDamageComparisonTable(takenBody, row, "cards_taken_from");
+}
+
+function cppVariantPct(row, key) {
+  const variants = row.cpp_eval_variants;
+  const wr = variants?.[key]?.p1_win_rate;
+  if (wr != null) return `${(wr * 100).toFixed(1)}%`;
+  if (key === "agent_vs_agent") {
+    const fallback = row.cpp_eval_win_rate ?? row.play_win_rate;
+    if (fallback != null) return `${(fallback * 100).toFixed(1)}%`;
+  }
+  return "—";
 }
 
 async function loadResults(runId) {
@@ -2184,7 +2228,7 @@ async function loadResults(runId) {
     if (!data.complete) {
       empty.hidden = false;
       content.hidden = true;
-      empty.textContent = "Training still in progress…";
+      empty.textContent = "Evaluation still in progress…";
       return;
     }
     empty.hidden = true;
@@ -2193,43 +2237,330 @@ async function loadResults(runId) {
     state.lastResultsRanking = ranking;
     const winner = data.winner || {};
     document.getElementById("winner-banner").innerHTML = winner.candidate_id
-      ? `<strong>Winner:</strong> ${winner.candidate_id} — ${winner.label || ""} <span class="status-pill completed">final eval ${((winner.final_eval_win_rate || 0) * 100).toFixed(1)}%</span>`
+      ? `<strong>Winner:</strong> ${winner.candidate_id} — ${winner.label || ""} ` +
+        `<span class="status-pill completed">C++ A/A ${cppVariantPct(winner, "agent_vs_agent")}</span> ` +
+        `<span class="status-pill completed">Logic vs agent ${(() => {
+          const wr = agentWinRateLogicVsAgent(winner);
+          return wr != null ? `${(wr * 100).toFixed(1)}% agent` : "n/a";
+        })()}</span> ` +
+        `<span class="status-pill completed">Talishar ${((winner.final_eval_win_rate || 0) * 100).toFixed(1)}%</span>`
       : "";
     const tbody = document.getElementById("results-tbody");
     tbody.innerHTML = ranking
       .map((row, i) => {
-        const train = ((row.play_win_rate || 0) * 100).toFixed(1);
-        const final = row.final_eval_win_rate != null ? `${(row.final_eval_win_rate * 100).toFixed(1)}%` : "n/a";
+        const talishar = row.final_eval_win_rate != null ? `${(row.final_eval_win_rate * 100).toFixed(1)}%` : "n/a";
         const delta = row.final_eval_delta_vs_baseline != null
           ? `${(row.final_eval_delta_vs_baseline * 100).toFixed(1)}%`
           : "n/a";
         const winCls = i === 0 ? "winner" : "";
-        return `<tr class="${winCls}"><td>${i + 1}</td><td>${row.candidate_id}</td><td>${train}%</td><td>${final}</td><td>${delta}</td><td>${row.label || ""}</td></tr>`;
+        return `<tr class="${winCls}"><td>${i + 1}</td><td>${row.candidate_id}</td><td>${cppVariantPct(row, "logic_vs_logic")}</td><td>${cppVariantPct(row, "agent_vs_logic")}</td><td>${cppVariantPct(row, "logic_vs_agent")}</td><td>${cppVariantPct(row, "agent_vs_agent")}</td><td>${talishar}</td><td>${delta}</td><td>${row.label || ""}</td></tr>`;
       })
       .join("");
     document.getElementById("results-meta").textContent =
       `Output: ${data.out_dir} · Winning deck asset: ${data.winning_deck_asset || "n/a"}`;
+    renderResultsLogicSummary(ranking);
     renderResultsDamagePanel(ranking, winner.candidate_id);
-    renderReplayPanel(data, runId);
   } catch (e) {
     document.getElementById("results-empty").textContent = e.message;
   }
 }
 
-document.getElementById("btn-render-replay").onclick = async () => {
-  if (!state.activeRun) return toast("No completed training run", true);
-  const btn = document.getElementById("btn-render-replay");
-  btn.disabled = true;
-  btn.textContent = "Rendering replay…";
+function refreshLivePlayMatchup() {
+  const el = document.getElementById("liveplay-matchup");
+  if (!el) return;
+  if (!state.deck || !state.opponent) {
+    el.textContent = "Import your deck and select an opponent on tabs 1–2 before live play.";
+    return;
+  }
+  const playerName = state.deck.name || state.deck.hero_id || "Your deck";
+  const oppName = state.opponent.label || state.opponent.opponent_deck || "Opponent";
+  el.innerHTML = `<strong>Matchup:</strong> ${escapeHtml(playerName)} vs ${escapeHtml(oppName)}<br><strong>Format:</strong> ${escapeHtml(state.deck.game_format || "silver_age")}`;
+}
+
+function syncLivePlayModeControls() {
+  const mode = document.getElementById("liveplay-human-deck")?.value || "opponent";
+  const watchOnly = mode === "watch";
+  ["liveplay-coach-wrap", "liveplay-rollouts-wrap", "liveplay-opponent-policy-wrap"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.classList.toggle("is-disabled", watchOnly);
+    if (el) el.hidden = watchOnly;
+  });
+  const coachSidebar = document.querySelector(".liveplay-coach-sidebar");
+  if (coachSidebar) coachSidebar.classList.toggle("is-disabled", watchOnly);
+}
+
+function renderLivePlayCoach(hints, status = {}) {
+  const list = document.getElementById("liveplay-coach-hints");
+  const intro = document.querySelector(".liveplay-coach-intro");
+  if (intro) {
+    const rollouts = Number(status.coach_rollouts || 0);
+    if (rollouts > 0 && status.coach_cpp_ready === false) {
+      intro.textContent =
+        "Policy guidance on your turns. C++ win % unavailable — build a C++ engine for this matchup (see training pipeline).";
+    } else if (rollouts > 0) {
+      intro.textContent = `Policy guidance plus C++ win estimates (${rollouts} rollouts per action).`;
+    } else {
+      intro.textContent =
+        "Policy guidance on your turns. Set rollouts above 0 in Setup for C++ win estimates.";
+    }
+  }
+  if (!list) return;
+  if (!hints?.length) {
+    list.hidden = true;
+    list.innerHTML = "";
+    return;
+  }
+  list.hidden = false;
+  list.innerHTML = hints
+    .map((hint) => {
+      const policy =
+        hint.policyPct != null ? `${Math.round(Number(hint.policyPct) * 100)}% policy` : "";
+      const win = hint.winPct != null ? `${Math.round(Number(hint.winPct) * 100)}% win` : "";
+      const scores = [policy, win].filter(Boolean).join(" · ");
+      const cls = hint.isBest ? "best" : "";
+      const star = hint.isBest ? " ★" : "";
+      return `<li class="${cls}">${escapeHtml(hint.label || "Action")}${star}${
+        scores ? `<div class="liveplay-coach-scores">${escapeHtml(scores)}</div>` : ""
+      }</li>`;
+    })
+    .join("");
+}
+
+function isLoopbackHost(hostname) {
+  const h = (hostname || "").toLowerCase();
+  return h === "localhost" || h === "::1" || h === "0.0.0.0" || h.startsWith("127.");
+}
+
+function normalizeTalisharFeUrl(url) {
+  if (!url) return "";
+  const pageHost = window.location.hostname || "127.0.0.1";
+  const browserBase = (
+    state.config?.talishar_fe_browser_url ||
+    state.config?.talishar_fe_url ||
+    `http://${isLoopbackHost(pageHost) ? "localhost" : pageHost}:5173`
+  ).replace(/\/$/, "");
   try {
-    await api(`/api/runs/${state.activeRun.run_id}/render-replay`, { method: "POST", body: "{}" });
-    startReplayPolling(state.activeRun.run_id);
-    await loadResults(state.activeRun.run_id);
-    toast("Replay render started — this may take a minute");
+    const parsed = new URL(url, browserBase);
+    const base = new URL(browserBase);
+    // Use the server-mapped FE host (loopback-safe); do not rewrite to 127.0.0.1.
+    parsed.protocol = base.protocol;
+    parsed.hostname = base.hostname;
+    if (base.port) {
+      parsed.port = base.port;
+    }
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}
+
+function applyLivePlayStatus(status) {
+  const frame = document.getElementById("liveplay-frame");
+  const frameEmpty = document.getElementById("liveplay-frame-empty");
+  const fallback = document.getElementById("liveplay-fallback");
+  const fallbackLink = document.getElementById("liveplay-fallback-link");
+  const chromiumBanner = document.getElementById("liveplay-chromium-banner");
+  const chromiumBtn = document.getElementById("btn-liveplay-chromium");
+  const statusEl = document.getElementById("liveplay-status");
+  const recordEl = document.getElementById("liveplay-record");
+  const turnBanner = document.getElementById("liveplay-turn-banner");
+  const startBtn = document.getElementById("btn-liveplay-start");
+  const stopBtn = document.getElementById("btn-liveplay-stop");
+  const preferChromium =
+    document.getElementById("liveplay-prefer-chromium")?.checked ??
+    status?.prefer_chromium ??
+    true;
+
+  if (!status?.active) {
+    statusEl.textContent = "idle";
+    statusEl.className = "status-pill pending";
+    if (startBtn) startBtn.disabled = !(state.deck && state.opponent);
+    if (stopBtn) stopBtn.disabled = true;
+    if (turnBanner) turnBanner.hidden = true;
+    if (chromiumBanner) {
+      chromiumBanner.hidden = false;
+      chromiumBanner.textContent =
+        "Talishar board opens in Chromium when you start a game. Coach hints stay in this sidebar.";
+    }
+    if (fallback) fallback.hidden = true;
+    if (chromiumBtn) chromiumBtn.disabled = true;
+    if (frame) frame.hidden = true;
+    if (frameEmpty) frameEmpty.hidden = true;
+    state.livePlayFrameUrl = "";
+    state.livePlayChromiumError = "";
+    return;
+  }
+
+  const sessionStatus = status.status || "starting";
+  statusEl.textContent = sessionStatus;
+  statusEl.className = `status-pill ${sessionStatus === "playing" ? "running" : sessionStatus}`;
+
+  const rec = status.record || {};
+  if (recordEl) {
+    recordEl.textContent = `Record: ${rec.wins || 0}W ${rec.losses || 0}L ${rec.draws || 0}D`;
+  }
+
+  const boardUrl = normalizeTalisharFeUrl(status.frontend_url || "");
+  const chromiumMode = preferChromium || Boolean(status.prefer_chromium || status.chromium_opened);
+
+  if (chromiumBanner) {
+    chromiumBanner.hidden = false;
+    if (chromiumMode) {
+      chromiumBanner.textContent = status.chromium_opened
+        ? "Playing in Chromium — use that window for clicks. Re-open below if you closed it."
+        : "Opening Chromium board…";
+    } else {
+      chromiumBanner.textContent =
+        "Experimental in-page embed (often blank with local Talishar-FE). Prefer Chromium board in Setup.";
+    }
+  }
+
+  if (boardUrl && frame) {
+    if (!chromiumMode) {
+      if (state.livePlayFrameUrl !== boardUrl) {
+        state.livePlayFrameUrl = boardUrl;
+        frame.src = boardUrl;
+      }
+      frame.hidden = false;
+      if (frameEmpty) frameEmpty.hidden = true;
+    } else {
+      frame.hidden = true;
+      if (frameEmpty) frameEmpty.hidden = true;
+    }
+    if (fallback) fallback.hidden = false;
+    if (fallbackLink) fallbackLink.href = boardUrl;
+    if (chromiumBtn) chromiumBtn.disabled = !boardUrl;
+  } else if (sessionStatus === "starting") {
+    if (frameEmpty) {
+      frameEmpty.hidden = false;
+      frameEmpty.textContent = chromiumMode
+        ? "Starting game — opening Chromium board…"
+        : "Starting game — loading Talishar board…";
+    }
+    if (frame) frame.hidden = true;
+    if (fallback) fallback.hidden = true;
+    if (chromiumBtn) chromiumBtn.disabled = true;
+  }
+
+  if (status.chromium_error && status.chromium_error !== state.livePlayChromiumError) {
+    state.livePlayChromiumError = status.chromium_error;
+    toast(status.chromium_error, true);
+  }
+
+  if (turnBanner) turnBanner.hidden = !status.your_turn;
+  renderLivePlayCoach(status.coach_hints || [], status);
+
+  const running = sessionStatus === "starting" || sessionStatus === "playing";
+  if (startBtn) startBtn.disabled = running;
+  if (stopBtn) stopBtn.disabled = !running;
+}
+
+async function openLivePlayChromium() {
+  const btn = document.getElementById("btn-liveplay-chromium");
+  if (btn) btn.disabled = true;
+  try {
+    const sessionId = state.livePlaySession?.session_id;
+    await api("/api/live-play/open-chromium", {
+      method: "POST",
+      body: JSON.stringify({ session_id: sessionId }),
+    });
+    toast("Re-opening Talishar in Chromium…");
+    if (state.livePlaySession?.session_id) {
+      const status = await api(`/api/live-play/${state.livePlaySession.session_id}/status`);
+      applyLivePlayStatus({ active: true, ...status });
+    }
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function stopLivePlayPolling() {
+  if (state.livePlayPollTimer) {
+    clearInterval(state.livePlayPollTimer);
+    state.livePlayPollTimer = null;
+  }
+}
+
+function startLivePlayPolling(sessionId) {
+  stopLivePlayPolling();
+  const poll = async () => {
+    try {
+      const status = await api(`/api/live-play/${sessionId}/status`);
+      applyLivePlayStatus({ active: true, ...status });
+      if (!["starting", "playing"].includes(status.status)) {
+        stopLivePlayPolling();
+        state.livePlaySession = null;
+        if (status.status === "finished") toast("Game finished");
+        else if (status.status === "cancelled") toast("Game stopped");
+        else if (status.status === "failed") toast(status.error || "Live play failed", true);
+      }
+    } catch (e) {
+      stopLivePlayPolling();
+      toast(e.message, true);
+    }
+  };
+  poll();
+  state.livePlayPollTimer = setInterval(poll, 400);
+}
+
+document.getElementById("btn-liveplay-start").onclick = async () => {
+  if (!state.deck) return toast("Import your deck first", true);
+  if (!state.opponent) return toast("Select an opponent first", true);
+  const btn = document.getElementById("btn-liveplay-start");
+  const mode = document.getElementById("liveplay-human-deck").value;
+  const watchOnly = mode === "watch";
+  btn.disabled = true;
+  try {
+    const payload = await api("/api/live-play/start", {
+      method: "POST",
+      body: JSON.stringify({
+        name: state.deck.name,
+        deck_name: state.deck.name,
+        hero_id: state.deck.hero_id,
+        game_format: state.deck.game_format,
+        equipment_header: state.deck.equipment_header,
+        deck: state.deck.deck,
+        card_pool: state.deck.card_pool,
+        opponent_hero_id: state.opponent.opponent_hero_id,
+        opponent_deck: state.opponent.opponent_deck,
+        opponent_game_deck: state.opponent.deck,
+        opponent_label: state.opponent.label || state.opponent.opponent_deck,
+        opponent_equipment_header:
+          state.opponent.equipment_header || state.opponent.opponent_hero_id || "",
+        human_deck: mode,
+        opponent_policy: watchOnly
+          ? "agent"
+          : document.getElementById("liveplay-opponent-policy")?.value || "agent",
+        enable_action_coach: !watchOnly && document.getElementById("liveplay-enable-coach").checked,
+        coach_rollouts_per_action: Math.max(0, +document.getElementById("liveplay-rollouts").value || 0),
+        prefer_chromium: document.getElementById("liveplay-prefer-chromium")?.checked || false,
+      }),
+    });
+    state.livePlaySession = payload;
+    startLivePlayPolling(payload.session_id);
+    applyLivePlayStatus({ active: true, ...payload });
+    toast("Live play started — use the board below");
   } catch (e) {
     toast(e.message, true);
     btn.disabled = false;
-    btn.textContent = "Generate replay GIF";
+  }
+};
+
+document.getElementById("btn-liveplay-stop").onclick = async () => {
+  const stopBtn = document.getElementById("btn-liveplay-stop");
+  stopBtn.disabled = true;
+  try {
+    const sessionId = state.livePlaySession?.session_id;
+    await api("/api/live-play/stop", {
+      method: "POST",
+      body: JSON.stringify({ session_id: sessionId || "" }),
+    });
+    toast("Stopping game…");
+  } catch (e) {
+    toast(e.message, true);
+    stopBtn.disabled = false;
   }
 };
 
@@ -2246,7 +2577,30 @@ async function init() {
   await loadPrecons();
   await loadSavedDecks();
   await loadSavedOpponents();
+  await refreshUnifiedAgentStatus("silver_age");
   if (state.opponent) doOpponentCardSearch("");
+  refreshLivePlayMatchup();
+  const livePlayMode = document.getElementById("liveplay-human-deck");
+  if (livePlayMode) {
+    livePlayMode.addEventListener("change", syncLivePlayModeControls);
+    syncLivePlayModeControls();
+  }
+  const livePlayFrame = document.getElementById("liveplay-frame");
+  if (livePlayFrame) {
+    livePlayFrame.addEventListener("error", () => {
+      const frameEmpty = document.getElementById("liveplay-frame-empty");
+      if (frameEmpty) {
+        frameEmpty.hidden = false;
+        frameEmpty.textContent =
+          "Talishar board failed to load in the iframe. Try Open in Chromium below.";
+      }
+      toast("Talishar board failed to embed — try Open in Chromium", true);
+    });
+  }
+  const chromiumBtn = document.getElementById("btn-liveplay-chromium");
+  if (chromiumBtn) {
+    chromiumBtn.addEventListener("click", openLivePlayChromium);
+  }
 }
 
 init();

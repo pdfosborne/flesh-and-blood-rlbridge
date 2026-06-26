@@ -88,7 +88,12 @@ from .frontend_action_overlay import (
     overlay_hints_payload,
     playwright_update_overlay_script,
 )
-from .fast_observation import fast_observation_payload, fast_observation_vector
+from .deck_context import load_episode_context
+from .player_observation import (
+    PLAYER_OBS_SCHEMA_VERSION,
+    player_observation_payload,
+    player_observation_vector,
+)
 from .legal_action_filter import filter_legal_actions
 from .talishar_default_policy import (
     choose_talishar_action_index,
@@ -132,6 +137,8 @@ _DEFAULT_RENDER_WIDTH = 1920
 _DEFAULT_RENDER_HEIGHT = 1080
 _TRUNCATION_PENALTY = -0.1  # negative reward for hitting max_turns without a winner
 _STEP_PENALTY = -0.001  # small per-step penalty to encourage faster game completion
+_HTTP_REQUEST_RETRIES = 6
+_HTTP_RETRY_BASE_SLEEP_S = 0.5
 _DISABLE_CARD_HOVER_STORAGE_KEY = "talishar-disable-card-hover"
 
 _PLAYWRIGHT_GDPR_INIT_SCRIPT = (
@@ -334,6 +341,8 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         self._multi_select_inputs: list[str] = []
         self._pending_chk_inputs: Optional[list[str]] = None
         self._last_observation_vec: Optional[np.ndarray] = None
+        self._p1_episode_context: Optional[Any] = None
+        self._p2_episode_context: Optional[Any] = None
 
         # Persistent Playwright worker thread for rgb_array rendering
         self._pw_page: Any = None
@@ -450,6 +459,18 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                 not terminated and self._steps >= self._max_turns
             )
         return result
+
+    def fast_logic_policy_action_index(self) -> int:
+        if not self._using_cpp or not hasattr(self._cpp_env, "logic_policy_action_index"):
+            raise RuntimeError(
+                "fast_logic_policy_action_index requires a C++ engine with fast training support"
+            )
+        return int(
+            self._cpp_env.logic_policy_action_index(  # type: ignore[union-attr]
+                max_pitch_value=self._block_max_pitch_value,
+                min_resource_cost=self._block_min_resource_cost,
+            )
+        )
 
     def _tracker_state_snapshot(
         self,
@@ -576,27 +597,44 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         """Build a requests.Session with connection pooling, keep-alive, and retry."""
         session = requests.Session()
         retry = Retry(
-            total=3,
-            backoff_factor=0.3,
+            total=2,
+            connect=2,
+            read=2,
+            backoff_factor=0.4,
             status_forcelist=(500, 502, 503, 504),
             allowed_methods={"GET", "POST"},
             raise_on_status=False,
         )
         adapter = HTTPAdapter(
             pool_connections=2,
-            pool_maxsize=8,
+            pool_maxsize=4,
             max_retries=retry,
         )
         session.mount("http://",  adapter)
         session.mount("https://", adapter)
-        session.headers.update({"User-Agent": "TalisharRLEnv/1.0"})
+        session.headers.update({
+            "User-Agent": "TalisharRLEnv/1.0",
+            "Connection": "close",
+        })
         return session
+
+    def _reset_http_session(self) -> None:
+        """Drop pooled connections after a transport failure."""
+        try:
+            self._session.close()
+        except Exception:
+            pass
+        self._session = self._make_session()
+
+    def _http_retry_sleep(self, attempt: int) -> None:
+        delay = min(8.0, _HTTP_RETRY_BASE_SLEEP_S * (2 ** attempt))
+        time.sleep(delay)
 
     def _http_get(
         self,
         path: str,
         params: dict[str, str],
-        _retries: int = 3,
+        _retries: int = _HTTP_REQUEST_RETRIES,
         *,
         allow_empty_body: bool = False,
     ) -> dict[str, Any]:
@@ -605,7 +643,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         for attempt in range(_retries):
             try:
                 if attempt > 0:
-                    time.sleep(0.3 * (2 ** attempt))
+                    self._http_retry_sleep(attempt - 1)
                 resp = self._session.get(
                     url, params=params, timeout=self._request_timeout
                 )
@@ -628,15 +666,22 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                 ) from None
             except requests.RequestException as exc:
                 last_exc = exc
+                if attempt < _retries - 1:
+                    self._reset_http_session()
         raise TalisharConnectionError(f"GET {url} failed: {last_exc}") from last_exc
 
-    def _http_post_json(self, path: str, payload: dict[str, Any], _retries: int = 3) -> dict[str, Any]:
+    def _http_post_json(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        _retries: int = _HTTP_REQUEST_RETRIES,
+    ) -> dict[str, Any]:
         url = self._base_url + path
         last_exc: Exception = RuntimeError("no attempts")
         for attempt in range(_retries):
             try:
                 if attempt > 0:
-                    time.sleep(0.3 * (2 ** attempt))
+                    self._http_retry_sleep(attempt - 1)
                 resp = self._session.post(
                     url, json=payload, timeout=self._request_timeout
                 )
@@ -653,6 +698,8 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                 ) from None
             except requests.RequestException as exc:
                 last_exc = exc
+                if attempt < _retries - 1:
+                    self._reset_http_session()
         raise TalisharConnectionError(f"POST {url} failed: {last_exc}") from last_exc
 
     # ── Game lifecycle ────────────────────────────────────────────────────────
@@ -860,6 +907,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         poll_interval: float = 0.3,
         max_wait_s: float = 3600.0,
         on_waiting: Optional[Any] = None,
+        cancel_event: Optional[Any] = None,
     ) -> str:
         """Block until *player_id* yields priority via the Talishar frontend.
 
@@ -868,10 +916,16 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
 
         *on_waiting* is called on each poll while *player_id* still has
         priority.  Use it to refresh frontend coaching overlays.
+
+        If *cancel_event* is set and becomes set, raises ``LivePlayCancelled``.
         """
+        from flesh_and_blood_rlbridge.live_play_cancel import LivePlayCancelled
+
         deadline = time.time() + max_wait_s
         last_overlay_poll = 0.0
         while time.time() < deadline:
+            if cancel_event is not None and cancel_event.is_set():
+                raise LivePlayCancelled("Live play session cancelled")
             for pid in (1, 2):
                 probe = self._fetch_state(player_id=pid, last_update=0)
                 if self._is_game_over(probe):
@@ -1372,6 +1426,40 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             return ordered
         return legal_actions
 
+    def _refresh_episode_contexts(self, *, first_player: int = 1) -> None:
+        opp = self._opponent_deck_name or self._local_deck_name or "Ira"
+        local = self._local_deck_name or "Ira"
+        fp = 2 if int(first_player) == 2 else 1
+        self._p1_episode_context = load_episode_context(
+            self_deck_name=local,
+            opponent_deck_name=opp,
+            game_format=self._format,
+            first_player=fp,
+        )
+        self._p2_episode_context = load_episode_context(
+            self_deck_name=opp,
+            opponent_deck_name=local,
+            game_format=self._format,
+            first_player=fp,
+        )
+
+    def _episode_context_for_acting_player(self, state: dict[str, Any]) -> Any:
+        ctx = (
+            self._p1_episode_context
+            if self._acting_player_id == 1
+            else self._p2_episode_context
+        )
+        if ctx is None:
+            self._refresh_episode_contexts(
+                first_player=_dp_to_int(state.get("firstPlayer"), 1),
+            )
+            ctx = (
+                self._p1_episode_context
+                if self._acting_player_id == 1
+                else self._p2_episode_context
+            )
+        return ctx
+
     def _encode_observation(
         self,
         state: dict[str, Any],
@@ -1388,7 +1476,6 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             for c in state.get("playerHand", [])
             if isinstance(c, dict)
         ]
-        fast_legal_actions = self._fast_compatible_legal_actions(state, legal_actions)
         obs: dict[str, Any] = {
             "actingPlayerID": self._acting_player_id,
             "selfPlay": self._self_play,
@@ -1405,13 +1492,16 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             "playerHand": hand,
             "legalActions": [
                 {"index": i, "label": a["label"], "zone": a["zone"]}
-                for i, a in enumerate(fast_legal_actions)
+                for i, a in enumerate(legal_actions)
             ],
-            "legal_actions": fast_legal_actions,
+            "legal_actions": legal_actions,
+            "obsSchemaVersion": PLAYER_OBS_SCHEMA_VERSION,
         }
-        self._last_observation_vec = fast_observation_vector(
+        episode_ctx = self._episode_context_for_acting_player(state)
+        self._last_observation_vec = player_observation_vector(
             obs,
-            fast_legal_actions,
+            legal_actions,
+            episode_context=episode_ctx,
             acting_player_id=self._acting_player_id,
             p1_health=(
                 _dp_to_int(obs["playerHealth"])
@@ -1424,8 +1514,9 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                 else _dp_to_int(obs["playerHealth"])
             ),
             game_over=self._is_game_over(state),
+            raw_talishar_state=state,
         )
-        obs["fastObservationVec"] = fast_observation_payload(self._last_observation_vec)
+        obs["observationVec"] = player_observation_payload(self._last_observation_vec)
         return json.dumps(obs, separators=(",", ":"))
 
     def _render_player_id(self) -> int:
@@ -1754,6 +1845,9 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         self._reset_repeat_tracking(
             turn_no=int(self._last_state.get("turnNo", 0) or 0),
             acting_player_id=self._acting_player_id,
+        )
+        self._refresh_episode_contexts(
+            first_player=_dp_to_int(self._last_state.get("firstPlayer"), 1),
         )
         self._initialized = True
         self._opened_frontend_url = None
