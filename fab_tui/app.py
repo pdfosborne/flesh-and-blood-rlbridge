@@ -20,6 +20,7 @@ from fab_tui.config import (
     MatchupSimSpec,
     RUNTIME,
     SideboardCompareSpec,
+    UnifiedRandomMatchupSpec,
     slugify,
 )
 from fab_tui.decks import (
@@ -56,6 +57,7 @@ from fab_tui.runner import (
     run_live_talishar_play,
     run_matchup_simulation,
     run_sideboard_compare,
+    run_unified_random_matchups,
 )
 from fab_tui.card_search import CARDS_DB_PATH, clear_card_db_caches
 
@@ -82,6 +84,13 @@ def _player_deck_choices() -> dict[str, tuple[str, str]]:
 EVAL_MODE_CHOICES = {
     "1": ("eval", "Run evaluation (win-rate episodes + GIF replay)"),
     "2": ("render", "Render optimal policy only (GIF replay, no eval episodes)"),
+}
+
+UNIFIED_FORMAT_CHOICES = {
+    "1": ("silver_age", "Silver Age"),
+    "2": ("classic_constructed", "Classic Constructed (CC)"),
+    "3": ("blitz", "Blitz"),
+    "4": ("upf", "Ultimate Pit Fight"),
 }
 
 
@@ -549,6 +558,80 @@ def wizard_simulate_decks(env: EnvironmentSettings) -> None:
     _pause()
 
 
+def wizard_unified_random_matchups(env: EnvironmentSettings) -> None:
+    _header(
+        "Unified random matchups",
+        "Train the shared unified agent on random fabrary deck pairs",
+    )
+
+    console.print("\n[bold]Format[/bold]")
+    for key, (_, label) in UNIFIED_FORMAT_CHOICES.items():
+        console.print(f"  [{key}] {label}")
+    fmt_choice = Prompt.ask(
+        "Select format",
+        choices=list(UNIFIED_FORMAT_CHOICES.keys()),
+        default="1",
+    )
+    game_format = UNIFIED_FORMAT_CHOICES[fmt_choice][0]  # type: ignore[assignment]
+
+    spec = UnifiedRandomMatchupSpec(game_format=game_format)  # type: ignore[arg-type]
+    spec.matchups = IntPrompt.ask("Random matchups this run", default=spec.matchups)
+    spec.episodes = IntPrompt.ask("Episodes per matchup", default=spec.episodes)
+    spec.max_steps = IntPrompt.ask("Max steps per episode", default=spec.max_steps)
+    spec.warmup_episodes = IntPrompt.ask("Warmup episodes", default=spec.warmup_episodes)
+    spec.checkpoint_interval_pct = IntPrompt.ask(
+        "Checkpoint interval (% of episodes)",
+        default=int(spec.checkpoint_interval_pct),
+    )
+    spec.checkpoint_eval_episodes = IntPrompt.ask(
+        "Eval games per checkpoint",
+        default=spec.checkpoint_eval_episodes,
+    )
+    spec.workers = IntPrompt.ask("Parallel workers", default=spec.workers)
+    spec.skip_converged = Confirm.ask(
+        "Skip already-converged deck pairs in cache?",
+        default=spec.skip_converged,
+    )
+    spec.build_cpp_engine = Confirm.ask(
+        "Build/use C++ engine if needed?",
+        default=spec.build_cpp_engine,
+    )
+    if Confirm.ask("Set a random seed?", default=False):
+        spec.seed = IntPrompt.ask("Seed", default=0)
+
+    out_dir = spec.resolved_out_dir()
+    table = Table(title="Review", box=box.ROUNDED)
+    table.add_column("Setting", style="cyan")
+    table.add_column("Value")
+    for key, value in [
+        ("Format", spec.game_format),
+        ("Matchups", str(spec.matchups)),
+        ("Episodes / matchup", str(spec.episodes)),
+        ("Max steps", str(spec.max_steps)),
+        ("Warmup episodes", str(spec.warmup_episodes)),
+        ("Checkpoint interval", f"{spec.checkpoint_interval_pct:g}%"),
+        ("Checkpoint eval games", str(spec.checkpoint_eval_episodes)),
+        ("Workers", str(spec.workers)),
+        ("C++ engine", "build if needed" if spec.build_cpp_engine else "HTTP fallback"),
+        ("Skip converged", str(spec.skip_converged)),
+        ("Seed", str(spec.seed) if spec.seed is not None else "random"),
+        ("Output", str(out_dir)),
+    ]:
+        table.add_row(key, value)
+    console.print(table)
+
+    if not Confirm.ask("\nStart unified random matchup training?", default=True):
+        return
+
+    console.print("\n[bold]Running unified random matchup training…[/bold]\n")
+    rc = run_unified_random_matchups(spec, env)
+    _header("Unified random matchups finished", f"Exit code {rc}")
+    summary_path = out_dir / "training_summary.json"
+    if summary_path.is_file():
+        console.print(f"[dim]Summary: {summary_path}[/dim]")
+    _pause()
+
+
 def _show_results_summary(results_path: Path) -> None:
     if not results_path.is_file():
         console.print(f"[yellow]No results at {results_path}[/yellow]")
@@ -917,7 +1000,8 @@ def run_tui() -> int:
         "3": ("Evaluate checkpoints", wizard_evaluate),
         "4": ("Evaluate trained agent", wizard_evaluate_trained_agent),
         "5": ("Real-time Talishar play", wizard_realtime_talishar_play),
-        "6": ("Settings", wizard_settings),
+        "6": ("Train unified agent with random matchups", wizard_unified_random_matchups),
+        "7": ("Settings", wizard_settings),
         "q": ("Quit", None),
     }
 

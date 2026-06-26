@@ -69,6 +69,8 @@ class MatchupTrainingRecord:
     p1_win_rate: Optional[float] = None
     p2_win_rate: Optional[float] = None
     checkpoint_eval_win_rate: Optional[float] = None
+    first_checkpoint_win_rate: Optional[float] = None
+    final_checkpoint_win_rate: Optional[float] = None
     trained_at: str = ""
     matchup_name: str = ""
     training_stats: Optional[dict[str, Any]] = None
@@ -98,6 +100,16 @@ class MatchupTrainingRecord:
             checkpoint_eval_win_rate=(
                 float(data["checkpoint_eval_win_rate"])
                 if data.get("checkpoint_eval_win_rate") is not None
+                else None
+            ),
+            first_checkpoint_win_rate=(
+                float(data["first_checkpoint_win_rate"])
+                if data.get("first_checkpoint_win_rate") is not None
+                else None
+            ),
+            final_checkpoint_win_rate=(
+                float(data["final_checkpoint_win_rate"])
+                if data.get("final_checkpoint_win_rate") is not None
                 else None
             ),
             trained_at=str(data.get("trained_at", "")),
@@ -341,9 +353,14 @@ class AgentCacheStore:
             "p1_win_rate",
             "p2_win_rate",
             "checkpoint_eval_win_rate",
+            "first_checkpoint_win_rate",
+            "final_checkpoint_win_rate",
         ):
             if summary.get(key) is not None:
                 entry[key] = summary[key]
+        final_ckpt = summary.get("final_checkpoint_win_rate")
+        if final_ckpt is not None and entry.get("checkpoint_eval_win_rate") is None:
+            entry["checkpoint_eval_win_rate"] = final_ckpt
         stats = summary.get("training_stats")
         if isinstance(stats, dict) and stats:
             entry["training_stats"] = stats

@@ -10,7 +10,9 @@ _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO / "scripts" / "eval"))
 
 from eval_phase3_checkpoint import (  # noqa: E402
+    CheckpointBundle,
     _latest_checkpoint,
+    _resolve_eval_dashboard_dir,
     is_sideboard_compare_dir,
     list_sideboard_candidate_ids,
 )
@@ -214,3 +216,40 @@ def test_label_for_results_dir_uses_deck_state_active_decks(tmp_path: Path) -> N
         encoding="utf-8",
     )
     assert _label_for_results_dir(run_dir) == "briar vs briar"
+
+
+def test_resolve_eval_dashboard_dir_at_results_root(tmp_path: Path) -> None:
+    results_dir = tmp_path / "briar_vs_briar"
+    ckpt_dir = (
+        results_dir
+        / "parallel_seeds"
+        / "seed_0"
+        / "p3_a-vs-b"
+        / "p1"
+        / "episode_000095"
+    )
+    ckpt_dir.mkdir(parents=True)
+    bundle = CheckpointBundle(
+        role="p1",
+        checkpoint_dir=ckpt_dir,
+        metadata={},
+        weights_path=ckpt_dir / "weights" / "agent_weights.json",
+    )
+    eval_dir = _resolve_eval_dashboard_dir(results_dir, bundle)
+    assert eval_dir == results_dir / "eval_dashboard"
+
+
+def test_resolve_eval_dashboard_dir_sideboard_candidate(tmp_path: Path) -> None:
+    results_dir = tmp_path / "sideboard_run"
+    candidate_dir = results_dir / "candidates" / "swap_01"
+    ckpt_dir = candidate_dir / "parallel_seeds" / "seed_0" / "p3_a-vs-b" / "p1" / "episode_000050"
+    ckpt_dir.mkdir(parents=True)
+    (results_dir / "candidates_manifest.json").write_text("{}", encoding="utf-8")
+    bundle = CheckpointBundle(
+        role="p1",
+        checkpoint_dir=ckpt_dir,
+        metadata={},
+        weights_path=ckpt_dir / "weights" / "agent_weights.json",
+    )
+    eval_dir = _resolve_eval_dashboard_dir(results_dir, bundle, candidate_id="swap_01")
+    assert eval_dir == candidate_dir / "eval_dashboard"

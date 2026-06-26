@@ -218,6 +218,31 @@ def is_sideboard_compare_dir(path: Path) -> bool:
     )
 
 
+def _resolve_eval_dashboard_dir(
+    results_dir: Path,
+    p1_bundle: CheckpointBundle,
+    *,
+    candidate_id: Optional[str] = None,
+) -> Path:
+    """Return where eval dashboard artifacts (GIF, JSON, parity) are written.
+
+    Artifacts live at the root of the results run folder — e.g.
+    ``results/matchup_sims/briar_vs_briar/eval_dashboard`` — not beside
+    individual checkpoint episode directories.
+    """
+    root = results_dir.resolve()
+    if is_sideboard_compare_dir(root):
+        if candidate_id:
+            return root / _SIDEBOARD_CANDIDATES_DIR / candidate_id / "eval_dashboard"
+        ckpt = p1_bundle.checkpoint_dir.resolve()
+        parts = ckpt.parts
+        if _SIDEBOARD_CANDIDATES_DIR in parts:
+            idx = parts.index(_SIDEBOARD_CANDIDATES_DIR)
+            if idx + 1 < len(parts):
+                return root / _SIDEBOARD_CANDIDATES_DIR / parts[idx + 1] / "eval_dashboard"
+    return root / "eval_dashboard"
+
+
 def _iter_checkpoint_metadata_paths(
     results_dir: Path,
     role: str,
@@ -1061,8 +1086,10 @@ def _run_eval_episode_batch(
 
 def _evaluate_checkpoint(
     *,
+    results_dir: Path,
     p1_bundle: CheckpointBundle,
     p2_bundle: Optional[CheckpointBundle],
+    candidate_id: Optional[str] = None,
     episodes: int,
     max_steps: int,
     base_url: str,
@@ -1116,7 +1143,11 @@ def _evaluate_checkpoint(
     if not p1_cards:
         raise RuntimeError(f"Checkpoint missing P1 deck spec: {p1_bundle.checkpoint_dir}")
 
-    eval_dir = p1_bundle.checkpoint_dir.parent / "eval_dashboard"
+    eval_dir = _resolve_eval_dashboard_dir(
+        results_dir,
+        p1_bundle,
+        candidate_id=candidate_id,
+    )
     eval_dir.mkdir(parents=True, exist_ok=True)
 
     print("  Writing deck files...", flush=True)
@@ -1562,8 +1593,10 @@ def main() -> None:
         elif p1_bundle.checkpoint_dir != last_seen:
             p2_bundle = _paired_checkpoint(p1_bundle, "p2")
             _evaluate_checkpoint(
+                results_dir=results_dir,
                 p1_bundle=p1_bundle,
                 p2_bundle=p2_bundle,
+                candidate_id=args.candidate_id,
                 episodes=args.episodes,
                 max_steps=args.max_steps,
                 base_url=args.talishar_url,

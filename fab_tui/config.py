@@ -275,3 +275,36 @@ class SideboardCompareSpec:
         path = RESULTS_ROOT / "sideboard_compare" / f"{hero}_vs_{opp}_{stamp}"
         self.out_dir = str(path)
         return path
+
+
+@dataclass
+class UnifiedRandomMatchupSpec:
+    """Random fabrary deck matchups for unified agent training."""
+
+    game_format: PipelineFormat = "silver_age"
+    matchups: int = 3
+    episodes: int = RUNTIME.dual_matchup.episodes
+    max_steps: int = RUNTIME.dual_matchup.max_steps
+    warmup_episodes: int = RUNTIME.play.warmup_episodes
+    checkpoint_interval_pct: float = DEFAULT_CHECKPOINT_INTERVAL_PCT
+    checkpoint_eval_episodes: int = DEFAULT_CHECKPOINT_EVAL_EPISODES
+    workers: int = RUNTIME.dual_matchup.workers
+    skip_converged: bool = True
+    build_cpp_engine: bool = True
+    require_cpp_engine: bool = True
+    seed: int | None = None
+    cache_dir: str | None = None
+    out_dir: str | None = None
+
+    def resolved_out_dir(self) -> Path:
+        if self.out_dir:
+            return Path(self.out_dir)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = (
+            RESULTS_ROOT
+            / "unified_random_matchups"
+            / normalize_pipeline_format(self.game_format)
+            / stamp
+        )
+        self.out_dir = str(path)
+        return path

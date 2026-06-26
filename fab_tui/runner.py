@@ -25,6 +25,7 @@ from fab_tui.config import (
     LivePlaySpec,
     MatchupSimSpec,
     SideboardCompareSpec,
+    UnifiedRandomMatchupSpec,
     normalize_pipeline_format,
 )
 
@@ -582,3 +583,51 @@ def run_sideboard_compare(
             from runscripts._common import stop_background_process  # noqa: PLC0415
 
             stop_background_process(dashboard_proc)
+
+
+def run_unified_random_matchups(
+    spec: UnifiedRandomMatchupSpec,
+    env: EnvironmentSettings,
+) -> int:
+    """Train unified agent on random fabrary deck matchups."""
+    env.apply_to_environ()
+    out_dir = spec.resolved_out_dir()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cache_dir = spec.cache_dir or str(RESULTS_ROOT / "agent_cache")
+
+    cmd = [
+        _python(),
+        str(SCRIPTS_TRAINING / "train_unified_random_matchups.py"),
+        "--format",
+        normalize_pipeline_format(spec.game_format),
+        "--matchups",
+        str(spec.matchups),
+        "--episodes",
+        str(spec.episodes),
+        "--max-steps",
+        str(spec.max_steps),
+        "--warmup-episodes",
+        str(spec.warmup_episodes),
+        "--checkpoint-interval-pct",
+        str(spec.checkpoint_interval_pct),
+        "--checkpoint-eval-episodes",
+        str(spec.checkpoint_eval_episodes),
+        "--workers",
+        str(spec.workers),
+        "--run-dir",
+        str(out_dir),
+        "--cache-dir",
+        cache_dir,
+        "--talishar-url",
+        env.talishar_url,
+    ]
+    if spec.seed is not None:
+        cmd.extend(["--seed", str(spec.seed)])
+    if spec.skip_converged:
+        cmd.append("--skip-converged")
+    else:
+        cmd.append("--no-skip-converged")
+    if not spec.build_cpp_engine:
+        cmd.append("--no-build-cpp-engine")
+        cmd.append("--no-require-cpp-engine")
+    return run_streaming(cmd)

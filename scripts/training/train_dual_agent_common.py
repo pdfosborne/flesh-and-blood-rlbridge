@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import subprocess
@@ -82,6 +83,8 @@ from runtime_defaults import (  # noqa: E402
     DEFAULT_PPO_ROLLOUT_BATCH,
     DEFAULT_WARMUP_BASELINE_EVAL_EPISODES,
     DEFAULT_WARMUP_EPISODES,
+    DEFAULT_CHECKPOINT_INTERVAL_PCT,
+    DEFAULT_CHECKPOINT_EVAL_EPISODES,
 )
 from parallel_seed_training import (  # noqa: E402
     run_parallel_seed_jobs,
@@ -93,6 +96,26 @@ FORMAT_DECK_RULES: dict[str, dict[str, int]] = {
     "silver_age": {"max_copies": 2, "deck_size": 40},
     "classic_constructed": {"max_copies": 3, "deck_size": 60},
 }
+
+FABRARY_ENV_SUFFIX: dict[str, str] = {
+    "silver_age": "SA",
+    "classic_constructed": "CC",
+    "blitz": "BL",
+    "upf": "UPF",
+}
+
+
+def resolve_checkpoint_interval(
+    n_episodes: int,
+    *,
+    checkpoint_interval: Optional[int] = None,
+    checkpoint_interval_pct: float = DEFAULT_CHECKPOINT_INTERVAL_PCT,
+) -> int:
+    """Resolve checkpoint cadence — fixed interval or a % of total episodes."""
+    if checkpoint_interval is not None and checkpoint_interval > 0:
+        return int(checkpoint_interval)
+    pct = max(0.1, float(checkpoint_interval_pct))
+    return max(1, int(math.ceil(n_episodes * pct / 100.0)))
 
 _TORCH_COMPUTE_DTYPE = torch.float32 if _TORCH_AVAILABLE else None
 
@@ -182,7 +205,7 @@ def make_env(
         enable_combat_tracker=enable_combat_tracker,
     )
     if require_fast_training is None:
-        require_fast_training = use_cpp_engine
+        require_fast_training = use_cpp_engine or bool(matchup.cpp_engine_dir)
     if (
         require_fast_training
         and getattr(env, "_using_cpp", False)
@@ -1754,7 +1777,11 @@ def train_agents_from_both_perspectives_parallel(
 
     # ── bootstrap: infer dims and init nets on a throw-away env ──────────────
     probe_env = make_env(matchup, base_url=base_url, game_format=game_format, max_turns=max_steps)
-    _announce_training_backend(probe_env, label="parallel training bootstrap")
+    _announce_training_backend(
+        probe_env,
+        label="parallel training bootstrap",
+        require_fast_training=bool(matchup.cpp_engine_dir),
+    )
     if _env_supports_fast_training(probe_env):
         probe_state = probe_env.fast_reset(seed=seed)
         n_actions_p1 = n_actions_p2 = int(probe_env.fast_action_capacity())
@@ -2113,6 +2140,7 @@ def train_agents_from_both_perspectives(
     p1_deck: str = "",
     p2_deck: str = "",
     suppress_train_progress: bool = False,
+    after_episode: Optional[Callable[[int], None]] = None,
 ) -> tuple[list[float], list[float], dict[str, Any]]:
     p1_policy = p1_tiers[0]
     p2_policy = p2_tiers[0]
@@ -2301,6 +2329,11 @@ def train_agents_from_both_perspectives(
             p1_ep_rewards.append(cur_p1_r)
             p2_ep_rewards.append(cur_p2_r)
             completed += 1
+            if after_episode is not None:
+                try:
+                    after_episode(completed)
+                except Exception as exc:
+                    print(f"  [train] after_episode callback failed ({exc!r})")
             if completed == warmup_episodes and not warmup_bc_applied:
                 print(
                     f"  [warmup] behavioural-cloning update from "
@@ -2484,6 +2517,104 @@ def save_agent(
     }
 
 
+class _CheckpointEvalTracker:
+    """Periodic head-to-head eval snapshots during unified self-play training."""
+
+    def __init__(
+        self,
+        *,
+        matchup: Matchup,
+        base_url: str,
+        game_format: str,
+        max_steps: int,
+        n_episodes: int,
+        checkpoint_interval: int,
+        checkpoint_eval_episodes: int,
+        p1_policy: PPOAgent,
+        p2_policy: PPOAgent,
+        seed: Optional[int],
+        out_dir: Path,
+    ) -> None:
+        self.matchup = matchup
+        self.base_url = base_url
+        self.game_format = game_format
+        self.max_steps = max_steps
+        self.n_episodes = n_episodes
+        self.checkpoint_interval = max(1, int(checkpoint_interval))
+        self.checkpoint_eval_episodes = int(checkpoint_eval_episodes)
+        self.p1_policy = p1_policy
+        self.p2_policy = p2_policy
+        self.seed = seed
+        self.out_dir = out_dir
+        self.log: list[dict[str, Any]] = []
+        self.first_win_rate: Optional[float] = None
+        self.final_win_rate: Optional[float] = None
+        self._episodes_done = 0
+
+    def on_episode(self, _local_completed: int = 0) -> None:
+        self._episodes_done += 1
+        self._maybe_eval(self._episodes_done)
+
+    def on_parallel_progress(
+        self,
+        completed: int,
+        *_args: Any,
+    ) -> None:
+        self._maybe_eval(int(completed))
+
+    def _maybe_eval(self, completed: int) -> None:
+        if self.checkpoint_eval_episodes <= 0:
+            return
+        if completed % self.checkpoint_interval != 0 and completed != self.n_episodes:
+            return
+        from agent_cache import clone_agent_weights  # noqa: PLC0415
+
+        eval_p1 = PPOAgent()
+        eval_p2 = PPOAgent()
+        clone_agent_weights(self.p1_policy, eval_p1)
+        clone_agent_weights(self.p2_policy, eval_p2)
+        metrics = _evaluate_policy_pair(
+            self.matchup,
+            base_url=self.base_url,
+            game_format=self.game_format,
+            max_steps=self.max_steps,
+            p1_policy=eval_p1,
+            p2_policy=eval_p2,
+            episodes=self.checkpoint_eval_episodes,
+            seed=(self.seed + completed) if self.seed is not None else None,
+        )
+        record = {
+            "episodes_completed": completed,
+            "target_episodes": self.n_episodes,
+            "eval_episodes": self.checkpoint_eval_episodes,
+            **metrics,
+        }
+        self.log.append(record)
+        wr = float(metrics["p1_win_rate"])
+        if self.first_win_rate is None:
+            self.first_win_rate = wr
+        self.final_win_rate = wr
+        ckpt_dir = (
+            self.out_dir
+            / self.matchup.name
+            / "checkpoint_eval"
+            / f"episode_{completed:06d}"
+        )
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        (ckpt_dir / "checkpoint_eval.json").write_text(
+            json.dumps(record, indent=2),
+            encoding="utf-8",
+        )
+        history_path = self.out_dir / "checkpoint_eval_history.json"
+        history_path.write_text(json.dumps(self.log, indent=2), encoding="utf-8")
+        print(
+            f"  Checkpoint eval @ ep {completed}: "
+            f"P1 win%={wr:.1%} "
+            f"({metrics['p1_wins']}W/{metrics['p2_wins']}L/{metrics['draws']}D "
+            f"over {self.checkpoint_eval_episodes} games)"
+        )
+
+
 def _evaluate_policy_pair(
     matchup: Matchup,
     *,
@@ -2587,6 +2718,8 @@ def _train_matchup_parallel_seeds(
     show_frontend: bool,
     frontend_url: Optional[str],
     n_workers: int,
+    build_cpp_engine: bool = True,
+    require_cpp_engine: bool = False,
 ) -> dict:
     workers_per_seed = workers_per_parallel_seed(n_workers, parallel_seeds)
     if workers_per_seed != n_workers:
@@ -2611,6 +2744,8 @@ def _train_matchup_parallel_seeds(
         parallel_seeds=1,
         _skip_cache_converge=True,
         _force_train=True,
+        build_cpp_engine=build_cpp_engine,
+        require_cpp_engine=require_cpp_engine,
     )
 
     def _run_one_seed(
@@ -2757,10 +2892,22 @@ def train_matchup(
     frontend_url: Optional[str] = None,
     n_workers: int = 1,
     parallel_seeds: int = 1,
+    checkpoint_interval_pct: float = DEFAULT_CHECKPOINT_INTERVAL_PCT,
+    checkpoint_interval: Optional[int] = None,
+    checkpoint_eval_episodes: int = DEFAULT_CHECKPOINT_EVAL_EPISODES,
+    build_cpp_engine: bool = True,
+    require_cpp_engine: bool = False,
     _seed_run_capture: Optional[dict[str, Any]] = None,
     _skip_cache_converge: bool = False,
     _force_train: bool = False,
 ) -> dict:
+    ensure_matchup_cpp_engine(
+        matchup,
+        base_url=base_url,
+        build=build_cpp_engine,
+        require=require_cpp_engine,
+    )
+
     if parallel_seeds > 1 and _seed_run_capture is None:
         return _train_matchup_parallel_seeds(
             matchup,
@@ -2778,6 +2925,8 @@ def train_matchup(
             show_frontend=show_frontend,
             frontend_url=frontend_url,
             n_workers=n_workers,
+            build_cpp_engine=build_cpp_engine,
+            require_cpp_engine=require_cpp_engine,
         )
     from agent_cache import AgentCacheStore, talishar_asset_deck_fingerprint
     print(f"\n{'=' * 60}")
@@ -2791,6 +2940,9 @@ def train_matchup(
     if show_frontend:
         print("  Live state image rendering: enabled (no browser tabs)")
     print(f"{'=' * 60}")
+
+    if matchup.cpp_engine_dir:
+        print(f"  C++ engine : {matchup.cpp_engine_dir}")
 
     if cache_store is None:
         cache_store = AgentCacheStore(
@@ -2919,6 +3071,31 @@ def train_matchup(
         live_state_image_path.parent.mkdir(parents=True, exist_ok=True)
         print(f"  Live state image path → {live_state_image_path}")
 
+    ckpt_tracker: Optional[_CheckpointEvalTracker] = None
+    effective_ckpt_interval = resolve_checkpoint_interval(
+        n_episodes,
+        checkpoint_interval=checkpoint_interval,
+        checkpoint_interval_pct=checkpoint_interval_pct,
+    )
+    if checkpoint_eval_episodes > 0:
+        ckpt_tracker = _CheckpointEvalTracker(
+            matchup=matchup,
+            base_url=base_url,
+            game_format=game_format,
+            max_steps=max_steps,
+            n_episodes=n_episodes,
+            checkpoint_interval=effective_ckpt_interval,
+            checkpoint_eval_episodes=checkpoint_eval_episodes,
+            p1_policy=p1_bundle.policy,
+            p2_policy=p2_bundle.policy,
+            seed=seed,
+            out_dir=out_dir,
+        )
+        print(
+            f"  Checkpoint eval: every {effective_ckpt_interval} episode(s), "
+            f"{checkpoint_eval_episodes} eval game(s) per checkpoint"
+        )
+
     # ── parallel path ─────────────────────────────────────────────────────────
     if n_workers > 1:
         print(f"  [parallel] Using {n_workers} worker game sessions for training")
@@ -2935,6 +3112,9 @@ def train_matchup(
             n_workers=n_workers,
             live_state_image_path=live_state_image_path,
             episode_cache=episode_cache,
+            on_episodes_progress=(
+                ckpt_tracker.on_parallel_progress if ckpt_tracker is not None else None
+            ),
         )
         p1_rewards.extend(rem_p1)
         p2_rewards.extend(rem_p2)
@@ -3008,6 +3188,7 @@ def train_matchup(
                 episode_cache=episode_cache,
                 p1_deck=matchup.p1_deck,
                 p2_deck=matchup.p2_deck,
+                after_episode=ckpt_tracker.on_episode if ckpt_tracker is not None else None,
             )
             p1_rewards.extend(warm_p1)
             p2_rewards.extend(warm_p2)
@@ -3060,6 +3241,7 @@ def train_matchup(
                 episode_cache=episode_cache,
                 p1_deck=matchup.p1_deck,
                 p2_deck=matchup.p2_deck,
+                after_episode=ckpt_tracker.on_episode if ckpt_tracker is not None else None,
             )
             p1_rewards.extend(rem_p1)
             p2_rewards.extend(rem_p2)
@@ -3078,6 +3260,10 @@ def train_matchup(
     p1_wr = float(np.mean([1.0 if r > 0 else 0.0 for r in p1_rewards])) if p1_rewards else None
     p2_wr = float(np.mean([1.0 if r > 0 else 0.0 for r in p2_rewards])) if p2_rewards else None
 
+    training_stats = dict(overall_stats)
+    if ckpt_tracker is not None and ckpt_tracker.log:
+        training_stats["checkpoint_eval_history"] = ckpt_tracker.log
+
     cache_store.persist(
         unified_bundle.policy,
         episodes_delta=len(p1_rewards),
@@ -3092,7 +3278,16 @@ def train_matchup(
                 "target_episodes": n_episodes,
                 "p1_win_rate": p1_wr,
                 "p2_win_rate": p2_wr,
-                "training_stats": overall_stats,
+                "first_checkpoint_win_rate": ckpt_tracker.first_win_rate
+                if ckpt_tracker is not None
+                else None,
+                "final_checkpoint_win_rate": ckpt_tracker.final_win_rate
+                if ckpt_tracker is not None
+                else None,
+                "checkpoint_eval_win_rate": ckpt_tracker.final_win_rate
+                if ckpt_tracker is not None
+                else None,
+                "training_stats": training_stats,
             }
             if len(p1_rewards) >= n_episodes and not _skip_cache_converge
             else None
@@ -3201,6 +3396,12 @@ def run_matchup_training(
     frontend_url: Optional[str] = None,
     n_workers: int = 1,
     parallel_seeds: int = 1,
+    checkpoint_interval_pct: float = DEFAULT_CHECKPOINT_INTERVAL_PCT,
+    checkpoint_interval: Optional[int] = None,
+    checkpoint_eval_episodes: int = DEFAULT_CHECKPOINT_EVAL_EPISODES,
+    skip_converged: bool = True,
+    build_cpp_engine: bool = True,
+    require_cpp_engine: bool = False,
 ) -> tuple[list[dict], list[str]]:
     from agent_cache import AgentCacheStore
 
@@ -3215,6 +3416,9 @@ def run_matchup_training(
     failed: list[str] = []
     for matchup in matchups:
         try:
+            train_kwargs: dict[str, Any] = {}
+            if not skip_converged:
+                train_kwargs["_force_train"] = True
             meta = train_matchup(
                 matchup,
                 base_url=base_url,
@@ -3231,6 +3435,12 @@ def run_matchup_training(
                 frontend_url=frontend_url,
                 n_workers=n_workers,
                 parallel_seeds=parallel_seeds,
+                checkpoint_interval_pct=checkpoint_interval_pct,
+                checkpoint_interval=checkpoint_interval,
+                checkpoint_eval_episodes=checkpoint_eval_episodes,
+                build_cpp_engine=build_cpp_engine,
+                require_cpp_engine=require_cpp_engine,
+                **train_kwargs,
             )
             summary.append(meta)
         except Exception as exc:
@@ -3248,6 +3458,37 @@ def talishar_assets_path() -> Path:
             str(REPO_ROOT / "Talishar" / "Assets"),
         )
     )
+
+
+def ensure_matchup_cpp_engine(
+    matchup: Matchup,
+    *,
+    base_url: str,
+    build: bool = True,
+    require: bool = False,
+) -> Optional[str]:
+    """Discover or build the C++ engine for *matchup* and attach it to the matchup."""
+    if matchup.cpp_engine_dir:
+        return matchup.cpp_engine_dir
+
+    from cpp_engine_matchup import ensure_cpp_engine_for_matchup  # noqa: PLC0415
+
+    cpp_dir = ensure_cpp_engine_for_matchup(
+        matchup.p1_deck,
+        matchup.p2_deck,
+        assets_path=str(talishar_assets_path()),
+        talishar_url=base_url,
+        build=build,
+    )
+    if cpp_dir:
+        matchup.cpp_engine_dir = cpp_dir
+        return cpp_dir
+    if require:
+        raise RuntimeError(
+            f"C++ engine required but unavailable for "
+            f"{matchup.p1_deck} vs {matchup.p2_deck}"
+        )
+    return None
 
 
 def load_fabrary_decks() -> list[dict]:
@@ -3385,6 +3626,88 @@ def build_fabrary_matchups(
 
 def hero_slug(hero_id: str) -> str:
     return hero_id.removeprefix("hero_").replace("_", "-")
+
+
+def build_fabrary_matchup(
+    slug1: str,
+    stem1: str,
+    entry1: dict,
+    slug2: str,
+    stem2: str,
+    entry2: dict,
+    format_name: str,
+) -> Matchup:
+    return Matchup(
+        name=f"{slug1}-vs-{slug2}",
+        p1_deck=stem1,
+        p2_deck=stem2,
+        description=(
+            f"{entry1.get('name', slug1)} (P1) vs "
+            f"{entry2.get('name', slug2)} (P2) — unified self-play"
+        ),
+        tags=[slug1, slug2, format_name],
+        p1_hero=hero_slug(str(entry1.get("hero_id", slug1))),
+        p2_hero=hero_slug(str(entry2.get("hero_id", slug2))),
+    )
+
+
+def sample_random_fabrary_matchups(
+    decks: list[tuple[str, str, dict]],
+    count: int,
+    rng: Any,
+    format_name: str,
+    *,
+    unique_pairs: bool = True,
+) -> list[Matchup]:
+    """Sample random deck-vs-deck matchups from a fabrary deck pool."""
+    if len(decks) < 2:
+        raise ValueError("need at least two decks to sample matchups")
+    if count <= 0:
+        return []
+
+    matchups: list[Matchup] = []
+    seen: set[tuple[str, str]] = set()
+    attempts = 0
+    max_attempts = max(count * 30, 30)
+    indices = list(range(len(decks)))
+
+    while len(matchups) < count and attempts < max_attempts:
+        attempts += 1
+        i, j = rng.sample(indices, 2)
+        slug1, stem1, entry1 = decks[i]
+        slug2, stem2, entry2 = decks[j]
+        if stem1 == stem2:
+            continue
+        pair_key = (min(stem1, stem2), max(stem1, stem2))
+        if unique_pairs and pair_key in seen:
+            continue
+        seen.add(pair_key)
+        if rng.random() < 0.5:
+            slug1, stem1, entry1, slug2, stem2, entry2 = (
+                slug2,
+                stem2,
+                entry2,
+                slug1,
+                stem1,
+                entry1,
+            )
+        matchups.append(
+            build_fabrary_matchup(
+                slug1,
+                stem1,
+                entry1,
+                slug2,
+                stem2,
+                entry2,
+                format_name,
+            )
+        )
+    if len(matchups) < count:
+        raise RuntimeError(
+            f"could only sample {len(matchups)} unique matchup(s) from "
+            f"{len(decks)} decks (requested {count})"
+        )
+    return matchups
 
 
 def build_fabrary_eval_env_ids(
