@@ -5,6 +5,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# shellcheck source=scripts/docker-gpu-compose.sh
+source "$ROOT/scripts/docker-gpu-compose.sh"
+fab_docker_gpu_compose_init
+
 SERVICE=fab-bridge
 
 if docker compose ps "$SERVICE" --status running -q 2>/dev/null | grep -q .; then

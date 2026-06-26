@@ -1,0 +1,10 @@
+# Optional overlay — merged only when scripts/docker-gpu-detect.* finds a usable GPU.
+# Applied automatically by scripts/docker-setup.* and bin/fab-* wrappers.
+services:
+  fab-bridge:
+    build:
+      args:
+        TORCH_CUDA: "1"
+    gpus: all
+    environment:
+      FAB_TORCH_CUDA: "1"

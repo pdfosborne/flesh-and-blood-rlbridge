@@ -1,10 +1,15 @@
-# Flesh and Blood rlbridge
+# Flesh and Blood rlbridge 
+Reinforcement learning simulation for [Flesh and Blood](https://fabtcg.com/) TCG, built on [Talishar](https://talishar.net/) as the game engine.
 
-Reinforcement-learning simulation for [Flesh and Blood](https://fabtcg.com/) TCG, built on [Talishar](https://talishar.net/) as the game engine.
-
-![FrontEnd-with-AgentGuide](./fab_tui/_images/fab-FE-demo-agentguide.gif)
+![FrontEnd-with-AgentGuide](./docs/_images/fab-FE-demo-agentguide.gif)
 
 *Example usage: play against AI agents with guidance for optimal play based on millions of simulated matches.*
+
+**NOTE: This work trains AI agents by playing thousands of games and therefore requires powerful hardware.**
+
+With limited resources you can test the interface and play against pre-trained agents. By sharing this work I hope we can pool resources to train and share AI agents to practice against and learn from.
+
+**This is a personal project and is in alpha development and will likely have bugs.**
 
 ---
 
@@ -20,15 +25,38 @@ cd flesh-and-blood-rlbridge
 ./scripts/docker-setup.sh
 ```
 
-When setup finishes, the terminal prints a **“setup complete / ready to use”** banner.
+When setup finishes (~10mins), the terminal prints a **“setup complete / ready to use”** banner.
 
 Then open **http://localhost:8765** in your browser.
 
-To start the stack again later (inside the repo directory):
+![GUI-Demo-1](./docs/_images/GUI-demo-img-1.png)
+*GUI demo - select player deck (precons or import from Fabrary), you can edit equipment as needed.*
+
+![GUI-Demo-2](./docs/_images/GUI-demo-img-2.png)
+*GUI demo - select opponent deck, auto sideboards, can edit equipment or any card and save for future runs.*
+
+![GUI-Demo-3](./docs/_images/GUI-demo-img-3.png)
+*GUI demo - create a deck variation by swapping cards, 'save for evaluation' confirms the selection.*
+
+
+![GUI-Demo-4](./docs/_images/GUI-demo-img-4.png)
+*GUI demo - agents are trained for both player and opponent, final evaluation on local Talishar server directly to ensure correctness (but can take a long time).*
+
+![GUI-Demo-5](./docs/_images/GUI-demo-img-5.png)
+*GUI demo - final results include win % summary, damage breakdown and example render of gameplay.*
+
+
+To start the stack again later (inside the repo directory), use a compose wrapper so GPU is picked up automatically when available:
 
 ```bash
-docker compose up
+./scripts/docker-compose.sh up      # macOS / Linux / Git Bash
 ```
+
+```powershell
+.\scripts\docker-compose.ps1 up   # Windows PowerShell
+```
+
+**Optional GPU in Docker:** `docker-setup` / `docker-compose` scripts probe for NVIDIA CUDA (`nvidia-smi` + `docker run --gpus all`). When a GPU is available, they merge `docker-compose.gpu.yml`, which gives the `fab-bridge` container CUDA PyTorch and `gpus: all`. Otherwise the stack stays on CPU PyTorch (default). Talishar PHP and C++ rollouts remain CPU-bound either way.
 
 **CLI commands** (`fab-tui`, `fab-gui`, `fab-bridge`) are installed in the Docker image and exposed on the host via wrappers in `bin/` — no separate Python venv required:
 
@@ -44,7 +72,11 @@ If you also run Talishar separately (e.g. `cd Talishar && docker compose up`), s
 Stop everything with `Ctrl+C`, then:
 
 ```bash
-docker compose down
+./scripts/docker-compose.sh down
+```
+
+```powershell
+.\scripts\docker-compose.ps1 down
 ```
 
 ### Option B - Local Python (recommended for development)
@@ -64,22 +96,12 @@ fab-gui
 git clone https://github.com/pdfosborne/flesh-and-blood-rlbridge.git
 cd flesh-and-blood-rlbridge
 chmod +x scripts/setup.sh
+sudo chown -R "$USER:$USER" results Talishar .venv
 ./scripts/setup.sh
 source .venv/bin/activate && fab-gui
 ```
 
 `setup` creates a venv, installs the package, verifies `Talishar/Assets`, and starts the Talishar backend via Docker.
-
-**Fix permission errors:**
-
-```bash
-docker compose down
-cd Talishar && docker compose down && cd ..
-sudo chown -R "$USER:$USER" results Talishar .venv
-rm -rf .venv
-./scripts/setup.sh
-source .venv/bin/activate && fab-gui
-```
 
 
 #### Starting and stopping

@@ -204,17 +204,24 @@ def merge_parallel_seed_training_live(
         for row in lives
         if row.get("win_rate") is not None
     ]
+    # Use the furthest-along seed for W/L/D/T so the record matches one run.
+    fastest = max(
+        lives,
+        key=lambda row: (
+            int(row.get("episodes_completed", 0) or 0),
+            float(row.get("episode_rate", 0.0) or 0.0),
+        ),
+    )
     merged: dict[str, Any] = {
+        **fastest,
         "episodes_completed": int(round(mean(episodes))) if episodes else 0,
         "target_episodes": int(round(mean(targets))) if targets else 0,
-        "win_rate": float(mean(win_rates)) if win_rates else 0.0,
+        "win_rate": float(mean(win_rates)) if win_rates else float(
+            fastest.get("win_rate", 0.0) or 0.0
+        ),
         "parallel_seeds": len(lives),
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
-    for key in ("wins", "losses", "draws", "timeouts"):
-        values = [int(row.get(key, 0) or 0) for row in lives if key in row]
-        if values:
-            merged[key] = int(round(mean(values)))
 
     if write:
         out_dir.mkdir(parents=True, exist_ok=True)

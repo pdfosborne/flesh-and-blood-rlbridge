@@ -109,29 +109,31 @@ def classify_p1_episode_outcome(
 ) -> str:
     """Classify one episode from P1's perspective.
 
-    Wins and losses require lethal damage (opponent or player at 0 HP).
-    Step-limit and other non-lethal endings count as timeouts, not wins
-    from HP advantage alone.
+    Wins and losses are decided only by lethal HP (≤ 0). Everything else —
+    step limits, stalls, missing HP, HP advantage without lethal, deck-out
+    without lethal — is a timeout. Draws require both players at ≤ 0 HP.
+
+    ``terminated`` is accepted for API compatibility but does not affect the
+    result. ``truncated`` forces timeout only when the episode did not also
+    ``terminate`` (step cap without a decided game).
     """
+    del p1_deck, p2_deck  # HP-only; decks do not decide W/L.
+
     if skipped:
         return OUTCOME_TIMEOUT
-    if truncated:
+    if truncated and not terminated:
         return OUTCOME_TIMEOUT
-    if terminated:
-        if p1_hp is None or p2_hp is None:
-            return OUTCOME_TIMEOUT
-        p1 = float(p1_hp)
-        p2 = float(p2_hp)
-        if p2 <= 0 and p1 > 0:
-            return OUTCOME_WIN
-        if p1 <= 0 and p2 > 0:
-            return OUTCOME_LOSS
-        if p1 <= 0 and p2 <= 0:
-            return OUTCOME_DRAW
-        if p1_deck is not None and p2_deck is not None:
-            if float(p1_deck) <= 0 and float(p2_deck) <= 0:
-                return OUTCOME_DRAW
+    if p1_hp is None or p2_hp is None:
         return OUTCOME_TIMEOUT
+
+    p1 = float(p1_hp)
+    p2 = float(p2_hp)
+    if p1 <= 0 and p2 <= 0:
+        return OUTCOME_DRAW
+    if p2 <= 0:
+        return OUTCOME_WIN
+    if p1 <= 0:
+        return OUTCOME_LOSS
     return OUTCOME_TIMEOUT
 
 
@@ -155,6 +157,7 @@ def summarize_p1_outcomes(
     elif total > counted:
         timeouts += total - counted
     total = max(1, total) if total > 0 else 1
+    decided = max(1, wins + losses + draws)
     return {
         "episodes": total,
         "wins": wins,
@@ -162,6 +165,7 @@ def summarize_p1_outcomes(
         "draws": draws,
         "timeouts": timeouts,
         "win_rate": wins / total,
+        "win_rate_decided": wins / decided,
         "loss_rate": losses / total,
         "draw_rate": draws / total,
         "timeout_rate": timeouts / total,

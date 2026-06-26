@@ -5,6 +5,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# shellcheck source=scripts/docker-gpu-compose.sh
+source "$ROOT/scripts/docker-gpu-compose.sh"
+fab_docker_gpu_compose_init
+
 if [[ $# -eq 0 ]]; then
   echo "Web GUI: http://localhost:8765"
   if command -v xdg-open >/dev/null 2>&1; then

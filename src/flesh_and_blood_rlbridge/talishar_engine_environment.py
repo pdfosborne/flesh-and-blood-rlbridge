@@ -446,11 +446,16 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
     def fast_step_index(self, action_index: int) -> dict[str, Any]:
         if not self._using_cpp or not hasattr(self._cpp_env, "fast_step_index"):
             raise RuntimeError("fast_step_index requires a C++ engine with fast training support")
-        result = self._cpp_env.fast_step_index(action_index)  # type: ignore[union-attr]
+        result = dict(self._cpp_env.fast_step_index(action_index))  # type: ignore[union-attr]
         self._acting_player_id = int(result["acting_player_id"])
         self._player_hp = int(result["p1_health"])
         self._opp_hp = int(result["p2_health"])
         self._steps = int(getattr(self._cpp_env, "_steps", self._steps + 1))  # type: ignore[union-attr]
+        if "truncated" not in result:
+            terminated = bool(result.get("terminated", False))
+            result["truncated"] = (
+                not terminated and self._steps >= self._max_turns
+            )
         return result
 
     def _tracker_state_snapshot(
@@ -2569,17 +2574,12 @@ def talishar_deck_player_won(
     """Whether *deck_player_id* won, from a Talishar JSON observation.
 
     Returns:
-        ``True``  — deck player won (opponent HP ≤ 0)
-        ``False`` — deck player lost (own HP ≤ 0)
-        ``None``  — draw (both decks empty, equal HP) **or** timeout (max
-                    steps hit without a winner — *not* treated as a draw).
+        ``True``  — deck player won (opponent HP ≤ 0, own HP > 0)
+        ``False`` — deck player lost (own HP ≤ 0, opponent HP > 0)
+        ``None``  — draw (both at ≤ 0 HP) or timeout (no lethal HP)
 
-    Callers that need to distinguish draw from timeout should check the
-    ``"timed_out"`` key in the episode dict returned by
-    :func:`run_talishar_eval_episode`.
+    Lethal-HP rules match ``classify_p1_episode_outcome`` in play training.
     """
-    # A timeout is not a decided outcome — return None immediately without
-    # inspecting HP so callers cannot accidentally treat it as a draw.
     if truncated and not terminated:
         return None
 
@@ -2591,17 +2591,21 @@ def talishar_deck_player_won(
     if not isinstance(obs, dict):
         return None
 
-    acting = int(obs.get("actingPlayerID", deck_player_id) or deck_player_id)
-    player_hp = float(obs.get("playerHealth", 0.0) or 0.0)
-    opp_hp = float(obs.get("opponentHealth", 0.0) or 0.0)
-    if acting != deck_player_id:
-        player_hp, opp_hp = opp_hp, player_hp
+    player_hp = obs.get("playerHealth")
+    opponent_hp = obs.get("opponentHealth")
+    if player_hp is None or opponent_hp is None:
+        return None
 
-    if terminated:
-        if opp_hp <= 0 < player_hp:
-            return True
-        if player_hp <= 0 < opp_hp:
-            return False
-        if player_hp == opp_hp:
-            return None   # genuine draw
+    p_player = float(player_hp or 0)
+    p_opponent = float(opponent_hp or 0)
+    acting = int(obs.get("actingPlayerID", deck_player_id) or deck_player_id)
+    if acting != deck_player_id:
+        p_player, p_opponent = p_opponent, p_player
+
+    if p_player <= 0 and p_opponent <= 0:
+        return None
+    if p_opponent <= 0:
+        return True
+    if p_player <= 0:
+        return False
     return None

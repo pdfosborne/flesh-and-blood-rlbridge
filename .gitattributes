@@ -1,0 +1,3 @@
+# Docker ENTRYPOINT scripts fail on Windows when checked out with CRLF
+# (exec reports "no such file or directory" because the shebang becomes /bin/sh\r).
+*.sh text eol=lf
