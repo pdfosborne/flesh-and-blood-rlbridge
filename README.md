@@ -5,11 +5,8 @@ Reinforcement learning simulation for [Flesh and Blood](https://fabtcg.com/) TCG
 
 *Example usage: play against AI agents with guidance for optimal play based on millions of simulated matches.*
 
-**NOTE: This work trains AI agents by playing thousands of games and therefore requires powerful hardware.**
 
-With limited resources you can test the interface and play against pre-trained agents. By sharing this work I hope we can pool resources to train and share AI agents to practice against and learn from.
-
-**This is a personal project and is in alpha development and will likely have bugs.**
+**This project is in alpha development and will likely have bugs.**
 
 ---
 
@@ -89,6 +86,8 @@ Stop everything with `Ctrl+C`, then:
 ### Option B - Local Python full build (train custom agents)
 
 Use this when you want to **train your own agents** (`fab-tui`, PPO pipelines, C++ fast simulation). **Option B** needs [Docker Desktop](https://www.docker.com/products/docker-desktop/) and **Python 3.10+** (and CMake plus a C++ compiler for fast C++ training). Heavier setup than Option A; recommended for development and long training runs.
+
+NOTE: Training AI agents (reinforcement learning) by playing thousands of games requires powerful hardware. By sharing this work I hope we can pool resources to collaboratively train AI agents to improve Flesh & Blood resources for players.
 
 **Windows (PowerShell):**
 
