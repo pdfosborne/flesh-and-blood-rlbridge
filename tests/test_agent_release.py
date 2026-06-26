@@ -20,7 +20,14 @@ from fab_bridge.agents import (
     unified_agent_cache_format,
     unified_agent_weights_path,
 )
-from rl_agents.ppo import PPOAgent
+from flesh_and_blood_rlbridge.player_observation import PLAYER_OBS_DIM
+from rl_agents.ppo import PPOAgent, UNIFIED_AGENT_WEIGHT_VERSION
+
+
+def _init_agent(agent: PPOAgent, *, n_actions: int = 128) -> None:
+    agent.n_actions = n_actions
+    agent.obs_dim = PLAYER_OBS_DIM
+    agent._init_nets(PLAYER_OBS_DIM)
 
 
 def test_unified_agent_cache_format_maps_sage() -> None:
@@ -30,14 +37,14 @@ def test_unified_agent_cache_format_maps_sage() -> None:
 
 def test_unified_agent_weights_path(tmp_path: Path) -> None:
     path = unified_agent_weights_path(tmp_path / "cache", "silver_age")
-    assert path.name == f"unified_agent_v{PLAYER_OBS_SCHEMA_VERSION}.json"
+    assert path.name == f"unified_agent_v{UNIFIED_AGENT_WEIGHT_VERSION}.json"
     assert path.parent.name == "silver_age"
 
 
 def test_release_asset_names() -> None:
-    weights, meta = release_asset_names("silver_age", 1)
-    assert weights == "silver_age-unified_agent_v1.json"
-    assert meta == "silver_age-unified_agent_v1.meta.json"
+    weights, meta = release_asset_names("silver_age")
+    assert weights == f"silver_age-unified_agent_v{UNIFIED_AGENT_WEIGHT_VERSION}.json"
+    assert meta == f"silver_age-unified_agent_v{UNIFIED_AGENT_WEIGHT_VERSION}.meta.json"
 
 
 def test_list_local_agents_empty(tmp_path: Path) -> None:
@@ -49,14 +56,14 @@ def test_list_local_agents_finds_weights(tmp_path: Path) -> None:
     fmt_dir = cache / "silver_age"
     fmt_dir.mkdir(parents=True)
     agent = PPOAgent()
-    agent.obs_dim = 8
-    agent.n_actions = 4
-    agent._init_nets(8)
-    weights = fmt_dir / f"unified_agent_v{PLAYER_OBS_SCHEMA_VERSION}.json"
+    _init_agent(agent, n_actions=128)
+    weights = fmt_dir / f"unified_agent_v{UNIFIED_AGENT_WEIGHT_VERSION}.json"
     agent.save(weights)
     meta = {
-        "obs_dim": 8,
+        "obs_dim": PLAYER_OBS_DIM,
         "obs_schema_version": PLAYER_OBS_SCHEMA_VERSION,
+        "architecture": "attention_v1",
+        "weight_version": UNIFIED_AGENT_WEIGHT_VERSION,
         "total_episodes_trained": 42,
         "last_updated": "2026-01-01T00:00:00+00:00",
     }
@@ -103,9 +110,7 @@ def test_summarize_public_agent_sync_states(tmp_path: Path) -> None:
     fmt_dir = cache / "silver_age"
     fmt_dir.mkdir(parents=True)
     agent = PPOAgent()
-    agent.obs_dim = 4
-    agent.n_actions = 2
-    agent._init_nets(4)
+    _init_agent(agent, n_actions=128)
     weights = unified_agent_weights_path(cache, "silver_age")
     agent.save(weights)
     from fab_bridge import agents as agents_mod
@@ -134,9 +139,7 @@ def test_sync_agents_downloads_and_installs(tmp_path: Path, monkeypatch: pytest.
     fmt_dir = cache / "silver_age"
     fmt_dir.mkdir(parents=True)
     agent = PPOAgent()
-    agent.obs_dim = 4
-    agent.n_actions = 2
-    agent._init_nets(4)
+    _init_agent(agent, n_actions=128)
     dest = unified_agent_weights_path(cache, "silver_age")
     agent.save(dest)
     from fab_bridge import agents as agents_mod

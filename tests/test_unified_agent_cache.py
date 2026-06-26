@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import json
 from pathlib import Path
 
 _REPO = Path(__file__).resolve().parents[1]
@@ -11,7 +12,7 @@ sys.path.insert(0, str(_REPO / "src"))
 
 from agent_cache import AgentCacheStore, deck_content_fingerprint  # noqa: E402
 from flesh_and_blood_rlbridge.player_observation import PLAYER_OBS_DIM  # noqa: E402
-from rl_agents.ppo import PPOAgent  # noqa: E402
+from rl_agents.ppo import ARCHITECTURE, PPOAgent, UNIFIED_AGENT_WEIGHT_VERSION  # noqa: E402
 
 
 def _make_agent() -> PPOAgent:
@@ -44,6 +45,8 @@ def test_unified_store_save_load_round_trip(tmp_path: Path) -> None:
 
     meta = store.load_meta()
     assert meta["obs_schema_version"] == 1
+    assert meta["weight_version"] == UNIFIED_AGENT_WEIGHT_VERSION
+    assert meta["architecture"] == ARCHITECTURE
     assert meta["total_episodes_trained"] == 10
     assert meta["last_matchup"] == "a_vs_b"
     assert len(meta["training_history"]) == 1
@@ -105,3 +108,19 @@ def test_coverage_lookup_requires_weights(tmp_path: Path) -> None:
         p2_fingerprint=p2_fp,
         target_episodes=100,
     ) is not None
+
+
+def test_load_if_exists_rejects_legacy_mlp_weights(tmp_path: Path) -> None:
+    store = AgentCacheStore(tmp_path / "cache", "silver_age")
+    legacy = {
+        "agent": "ppo",
+        "n_actions": 128,
+        "obs_dim": PLAYER_OBS_DIM,
+        "hidden_size": 64,
+        "actor_weights": {"W1": [[0.0]]},
+        "critic_weights": {"W1": [[0.0]]},
+    }
+    path = store.cache_root / f"unified_agent_v{UNIFIED_AGENT_WEIGHT_VERSION}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(legacy), encoding="utf-8")
+    assert store.load_if_exists() is None

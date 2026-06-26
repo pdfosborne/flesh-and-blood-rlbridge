@@ -6,11 +6,13 @@ Public unified PPO agent weights for GUI evaluation and live play are listed in
 ## On-disk layout (after sync)
 
 ```
-results/agent_cache/<format>/unified_agent_v1.json
+results/agent_cache/<format>/unified_agent_v2.json
 results/agent_cache/<format>/unified_agent.meta.json
 ```
 
 Supported format keys: `silver_age`, `classic_constructed`, `blitz`, `upf` (GUI `sage` maps to `silver_age`).
+
+**Note:** Legacy MLP weights (`unified_agent_v1.json`) are incompatible with the attention policy trunk (`attention_v1`). Retrain or sync v2 weights after upgrading.
 
 ## For users
 
@@ -47,9 +49,9 @@ This creates a GitHub Release via `gh`, uploads weight + meta assets, and update
 ### Requirements for publish
 
 - [GitHub CLI](https://cli.github.com/) (`gh`) installed and authenticated (`gh auth login`)
-- Local weights at `results/agent_cache/<format>/unified_agent_v1.json`
+- Local weights at `results/agent_cache/<format>/unified_agent_v2.json`
 
 ### Manifest fields
 
-Each `agents[]` entry includes `weights_url`, `meta_url`, `sha256`, `obs_dim`, and `release` tag.
-Release asset filenames use the pattern `{format}-unified_agent_v1.json` (distinct from cache filenames).
+Each `agents[]` entry includes `weights_url`, `meta_url`, `sha256`, `obs_dim`, `architecture`, and `release` tag.
+Release asset filenames use the pattern `{format}-unified_agent_v2.json` (distinct from cache filenames).

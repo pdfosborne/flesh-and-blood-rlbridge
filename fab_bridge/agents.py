@@ -21,6 +21,7 @@ from fab_bridge.paths import configure_import_paths, repo_root
 configure_import_paths()
 
 from flesh_and_blood_rlbridge.player_observation import PLAYER_OBS_SCHEMA_VERSION  # noqa: E402
+from rl_agents.ppo import ARCHITECTURE, UNIFIED_AGENT_WEIGHT_VERSION  # noqa: E402
 
 DEFAULT_REPOSITORY = "pdfosborne/flesh-and-blood-rlbridge"
 MANIFEST_REL_PATH = Path("agents") / "manifest.json"
@@ -96,7 +97,7 @@ def unified_agent_cache_format(game_format: str) -> str:
 def unified_agent_weights_path(cache_dir: Path, game_format: str) -> Path:
     cache_format = unified_agent_cache_format(game_format)
     store_root = Path(cache_dir) / cache_format
-    return store_root / f"unified_agent_v{PLAYER_OBS_SCHEMA_VERSION}.json"
+    return store_root / f"unified_agent_v{UNIFIED_AGENT_WEIGHT_VERSION}.json"
 
 
 def unified_agent_meta_path(cache_dir: Path, game_format: str) -> Path:
@@ -104,10 +105,14 @@ def unified_agent_meta_path(cache_dir: Path, game_format: str) -> Path:
     return Path(cache_dir) / cache_format / UNIFIED_META_FILENAME
 
 
-def release_asset_names(game_format: str, obs_schema_version: int) -> tuple[str, str]:
+def release_asset_names(
+    game_format: str,
+    weight_version: int | None = None,
+) -> tuple[str, str]:
+    version = UNIFIED_AGENT_WEIGHT_VERSION if weight_version is None else int(weight_version)
     fmt = unified_agent_cache_format(game_format)
-    weights = f"{fmt}-unified_agent_v{obs_schema_version}.json"
-    meta = f"{fmt}-unified_agent_v{obs_schema_version}.meta.json"
+    weights = f"{fmt}-unified_agent_v{version}.json"
+    meta = f"{fmt}-unified_agent_v{version}.meta.json"
     return weights, meta
 
 
@@ -193,7 +198,7 @@ def list_local_agents(cache_dir: Path | None = None) -> list[LocalAgentInfo]:
     for fmt_dir in sorted(root.iterdir()):
         if not fmt_dir.is_dir():
             continue
-        weights = fmt_dir / f"unified_agent_v{PLAYER_OBS_SCHEMA_VERSION}.json"
+        weights = fmt_dir / f"unified_agent_v{UNIFIED_AGENT_WEIGHT_VERSION}.json"
         if not weights.is_file():
             continue
         meta_path = fmt_dir / UNIFIED_META_FILENAME
@@ -344,7 +349,7 @@ def sync_agents(
             )
             continue
 
-        dest_weights = cache / fmt / f"unified_agent_v{PLAYER_OBS_SCHEMA_VERSION}.json"
+        dest_weights = cache / fmt / f"unified_agent_v{UNIFIED_AGENT_WEIGHT_VERSION}.json"
         dest_meta = cache / fmt / UNIFIED_META_FILENAME
 
         if dest_weights.is_file() and not force:
@@ -426,7 +431,7 @@ def prepare_publish_bundle(
 
     sha256 = _sha256_file(weights_path)
     tag = release_id or suggest_next_release_tag()
-    weights_asset, meta_asset = release_asset_names(fmt, PLAYER_OBS_SCHEMA_VERSION)
+    weights_asset, meta_asset = release_asset_names(fmt)
 
     staging_dir = Path(tempfile.mkdtemp(prefix="fab-agent-publish-"))
     weights_staging = staging_dir / weights_asset
@@ -437,8 +442,13 @@ def prepare_publish_bundle(
     enriched.update(
         {
             "obs_schema_version": PLAYER_OBS_SCHEMA_VERSION,
+            "weight_version": UNIFIED_AGENT_WEIGHT_VERSION,
+            "architecture": str(agent_data.get("architecture", meta.get("architecture", ARCHITECTURE))),
             "obs_dim": obs_dim,
             "n_actions": int(agent_data.get("n_actions", meta.get("n_actions", 0))),
+            "d_model": int(agent_data.get("d_model", meta.get("d_model", agent_data.get("hidden_size", 0)))),
+            "n_layers": int(agent_data.get("n_layers", meta.get("n_layers", 0))),
+            "n_heads": int(agent_data.get("n_heads", meta.get("n_heads", 0))),
             "game_format": fmt,
             "release_id": tag,
             "source": OFFICIAL_SOURCE,

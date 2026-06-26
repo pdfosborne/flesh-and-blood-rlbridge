@@ -17,7 +17,7 @@ from fab_gui.api import (
     stop_live_play,
 )
 from fab_tui.config import EnvironmentSettings, browser_talishar_fe_url
-from flesh_and_blood_rlbridge.player_observation import PLAYER_OBS_SCHEMA_VERSION
+from rl_agents.ppo import UNIFIED_AGENT_WEIGHT_VERSION
 
 
 def test_live_play_registry_rejects_concurrent_session() -> None:
@@ -121,7 +121,7 @@ def test_start_live_play_spawns_thread(tmp_path: Path, monkeypatch) -> None:
     cache_dir = tmp_path / "cache"
     fmt_dir = cache_dir / "silver_age"
     fmt_dir.mkdir(parents=True)
-    weights = fmt_dir / f"unified_agent_v{PLAYER_OBS_SCHEMA_VERSION}.json"
+    weights = fmt_dir / f"unified_agent_v{UNIFIED_AGENT_WEIGHT_VERSION}.json"
     weights.write_text("{}", encoding="utf-8")
 
     env = EnvironmentSettings(

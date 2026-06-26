@@ -164,6 +164,8 @@ class PpoDefaults:
     """PPO hyperparameters shared by dual-agent trainers."""
 
     hidden_size: int = 64
+    n_layers: int = 2
+    n_heads: int = 4
     lr: float = 3e-4
     gamma: float = 0.99
     lam: float = 0.95
@@ -303,6 +305,8 @@ DEFAULT_STALL_MIN_ATTACK_HAND = RUNTIME.game.stall_min_attack_hand
 
 DEFAULT_N_EPISODES = RUNTIME.dual_matchup.episodes
 DEFAULT_HIDDEN_SIZE = RUNTIME.ppo.hidden_size
+DEFAULT_N_LAYERS = RUNTIME.ppo.n_layers
+DEFAULT_N_HEADS = RUNTIME.ppo.n_heads
 DEFAULT_LR = RUNTIME.ppo.lr
 DEFAULT_GAMMA = RUNTIME.ppo.gamma
 DEFAULT_LAM = RUNTIME.ppo.lam
@@ -321,7 +325,7 @@ def apply_meta(**overrides: object) -> RuntimeDefaults:
     global DEFAULT_WARMUP_BASELINE_EVAL_EPISODES, DEFAULT_N_EPISODES  # noqa: PLW0603
     global DEFAULT_STALL_NO_DAMAGE_TURNS, DEFAULT_STALL_LOW_HAND_TURNS  # noqa: PLW0603
     global DEFAULT_STALL_MAX_SINGLE_LOW_HAND_TURNS, DEFAULT_STALL_MIN_ATTACK_HAND  # noqa: PLW0603
-    global DEFAULT_HIDDEN_SIZE, DEFAULT_LR, DEFAULT_GAMMA, DEFAULT_LAM  # noqa: PLW0603
+    global DEFAULT_HIDDEN_SIZE, DEFAULT_N_LAYERS, DEFAULT_N_HEADS, DEFAULT_LR, DEFAULT_GAMMA, DEFAULT_LAM  # noqa: PLW0603
     global DEFAULT_CLIP_EPS, DEFAULT_N_STEPS, DEFAULT_PPO_EPOCHS  # noqa: PLW0603
     global DEFAULT_MINI_BATCH, DEFAULT_PPO_ROLLOUT_BATCH  # noqa: PLW0603
 
@@ -339,6 +343,8 @@ def apply_meta(**overrides: object) -> RuntimeDefaults:
     DEFAULT_STALL_MIN_ATTACK_HAND = RUNTIME.game.stall_min_attack_hand
     DEFAULT_N_EPISODES = RUNTIME.dual_matchup.episodes
     DEFAULT_HIDDEN_SIZE = RUNTIME.ppo.hidden_size
+    DEFAULT_N_LAYERS = RUNTIME.ppo.n_layers
+    DEFAULT_N_HEADS = RUNTIME.ppo.n_heads
     DEFAULT_LR = RUNTIME.ppo.lr
     DEFAULT_GAMMA = RUNTIME.ppo.gamma
     DEFAULT_LAM = RUNTIME.ppo.lam

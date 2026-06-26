@@ -149,7 +149,7 @@ def main() -> None:
     t_tracked = _bench("step() + combat tracker", tracked_step, iters=200)
 
     # ── PPO inference ───────────────────────────────────────────────────────
-    print("\n[PPO inference — hidden_size=%d, n_actions=%d]" % (DEFAULT_HIDDEN_SIZE, ACTION_CAPACITY))
+    print("\n[PPO attention inference — d_model=%d, n_actions=%d]" % (DEFAULT_HIDDEN_SIZE, ACTION_CAPACITY))
     policy = PPOAgent(hidden_size=DEFAULT_HIDDEN_SIZE, n_actions=ACTION_CAPACITY, obs_dim=PLAYER_OBS_DIM)
     policy._init_nets(PLAYER_OBS_DIM)
     obs_vec = np.asarray(state["obs_vec"], dtype=np.float64)

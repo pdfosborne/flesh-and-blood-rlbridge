@@ -44,7 +44,7 @@ from flesh_and_blood_rlbridge.player_observation import (  # noqa: E402
     PLAYER_OBS_DIM,
     PLAYER_OBS_SCHEMA_VERSION,
 )
-from rl_agents.ppo import PPOAgent  # noqa: E402
+from rl_agents.ppo import PPOAgent, UNIFIED_AGENT_WEIGHT_VERSION  # noqa: E402
 from runtime_defaults import RUNTIME  # noqa: E402
 from train_dual_agent_common import Matchup, make_env, _env_supports_fast_training  # noqa: E402
 from train_pipeline_common import (  # noqa: E402
@@ -114,7 +114,7 @@ def _load_unified_agent(
         n_actions = ACTION_CAPACITY
 
     weights_path = (
-        store.cache_root / f"unified_agent_v{PLAYER_OBS_SCHEMA_VERSION}.json"
+        store.cache_root / f"unified_agent_v{UNIFIED_AGENT_WEIGHT_VERSION}.json"
     )
     agent = store.load_required(
         obs_dim=obs_dim,

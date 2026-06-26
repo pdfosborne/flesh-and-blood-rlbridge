@@ -11,6 +11,7 @@ _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO / "scripts" / "training"))
 
 from agent_cache import AgentCacheStore  # noqa: E402
+from flesh_and_blood_rlbridge.player_observation import PLAYER_OBS_DIM  # noqa: E402
 from rl_agents.ppo import PPOAgent  # noqa: E402
 from train_dual_agent_common import (  # noqa: E402
     resolve_checkpoint_interval,
@@ -45,9 +46,9 @@ def test_resolve_checkpoint_interval_pct() -> None:
 def test_training_history_stores_checkpoint_win_rates(tmp_path: Path) -> None:
     store = AgentCacheStore(tmp_path / "cache", "silver_age")
     agent = PPOAgent()
-    agent.obs_dim = 4
-    agent.n_actions = 8
-    agent._init_nets(4)
+    agent.obs_dim = PLAYER_OBS_DIM
+    agent.n_actions = 128
+    agent._init_nets(PLAYER_OBS_DIM)
 
     store.persist(
         agent,

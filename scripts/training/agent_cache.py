@@ -1,6 +1,6 @@
-"""Unified PPO agent cache — one shared policy per (game_format, obs_schema_version).
+"""Unified PPO agent cache — one shared policy per (game_format, weight_version).
 
-Weights: ``{cache_root}/{format}/unified_agent_v{schema}.json``
+Weights: ``{cache_root}/{format}/unified_agent_v{weight_version}.json``
 Metadata: ``{cache_root}/{format}/unified_agent.meta.json`` including ``training_history``.
 """
 
@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
-from rl_agents.ppo import PPOAgent
+from rl_agents.ppo import ARCHITECTURE, PPOAgent, UNIFIED_AGENT_WEIGHT_VERSION
 
 UNIFIED_META_FILENAME = "unified_agent.meta.json"
 LEGACY_REGISTRY_FILENAME = "deck_matchup_registry.json"
@@ -131,14 +131,17 @@ class UnifiedPolicyBundle:
 
 
 def clone_agent_weights(src: PPOAgent, dst: PPOAgent) -> None:
-    if src._actor is None or src.obs_dim <= 0:
+    if src._shared is None or src.obs_dim <= 0:
         return
     dst.n_actions = src.n_actions
     dst._mask_actions = src._mask_actions
     dst.obs_dim = src.obs_dim
+    dst.hidden_size = src.hidden_size
+    dst.n_layers = src.n_layers
+    dst.n_heads = src.n_heads
     dst._init_nets(src.obs_dim)
-    dst._actor.from_dict(src._actor.to_dict())  # type: ignore[union-attr]
-    dst._critic.from_dict(src._critic.to_dict())  # type: ignore[union-attr]
+    assert src._shared is not None and dst._shared is not None
+    dst._shared.load_state_dict(src._shared.state_dict())
 
 
 class AgentCacheStore:
@@ -158,7 +161,7 @@ class AgentCacheStore:
         self.cache_root.mkdir(parents=True, exist_ok=True)
 
     def _weights_path(self) -> Path:
-        return self.cache_root / f"unified_agent_v{self.obs_schema_version}.json"
+        return self.cache_root / f"unified_agent_v{UNIFIED_AGENT_WEIGHT_VERSION}.json"
 
     def _meta_path(self) -> Path:
         return self.cache_root / UNIFIED_META_FILENAME
@@ -232,7 +235,7 @@ class AgentCacheStore:
         try:
             agent.load(path)
             return agent
-        except (json.JSONDecodeError, KeyError, OSError):
+        except (json.JSONDecodeError, KeyError, OSError, ValueError):
             return None
 
     def has_agent(self) -> bool:
@@ -338,8 +341,13 @@ class AgentCacheStore:
         meta.update(
             {
                 "obs_schema_version": self.obs_schema_version,
+                "weight_version": UNIFIED_AGENT_WEIGHT_VERSION,
+                "architecture": ARCHITECTURE,
                 "obs_dim": agent.obs_dim,
                 "n_actions": agent.n_actions,
+                "d_model": agent.hidden_size,
+                "n_layers": agent.n_layers,
+                "n_heads": agent.n_heads,
                 "game_format": self.game_format,
                 "total_episodes_trained": int(meta.get("total_episodes_trained", 0))
                 + int(episodes_delta),

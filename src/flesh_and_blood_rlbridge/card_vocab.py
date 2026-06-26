@@ -127,8 +127,13 @@ def hero_index(hero_id: str) -> int:
     return 0
 
 
+def hero_vocab_size() -> int:
+    """Number of hero embedding slots (0 = unknown/padding)."""
+    return len(_build_hero_index()) + 1
+
+
 def hero_index_normalized(hero_id: str) -> float:
-    size = max(len(_build_hero_index()) + 1, 1)
+    size = max(hero_vocab_size(), 1)
     return float(hero_index(hero_id)) / float(size)
 
 

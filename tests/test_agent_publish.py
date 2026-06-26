@@ -14,21 +14,24 @@ from fab_bridge.agents import (
     publish_to_github_release,
     update_manifest_entry,
 )
-from rl_agents.ppo import PPOAgent
+from flesh_and_blood_rlbridge.player_observation import PLAYER_OBS_DIM
+from rl_agents.ppo import ARCHITECTURE, PPOAgent, UNIFIED_AGENT_WEIGHT_VERSION
 
 
 def _write_local_agent(cache: Path, fmt: str = "silver_age") -> None:
     fmt_dir = cache / fmt
     fmt_dir.mkdir(parents=True)
     agent = PPOAgent()
-    agent.obs_dim = 16
-    agent.n_actions = 4
-    agent._init_nets(16)
-    weights = fmt_dir / f"unified_agent_v{PLAYER_OBS_SCHEMA_VERSION}.json"
+    agent.n_actions = 128
+    agent.obs_dim = PLAYER_OBS_DIM
+    agent._init_nets(PLAYER_OBS_DIM)
+    weights = fmt_dir / f"unified_agent_v{UNIFIED_AGENT_WEIGHT_VERSION}.json"
     agent.save(weights)
     meta = {
-        "obs_dim": 16,
+        "obs_dim": PLAYER_OBS_DIM,
         "obs_schema_version": PLAYER_OBS_SCHEMA_VERSION,
+        "architecture": ARCHITECTURE,
+        "weight_version": UNIFIED_AGENT_WEIGHT_VERSION,
         "total_episodes_trained": 500,
         "game_format": fmt,
     }
@@ -41,12 +44,14 @@ def test_prepare_publish_bundle(tmp_path: Path) -> None:
     bundle = prepare_publish_bundle("silver_age", cache_dir=cache, release_id="agents-2026.06.9")
     try:
         assert bundle.format == "silver_age"
-        assert bundle.obs_dim == 16
+        assert bundle.obs_dim == PLAYER_OBS_DIM
         assert bundle.weights_staging_path.is_file()
         assert bundle.meta_staging_path.is_file()
         meta = json.loads(bundle.meta_staging_path.read_text(encoding="utf-8"))
         assert meta["release_id"] == "agents-2026.06.9"
         assert meta["source"] == "fab-rlbridge-official"
+        assert meta["architecture"] == ARCHITECTURE
+        assert meta["weight_version"] == UNIFIED_AGENT_WEIGHT_VERSION
         assert len(bundle.sha256) == 64
     finally:
         from fab_bridge.agents import cleanup_publish_bundle
@@ -65,9 +70,9 @@ def test_update_manifest_entry_replaces_format() -> None:
     bundle.format = "silver_age"
     bundle.release_id = "agents-2026.06.2"
     bundle.obs_schema_version = 1
-    bundle.obs_dim = 16
-    bundle.weights_asset_name = "silver_age-unified_agent_v1.json"
-    bundle.meta_asset_name = "silver_age-unified_agent_v1.meta.json"
+    bundle.obs_dim = PLAYER_OBS_DIM
+    bundle.weights_asset_name = f"silver_age-unified_agent_v{UNIFIED_AGENT_WEIGHT_VERSION}.json"
+    bundle.meta_asset_name = f"silver_age-unified_agent_v{UNIFIED_AGENT_WEIGHT_VERSION}.meta.json"
     bundle.sha256 = "abc"
     urls = {
         "weights_url": "https://example/w.json",

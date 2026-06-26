@@ -15,6 +15,7 @@ from agent_cache import (  # noqa: E402
     deck_content_fingerprint,
     deck_matchup_key,
 )
+from flesh_and_blood_rlbridge.player_observation import PLAYER_OBS_DIM  # noqa: E402
 from rl_agents.ppo import PPOAgent  # noqa: E402
 
 
@@ -42,9 +43,9 @@ def test_training_history_in_meta(tmp_path: Path) -> None:
     matchup_key = deck_matchup_key(p1_fp, p2_fp)
 
     agent = PPOAgent()
-    agent.obs_dim = 4
-    agent.n_actions = 8
-    agent._init_nets(4)
+    agent.obs_dim = PLAYER_OBS_DIM
+    agent.n_actions = 128
+    agent._init_nets(PLAYER_OBS_DIM)
 
     store.persist(
         agent,
@@ -93,21 +94,21 @@ def test_load_required_reads_unified_weights(tmp_path: Path) -> None:
     store = AgentCacheStore(cache_root, "silver_age")
 
     agent = PPOAgent()
-    agent.obs_dim = 524
-    agent.n_actions = 18
-    agent._init_nets(524)
+    agent.obs_dim = PLAYER_OBS_DIM
+    agent.n_actions = 128
+    agent._init_nets(PLAYER_OBS_DIM)
     store.persist(agent, episodes_delta=1)
 
-    loaded = store.load_required(obs_dim=524, n_actions=18)
+    loaded = store.load_required(obs_dim=PLAYER_OBS_DIM, n_actions=128)
     assert loaded._actor is not None
-    assert loaded.obs_dim == 524
-    assert loaded.n_actions == 18
+    assert loaded.obs_dim == PLAYER_OBS_DIM
+    assert loaded.n_actions == 128
 
 
 def test_load_required_raises_when_missing(tmp_path: Path) -> None:
     store = AgentCacheStore(tmp_path / "agent_cache", "silver_age")
     try:
-        store.load_required(obs_dim=524, n_actions=18)
+        store.load_required(obs_dim=PLAYER_OBS_DIM, n_actions=128)
         raise AssertionError("expected FileNotFoundError")
     except FileNotFoundError as exc:
         assert "Unified agent weights not found" in str(exc)

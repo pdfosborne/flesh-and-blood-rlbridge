@@ -77,6 +77,8 @@ from runtime_defaults import (  # noqa: E402
     DEFAULT_LR,
     DEFAULT_MINI_BATCH,
     DEFAULT_N_EPISODES,
+    DEFAULT_N_HEADS,
+    DEFAULT_N_LAYERS,
     DEFAULT_N_STEPS,
     DEFAULT_PARALLEL_SEEDS,
     DEFAULT_PPO_EPOCHS,
@@ -222,6 +224,8 @@ def make_env(
 def make_agent(seed: Optional[int] = None) -> PPOAgent:
     return PPOAgent(
         hidden_size=DEFAULT_HIDDEN_SIZE,
+        n_layers=DEFAULT_N_LAYERS,
+        n_heads=DEFAULT_N_HEADS,
         lr_actor=DEFAULT_LR,
         lr_critic=DEFAULT_LR,
         gamma=DEFAULT_GAMMA,
