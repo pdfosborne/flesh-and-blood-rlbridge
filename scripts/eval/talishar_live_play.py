@@ -31,7 +31,7 @@ from flesh_and_blood_rlbridge.live_action_advisor import LiveActionCoach  # noqa
 from flesh_and_blood_rlbridge.talishar_engine_environment import (  # noqa: E402
     parse_acting_player_id,
 )
-from scripts.eval.eval_phase3_checkpoint import (  # noqa: E402
+from eval_phase3_checkpoint import (  # noqa: E402
     CheckpointBundle,
     _deck_cards,
     _equipment_header,
@@ -43,15 +43,15 @@ from scripts.eval.eval_phase3_checkpoint import (  # noqa: E402
     deck_labels_from_checkpoints,
     is_sideboard_compare_dir,
 )
-from scripts.training.play_outcome_stats import (  # noqa: E402
+from play_outcome_stats import (  # noqa: E402
     absolute_p1_p2_deck_from_env,
     absolute_p1_p2_deck_from_obs,
     absolute_p1_p2_hp_from_env,
     absolute_p1_p2_hp_from_obs,
     classify_p1_episode_outcome,
 )
-from scripts.training.train_play import _ensure_playwright  # noqa: E402
-from scripts.training.train_pipeline_common import _write_deck_file  # noqa: E402
+from train_play import _ensure_playwright  # noqa: E402
+from train_pipeline_common import _write_deck_file  # noqa: E402
 
 
 @dataclass

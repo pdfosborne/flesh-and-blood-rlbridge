@@ -75,11 +75,13 @@ from checkpoint_eval_async import (  # noqa: E402
     wait_for_checkpoint_evals,
 )
 from play_outcome_stats import (  # noqa: E402
+    OUTCOME_ERROR,
     absolute_p1_p2_deck_from_env,
     absolute_p1_p2_deck_from_obs,
     absolute_p1_p2_hp_from_env,
     absolute_p1_p2_hp_from_obs,
     classify_p1_episode_outcome,
+    classify_p1_fast_episode_outcome,
     compute_eval_stability,
     summarize_p1_outcomes,
 )
@@ -1240,6 +1242,8 @@ def run_phase3_play(
                 max_steps=max_play_steps,
                 episodes=checkpoint_eval_episodes,
                 seed=(seed + completed) if seed is not None else None,
+                backend="cpp",
+                eval_label="Checkpoint eval",
             )
             eval_record = {
                 "episodes_completed": completed,
@@ -1653,6 +1657,28 @@ def _fast_sample_action_index(
     return action
 
 
+def _record_eval_outcome(
+    outcome: str,
+    *,
+    wins: int,
+    losses: int,
+    draws: int,
+    timeouts: int,
+    errors: int,
+) -> tuple[int, int, int, int, int]:
+    if outcome == "win":
+        wins += 1
+    elif outcome == "loss":
+        losses += 1
+    elif outcome == "draw":
+        draws += 1
+    elif outcome == OUTCOME_ERROR:
+        errors += 1
+    else:
+        timeouts += 1
+    return wins, losses, draws, timeouts, errors
+
+
 def _evaluate_fast_p1_vs_fixed_opponent(
     env: Any,
     p1_agent: Any,
@@ -1661,58 +1687,102 @@ def _evaluate_fast_p1_vs_fixed_opponent(
     max_steps: int,
     episodes: int,
     seed: Optional[int] = None,
+    eval_label: str = "Eval",
+    live_progress_path: Optional[Path] = None,
+    progress_interval: int = 100,
 ) -> Optional[dict[str, Any]]:
     if not _env_supports_fast_training(env):
         return None
 
-    wins = losses = draws = timeouts = 0
-    eval_rng = np.random.default_rng(seed)
+    wins = losses = draws = timeouts = errors = 0
+    anomalies: list[str] = []
+    end_state_keys: set[tuple[Any, ...]] = set()
     for ep in range(episodes):
-        ep_seed = (seed + ep) if seed is not None else None
+        ep_seed = (seed + ep) if seed is not None else ep
+        episode_rng = np.random.default_rng(ep_seed)
         state = env.fast_reset(seed=ep_seed, starting_player_id=1 + (ep % 2))
         terminated = truncated = False
         steps = 0
-        p1_hp = int(state.get("p1_health", 0) or 0)
-        p2_hp = int(state.get("p2_health", 0) or 0)
-        p1_deck = int(state.get("p1_deck", 0) or 0)
-        p2_deck = int(state.get("p2_deck", 0) or 0)
 
         while steps < max_steps:
             acting = int(state.get("acting_player_id", 1) or 1)
             agent = p1_agent if acting == 1 else p2_agent
             obs_vec = np.asarray(state["obs_vec"], dtype=np.float64)
             n_legal = max(1, int(state.get("legal_count", 1) or 1))
-            action = _fast_sample_action_index(agent, obs_vec, n_legal, eval_rng)
+            action = _fast_sample_action_index(agent, obs_vec, n_legal, episode_rng)
             state = env.fast_step_index(action)
             terminated = bool(state.get("terminated", False))
             truncated = bool(state.get("truncated", False))
             steps += 1
-            p1_hp = int(state.get("p1_health", p1_hp))
-            p2_hp = int(state.get("p2_health", p2_hp))
-            p1_deck = int(state.get("p1_deck", p1_deck))
-            p2_deck = int(state.get("p2_deck", p2_deck))
             if terminated or truncated:
                 break
 
-        if not terminated and not truncated and steps >= max_steps:
-            truncated = True
-
-        outcome = classify_p1_episode_outcome(
-            p1_hp=p1_hp,
-            p2_hp=p2_hp,
-            p1_deck=p1_deck,
-            p2_deck=p2_deck,
-            terminated=terminated,
-            truncated=truncated,
+        max_steps_reached = not terminated and not truncated and steps >= max_steps
+        outcome, anomaly = classify_p1_fast_episode_outcome(
+            state,
+            max_steps_reached=max_steps_reached,
         )
-        if outcome == "win":
-            wins += 1
-        elif outcome == "loss":
-            losses += 1
-        elif outcome == "draw":
-            draws += 1
-        else:
-            timeouts += 1
+        if anomaly:
+            msg = f"ep {ep + 1}: {anomaly}"
+            anomalies.append(msg)
+            if len(anomalies) <= 5:
+                print(f"  WARNING: {eval_label} {msg}")
+        end_state_keys.add(
+            (
+                outcome,
+                state.get("p1_health"),
+                state.get("p2_health"),
+                state.get("winner"),
+                1 + (ep % 2),
+            )
+        )
+        wins, losses, draws, timeouts, errors = _record_eval_outcome(
+            outcome,
+            wins=wins,
+            losses=losses,
+            draws=draws,
+            timeouts=timeouts,
+            errors=errors,
+        )
+
+        completed = ep + 1
+        if progress_interval > 0 and (
+            completed % progress_interval == 0 or completed == episodes
+        ):
+            print(
+                f"  {eval_label}: {completed}/{episodes} games "
+                f"(W={wins} L={losses} D={draws} T={timeouts} E={errors})"
+            )
+        if live_progress_path is not None:
+            live_progress_path.parent.mkdir(parents=True, exist_ok=True)
+            live_progress_path.write_text(
+                json.dumps(
+                    {
+                        "phase": "cpp_checkpoint",
+                        "episodes_completed": completed,
+                        "target_episodes": episodes,
+                        "wins": wins,
+                        "losses": losses,
+                        "draws": draws,
+                        "timeouts": timeouts,
+                        "errors": errors,
+                        "runtime_backend": "C++ engine fast sampled eval",
+                        "updated_at": datetime.now().isoformat(),
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+
+    if episodes > 1 and len(end_state_keys) <= 2 and (wins == 0 or losses == 0):
+        print(
+            f"  WARNING: {eval_label}: only {len(end_state_keys)} unique end state(s) "
+            f"across {episodes} episodes — results may be degenerate (check eval seed)"
+        )
+    if errors:
+        print(f"  WARNING: {eval_label}: {errors} episode(s) ended with classification errors")
+    if anomalies and len(anomalies) > 5:
+        print(f"  WARNING: {eval_label}: {len(anomalies)} engine/HP anomalies (first 5 shown)")
 
     total = max(1, episodes)
     decided = max(1, wins + losses + draws)
@@ -1722,13 +1792,15 @@ def _evaluate_fast_p1_vs_fixed_opponent(
         "p2_wins": losses,
         "draws": draws,
         "timeouts": timeouts,
+        "errors": errors,
         "losses": losses,
         "p1_win_rate": wins / total,
         "p2_win_rate": losses / total,
         "win_rate_decided": wins / decided,
         "draw_rate": draws / total,
-        "timeout_rate": timeouts / total,
+        "timeout_rate": (timeouts + errors) / total,
         "runtime_backend": "C++ engine fast sampled eval",
+        "eval_anomalies": anomalies[:20],
     }
 
 
@@ -1743,6 +1815,8 @@ def _evaluate_p1_vs_fixed_opponent(
     episodes: int,
     seed: Optional[int] = None,
     backend: str = "auto",
+    eval_label: str = "Eval",
+    live_progress_path: Optional[Path] = None,
 ) -> dict[str, Any]:
     """Evaluate frozen P1/P2 policies against each other.
 
@@ -1777,7 +1851,6 @@ def _evaluate_p1_vs_fixed_opponent(
         game_format=game_format,
         max_turns=max_steps,
         use_cpp_engine=use_cpp,
-        cpp_engine_dir=matchup.cpp_engine_dir,
         require_fast_training=(backend == "cpp"),
     )
     if backend in {"auto", "cpp"}:
@@ -1788,10 +1861,12 @@ def _evaluate_p1_vs_fixed_opponent(
             max_steps=max_steps,
             episodes=episodes,
             seed=seed,
+            eval_label=eval_label,
+            live_progress_path=live_progress_path,
         )
         if fast_metrics is not None:
             env.close()
-            print("  Eval backend: C++ engine fast sampled eval")
+            print(f"  {eval_label} backend: C++ engine fast sampled eval")
             return fast_metrics
         if backend == "cpp":
             env.close()
@@ -1821,37 +1896,59 @@ def _evaluate_p1_vs_fixed_opponent(
     losses = 0
     draws = 0
     timeouts = 0
+    errors = 0
     runtime_backend: Optional[str] = None
     backend_printed = False
     try:
         for ep in range(episodes):
-            ep_seed = (seed + ep) if seed is not None else None
-            result = env.reset(
-                seed=ep_seed,
-                options={"acting_player_id": 1 + (ep % 2)},
-            )
+            ep_seed = (seed + ep) if seed is not None else ep
+            try:
+                result = env.reset(
+                    seed=ep_seed,
+                    options={"acting_player_id": 1 + (ep % 2)},
+                )
+            except Exception as exc:
+                errors += 1
+                print(
+                    f"  WARNING: {eval_label} ep {ep + 1}/{episodes} "
+                    f"reset failed: {exc!r}"
+                )
+                continue
             obs = result.observation
             if not backend_printed:
                 runtime_backend = _runtime_backend_label(env)
-                print(f"  Checkpoint eval backend: {runtime_backend}")
+                print(f"  {eval_label} backend: {runtime_backend}")
                 backend_printed = True
             done = False
             steps = 0
             terminated = False
             truncated = False
+            episode_error = False
             while not done and steps < max_steps:
-                obs_data = json.loads(obs) if isinstance(obs, str) else (obs or {})
-                acting = int(obs_data.get("actingPlayerID", 1) or 1)
-                if acting == 1:
-                    action = _agent_action_for_eval(p1_agent, obs)
-                else:
-                    action = _agent_action_for_eval(p2_agent, obs)
-                step = env.step(action)
-                obs = step.observation
-                terminated = bool(step.terminated)
-                truncated = bool(step.truncated)
-                done = terminated or truncated
-                steps += 1
+                try:
+                    obs_data = json.loads(obs) if isinstance(obs, str) else (obs or {})
+                    acting = int(obs_data.get("actingPlayerID", 1) or 1)
+                    if acting == 1:
+                        action = _agent_action_for_eval(p1_agent, obs)
+                    else:
+                        action = _agent_action_for_eval(p2_agent, obs)
+                    step = env.step(action)
+                    obs = step.observation
+                    terminated = bool(step.terminated)
+                    truncated = bool(step.truncated)
+                    done = terminated or truncated
+                    steps += 1
+                except Exception as exc:
+                    errors += 1
+                    episode_error = True
+                    print(
+                        f"  WARNING: {eval_label} ep {ep + 1}/{episodes} "
+                        f"step {steps + 1} failed: {exc!r}"
+                    )
+                    break
+
+            if episode_error:
+                continue
 
             if not terminated and not truncated and steps >= max_steps:
                 truncated = True
@@ -1865,6 +1962,13 @@ def _evaluate_p1_vs_fixed_opponent(
                 p2_hp = int(p2_hp_f) if p2_hp_f is not None else None
             if p1_deck is None or p2_deck is None:
                 p1_deck, p2_deck = absolute_p1_p2_deck_from_obs(obs_data)
+            if p1_hp is None or p2_hp is None:
+                errors += 1
+                print(
+                    f"  WARNING: {eval_label} ep {ep + 1}/{episodes} "
+                    "missing HP — counted as error, not loss"
+                )
+                continue
             outcome = classify_p1_episode_outcome(
                 p1_hp=p1_hp,
                 p2_hp=p2_hp,
@@ -1873,14 +1977,40 @@ def _evaluate_p1_vs_fixed_opponent(
                 terminated=terminated,
                 truncated=truncated,
             )
-            if outcome == "win":
-                wins += 1
-            elif outcome == "loss":
-                losses += 1
-            elif outcome == "draw":
-                draws += 1
-            else:
-                timeouts += 1
+            wins, losses, draws, timeouts, errors = _record_eval_outcome(
+                outcome,
+                wins=wins,
+                losses=losses,
+                draws=draws,
+                timeouts=timeouts,
+                errors=errors,
+            )
+
+            completed = ep + 1
+            print(
+                f"  {eval_label}: {completed}/{episodes} games "
+                f"(W={wins} L={losses} D={draws} T={timeouts} E={errors})"
+            )
+            if live_progress_path is not None:
+                live_progress_path.parent.mkdir(parents=True, exist_ok=True)
+                live_progress_path.write_text(
+                    json.dumps(
+                        {
+                            "phase": "final_eval",
+                            "episodes_completed": completed,
+                            "target_episodes": episodes,
+                            "wins": wins,
+                            "losses": losses,
+                            "draws": draws,
+                            "timeouts": timeouts,
+                            "errors": errors,
+                            "runtime_backend": runtime_backend or "HTTP Talishar",
+                            "updated_at": datetime.now().isoformat(),
+                        },
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
     finally:
         env.close()
 
@@ -1891,11 +2021,12 @@ def _evaluate_p1_vs_fixed_opponent(
         "p2_wins": losses,
         "draws": draws,
         "timeouts": timeouts,
+        "errors": errors,
         "losses": losses,
         "p1_win_rate": wins / total,
         "p2_win_rate": losses / total,
         "draw_rate": draws / total,
-        "timeout_rate": timeouts / total,
+        "timeout_rate": (timeouts + errors) / total,
         "runtime_backend": runtime_backend or "HTTP Talishar",
     }
 
@@ -1910,6 +2041,8 @@ def evaluate_fixed_matchup(
     episodes: int,
     seed: Optional[int] = None,
     backend: str = "auto",
+    eval_label: str = "Eval",
+    live_progress_path: Optional[Path] = None,
 ) -> dict[str, Any]:
     """Evaluate a unified/sampled policy on both seats for a fixed deck matchup."""
     from agent_cache import clone_agent_weights  # noqa: PLC0415
@@ -1927,6 +2060,8 @@ def evaluate_fixed_matchup(
         episodes=episodes,
         seed=seed,
         backend=backend,
+        eval_label=eval_label,
+        live_progress_path=live_progress_path,
     )
 
 

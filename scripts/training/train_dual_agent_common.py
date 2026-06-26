@@ -2577,15 +2577,19 @@ class _CheckpointEvalTracker:
         eval_p2 = PPOAgent()
         clone_agent_weights(self.p1_policy, eval_p1)
         clone_agent_weights(self.p2_policy, eval_p2)
-        metrics = _evaluate_policy_pair(
+        from train_play import _evaluate_p1_vs_fixed_opponent  # noqa: PLC0415
+
+        metrics = _evaluate_p1_vs_fixed_opponent(
             self.matchup,
+            eval_p1,
+            p2_agent=eval_p2,
             base_url=self.base_url,
             game_format=self.game_format,
             max_steps=self.max_steps,
-            p1_policy=eval_p1,
-            p2_policy=eval_p2,
             episodes=self.checkpoint_eval_episodes,
             seed=(self.seed + completed) if self.seed is not None else None,
+            backend="cpp" if self.matchup.cpp_engine_dir else "auto",
+            eval_label="Checkpoint eval",
         )
         record = {
             "episodes_completed": completed,

@@ -34,7 +34,10 @@ if _RL_SRC.is_dir() and str(_RL_SRC) not in sys.path:
     sys.path.insert(0, str(_RL_SRC))
 
 from agent_cache import AgentCacheStore  # noqa: E402
-from cpp_engine_matchup import ensure_cpp_engine_for_matchup  # noqa: E402
+from cpp_engine_matchup import (  # noqa: E402
+    ensure_cpp_engine_for_matchup,
+    resolve_cpp_eval_deck_stems,
+)
 from flesh_and_blood_rlbridge.opponent_deck import normalize_talishar_asset_name  # noqa: E402
 from flesh_and_blood_rlbridge.player_observation import (  # noqa: E402
     ACTION_CAPACITY,
@@ -108,6 +111,132 @@ def _load_unified_agent(
     return agent
 
 
+def _write_candidate_deck_json(candidate_dir: Path, game_deck: dict[str, int]) -> Path:
+    """Write a minimal deck JSON for C++ engine generation."""
+    path = candidate_dir / "game_deck.json"
+    path.write_text(json.dumps({"deck": game_deck}, indent=2), encoding="utf-8")
+    return path
+
+
+def _precon_play_deck(assets_path: str, precon_stem: str) -> dict[str, int]:
+    asset = Path(assets_path) / f"{precon_stem}.txt"
+    if not asset.is_file():
+        return {}
+    lines = asset.read_text(encoding="utf-8").splitlines()
+    if len(lines) < 2:
+        return {}
+    counts: dict[str, int] = {}
+    for card_id in lines[1].split():
+        if card_id:
+            counts[card_id] = counts.get(card_id, 0) + 1
+    return counts
+
+
+def _deck_signature(deck: dict[str, int]) -> tuple[tuple[str, int], ...]:
+    return tuple(sorted((str(k), int(v)) for k, v in deck.items() if int(v) > 0))
+
+
+def _needs_custom_cpp_engine(
+    assets_path: str,
+    precon_stem: str,
+    game_deck: dict[str, int],
+    *,
+    swaps: tuple[tuple[str, str], ...],
+) -> bool:
+    if swaps:
+        return True
+    return _deck_signature(game_deck) != _deck_signature(
+        _precon_play_deck(assets_path, precon_stem)
+    )
+
+
+def _warn_cpp_eval_skipped(candidate_id: str, *, cpp_eval_episodes: int) -> None:
+    if cpp_eval_episodes <= 0:
+        return
+    print(
+        f"  NOTE: Skipping {cpp_eval_episodes} C++ eval game(s) for {candidate_id} "
+        f"(no compiled engine) — Talishar HTTP eval only"
+    )
+
+
+def _refresh_dashboard(out_dir: Path) -> None:
+    try:
+        from sideboard_compare_dashboard import write_sideboard_compare_dashboard  # noqa: E402
+
+        write_sideboard_compare_dashboard(out_dir, auto_refresh_seconds=5.0)
+    except Exception:
+        pass
+
+
+def _write_eval_live(
+    path: Path,
+    *,
+    phase: str,
+    completed: int,
+    target: int,
+    wins: int = 0,
+    losses: int = 0,
+    draws: int = 0,
+    timeouts: int = 0,
+    runtime_backend: str = "",
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "phase": phase,
+        "episodes_completed": completed,
+        "target_episodes": target,
+        "wins": wins,
+        "losses": losses,
+        "draws": draws,
+        "timeouts": timeouts,
+        "runtime_backend": runtime_backend,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _write_partial_candidate_result(
+    candidate_dir: Path,
+    *,
+    candidate: SideboardCandidate,
+    args: argparse.Namespace,
+    play_win_rate: float | None = None,
+    cpp_metrics: dict[str, Any] | None = None,
+    final_eval_win_rate: float | None = None,
+    talishar_metrics: dict[str, Any] | None = None,
+) -> None:
+    result: dict[str, Any] = {
+        "candidate_id": candidate.candidate_id,
+        "label": candidate.label,
+        "swaps": [list(pair) for pair in candidate.swaps],
+        "guide_margin": candidate.guide_margin,
+        "game_deck_size": sum(candidate.game_deck.values()),
+        "eval_only": True,
+        "progress_pct": 50.0 if play_win_rate is not None and final_eval_win_rate is None else 100.0,
+        "out_dir": str(candidate_dir),
+    }
+    if play_win_rate is not None:
+        result["play_win_rate"] = float(play_win_rate)
+        result["cpp_eval_win_rate"] = float(play_win_rate)
+    if cpp_metrics:
+        result["cpp_eval"] = cpp_metrics
+    if final_eval_win_rate is not None:
+        result["final_eval_win_rate"] = float(final_eval_win_rate)
+        result["final_eval"] = {
+            "win_rate": float(final_eval_win_rate),
+            "wins": int((talishar_metrics or {}).get("p1_wins", 0)),
+            "losses": int((talishar_metrics or {}).get("losses", 0)),
+            "draws": int((talishar_metrics or {}).get("draws", 0)),
+            "episodes": args.talishar_eval_episodes,
+            "runtime_backend": (talishar_metrics or {}).get("runtime_backend", "HTTP Talishar"),
+        }
+    candidate_dir.mkdir(parents=True, exist_ok=True)
+    (candidate_dir / "candidate_result.json").write_text(
+        json.dumps(result, indent=2),
+        encoding="utf-8",
+    )
+
+
 def _eval_candidate(
     candidate: SideboardCandidate,
     *,
@@ -133,17 +262,40 @@ def _eval_candidate(
         assets_path,
     )
     opp_name = normalize_talishar_asset_name(args.opponent_deck, assets_path)
+    deck_json_path = _write_candidate_deck_json(candidate_dir, candidate.game_deck)
+    cpp_deck1, cpp_deck2 = resolve_cpp_eval_deck_stems(
+        assets_path,
+        args.hero_id,
+        opp_name,
+    )
+    # Reuse a Talishar precon engine when the list matches; otherwise build/find by JSON hash.
+    deck_json_for_cpp = (
+        deck_json_path
+        if _needs_custom_cpp_engine(
+            assets_path,
+            cpp_deck1,
+            candidate.game_deck,
+            swaps=candidate.swaps,
+        )
+        else None
+    )
 
     cpp_dir = ensure_cpp_engine_for_matchup(
-        deck_name,
-        opp_name,
+        cpp_deck1,
+        cpp_deck2,
         assets_path=assets_path,
         talishar_url=args.talishar_url,
+        deck1_json=deck_json_for_cpp,
         build=not args.no_build_cpp_engine,
     )
-    if cpp_dir is None and not args.no_require_cpp_engine:
-        raise RuntimeError(
-            f"C++ engine required for {candidate.candidate_id} but unavailable"
+    if cpp_dir is None:
+        if args.require_cpp_engine and not args.no_require_cpp_engine:
+            raise RuntimeError(
+                f"C++ engine required for {candidate.candidate_id} but unavailable"
+            )
+        _warn_cpp_eval_skipped(
+            candidate.candidate_id,
+            cpp_eval_episodes=args.cpp_eval_episodes,
         )
 
     matchup = Matchup(
@@ -154,17 +306,34 @@ def _eval_candidate(
         tags=[candidate.candidate_id, args.format],
         p1_hero=args.hero_id.replace("_", "-"),
         p2_hero=args.opponent_hero_id.replace("_", "-"),
+        cpp_engine_deck1=cpp_deck1,
+        cpp_engine_deck2=cpp_deck2,
         cpp_engine_dir=cpp_dir,
     )
 
+    eval_seed = 0 if args.seed is None else args.seed
+
     print(
         f"\n  [{candidate.candidate_id}] {candidate.label}\n"
-        f"    C++ eval: {args.cpp_eval_episodes} ep  |  "
-        f"Talishar eval: {args.talishar_eval_episodes} ep"
+        f"    C++ checkpoint eval: {args.cpp_eval_episodes if cpp_dir else 0} ep  |  "
+        f"Talishar final eval: {args.talishar_eval_episodes} ep"
     )
 
+    eval_live_path = candidate_dir / "eval_live.json"
+    final_live_path = candidate_dir / "final_eval" / "final_eval_live.json"
+    _write_eval_live(
+        eval_live_path,
+        phase="cpp_checkpoint",
+        completed=0,
+        target=args.cpp_eval_episodes if cpp_dir else 0,
+        runtime_backend="C++ engine",
+    )
+    _write_partial_candidate_result(candidate_dir, candidate=candidate, args=args)
+    _refresh_dashboard(out_dir)
+
     cpp_metrics: dict[str, Any] = {}
-    if args.cpp_eval_episodes > 0:
+    if cpp_dir and args.cpp_eval_episodes > 0:
+        print(f"  Running C++ checkpoint eval ({args.cpp_eval_episodes} games)…")
         cpp_metrics = evaluate_fixed_matchup(
             matchup,
             agent,
@@ -172,12 +341,59 @@ def _eval_candidate(
             game_format=args.format,
             max_steps=args.max_eval_steps,
             episodes=args.cpp_eval_episodes,
-            seed=args.seed,
-            backend="cpp" if cpp_dir else "auto",
+            seed=eval_seed,
+            backend="cpp",
+            eval_label="C++ checkpoint eval",
+            live_progress_path=eval_live_path,
         )
+        cpp_wr = float(cpp_metrics.get("p1_win_rate", 0.0))
+        _write_eval_live(
+            eval_live_path,
+            phase="cpp_checkpoint",
+            completed=args.cpp_eval_episodes,
+            target=args.cpp_eval_episodes,
+            wins=int(cpp_metrics.get("p1_wins", 0)),
+            losses=int(cpp_metrics.get("losses", 0)),
+            draws=int(cpp_metrics.get("draws", 0)),
+            timeouts=int(cpp_metrics.get("timeouts", 0)),
+            runtime_backend=str(cpp_metrics.get("runtime_backend", "C++ engine")),
+        )
+        _write_partial_candidate_result(
+            candidate_dir,
+            candidate=candidate,
+            args=args,
+            play_win_rate=cpp_wr,
+            cpp_metrics=cpp_metrics,
+        )
+        _refresh_dashboard(out_dir)
+        print(
+            f"  C++ checkpoint eval done: {cpp_wr * 100:.1f}% "
+            f"({cpp_metrics.get('p1_wins', 0)}W/"
+            f"{cpp_metrics.get('losses', 0)}L/"
+            f"{cpp_metrics.get('draws', 0)}D/"
+            f"{cpp_metrics.get('timeouts', 0)}T/"
+            f"{cpp_metrics.get('errors', 0)}E)"
+        )
+        if int(cpp_metrics.get("errors", 0)) > 0:
+            print(
+                f"  WARNING: C++ checkpoint eval had "
+                f"{cpp_metrics.get('errors', 0)} classification error(s) — not counted as losses"
+            )
 
     talishar_metrics: dict[str, Any] = {}
     if args.talishar_eval_episodes > 0:
+        print(
+            f"  Running Talishar final eval ({args.talishar_eval_episodes} games)… "
+            f"(Talishar server required: {args.talishar_url})"
+        )
+        _write_eval_live(
+            final_live_path,
+            phase="final_eval",
+            completed=0,
+            target=args.talishar_eval_episodes,
+            runtime_backend="HTTP Talishar",
+        )
+        _refresh_dashboard(out_dir)
         talishar_metrics = evaluate_fixed_matchup(
             matchup,
             agent,
@@ -185,8 +401,10 @@ def _eval_candidate(
             game_format=args.format,
             max_steps=args.max_eval_steps,
             episodes=args.talishar_eval_episodes,
-            seed=(args.seed + 10_000) if args.seed is not None else None,
+            seed=eval_seed + 10_000,
             backend="http",
+            eval_label="Talishar final eval",
+            live_progress_path=final_live_path,
         )
         eval_dir = candidate_dir / "final_eval"
         eval_dir.mkdir(parents=True, exist_ok=True)
@@ -208,9 +426,17 @@ def _eval_candidate(
             ),
             encoding="utf-8",
         )
+        tal_wr_done = float(talishar_metrics.get("p1_win_rate", 0.0))
+        print(
+            f"  Talishar final eval done: {tal_wr_done * 100:.1f}% "
+            f"({talishar_metrics.get('p1_wins', 0)}W/"
+            f"{talishar_metrics.get('losses', 0)}L/"
+            f"{talishar_metrics.get('draws', 0)}D)"
+        )
 
     cpp_wr = float(cpp_metrics.get("p1_win_rate", 0.0)) if cpp_metrics else None
     tal_wr = float(talishar_metrics.get("p1_win_rate", 0.0)) if talishar_metrics else None
+    play_wr = float(cpp_wr if cpp_wr is not None else tal_wr or 0.0)
 
     result = {
         "candidate_id": candidate.candidate_id,
@@ -218,7 +444,7 @@ def _eval_candidate(
         "swaps": [list(pair) for pair in candidate.swaps],
         "guide_margin": candidate.guide_margin,
         "game_deck_size": sum(candidate.game_deck.values()),
-        "play_win_rate": float(cpp_wr or 0.0),
+        "play_win_rate": play_wr,
         "cpp_eval_win_rate": cpp_wr,
         "cpp_eval": cpp_metrics,
         "final_eval_win_rate": tal_wr,
@@ -247,8 +473,13 @@ def _eval_candidate(
     print(
         f"    → C++ {cpp_wr * 100:.1f}%  |  Talishar {tal_wr * 100:.1f}%"
         if cpp_wr is not None and tal_wr is not None
-        else f"    → done"
+        else (
+            f"    → Talishar {tal_wr * 100:.1f}%"
+            if tal_wr is not None
+            else "    → done"
+        )
     )
+    _refresh_dashboard(out_dir)
     return result
 
 
@@ -276,7 +507,16 @@ def main() -> int:
     parser.add_argument("--talishar-url", default=None)
     parser.add_argument("--assets-path", default=None)
     parser.add_argument("--no-build-cpp-engine", action="store_true")
-    parser.add_argument("--no-require-cpp-engine", action="store_true")
+    parser.add_argument(
+        "--require-cpp-engine",
+        action="store_true",
+        help="Fail when the C++ engine cannot be built (default: HTTP Talishar fallback).",
+    )
+    parser.add_argument(
+        "--no-require-cpp-engine",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     args = parser.parse_args()
 
     import os
@@ -312,11 +552,26 @@ def main() -> int:
     probe_deck = f"rl_eval_probe_{uuid.uuid4().hex[:8]}"
     _write_deck_file(game_deck, args.equipment_header, probe_deck, assets_path)
     opp_name = normalize_talishar_asset_name(args.opponent_deck, assets_path)
-    probe_cpp = ensure_cpp_engine_for_matchup(
-        probe_deck,
+    cpp_deck1, cpp_deck2 = resolve_cpp_eval_deck_stems(
+        assets_path,
+        args.hero_id,
         opp_name,
+    )
+    probe_cpp = ensure_cpp_engine_for_matchup(
+        cpp_deck1,
+        cpp_deck2,
         assets_path=assets_path,
         talishar_url=args.talishar_url,
+        deck1_json=(
+            starting
+            if _needs_custom_cpp_engine(
+                assets_path,
+                cpp_deck1,
+                game_deck,
+                swaps=(),
+            )
+            else None
+        ),
         build=not args.no_build_cpp_engine,
     )
     probe_matchup = Matchup(
@@ -324,6 +579,8 @@ def main() -> int:
         p1_deck=probe_deck,
         p2_deck=opp_name,
         description="probe",
+        cpp_engine_deck1=cpp_deck1,
+        cpp_engine_deck2=cpp_deck2,
         cpp_engine_dir=probe_cpp,
     )
     probe_env = make_env(
@@ -360,6 +617,7 @@ def main() -> int:
         "opponent_hero_id": args.opponent_hero_id,
         "opponent_deck": args.opponent_deck,
         "play_episodes": 0,
+        "checkpoint_eval_episodes": args.cpp_eval_episodes,
         "cpp_eval_episodes": args.cpp_eval_episodes,
         "talishar_eval_episodes": args.talishar_eval_episodes,
         "final_eval_episodes": args.talishar_eval_episodes,
@@ -368,9 +626,12 @@ def main() -> int:
         "max_parallel": max_parallel,
         "candidates": [asdict(c) for c in candidates],
     }
+    if probe_cpp:
+        manifest["cpp_engine_dir"] = probe_cpp
     if existing_gui_run_id:
         manifest["gui_run_id"] = existing_gui_run_id
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    _refresh_dashboard(out_dir)
 
     print(
         f"\n{'='*62}\n"

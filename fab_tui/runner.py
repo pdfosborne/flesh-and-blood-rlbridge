@@ -637,10 +637,10 @@ def run_eval_sideboard_compare(
         env.talishar_url,
         "--assets-path",
         env.assets_path,
+        "--no-require-cpp-engine",
     ]
     if not spec.build_cpp_engine:
         cmd.append("--no-build-cpp-engine")
-        cmd.append("--no-require-cpp-engine")
     return run_streaming(cmd)
 
 

@@ -11,6 +11,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import shutil
 import subprocess
 import sys
 import time
@@ -57,6 +58,20 @@ def _run(cmd: list[str], *, cwd: Path) -> None:
     subprocess.run(cmd, cwd=cwd, check=True)  # noqa: S603
 
 
+def _npm_executable() -> str:
+    """Resolve npm on PATH (required on Windows where ``npm`` is ``npm.cmd``)."""
+    npm = shutil.which("npm")
+    if npm is None:
+        raise FileNotFoundError(
+            "npm not found on PATH. Install Node.js 18+ to run Talishar-FE."
+        )
+    return npm
+
+
+def _npm_cmd(*args: str) -> list[str]:
+    return [_npm_executable(), *args]
+
+
 def _prepare_talishar_runtime_files(talishar_dir: Path) -> None:
     """Create gitignored HostFiles Talishar needs before the PHP server starts."""
     host_files = talishar_dir / "HostFiles"
@@ -87,15 +102,16 @@ def _prepare_talishar_runtime_files(talishar_dir: Path) -> None:
 
 
 def _start_vite_detached(fe_dir: Path) -> None:
+    cmd = _npm_cmd("run", "dev")
     if sys.platform == "win32":
         subprocess.Popen(  # noqa: S603
-            ["npm", "run", "dev"],
+            cmd,
             cwd=fe_dir,
             creationflags=subprocess.CREATE_NEW_CONSOLE,
         )
     else:
         subprocess.Popen(  # noqa: S603
-            ["npm", "run", "dev"],
+            cmd,
             cwd=fe_dir,
             start_new_session=True,
             stdout=subprocess.DEVNULL,
@@ -144,24 +160,28 @@ def run(
             print(f"ERROR: Talishar-FE directory not found: {FE_DIR}", file=sys.stderr)
             return 1
 
-        if not (FE_DIR / "node_modules").is_dir():
-            print("  node_modules not found - running npm install...")
-            _run(["npm", "install"], cwd=FE_DIR)
+        try:
+            if not (FE_DIR / "node_modules").is_dir():
+                print("  node_modules not found - running npm install...")
+                _run(_npm_cmd("install"), cwd=FE_DIR)
 
-        if _reachable(FE_URL):
-            print(f"  Vite dev server already running at {FE_URL}")
-        else:
-            _start_vite_detached(FE_DIR)
-            if sys.platform == "win32":
-                print("  Vite dev server launched in a new window.")
+            if _reachable(FE_URL):
+                print(f"  Vite dev server already running at {FE_URL}")
             else:
-                print("  Vite dev server launched in the background.")
-            print(f"  Frontend URL : {FE_URL}")
+                _start_vite_detached(FE_DIR)
+                if sys.platform == "win32":
+                    print("  Vite dev server launched in a new window.")
+                else:
+                    print("  Vite dev server launched in the background.")
+                print(f"  Frontend URL : {FE_URL}")
 
-            if _wait_for(FE_URL, 20, "Vite to start"):
-                print("  Frontend is up.")
-            else:
-                print("  Frontend did not respond yet - it may need a few more seconds.")
+                if _wait_for(FE_URL, 20, "Vite to start"):
+                    print("  Frontend is up.")
+                else:
+                    print("  Frontend did not respond yet - it may need a few more seconds.")
+        except FileNotFoundError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 1
 
     _header("Talishar stack ready")
     if not fe_only:

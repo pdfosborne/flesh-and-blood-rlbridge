@@ -9,6 +9,70 @@ OUTCOME_WIN = "win"
 OUTCOME_LOSS = "loss"
 OUTCOME_DRAW = "draw"
 OUTCOME_TIMEOUT = "timeout"
+OUTCOME_ERROR = "error"
+
+
+def classify_p1_outcome_from_engine_winner(winner: int) -> Optional[str]:
+    """Map C++ ``winner`` (0=P1, 1=P2, -1=undecided) to a P1 outcome."""
+    if winner == 0:
+        return OUTCOME_WIN
+    if winner == 1:
+        return OUTCOME_LOSS
+    if winner < 0:
+        return None
+    return OUTCOME_DRAW
+
+
+def classify_p1_fast_episode_outcome(
+    state: dict[str, Any],
+    *,
+    max_steps_reached: bool = False,
+) -> tuple[str, Optional[str]]:
+    """Classify a C++ fast-path episode; return ``(outcome, anomaly)``."""
+    terminated = bool(state.get("terminated", False))
+    truncated = bool(state.get("truncated", False))
+    if max_steps_reached or (truncated and not terminated):
+        return OUTCOME_TIMEOUT, None
+
+    winner_raw = state.get("winner", -1)
+    try:
+        winner = int(winner_raw)
+    except (TypeError, ValueError):
+        winner = -1
+
+    p1_hp = state.get("p1_health")
+    p2_hp = state.get("p2_health")
+
+    if terminated and winner >= 0:
+        winner_outcome = classify_p1_outcome_from_engine_winner(winner)
+        if winner_outcome is None:
+            return OUTCOME_TIMEOUT, f"unexpected winner code {winner}"
+        if p1_hp is not None and p2_hp is not None:
+            hp_outcome = classify_p1_episode_outcome(
+                p1_hp=p1_hp,
+                p2_hp=p2_hp,
+                terminated=True,
+                truncated=False,
+            )
+            if (
+                hp_outcome in {OUTCOME_WIN, OUTCOME_LOSS, OUTCOME_DRAW}
+                and hp_outcome != winner_outcome
+            ):
+                return winner_outcome, (
+                    f"engine winner={winner} ({winner_outcome}) disagrees with "
+                    f"HP outcome {hp_outcome} (p1_hp={p1_hp}, p2_hp={p2_hp})"
+                )
+        return winner_outcome, None
+
+    if p1_hp is None or p2_hp is None:
+        return OUTCOME_ERROR, "missing p1_hp/p2_hp at episode end"
+
+    return classify_p1_episode_outcome(
+        p1_hp=p1_hp,
+        p2_hp=p2_hp,
+        terminated=terminated,
+        truncated=truncated,
+    ), None
 
 
 def _observation_dict(obs: Any) -> dict[str, Any]:

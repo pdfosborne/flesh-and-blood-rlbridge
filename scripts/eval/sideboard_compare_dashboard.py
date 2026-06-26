@@ -150,6 +150,15 @@ def _live_final_eval_progress(candidate_dir: Path) -> Optional[dict[str, Any]]:
     return None
 
 
+def _live_eval_only_progress(candidate_dir: Path) -> Optional[dict[str, Any]]:
+    live_path = candidate_dir / "eval_live.json"
+    if live_path.is_file():
+        data = _read_json(live_path)
+        if isinstance(data, dict):
+            return data
+    return None
+
+
 def _resolve_final_eval_eta_weight(manifest: dict[str, Any]) -> float:
     raw = manifest.get("final_eval_eta_weight")
     if raw is not None:
@@ -360,12 +369,15 @@ def _candidate_status(
     result: Optional[dict[str, Any]],
     training_meta: Optional[dict[str, Any]],
     skip_final_eval: bool,
+    eval_only: bool = False,
 ) -> str:
     if result is not None:
         if skip_final_eval or result.get("final_eval_win_rate") is not None:
             return "complete"
         if result.get("play_win_rate") is not None:
             return "final_eval"
+    if eval_only and result is not None and result.get("play_win_rate") is None:
+        return "training"
     if training_meta is not None:
         done = int(training_meta.get("episodes_completed", 0) or 0)
         target = int(training_meta.get("target_episodes", 0) or 0)
@@ -502,6 +514,14 @@ def collect_sideboard_compare_state(out_dir: Path) -> dict[str, Any]:
         summary = None
 
     play_episodes = int(manifest.get("play_episodes", 0) or 0)
+    eval_only = bool(manifest.get("eval_only"))
+    cpp_eval_episodes = int(
+        manifest.get("cpp_eval_episodes")
+        or manifest.get("checkpoint_eval_episodes")
+        or 0
+    )
+    if eval_only and play_episodes <= 0 and cpp_eval_episodes > 0:
+        play_episodes = cpp_eval_episodes
     final_eval_episodes = int(manifest.get("final_eval_episodes", 0) or 0)
     default_checkpoint_eval_episodes = int(
         manifest.get("checkpoint_eval_episodes", 0) or 0
@@ -541,6 +561,7 @@ def collect_sideboard_compare_state(out_dir: Path) -> dict[str, Any]:
         result: Optional[dict[str, Any]] = None
         training_meta: Optional[dict[str, Any]] = None
         live_training: Optional[dict[str, Any]] = None
+        live_eval_only: Optional[dict[str, Any]] = None
         eval_series: list[dict[str, Any]] = []
         train_series: list[dict[str, Any]] = []
         if candidate_dir and candidate_dir.is_dir():
@@ -551,6 +572,7 @@ def collect_sideboard_compare_state(out_dir: Path) -> dict[str, Any]:
                     result = loaded
             training_meta = _latest_training_metadata(candidate_dir)
             live_training = _live_training_progress(candidate_dir)
+            live_eval_only = _live_eval_only_progress(candidate_dir)
             eval_series = _checkpoint_eval_series(candidate_dir)
             train_series = _training_win_series(candidate_dir)
 
@@ -565,10 +587,19 @@ def collect_sideboard_compare_state(out_dir: Path) -> dict[str, Any]:
         )
         train_done = int(training_progress["done"])
         train_target = int(training_progress["target"])
+        if eval_only and live_eval_only is not None:
+            cpp_done = int(live_eval_only.get("episodes_completed", 0) or 0)
+            cpp_target = int(
+                live_eval_only.get("target_episodes", 0) or cpp_eval_episodes
+            )
+            if cpp_target > 0:
+                train_done = min(cpp_done, cpp_target)
+                train_target = cpp_target
         status = _candidate_status(
             result=result,
             training_meta=training_meta,
             skip_final_eval=skip_final_eval,
+            eval_only=eval_only,
         )
         if train_target > 0 and 0 < train_done < train_target:
             status = "training"

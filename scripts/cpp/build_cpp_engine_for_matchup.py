@@ -223,12 +223,79 @@ def pybind11_cmake_dir() -> str:
     return output.splitlines()[-1].strip()
 
 
-def cmake_generator_args(engine_dir: Path, pybind11_dir: str) -> list[str]:
+def _which_in_env(name: str, env: dict[str, str]) -> str | None:
+    path = env.get("PATH", "")
+    if path:
+        return shutil.which(name, path=path)
+    return shutil.which(name)
+
+
+def _parse_cmd_set_output(text: str) -> dict[str, str]:
+    parsed: dict[str, str] = {}
+    for line in text.splitlines():
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        if key:
+            parsed[key] = value
+    return parsed
+
+
+def _windows_msvc_build_env(base: dict[str, str] | None = None) -> dict[str, str]:
+    """Load vcvars64 so CMake can compile with MSVC outside a Developer shell."""
+    env = dict(base or os.environ)
+    if sys.platform != "win32":
+        return env
+
+    vswhere_candidates = [
+        Path(os.environ.get("ProgramFiles(x86)", "")) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe",
+        Path(os.environ.get("ProgramFiles", "")) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe",
+    ]
+    for vswhere in vswhere_candidates:
+        if not vswhere.is_file():
+            continue
+        completed = subprocess.run(
+            [str(vswhere), "-latest", "-property", "installationPath"],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        install_path = (completed.stdout or "").strip()
+        if not install_path:
+            continue
+        vcvars = Path(install_path) / "VC" / "Auxiliary" / "Build" / "vcvars64.bat"
+        if not vcvars.is_file():
+            continue
+        boot = subprocess.run(
+            ["cmd", "/c", f'call "{vcvars}" >nul 2>&1 && set'],
+            check=False,
+            text=True,
+            capture_output=True,
+            env=env,
+        )
+        if boot.returncode == 0 and boot.stdout:
+            env.update(_parse_cmd_set_output(boot.stdout))
+            if _which_in_env("cl", env):
+                _ok("MSVC environment loaded (vcvars64)")
+                return env
+    return env
+
+
+def cmake_generator_args(
+    engine_dir: Path,
+    pybind11_dir: str,
+    *,
+    env: dict[str, str] | None = None,
+) -> list[str]:
+    build_env = env or os.environ
+    if _which_in_env("ninja", build_env) and _which_in_env("cl", build_env):
+        _ok("Generator: Ninja (MSVC)")
+        return ["-G", "Ninja"]
     if shutil.which("ninja"):
         _ok("Generator: Ninja")
         return ["-G", "Ninja"]
     if sys.platform == "win32":
-        if shutil.which("cl"):
+        if _which_in_env("cl", build_env):
             _ok("Generator: auto (cl.exe found)")
             return []
         vswhere_candidates = [
@@ -353,7 +420,8 @@ def build_engine(engine_dir: Path, input_hash: str, pybind11_dir: str) -> None:
     print("  Locating pybind11 cmake dir...")
     _ok(f"pybind11 cmake dir: {pybind11_dir}")
 
-    generator_args = cmake_generator_args(engine_dir, pybind11_dir)
+    build_env = _windows_msvc_build_env()
+    generator_args = cmake_generator_args(engine_dir, pybind11_dir, env=build_env)
     build_dir = engine_dir / "build"
     if (build_dir / "CMakeCache.txt").is_file():
         print("  Clearing stale CMake cache...")
@@ -379,6 +447,7 @@ def build_engine(engine_dir: Path, input_hash: str, pybind11_dir: str) -> None:
         check=False,
         text=True,
         capture_output=True,
+        env=build_env,
     )
     for line in (configure.stdout or configure.stderr or "").splitlines():
         print(f"    {line}")
@@ -393,6 +462,7 @@ def build_engine(engine_dir: Path, input_hash: str, pybind11_dir: str) -> None:
         check=False,
         text=True,
         capture_output=True,
+        env=build_env,
     )
     for line in (build.stdout or build.stderr or "").splitlines():
         print(f"    {line}")
