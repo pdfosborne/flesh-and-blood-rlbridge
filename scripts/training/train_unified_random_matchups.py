@@ -20,7 +20,12 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+_SCRIPTS_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_SCRIPTS_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _bootstrap  # noqa: E402
+
+_bootstrap.configure_paths()
 
 from train_dual_agent_common import (  # noqa: E402
     DEFAULT_N_EPISODES,

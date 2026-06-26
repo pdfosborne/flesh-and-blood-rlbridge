@@ -65,13 +65,21 @@ def src_dir() -> Path:
     return repo_root() / "src"
 
 
-def configure_import_paths() -> Path:
-    """Ensure ``src`` and repo root are on ``sys.path`` (idempotent)."""
+def prepend_sys_path(entry: str | Path) -> None:
+    """Move *entry* to the front of ``sys.path`` (idempotent)."""
     import sys
 
+    entry_str = str(entry)
+    while entry_str in sys.path:
+        sys.path.remove(entry_str)
+    sys.path.insert(0, entry_str)
+
+
+def configure_import_paths() -> Path:
+    """Ensure repo root and ``src`` are prepended to ``sys.path`` (idempotent)."""
     root = str(repo_root())
     src = str(src_dir())
-    for entry in (root, src):
-        if entry not in sys.path:
-            sys.path.insert(0, entry)
+    # Insert src first so repo root ends up at index 0 (runtime_defaults, fab_tui, …).
+    for entry in (src, root):
+        prepend_sys_path(entry)
     return repo_root()

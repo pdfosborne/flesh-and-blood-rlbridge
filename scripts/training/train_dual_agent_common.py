@@ -17,18 +17,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-FAB_SRC = REPO_ROOT / "src"
+from fab_bridge.paths import configure_import_paths, prepend_sys_path, repo_root, src_dir  # noqa: E402
+
+configure_import_paths()
+REPO_ROOT = repo_root()
+FAB_SRC = src_dir()
 RL_SRC = Path("~/Documents/RL/rlbridge/src").expanduser()
+prepend_sys_path(RL_SRC)
 FAB_DB_DIR = FAB_SRC / "flesh_and_blood_rlbridge" / "card_db"
 FABRARY_DECKS_PATH = FAB_DB_DIR / "fabrary_decks.json"
 CARDS_DB_PATH = FAB_DB_DIR / "cards.json"
 TALISHAR_ID_RE = re.compile(r"^[a-z][a-z0-9_]+$")
-
-for p in (FAB_SRC, REPO_ROOT, RL_SRC):
-    s = str(p)
-    if s not in sys.path:
-        sys.path.insert(0, s)
 
 from fab_tui.deck_cards import assign_pitch_variants  # noqa: E402
 from play_outcome_stats import (  # noqa: E402

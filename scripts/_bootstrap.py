@@ -44,12 +44,12 @@ def configure_paths() -> Path:
         else:
             repo = REPO_ROOT
 
-        repo_str = str(repo)
-        if repo_str not in sys.path:
-            sys.path.insert(0, repo_str)
-        src = str(repo / "src")
-        if (repo / "src").is_dir() and src not in sys.path:
-            sys.path.insert(0, src)
+        from fab_bridge.paths import prepend_sys_path
+
+        src = repo / "src"
+        if src.is_dir():
+            prepend_sys_path(src)
+        prepend_sys_path(repo)
         scripts_root = SCRIPTS_ROOT
 
     _add_script_subdirs(scripts_root)
