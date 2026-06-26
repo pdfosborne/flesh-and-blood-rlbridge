@@ -16,6 +16,10 @@ const state = {
   activeRun: null,
   pollTimer: null,
   lastResultsRanking: null,
+  livePlaySession: null,
+  livePlayPollTimer: null,
+  livePlayFrameUrl: "",
+  livePlayChromiumError: "",
 };
 
 const MIN_DECK_SIZES = {
@@ -54,6 +58,10 @@ function switchTab(name) {
   if (name === "results" && state.activeRun) loadResults(state.activeRun.run_id);
   if (name === "opponent") {
     updateOpponentSummary();
+  }
+  if (name === "liveplay") {
+    refreshLivePlayMatchup();
+    syncLivePlayModeControls();
   }
 }
 
@@ -1990,130 +1998,6 @@ function startPolling() {
   }, 5000);
 }
 
-let replayPollTimer = null;
-
-function replayPreviewMeta(status) {
-  if (status.status === "encoding") {
-    return `Building GIF from ${status.frames_saved || 0} frames…`;
-  }
-  if (status.frames_saved) {
-    return `Capturing frame ${status.frames_saved}…`;
-  }
-  return "Capturing Talishar FE replay (one full game)…";
-}
-
-function applyReplayPreview(status) {
-  const empty = document.getElementById("results-replay-empty");
-  const panel = document.getElementById("results-replay-panel");
-  const img = document.getElementById("results-replay-gif");
-  const meta = document.getElementById("results-replay-meta");
-  const btn = document.getElementById("btn-render-replay");
-  if (!empty || !panel || !img || !meta || !btn) return;
-
-  if (status.latest_frame_url) {
-    empty.hidden = true;
-    panel.hidden = false;
-    img.src = `${status.latest_frame_url}?t=${Date.now()}`;
-    meta.textContent = replayPreviewMeta(status);
-    btn.hidden = false;
-    btn.disabled = true;
-    btn.textContent = status.status === "encoding" ? "Building GIF…" : "Rendering replay…";
-  }
-}
-
-function renderReplayPanel(data, runId) {
-  const empty = document.getElementById("results-replay-empty");
-  const panel = document.getElementById("results-replay-panel");
-  const img = document.getElementById("results-replay-gif");
-  const meta = document.getElementById("results-replay-meta");
-  const btn = document.getElementById("btn-render-replay");
-  if (!empty || !panel || !img || !meta || !btn) return;
-
-  const replayUrl = data.replay_gif_url;
-  const replayStatus = data.replay_render_status || data.replay_render || {};
-  const isRunning = replayStatus.status === "running" || replayStatus.status === "encoding";
-
-  if (replayUrl) {
-    empty.hidden = true;
-    panel.hidden = false;
-    btn.hidden = true;
-    img.src = `${replayUrl}?t=${Date.now()}`;
-    const outcome = replayStatus.outcome || data.replay_render?.outcome;
-    const frames = replayStatus.frames_saved ?? data.replay_render?.frames_saved;
-    meta.textContent = [
-      outcome ? `Outcome: ${outcome}` : "",
-      frames != null ? `${frames} frames` : "",
-    ]
-      .filter(Boolean)
-      .join(" · ");
-    if (replayPollTimer) {
-      clearInterval(replayPollTimer);
-      replayPollTimer = null;
-    }
-    return;
-  }
-
-  btn.hidden = false;
-  btn.disabled = isRunning;
-  btn.textContent =
-    replayStatus.status === "encoding"
-      ? "Building GIF…"
-      : isRunning
-        ? "Rendering replay…"
-        : "Generate replay GIF";
-
-  if (isRunning) {
-    if (replayStatus.latest_frame_url) {
-      applyReplayPreview(replayStatus);
-    } else {
-      panel.hidden = true;
-      empty.hidden = false;
-      empty.textContent = replayPreviewMeta(replayStatus);
-    }
-    if (!replayPollTimer && runId) startReplayPolling(runId);
-    return;
-  }
-
-  panel.hidden = true;
-  if (replayStatus.status === "failed") {
-    empty.hidden = false;
-    empty.textContent = replayStatus.error || "Replay render failed. Ensure Talishar-FE is running.";
-    return;
-  }
-  empty.hidden = false;
-  empty.textContent =
-    "No replay GIF yet. Start Talishar-FE on port 5173, then generate a replay for the winning list.";
-}
-
-function startReplayPolling(runId) {
-  if (replayPollTimer) clearInterval(replayPollTimer);
-  const poll = async () => {
-    try {
-      const status = await api(`/api/runs/${runId}/replay-status`);
-      if (!status.ready && (status.status === "running" || status.status === "encoding")) {
-        applyReplayPreview(status);
-      }
-      if (status.ready) {
-        clearInterval(replayPollTimer);
-        replayPollTimer = null;
-        await loadResults(runId);
-        toast("Replay GIF ready");
-        return;
-      }
-      if (status.status === "failed") {
-        clearInterval(replayPollTimer);
-        replayPollTimer = null;
-        await loadResults(runId);
-        toast(status.error || "Replay render failed", true);
-      }
-    } catch {
-      /* ignore transient poll errors */
-    }
-  };
-  poll();
-  replayPollTimer = setInterval(poll, 1500);
-}
-
 function formatCardIdLabel(cardId) {
   return String(cardId || "?").replace(/_/g, " ");
 }
@@ -2344,26 +2228,307 @@ async function loadResults(runId) {
       `Output: ${data.out_dir} · Winning deck asset: ${data.winning_deck_asset || "n/a"}`;
     renderResultsLogicSummary(ranking);
     renderResultsDamagePanel(ranking, winner.candidate_id);
-    renderReplayPanel(data, runId);
   } catch (e) {
     document.getElementById("results-empty").textContent = e.message;
   }
 }
 
-document.getElementById("btn-render-replay").onclick = async () => {
-  if (!state.activeRun) return toast("No completed evaluation run", true);
-  const btn = document.getElementById("btn-render-replay");
-  btn.disabled = true;
-  btn.textContent = "Rendering replay…";
+function refreshLivePlayMatchup() {
+  const el = document.getElementById("liveplay-matchup");
+  if (!el) return;
+  if (!state.deck || !state.opponent) {
+    el.textContent = "Import your deck and select an opponent on tabs 1–2 before live play.";
+    return;
+  }
+  const playerName = state.deck.name || state.deck.hero_id || "Your deck";
+  const oppName = state.opponent.label || state.opponent.opponent_deck || "Opponent";
+  el.innerHTML = `<strong>Matchup:</strong> ${escapeHtml(playerName)} vs ${escapeHtml(oppName)}<br><strong>Format:</strong> ${escapeHtml(state.deck.game_format || "silver_age")}`;
+}
+
+function syncLivePlayModeControls() {
+  const mode = document.getElementById("liveplay-human-deck")?.value || "opponent";
+  const watchOnly = mode === "watch";
+  ["liveplay-coach-wrap", "liveplay-rollouts-wrap", "liveplay-opponent-policy-wrap"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.classList.toggle("is-disabled", watchOnly);
+    if (el) el.hidden = watchOnly;
+  });
+  const coachSidebar = document.querySelector(".liveplay-coach-sidebar");
+  if (coachSidebar) coachSidebar.classList.toggle("is-disabled", watchOnly);
+}
+
+function renderLivePlayCoach(hints, status = {}) {
+  const list = document.getElementById("liveplay-coach-hints");
+  const intro = document.querySelector(".liveplay-coach-intro");
+  if (intro) {
+    const rollouts = Number(status.coach_rollouts || 0);
+    if (rollouts > 0 && status.coach_cpp_ready === false) {
+      intro.textContent =
+        "Policy guidance on your turns. C++ win % unavailable — build a C++ engine for this matchup (see training pipeline).";
+    } else if (rollouts > 0) {
+      intro.textContent = `Policy guidance plus C++ win estimates (${rollouts} rollouts per action).`;
+    } else {
+      intro.textContent =
+        "Policy guidance on your turns. Set rollouts above 0 in Setup for C++ win estimates.";
+    }
+  }
+  if (!list) return;
+  if (!hints?.length) {
+    list.hidden = true;
+    list.innerHTML = "";
+    return;
+  }
+  list.hidden = false;
+  list.innerHTML = hints
+    .map((hint) => {
+      const policy =
+        hint.policyPct != null ? `${Math.round(Number(hint.policyPct) * 100)}% policy` : "";
+      const win = hint.winPct != null ? `${Math.round(Number(hint.winPct) * 100)}% win` : "";
+      const scores = [policy, win].filter(Boolean).join(" · ");
+      const cls = hint.isBest ? "best" : "";
+      const star = hint.isBest ? " ★" : "";
+      return `<li class="${cls}">${escapeHtml(hint.label || "Action")}${star}${
+        scores ? `<div class="liveplay-coach-scores">${escapeHtml(scores)}</div>` : ""
+      }</li>`;
+    })
+    .join("");
+}
+
+function isLoopbackHost(hostname) {
+  const h = (hostname || "").toLowerCase();
+  return h === "localhost" || h === "::1" || h === "0.0.0.0" || h.startsWith("127.");
+}
+
+function normalizeTalisharFeUrl(url) {
+  if (!url) return "";
+  const pageHost = window.location.hostname || "127.0.0.1";
+  const browserBase = (
+    state.config?.talishar_fe_browser_url ||
+    state.config?.talishar_fe_url ||
+    `http://${isLoopbackHost(pageHost) ? "localhost" : pageHost}:5173`
+  ).replace(/\/$/, "");
   try {
-    await api(`/api/runs/${state.activeRun.run_id}/render-replay`, { method: "POST", body: "{}" });
-    startReplayPolling(state.activeRun.run_id);
-    await loadResults(state.activeRun.run_id);
-    toast("Replay render started — this may take a minute");
+    const parsed = new URL(url, browserBase);
+    const base = new URL(browserBase);
+    // Use the server-mapped FE host (loopback-safe); do not rewrite to 127.0.0.1.
+    parsed.protocol = base.protocol;
+    parsed.hostname = base.hostname;
+    if (base.port) {
+      parsed.port = base.port;
+    }
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}
+
+function applyLivePlayStatus(status) {
+  const frame = document.getElementById("liveplay-frame");
+  const frameEmpty = document.getElementById("liveplay-frame-empty");
+  const fallback = document.getElementById("liveplay-fallback");
+  const fallbackLink = document.getElementById("liveplay-fallback-link");
+  const chromiumBanner = document.getElementById("liveplay-chromium-banner");
+  const chromiumBtn = document.getElementById("btn-liveplay-chromium");
+  const statusEl = document.getElementById("liveplay-status");
+  const recordEl = document.getElementById("liveplay-record");
+  const turnBanner = document.getElementById("liveplay-turn-banner");
+  const startBtn = document.getElementById("btn-liveplay-start");
+  const stopBtn = document.getElementById("btn-liveplay-stop");
+  const preferChromium =
+    document.getElementById("liveplay-prefer-chromium")?.checked ??
+    status?.prefer_chromium ??
+    true;
+
+  if (!status?.active) {
+    statusEl.textContent = "idle";
+    statusEl.className = "status-pill pending";
+    if (startBtn) startBtn.disabled = !(state.deck && state.opponent);
+    if (stopBtn) stopBtn.disabled = true;
+    if (turnBanner) turnBanner.hidden = true;
+    if (chromiumBanner) {
+      chromiumBanner.hidden = false;
+      chromiumBanner.textContent =
+        "Talishar board opens in Chromium when you start a game. Coach hints stay in this sidebar.";
+    }
+    if (fallback) fallback.hidden = true;
+    if (chromiumBtn) chromiumBtn.disabled = true;
+    if (frame) frame.hidden = true;
+    if (frameEmpty) frameEmpty.hidden = true;
+    state.livePlayFrameUrl = "";
+    state.livePlayChromiumError = "";
+    return;
+  }
+
+  const sessionStatus = status.status || "starting";
+  statusEl.textContent = sessionStatus;
+  statusEl.className = `status-pill ${sessionStatus === "playing" ? "running" : sessionStatus}`;
+
+  const rec = status.record || {};
+  if (recordEl) {
+    recordEl.textContent = `Record: ${rec.wins || 0}W ${rec.losses || 0}L ${rec.draws || 0}D`;
+  }
+
+  const boardUrl = normalizeTalisharFeUrl(status.frontend_url || "");
+  const chromiumMode = preferChromium || Boolean(status.prefer_chromium || status.chromium_opened);
+
+  if (chromiumBanner) {
+    chromiumBanner.hidden = false;
+    if (chromiumMode) {
+      chromiumBanner.textContent = status.chromium_opened
+        ? "Playing in Chromium — use that window for clicks. Re-open below if you closed it."
+        : "Opening Chromium board…";
+    } else {
+      chromiumBanner.textContent =
+        "Experimental in-page embed (often blank with local Talishar-FE). Prefer Chromium board in Setup.";
+    }
+  }
+
+  if (boardUrl && frame) {
+    if (!chromiumMode) {
+      if (state.livePlayFrameUrl !== boardUrl) {
+        state.livePlayFrameUrl = boardUrl;
+        frame.src = boardUrl;
+      }
+      frame.hidden = false;
+      if (frameEmpty) frameEmpty.hidden = true;
+    } else {
+      frame.hidden = true;
+      if (frameEmpty) frameEmpty.hidden = true;
+    }
+    if (fallback) fallback.hidden = false;
+    if (fallbackLink) fallbackLink.href = boardUrl;
+    if (chromiumBtn) chromiumBtn.disabled = !boardUrl;
+  } else if (sessionStatus === "starting") {
+    if (frameEmpty) {
+      frameEmpty.hidden = false;
+      frameEmpty.textContent = chromiumMode
+        ? "Starting game — opening Chromium board…"
+        : "Starting game — loading Talishar board…";
+    }
+    if (frame) frame.hidden = true;
+    if (fallback) fallback.hidden = true;
+    if (chromiumBtn) chromiumBtn.disabled = true;
+  }
+
+  if (status.chromium_error && status.chromium_error !== state.livePlayChromiumError) {
+    state.livePlayChromiumError = status.chromium_error;
+    toast(status.chromium_error, true);
+  }
+
+  if (turnBanner) turnBanner.hidden = !status.your_turn;
+  renderLivePlayCoach(status.coach_hints || [], status);
+
+  const running = sessionStatus === "starting" || sessionStatus === "playing";
+  if (startBtn) startBtn.disabled = running;
+  if (stopBtn) stopBtn.disabled = !running;
+}
+
+async function openLivePlayChromium() {
+  const btn = document.getElementById("btn-liveplay-chromium");
+  if (btn) btn.disabled = true;
+  try {
+    const sessionId = state.livePlaySession?.session_id;
+    await api("/api/live-play/open-chromium", {
+      method: "POST",
+      body: JSON.stringify({ session_id: sessionId }),
+    });
+    toast("Re-opening Talishar in Chromium…");
+    if (state.livePlaySession?.session_id) {
+      const status = await api(`/api/live-play/${state.livePlaySession.session_id}/status`);
+      applyLivePlayStatus({ active: true, ...status });
+    }
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function stopLivePlayPolling() {
+  if (state.livePlayPollTimer) {
+    clearInterval(state.livePlayPollTimer);
+    state.livePlayPollTimer = null;
+  }
+}
+
+function startLivePlayPolling(sessionId) {
+  stopLivePlayPolling();
+  const poll = async () => {
+    try {
+      const status = await api(`/api/live-play/${sessionId}/status`);
+      applyLivePlayStatus({ active: true, ...status });
+      if (!["starting", "playing"].includes(status.status)) {
+        stopLivePlayPolling();
+        state.livePlaySession = null;
+        if (status.status === "finished") toast("Game finished");
+        else if (status.status === "cancelled") toast("Game stopped");
+        else if (status.status === "failed") toast(status.error || "Live play failed", true);
+      }
+    } catch (e) {
+      stopLivePlayPolling();
+      toast(e.message, true);
+    }
+  };
+  poll();
+  state.livePlayPollTimer = setInterval(poll, 400);
+}
+
+document.getElementById("btn-liveplay-start").onclick = async () => {
+  if (!state.deck) return toast("Import your deck first", true);
+  if (!state.opponent) return toast("Select an opponent first", true);
+  const btn = document.getElementById("btn-liveplay-start");
+  const mode = document.getElementById("liveplay-human-deck").value;
+  const watchOnly = mode === "watch";
+  btn.disabled = true;
+  try {
+    const payload = await api("/api/live-play/start", {
+      method: "POST",
+      body: JSON.stringify({
+        name: state.deck.name,
+        deck_name: state.deck.name,
+        hero_id: state.deck.hero_id,
+        game_format: state.deck.game_format,
+        equipment_header: state.deck.equipment_header,
+        deck: state.deck.deck,
+        card_pool: state.deck.card_pool,
+        opponent_hero_id: state.opponent.opponent_hero_id,
+        opponent_deck: state.opponent.opponent_deck,
+        opponent_game_deck: state.opponent.deck,
+        opponent_label: state.opponent.label || state.opponent.opponent_deck,
+        opponent_equipment_header:
+          state.opponent.equipment_header || state.opponent.opponent_hero_id || "",
+        human_deck: mode,
+        opponent_policy: watchOnly
+          ? "agent"
+          : document.getElementById("liveplay-opponent-policy")?.value || "agent",
+        enable_action_coach: !watchOnly && document.getElementById("liveplay-enable-coach").checked,
+        coach_rollouts_per_action: Math.max(0, +document.getElementById("liveplay-rollouts").value || 0),
+        prefer_chromium: document.getElementById("liveplay-prefer-chromium")?.checked || false,
+      }),
+    });
+    state.livePlaySession = payload;
+    startLivePlayPolling(payload.session_id);
+    applyLivePlayStatus({ active: true, ...payload });
+    toast("Live play started — use the board below");
   } catch (e) {
     toast(e.message, true);
     btn.disabled = false;
-    btn.textContent = "Generate replay GIF";
+  }
+};
+
+document.getElementById("btn-liveplay-stop").onclick = async () => {
+  const stopBtn = document.getElementById("btn-liveplay-stop");
+  stopBtn.disabled = true;
+  try {
+    const sessionId = state.livePlaySession?.session_id;
+    await api("/api/live-play/stop", {
+      method: "POST",
+      body: JSON.stringify({ session_id: sessionId || "" }),
+    });
+    toast("Stopping game…");
+  } catch (e) {
+    toast(e.message, true);
+    stopBtn.disabled = false;
   }
 };
 
@@ -2381,6 +2546,28 @@ async function init() {
   await loadSavedDecks();
   await loadSavedOpponents();
   if (state.opponent) doOpponentCardSearch("");
+  refreshLivePlayMatchup();
+  const livePlayMode = document.getElementById("liveplay-human-deck");
+  if (livePlayMode) {
+    livePlayMode.addEventListener("change", syncLivePlayModeControls);
+    syncLivePlayModeControls();
+  }
+  const livePlayFrame = document.getElementById("liveplay-frame");
+  if (livePlayFrame) {
+    livePlayFrame.addEventListener("error", () => {
+      const frameEmpty = document.getElementById("liveplay-frame-empty");
+      if (frameEmpty) {
+        frameEmpty.hidden = false;
+        frameEmpty.textContent =
+          "Talishar board failed to load in the iframe. Try Open in Chromium below.";
+      }
+      toast("Talishar board failed to embed — try Open in Chromium", true);
+    });
+  }
+  const chromiumBtn = document.getElementById("btn-liveplay-chromium");
+  if (chromiumBtn) {
+    chromiumBtn.addEventListener("click", openLivePlayChromium);
+  }
 }
 
 init();

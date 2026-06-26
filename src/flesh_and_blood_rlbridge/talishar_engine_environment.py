@@ -907,6 +907,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         poll_interval: float = 0.3,
         max_wait_s: float = 3600.0,
         on_waiting: Optional[Any] = None,
+        cancel_event: Optional[Any] = None,
     ) -> str:
         """Block until *player_id* yields priority via the Talishar frontend.
 
@@ -915,10 +916,16 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
 
         *on_waiting* is called on each poll while *player_id* still has
         priority.  Use it to refresh frontend coaching overlays.
+
+        If *cancel_event* is set and becomes set, raises ``LivePlayCancelled``.
         """
+        from flesh_and_blood_rlbridge.live_play_cancel import LivePlayCancelled
+
         deadline = time.time() + max_wait_s
         last_overlay_poll = 0.0
         while time.time() < deadline:
+            if cancel_event is not None and cancel_event.is_set():
+                raise LivePlayCancelled("Live play session cancelled")
             for pid in (1, 2):
                 probe = self._fetch_state(player_id=pid, last_update=0)
                 if self._is_game_over(probe):

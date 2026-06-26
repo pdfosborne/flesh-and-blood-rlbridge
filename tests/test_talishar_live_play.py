@@ -11,11 +11,15 @@ sys.path.insert(0, str(_REPO / "scripts" / "eval"))
 
 from talishar_live_play import (  # noqa: E402
     LivePlayContext,
+    _gui_human_deck_to_trained_opponent,
     _outcome_from_human_perspective,
+    _refresh_human_action_coach,
     configure_human_vs_agent,
     deck_labels_from_bundle,
     prepare_live_play_context,
+    prepare_unified_live_play_context,
     resolve_checkpoint_bundles,
+    unified_agent_weights_path,
 )
 from eval_phase3_checkpoint import CheckpointBundle  # noqa: E402
 
@@ -182,3 +186,256 @@ def test_deck_labels_dual_mode_ignores_stale_preset_name() -> None:
     trained, opponent = deck_labels_from_bundle(p1, p2)
     assert trained == "briar"
     assert opponent == "briar"
+
+
+def test_gui_human_deck_mapping() -> None:
+    assert _gui_human_deck_to_trained_opponent("player") == "trained"
+    assert _gui_human_deck_to_trained_opponent("opponent") == "opponent"
+
+
+def test_unified_agent_weights_path(tmp_path: Path) -> None:
+    path = unified_agent_weights_path(tmp_path / "cache", "silver_age")
+    assert path.parent.name == "silver_age"
+    assert path.name.startswith("unified_agent_v")
+
+
+def test_unified_agent_weights_path_maps_sage_to_silver_age(tmp_path: Path) -> None:
+    from talishar_live_play import unified_agent_cache_format  # noqa: PLC0415
+
+    assert unified_agent_cache_format("sage") == "silver_age"
+    path = unified_agent_weights_path(tmp_path / "cache", "sage")
+    assert path.parent.name == "silver_age"
+
+
+def test_prepare_unified_live_play_context(tmp_path: Path, monkeypatch) -> None:
+    cache_dir = tmp_path / "cache"
+    fmt_dir = cache_dir / "silver_age"
+    fmt_dir.mkdir(parents=True)
+    weights = fmt_dir / unified_agent_weights_path(cache_dir, "silver_age").name
+    weights.write_text("{}", encoding="utf-8")
+    assets = tmp_path / "Assets"
+    assets.mkdir()
+
+    class _FakeEnv:
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        "talishar_live_play.TalisharEngineEnvironment",
+        lambda **kwargs: _FakeEnv(),
+    )
+    monkeypatch.setattr(
+        "eval_sideboard_compare._load_unified_agent",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        "agent_cache.clone_agent_weights",
+        lambda _src, _dst: None,
+    )
+
+    written: list[str] = []
+
+    def _fake_write_deck(
+        deck: dict[str, int],
+        equipment_header: str,
+        deck_name: str,
+        assets_path: str,
+    ) -> Path:
+        written.append(deck_name)
+        out = assets / f"{deck_name}.txt"
+        out.write_text("deck", encoding="utf-8")
+        return out
+
+    monkeypatch.setattr("talishar_live_play._write_deck_file", _fake_write_deck)
+
+    ctx = prepare_unified_live_play_context(
+        player_deck={"a_red": 40},
+        opponent_asset_stem="OppPrecon",
+        player_equipment_header="aurora",
+        game_format="silver_age",
+        assets_path=str(assets),
+        cache_dir=cache_dir,
+        base_url="http://localhost:8080/game",
+        fe_url="http://localhost:5173",
+        human_deck="opponent",
+        player_deck_label="My deck",
+        opponent_deck_label="Opp deck",
+    )
+    assert ctx.human_vs_agent
+    assert ctx.human_player_id == 2
+    assert ctx.p2_deck_name == "OppPrecon"
+    assert ctx.p1_bundle is None
+    assert ctx.cpp_engine_deck1 == "aurora"
+    assert ctx.cpp_engine_deck2 == "OppPrecon"
+    assert len(written) == 1
+
+
+def test_prepare_unified_live_play_context_watch_mode(tmp_path: Path, monkeypatch) -> None:
+    cache_dir = tmp_path / "cache"
+    fmt_dir = cache_dir / "silver_age"
+    fmt_dir.mkdir(parents=True)
+    weights = fmt_dir / unified_agent_weights_path(cache_dir, "silver_age").name
+    weights.write_text("{}", encoding="utf-8")
+    assets = tmp_path / "Assets"
+    assets.mkdir()
+
+    class _FakeEnv:
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("talishar_live_play.TalisharEngineEnvironment", lambda **kwargs: _FakeEnv())
+    monkeypatch.setattr("eval_sideboard_compare._load_unified_agent", lambda *_a, **_k: object())
+    monkeypatch.setattr("agent_cache.clone_agent_weights", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        "talishar_live_play._write_deck_file",
+        lambda *_a, **_k: assets / "deck.txt",
+    )
+
+    ctx = prepare_unified_live_play_context(
+        player_deck={"a_red": 40},
+        opponent_asset_stem="OppPrecon",
+        player_equipment_header="aurora",
+        game_format="silver_age",
+        assets_path=str(assets),
+        cache_dir=cache_dir,
+        base_url="http://localhost:8080/game",
+        fe_url="http://localhost:5173",
+        human_deck="watch",
+    )
+    assert not ctx.human_vs_agent
+    assert ctx.p1_agent is not None
+    assert ctx.p2_agent is not None
+
+
+def test_prepare_unified_live_play_context_resolves_sage_cpp_stems(
+    tmp_path: Path, monkeypatch
+) -> None:
+    cache_dir = tmp_path / "cache"
+    fmt_dir = cache_dir / "silver_age"
+    fmt_dir.mkdir(parents=True)
+    weights = fmt_dir / unified_agent_weights_path(cache_dir, "silver_age").name
+    weights.write_text("{}", encoding="utf-8")
+    assets = tmp_path / "Assets"
+    assets.mkdir()
+    (assets / "BriarSAGEPrecon.txt").write_text("deck", encoding="utf-8")
+
+    class _FakeEnv:
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("talishar_live_play.TalisharEngineEnvironment", lambda **kwargs: _FakeEnv())
+    monkeypatch.setattr("eval_sideboard_compare._load_unified_agent", lambda *_a, **_k: object())
+    monkeypatch.setattr("agent_cache.clone_agent_weights", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        "talishar_live_play._write_deck_file",
+        lambda *_a, **_k: assets / "deck.txt",
+    )
+
+    ctx = prepare_unified_live_play_context(
+        player_deck={"a_red": 40},
+        opponent_asset_stem="BriarSAGEPrecon",
+        player_equipment_header="briar",
+        game_format="sage",
+        assets_path=str(assets),
+        cache_dir=cache_dir,
+        base_url="http://localhost:8080/game",
+        fe_url="http://localhost:5173",
+        human_deck="opponent",
+    )
+    assert ctx.cpp_engine_deck1 == "BriarSAGEPrecon"
+    assert ctx.cpp_engine_deck2 == "BriarSAGEPrecon"
+
+
+def test_prepare_unified_live_play_context_logic_opponent(tmp_path: Path, monkeypatch) -> None:
+    from train_play import LOGIC_POLICY  # noqa: PLC0415
+
+    cache_dir = tmp_path / "cache"
+    fmt_dir = cache_dir / "silver_age"
+    fmt_dir.mkdir(parents=True)
+    weights = fmt_dir / unified_agent_weights_path(cache_dir, "silver_age").name
+    weights.write_text("{}", encoding="utf-8")
+    assets = tmp_path / "Assets"
+    assets.mkdir()
+
+    class _FakeEnv:
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("talishar_live_play.TalisharEngineEnvironment", lambda **kwargs: _FakeEnv())
+    monkeypatch.setattr("eval_sideboard_compare._load_unified_agent", lambda *_a, **_k: object())
+    monkeypatch.setattr("agent_cache.clone_agent_weights", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        "talishar_live_play._write_deck_file",
+        lambda *_a, **_k: assets / "deck.txt",
+    )
+
+    ctx = prepare_unified_live_play_context(
+        player_deck={"a_red": 40},
+        opponent_asset_stem="OppPrecon",
+        player_equipment_header="aurora",
+        game_format="silver_age",
+        assets_path=str(assets),
+        cache_dir=cache_dir,
+        base_url="http://localhost:8080/game",
+        fe_url="http://localhost:5173",
+        human_deck="opponent",
+        opponent_policy="logic",
+    )
+    assert ctx.opponent_policy == "logic"
+    assert ctx.p1_agent is LOGIC_POLICY
+    assert ctx.p2_agent is None
+    assert ctx.trained_agent is not None
+
+
+def test_refresh_human_action_coach_uses_callback() -> None:
+    hints_received: list[list[dict]] = []
+
+    class _Coach:
+        def build_hints(self, *_args, **_kwargs) -> list:
+            from flesh_and_blood_rlbridge.frontend_action_overlay import ActionCoachHint
+
+            return [
+                ActionCoachHint(
+                    index=0,
+                    label="Attack",
+                    policy_pct=0.8,
+                    is_best=True,
+                )
+            ]
+
+    class _Env:
+        _last_state = {}
+        _acting_player_id = 1
+        _last_action_overlay_key = None
+
+        def _legal_actions(self, _state: dict) -> list:
+            return [{"index": 0, "label": "Attack", "zone": "hand"}]
+
+        def _encode_observation(self, _state: dict, _legal: list) -> str:
+            return "{}"
+
+        def update_frontend_action_overlay(self, *_args, **_kwargs) -> None:
+            raise AssertionError("overlay should not be used with callback")
+
+    ctx = LivePlayContext(
+        p1_agent=None,
+        p2_agent="agent",
+        p1_deck_name="p1",
+        p2_deck_name="p2",
+        game_format="silver_age",
+        opponent_label="",
+        cleanup_files=[],
+        human_vs_agent=True,
+        human_player_id=2,
+    )
+    _refresh_human_action_coach(
+        _Env(),
+        ctx,
+        _Coach(),
+        {"turnNo": 1, "playerHand": [], "turnPhase": {}, "playerPrompt": {}, "playerInputPopUp": {}},
+        on_hints=lambda rows: hints_received.append(rows),
+        last_hint_key=[""],
+    )
+    assert len(hints_received) == 1
+    assert hints_received[0][0]["label"] == "Attack"
+    assert hints_received[0][0]["isBest"] is True

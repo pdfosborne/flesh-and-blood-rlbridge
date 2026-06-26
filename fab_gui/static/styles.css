@@ -978,17 +978,6 @@ button:disabled {
   font-size: 0.92rem;
 }
 
-.results-replay-gif {
-  display: block;
-  width: min(100%, 720px);
-  min-height: 12rem;
-  margin: 0 auto;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: #000;
-  object-fit: contain;
-}
-
 .results-damage-table-wrap {
   overflow-x: auto;
   margin-top: 0.35rem;
@@ -1317,4 +1306,248 @@ button:disabled {
   text-align: center;
   padding: 2rem 1rem;
   font-size: 0.95rem;
+}
+
+.liveplay-layout {
+  display: grid;
+  grid-template-columns: minmax(240px, 280px) minmax(0, 1fr) minmax(260px, 300px);
+  gap: 1rem;
+  align-items: stretch;
+  min-height: 560px;
+}
+
+.liveplay-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  min-height: 560px;
+  max-height: calc(100vh - 12rem);
+  overflow-y: auto;
+}
+
+.liveplay-coach-sidebar {
+  border-left: 3px solid var(--accent);
+  background: linear-gradient(
+    180deg,
+    rgba(61, 156, 240, 0.08) 0%,
+    var(--surface) 2.5rem
+  );
+}
+
+.liveplay-rollouts-hint {
+  margin: -0.25rem 0 0;
+  font-size: 0.8rem;
+  line-height: 1.35;
+}
+
+.liveplay-coach-intro {
+  margin: 0;
+  font-size: 0.85rem;
+  line-height: 1.4;
+}
+
+.liveplay-sidebar-heading {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.liveplay-matchup {
+  padding: 0.65rem 0.75rem;
+  background: var(--surface2);
+  border-radius: var(--radius);
+  margin: 0;
+}
+
+.liveplay-controls-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.liveplay-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.liveplay-field select,
+.liveplay-field input[type="number"] {
+  padding: 0.45rem 0.55rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  color: var(--text);
+}
+
+.liveplay-field.liveplay-check {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  cursor: pointer;
+  color: var(--text);
+}
+
+.liveplay-check-label {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  line-height: 1.35;
+}
+
+.liveplay-field.liveplay-check input[type="checkbox"] {
+  flex-shrink: 0;
+  width: 1.05rem;
+  height: 1.05rem;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.liveplay-field.is-disabled {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.liveplay-coach-sidebar.is-disabled {
+  opacity: 0.5;
+}
+
+.liveplay-status-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.liveplay-board-wrap {
+  display: flex;
+  flex-direction: column;
+  min-height: 520px;
+  padding: 0;
+  overflow: hidden;
+}
+
+.liveplay-frame {
+  flex: 1;
+  width: 100%;
+  min-height: 480px;
+  border: none;
+  background: #0a0e14;
+}
+
+.liveplay-turn-banner {
+  background: rgba(61, 156, 240, 0.15);
+  border-bottom: 1px solid rgba(61, 156, 240, 0.35);
+  color: var(--accent);
+  padding: 0.5rem 0.75rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.liveplay-chromium-banner {
+  background: rgba(120, 200, 120, 0.12);
+  border-bottom: 1px solid rgba(120, 200, 120, 0.35);
+  color: #9fd89f;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.9rem;
+}
+
+.liveplay-chromium-hint {
+  margin: 0;
+}
+
+.liveplay-host-warning {
+  color: #f0b86c;
+}
+
+.liveplay-fallback {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  border-top: 1px solid var(--border);
+}
+
+.liveplay-fallback a.secondary {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.35rem 0.75rem;
+  text-decoration: none;
+}
+
+.liveplay-coach-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+.liveplay-coach-list li {
+  padding: 0.75rem 0.65rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.9rem;
+  border-radius: 6px;
+}
+
+.liveplay-coach-list li.best {
+  color: var(--accent);
+  font-weight: 600;
+  background: rgba(61, 156, 240, 0.1);
+  border: 1px solid rgba(61, 156, 240, 0.25);
+  margin-bottom: 0.35rem;
+}
+
+.liveplay-coach-scores {
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin-top: 0.2rem;
+}
+
+.liveplay-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+@media (max-width: 1100px) {
+  .liveplay-layout {
+    grid-template-columns: minmax(220px, 260px) minmax(0, 1fr);
+    grid-template-areas:
+      "setup board"
+      "coach coach";
+  }
+
+  .liveplay-setup-sidebar {
+    grid-area: setup;
+  }
+
+  .liveplay-board-wrap {
+    grid-area: board;
+  }
+
+  .liveplay-coach-sidebar {
+    grid-area: coach;
+    min-height: auto;
+    max-height: none;
+    border-left: none;
+    border-top: 3px solid var(--accent);
+  }
+
+  .liveplay-coach-list {
+    max-height: 220px;
+  }
+}
+
+@media (max-width: 760px) {
+  .liveplay-layout {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "setup"
+      "board"
+      "coach";
+  }
 }

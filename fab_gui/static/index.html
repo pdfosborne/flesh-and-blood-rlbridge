@@ -4,13 +4,13 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>FAB RL Bridge — Sideboard Compare</title>
-  <link rel="stylesheet" href="/static/styles.css?v=29" />
+  <link rel="stylesheet" href="/static/styles.css?v=31" />
 </head>
 <body>
   <header>
     <div>
-      <h1>FAB RL Bridge</h1>
-      <div class="subtitle">Sideboard comparison — deck import, edit &amp; evaluate</div>
+      <h1>Flesh &amp; Blood Simulation</h1>
+      <div class="subtitle">Evaluate AI agents to find the best deck - deck import, edit &amp; evaluate - live play against agents</div>
     </div>
     <div id="run-status"></div>
   </header>
@@ -21,6 +21,7 @@
     <button class="tab" data-tab="editor" role="tab">3. Editor</button>
     <button class="tab" data-tab="dashboard" role="tab">4. Dashboard</button>
     <button class="tab" data-tab="results" role="tab">5. Results</button>
+    <button class="tab" data-tab="liveplay" role="tab">6. Live play</button>
   </nav>
 
   <main>
@@ -218,18 +219,69 @@
             </div>
           </div>
         </div>
-        <div class="card" style="margin-top:1rem">
-          <h3>Replay</h3>
-          <p class="hint">One greedy-policy game rendered through Talishar-FE (Playwright screenshots). Live frames appear during capture, then the GIF replaces them when ready.</p>
-          <div id="results-replay-empty" class="empty-state">Replay GIF will appear here after evaluation finishes.</div>
-          <div id="results-replay-panel" hidden>
-            <img id="results-replay-gif" class="results-replay-gif" alt="Replay animation" />
-            <p id="results-replay-meta" class="hint" style="margin-top:0.75rem"></p>
+      </div>
+    </section>
+
+    <!-- Live play -->
+    <section id="panel-liveplay" class="panel" role="tabpanel">
+      <h2>Live play</h2>
+      <p class="hint">Play against the unified trained agent with the coach in this UI and the Talishar board in a Chromium window (same as CLI live play). Requires Talishar backend on :8080, Talishar-FE on :5173 (<code>python start_talishar.py</code>), Playwright (<code>pip install playwright &amp;&amp; playwright install chromium</code>), and a trained unified agent. The in-page embed and new-tab links often stay blank with the local Vite dev server — use Chromium. Import deck and opponent on tabs 1–2 first.</p>
+      <div class="liveplay-layout">
+        <aside class="liveplay-sidebar liveplay-setup-sidebar card">
+          <div id="liveplay-matchup" class="liveplay-matchup hint"></div>
+          <h3 class="liveplay-sidebar-heading">Setup</h3>
+          <div class="liveplay-controls-stack">
+            <label class="liveplay-field">Play as
+              <select id="liveplay-human-deck">
+                <option value="opponent">Opponent deck (P2)</option>
+                <option value="player">Your deck (P1)</option>
+                <option value="watch">Watch agents only</option>
+              </select>
+            </label>
+            <label class="liveplay-field" id="liveplay-opponent-policy-wrap">Opponent
+              <select id="liveplay-opponent-policy">
+                <option value="agent">Agent</option>
+                <option value="logic">Logic policy</option>
+              </select>
+            </label>
+            <label class="liveplay-field liveplay-check" id="liveplay-coach-wrap">
+              <span class="liveplay-check-label">Agent coach</span>
+              <input type="checkbox" id="liveplay-enable-coach" checked />
+            </label>
+            <label class="liveplay-field" id="liveplay-rollouts-wrap">C++ rollouts per action
+              <input id="liveplay-rollouts" type="number" min="0" max="16" step="1" value="0" title="0 = policy-only coach; higher values add slower C++ win estimates" />
+            </label>
+            <p class="hint liveplay-rollouts-hint">0 = policy hints only. Set 1–16 to enable simulated win estimates (slower).</p>
+            <label class="liveplay-field liveplay-check" id="liveplay-chromium-wrap">
+              <span class="liveplay-check-label">Chromium board (recommended)</span>
+              <input type="checkbox" id="liveplay-prefer-chromium" checked />
+            </label>
+            <p class="hint liveplay-chromium-hint">Opens Talishar in Playwright Chromium when the game starts. Uncheck only to try the unreliable in-page embed.</p>
+            <div class="liveplay-actions">
+              <button type="button" id="btn-liveplay-start">Start game</button>
+              <button type="button" id="btn-liveplay-stop" class="secondary" disabled>Stop game</button>
+            </div>
+            <div class="liveplay-status-row">
+              <span id="liveplay-status" class="status-pill pending">idle</span>
+              <span id="liveplay-record" class="hint"></span>
+            </div>
           </div>
-          <button type="button" id="btn-render-replay" class="secondary" style="margin-top:0.75rem" hidden>
-            Generate replay GIF
-          </button>
+        </aside>
+        <div class="liveplay-board-wrap card">
+          <div id="liveplay-turn-banner" class="liveplay-turn-banner" hidden>Your turn — click actions in the Chromium board window</div>
+          <div id="liveplay-chromium-banner" class="liveplay-chromium-banner">Talishar board opens in Chromium when you start a game. Coach hints stay in this sidebar.</div>
+          <div id="liveplay-frame-empty" class="empty-state" hidden>Starting game…</div>
+          <iframe id="liveplay-frame" class="liveplay-frame" title="Talishar live game" hidden allow="fullscreen; clipboard-read; clipboard-write"></iframe>
+          <div id="liveplay-fallback" class="liveplay-fallback" hidden>
+            <button type="button" id="btn-liveplay-chromium" class="secondary">Re-open Chromium board</button>
+            <a id="liveplay-fallback-link" class="secondary" href="#" target="_blank" rel="noopener" title="Often blank with local Vite">Open in browser tab (experimental)</a>
+          </div>
         </div>
+        <aside class="liveplay-sidebar liveplay-coach-sidebar card" aria-label="Agent coach">
+          <h3 class="liveplay-sidebar-heading">Agent coach</h3>
+          <p class="hint liveplay-coach-intro">Policy guidance on your turns. C++ win % appears when rollouts are set above 0 in Setup.</p>
+          <ul id="liveplay-coach-hints" class="liveplay-coach-list" hidden></ul>
+        </aside>
       </div>
     </section>
   </main>
@@ -286,6 +338,6 @@
       <div id="search-results" class="search-results equipment-modal__results"></div>
     </div>
   </div>
-  <script src="/static/app.js?v=20"></script>
+  <script src="/static/app.js?v=23"></script>
 </body>
 </html>

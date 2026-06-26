@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
-from fab_tui.config import EnvironmentSettings, REPO_ROOT
+from fab_tui.config import EnvironmentSettings, REPO_ROOT, browser_talishar_fe_url
 
 from fab_gui import api as gui_api
 
@@ -80,6 +80,11 @@ def _serve_file(handler: BaseHTTPRequestHandler, path: Path, *, no_cache: bool =
     _write_body(handler, content)
 
 
+def _page_hostname(handler: BaseHTTPRequestHandler) -> str:
+    host = str(handler.headers.get("Host") or "localhost:8765")
+    return host.split(":", 1)[0] or "localhost"
+
+
 class GuiRequestHandler(BaseHTTPRequestHandler):
     env = EnvironmentSettings()
 
@@ -114,12 +119,18 @@ class GuiRequestHandler(BaseHTTPRequestHandler):
             return _serve_bytes(self, data, content_type=mime)
 
         if path == "/api/config":
+            page_host = _page_hostname(self)
             return _json_response(
                 self,
                 {
                     "talishar_url": self.env.talishar_url,
                     "talishar_fe_url": self.env.talishar_fe_url,
+                    "talishar_fe_browser_url": browser_talishar_fe_url(
+                        self.env.talishar_fe_url,
+                        page_host=page_host,
+                    ),
                     "assets_path": self.env.assets_path,
+                    "agent_cache_dir": str(gui_api.AGENT_CACHE_DIR),
                 },
             )
         if path == "/api/precons":
@@ -255,6 +266,14 @@ class GuiRequestHandler(BaseHTTPRequestHandler):
             if status is None:
                 return _json_response(self, {"error": "Run not found"}, status=404)
             return _json_response(self, status)
+
+        if path == "/api/live-play/status":
+            session_id = (query.get("session_id") or [None])[0]
+            return _json_response(self, gui_api.live_play_status(session_id))
+
+        match = re.fullmatch(r"/api/live-play/([^/]+)/status", path)
+        if match:
+            return _json_response(self, gui_api.live_play_status(match.group(1)))
 
         self.send_error(HTTPStatus.NOT_FOUND)
 
@@ -504,10 +523,36 @@ class GuiRequestHandler(BaseHTTPRequestHandler):
             except Exception as exc:  # noqa: BLE001
                 return _json_response(self, {"error": str(exc)}, status=400)
 
+        if path == "/api/live-play/start":
+            try:
+                return _json_response(
+                    self,
+                    gui_api.start_live_play(self.env, body, page_host=_page_hostname(self)),
+                )
+            except FileNotFoundError as exc:
+                return _json_response(self, {"error": str(exc)}, status=400)
+            except RuntimeError as exc:
+                return _json_response(self, {"error": str(exc)}, status=409)
+            except Exception as exc:  # noqa: BLE001
+                return _json_response(self, {"error": str(exc)}, status=500)
+
+        if path == "/api/live-play/stop":
+            session_id = str(body.get("session_id") or "").strip() or None
+            return _json_response(self, gui_api.stop_live_play(session_id))
+
+        if path == "/api/live-play/open-chromium":
+            try:
+                session_id = str(body.get("session_id") or "").strip() or None
+                return _json_response(self, gui_api.open_live_play_chromium(session_id))
+            except RuntimeError as exc:
+                return _json_response(self, {"error": str(exc)}, status=409)
+            except Exception as exc:  # noqa: BLE001
+                return _json_response(self, {"error": str(exc)}, status=500)
+
         return _json_response(self, {"error": "Not found"}, status=404)
 
 
-def run_gui(*, host: str = "127.0.0.1", port: int = DEFAULT_PORT, open_browser: bool = True) -> int:
+def run_gui(*, host: str = "localhost", port: int = DEFAULT_PORT, open_browser: bool = True) -> int:
     """Start the web GUI and block until interrupted."""
     if str(REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(REPO_ROOT))

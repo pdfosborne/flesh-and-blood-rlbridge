@@ -40,7 +40,7 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("tui", help="Launch the interactive terminal menu (default)")
 
     gui = sub.add_parser("gui", help="Launch the web GUI for sideboard comparison")
-    gui.add_argument("--host", default="127.0.0.1")
+    gui.add_argument("--host", default="localhost")
     gui.add_argument("--port", type=int, default=8765)
     gui.add_argument("--no-browser", action="store_true", help="Do not open a browser tab")
 

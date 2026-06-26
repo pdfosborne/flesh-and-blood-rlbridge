@@ -48,6 +48,51 @@ def slugify(value: str) -> str:
     return token or "experiment"
 
 
+_DOCKER_FE_HOSTS = frozenset(
+    {"talishar-fe", "web-server", "fab-bridge", "host.docker.internal"}
+)
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0"})
+
+
+def _is_loopback_host(host: str | None) -> bool:
+    if not host:
+        return False
+    token = host.lower().strip("[]")
+    return token in _LOOPBACK_HOSTS or token.startswith("127.")
+
+
+def _loopback_fe_browser_host(*, fe_host: str, page_host: str | None) -> str:
+    """Browser host for Talishar-FE when both GUI and FE are on loopback."""
+    if page_host and not _is_loopback_host(page_host):
+        return page_host
+    # Vite on Windows often binds [::1] only — localhost works, 127.0.0.1 may not.
+    if _is_loopback_host(fe_host) or fe_host in {"", "localhost"}:
+        return "localhost"
+    return fe_host or "localhost"
+
+
+def browser_talishar_fe_url(fe_url: str, *, page_host: str | None = None) -> str:
+    """Map docker-internal Talishar-FE URLs to a host the browser can reach."""
+    override = os.environ.get("TALISHAR_FE_BROWSER_URL", "").strip()
+    if override:
+        return override.rstrip("/")
+    from urllib.parse import urlparse
+
+    parsed = urlparse(fe_url)
+    host = (parsed.hostname or "").lower()
+    port = parsed.port or 5173
+    scheme = parsed.scheme or "http"
+    if host in _DOCKER_FE_HOSTS:
+        browser_host = (page_host or "127.0.0.1").strip() or "127.0.0.1"
+    elif _is_loopback_host(host):
+        browser_host = _loopback_fe_browser_host(fe_host=host, page_host=page_host)
+    else:
+        browser_host = host or "localhost"
+    if browser_host in {"0.0.0.0", "[::]", "::"}:
+        browser_host = "localhost"
+    return f"{scheme}://{browser_host}:{port}"
+
+
 @dataclass
 class EnvironmentSettings:
     talishar_url: str = field(
