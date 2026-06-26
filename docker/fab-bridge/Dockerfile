@@ -17,6 +17,7 @@ COPY src ./src
 COPY fab_bridge ./fab_bridge
 COPY fab_tui ./fab_tui
 COPY fab_gui ./fab_gui
+COPY agents ./agents
 COPY rl_agents ./rl_agents
 COPY scripts ./scripts
 COPY runscripts ./runscripts
