@@ -72,6 +72,9 @@ services:
       - "8765:8765"
     environment:
       FAB_BRIDGE_HOME: /app
+      FAB_RESULTS_DIR: /app/results
+      HOST_UID: "${HOST_UID:-0}"
+      HOST_GID: "${HOST_GID:-0}"
       # Same compose stack as web-server so deck files in Talishar/Assets are visible to PHP
       TALISHAR_URL: http://web-server/game
       TALISHAR_FE_URL: http://talishar-fe:5173

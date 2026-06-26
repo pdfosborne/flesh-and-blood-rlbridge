@@ -28,7 +28,7 @@ cd flesh-and-blood-rlbridge
 .\scripts\docker-setup.ps1
 ```
 
-When setup finishes, open **http://localhost:8765** (GUI) and **http://localhost:5173** (Talishar-FE for live play). Official agent weights are synced during the image build; refresh with `fab-bridge agents sync`.
+When setup finishes, open **http://localhost:8765** (GUI) and **http://localhost:5173** (Talishar-FE for live play). Unified agents are installed on first container start (public sync when available, otherwise a bootstrap placeholder). Refresh with `fab-bridge agents ensure`.
 
 **Sideboard-only (no live play):** use `./scripts/docker-setup.sh --eval` (or `.\scripts\docker-setup.ps1 -Eval`) for a slimmer stack without Talishar-FE or Playwright.
 
@@ -149,8 +149,9 @@ python start_talishar.py --fe-only
 |---------|----------------|
 | `fab-gui` | Web GUI for sideboard comparison (http://localhost:8765) |
 | `fab-tui` | Interactive terminal menu |
-| `fab-bridge init` | First-time setup: dirs + Talishar backend + agent sync |
-| `fab-bridge agents sync` | Download official unified agent weights |
+| `fab-bridge init` | First-time setup: dirs + Talishar backend + agent ensure |
+| `fab-bridge agents ensure` | Sync official weights (when compatible) or install bootstrap placeholders |
+| `fab-bridge agents sync` | Download official unified agent weights from manifest only |
 | `fab-bridge agents publish` | Publish local weights to GitHub Releases (maintainers) |
 | `fab-bridge doctor` | Check Python, Docker, Assets, card DB |
 | `fab-bridge talishar --down` | Stop Talishar Docker containers |

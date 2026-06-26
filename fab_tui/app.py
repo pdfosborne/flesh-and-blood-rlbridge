@@ -23,7 +23,7 @@ from fab_bridge.agents import (
     publish_local_agent,
     suggest_next_release_tag,
     summarize_public_agent_sync,
-    sync_agents,
+    ensure_agents_available,
     unified_agent_cache_format,
 )
 from fab_tui.config import (
@@ -1022,7 +1022,7 @@ def wizard_sync_unified_agent(env: EnvironmentSettings) -> None:
 
     console.print("\n[bold]Syncing…[/bold]")
     try:
-        results = sync_agents(
+        results = ensure_agents_available(
             manifest_url=manifest_url,
             cache_dir=AGENT_CACHE_DIR,
             formats=selected_formats,

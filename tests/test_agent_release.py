@@ -11,6 +11,8 @@ import pytest
 from fab_bridge.agents import (
     PLAYER_OBS_SCHEMA_VERSION,
     agent_status,
+    bootstrap_unified_agent,
+    ensure_agents_available,
     list_local_agents,
     load_manifest,
     release_asset_names,
@@ -19,6 +21,8 @@ from fab_bridge.agents import (
     sync_agents,
     unified_agent_cache_format,
     unified_agent_weights_path,
+    validate_weights_file,
+    weights_are_compatible,
 )
 from flesh_and_blood_rlbridge.player_observation import PLAYER_OBS_DIM
 from rl_agents.ppo import PPOAgent, UNIFIED_AGENT_WEIGHT_VERSION
@@ -165,3 +169,92 @@ def test_sync_agents_downloads_and_installs(tmp_path: Path, monkeypatch: pytest.
     monkeypatch.setattr(agents_mod.requests, "get", fail_get)
     results = sync_agents(manifest_url=str(manifest_path), cache_dir=cache)
     assert results[0].action == "unchanged"
+
+
+def test_validate_weights_file_rejects_legacy_mlp(tmp_path: Path) -> None:
+    legacy = tmp_path / "legacy.json"
+    legacy.write_text(
+        json.dumps({"architecture": "mlp", "actor_weights": [[1.0]]}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="Legacy or incompatible"):
+        validate_weights_file(legacy)
+
+
+def test_sync_agents_rejects_legacy_download(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from fab_bridge import agents as agents_mod
+
+    cache = tmp_path / "cache"
+    legacy = {"architecture": "mlp", "actor_weights": [[1.0]]}
+    manifest_path = tmp_path / "manifest.json"
+    save_manifest(
+        {
+            "agents": [
+                {
+                    "format": "silver_age",
+                    "weights_url": "http://example/w.json",
+                    "sha256": "",
+                }
+            ]
+        },
+        manifest_path,
+    )
+
+    class FakeResponse:
+        content = json.dumps(legacy).encode()
+
+        @staticmethod
+        def raise_for_status() -> None:
+            return None
+
+    monkeypatch.setattr(agents_mod.requests, "get", lambda *_a, **_k: FakeResponse())
+    results = sync_agents(manifest_url=str(manifest_path), cache_dir=cache)
+    assert results[0].action == "rejected"
+    assert not unified_agent_weights_path(cache, "silver_age").is_file()
+
+
+def test_ensure_agents_available_bootstraps_when_sync_rejects_legacy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fab_bridge import agents as agents_mod
+
+    cache = tmp_path / "cache"
+    legacy = {"architecture": "mlp", "actor_weights": [[1.0]]}
+    manifest_path = tmp_path / "manifest.json"
+    save_manifest(
+        {
+            "agents": [
+                {
+                    "format": "silver_age",
+                    "weights_url": "http://example/w.json",
+                    "sha256": "",
+                }
+            ]
+        },
+        manifest_path,
+    )
+
+    class FakeResponse:
+        content = json.dumps(legacy).encode()
+
+        @staticmethod
+        def raise_for_status() -> None:
+            return None
+
+    monkeypatch.setattr(agents_mod.requests, "get", lambda *_a, **_k: FakeResponse())
+    results = ensure_agents_available(manifest_url=str(manifest_path), cache_dir=cache)
+    assert any(row.action == "rejected" for row in results)
+    assert any(row.action == "bootstrapped" for row in results)
+    weights = unified_agent_weights_path(cache, "silver_age")
+    assert weights.is_file()
+    validate_weights_file(weights)
+
+
+def test_bootstrap_unified_agent_writes_compatible_weights(tmp_path: Path) -> None:
+    cache = tmp_path / "cache"
+    result = bootstrap_unified_agent("silver_age", cache)
+    assert result.action == "bootstrapped"
+    weights = unified_agent_weights_path(cache, "silver_age")
+    data = json.loads(weights.read_text(encoding="utf-8"))
+    assert weights_are_compatible(data)

@@ -38,6 +38,21 @@ _ensure_talishar_fe() {
   fi
 }
 
+_prepare_results_dir() {
+  mkdir -p results/agent_cache
+  export HOST_UID="$(id -u)"
+  export HOST_GID="$(id -g)"
+  if [[ -d results ]] && [[ ! -w results ]]; then
+    echo "[setup] Fixing ownership of results/ (often created by Docker as root)..."
+    if command -v sudo >/dev/null 2>&1; then
+      sudo chown -R "${HOST_UID}:${HOST_GID}" results 2>/dev/null || true
+    fi
+    if [[ ! -w results ]]; then
+      echo "[setup] WARNING: results/ is not writable. Run: sudo chown -R \"\$USER:\$USER\" results"
+    fi
+  fi
+}
+
 _wait_for_url() {
   local url="$1"
   local label="$2"
@@ -109,6 +124,8 @@ _print_ready_banner() {
 }
 
 _ensure_talishar_fe
+
+_prepare_results_dir
 
 # shellcheck source=scripts/docker-gpu-compose.sh
 source "$ROOT/scripts/docker-gpu-compose.sh"

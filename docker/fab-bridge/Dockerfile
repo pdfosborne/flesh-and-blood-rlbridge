@@ -23,6 +23,8 @@ COPY scripts ./scripts
 COPY runscripts ./runscripts
 COPY Talishar/Assets ./Talishar/Assets
 COPY Talishar/GeneratedCode ./Talishar/GeneratedCode
+COPY docker/fab-bridge/entrypoint.sh /entrypoint.sh
+RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
 
 RUN pip install --no-cache-dir -e ".[gui,cpp]" \
     && if [ "$TORCH_CUDA" = "1" ]; then \
@@ -34,4 +36,5 @@ RUN pip install --no-cache-dir -e ".[gui,cpp]" \
 
 EXPOSE 8765
 
+ENTRYPOINT ["/entrypoint.sh"]
 CMD ["fab-bridge", "gui", "--host", "0.0.0.0", "--no-browser"]

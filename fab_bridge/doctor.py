@@ -121,7 +121,7 @@ def run_doctor(*, require_docker: bool = True) -> DoctorReport:
             f"{status.get('weights_path')} — release: {release}"
             if agent_ok
             else (
-                f"Missing — run: fab-bridge agents sync"
+                f"Missing — run: fab-bridge agents ensure"
                 if manifest_has_entry
                 else "No published agent in manifest yet"
             ),

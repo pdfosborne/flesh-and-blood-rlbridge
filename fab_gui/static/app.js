@@ -1909,7 +1909,7 @@ function renderTrainReview() {
       const cacheFmt = agent.cache_format && agent.cache_format !== agent.format
         ? ` (cache key ${agent.cache_format})`
         : "";
-      agentLine = `<div><strong>Unified agent:</strong> <span style="color:var(--warn,#c90)">missing for ${escapeHtml(agent.format || state.deck.game_format)}${escapeHtml(cacheFmt)}</span> — run <code>fab-bridge agents sync</code></div>`;
+      agentLine = `<div><strong>Unified agent:</strong> <span style="color:var(--warn,#c90)">missing for ${escapeHtml(agent.format || state.deck.game_format)}${escapeHtml(cacheFmt)}</span> — run <code>fab-bridge agents ensure</code></div>`;
     }
   }
   el.innerHTML = `
@@ -1937,7 +1937,7 @@ document.getElementById("btn-start-evaluation").onclick = async () => {
   await refreshUnifiedAgentStatus(state.deck.game_format);
   if (state.unifiedAgentStatus && !state.unifiedAgentStatus.exists) {
     return toast(
-      `No unified agent for ${state.deck.game_format}. Run: fab-bridge agents sync`,
+      `No unified agent for ${state.deck.game_format}. Run: fab-bridge agents ensure`,
       true,
     );
   }

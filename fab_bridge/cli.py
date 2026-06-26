@@ -76,6 +76,14 @@ def _build_parser() -> argparse.ArgumentParser:
     agents_sync.add_argument("--force", action="store_true", help="Re-download even if SHA256 matches")
     agents_sync.add_argument("--manifest", default=None, help="Manifest URL or path")
 
+    agents_ensure = agents_sub.add_parser(
+        "ensure",
+        help="Sync official weights when compatible, bootstrap placeholders otherwise",
+    )
+    agents_ensure.add_argument("--format", action="append", dest="formats", metavar="FORMAT")
+    agents_ensure.add_argument("--force", action="store_true", help="Re-download even if SHA256 matches")
+    agents_ensure.add_argument("--manifest", default=None, help="Manifest URL or path")
+
     agents_status = agents_sub.add_parser("status", help="Show local unified agent cache status")
     agents_status.add_argument("--format", default=None, help="Game format (default: manifest default)")
 

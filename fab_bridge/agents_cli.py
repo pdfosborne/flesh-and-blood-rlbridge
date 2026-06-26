@@ -12,6 +12,7 @@ from fab_bridge.agents import (
     agent_cache_dir,
     agent_status,
     default_manifest_url,
+    ensure_agents_available,
     load_manifest,
     publish_local_agent,
     sync_agents,
@@ -21,6 +22,8 @@ from fab_bridge.agents import (
 def run_agents_command(args: argparse.Namespace) -> int:
     if args.agents_command == "sync":
         return _run_sync(args)
+    if args.agents_command == "ensure":
+        return _run_ensure(args)
     if args.agents_command == "status":
         return _run_status(args)
     if args.agents_command == "publish":
@@ -50,6 +53,34 @@ def _run_sync(args: argparse.Namespace) -> int:
     downloaded = sum(1 for row in results if row.action == "downloaded")
     if downloaded:
         print(f"\nSynced {downloaded} agent(s) to {agent_cache_dir()}")
+    return 0
+
+
+def _run_ensure(args: argparse.Namespace) -> int:
+    try:
+        results = ensure_agents_available(
+            manifest_url=args.manifest,
+            cache_dir=agent_cache_dir(),
+            formats=args.formats,
+            force=args.force,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"Agent ensure failed: {exc}", file=sys.stderr)
+        return 1
+
+    if not results:
+        print("No agent formats to ensure.")
+        return 0
+
+    for row in results:
+        print(f"  [{row.action}] {row.format}: {row.detail}")
+    ready = sum(
+        1
+        for row in results
+        if row.action in {"downloaded", "unchanged", "bootstrapped"}
+    )
+    if ready:
+        print(f"\nAgent cache ready at {agent_cache_dir()}")
     return 0
 
 

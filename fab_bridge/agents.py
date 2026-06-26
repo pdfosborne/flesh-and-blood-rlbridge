@@ -20,8 +20,14 @@ from fab_bridge.paths import configure_import_paths, repo_root
 
 configure_import_paths()
 
-from flesh_and_blood_rlbridge.player_observation import PLAYER_OBS_SCHEMA_VERSION  # noqa: E402
+from flesh_and_blood_rlbridge.player_observation import (  # noqa: E402
+    PLAYER_OBS_DIM,
+    PLAYER_OBS_SCHEMA_VERSION,
+)
 from rl_agents.ppo import ARCHITECTURE, UNIFIED_AGENT_WEIGHT_VERSION  # noqa: E402
+
+_LEGACY_ARCHITECTURES = frozenset({"mlp", ""})
+BOOTSTRAP_SOURCE = "fab-rlbridge-bootstrap"
 
 DEFAULT_REPOSITORY = "pdfosborne/flesh-and-blood-rlbridge"
 MANIFEST_REL_PATH = Path("agents") / "manifest.json"
@@ -114,6 +120,40 @@ def release_asset_names(
     weights = f"{fmt}-unified_agent_v{version}.json"
     meta = f"{fmt}-unified_agent_v{version}.meta.json"
     return weights, meta
+
+
+def weights_are_compatible(data: dict[str, Any]) -> bool:
+    """Return True when weights use the attention policy trunk expected by this package."""
+    arch = str(data.get("architecture", "mlp"))
+    if arch in _LEGACY_ARCHITECTURES or "actor_weights" in data:
+        return False
+    return arch == ARCHITECTURE and "state_dict" in data
+
+
+def validate_weights_file(path: Path) -> None:
+    """Raise ``ValueError`` when *path* is missing or uses legacy/incompatible weights."""
+    data = _load_json_file(path)
+    if not weights_are_compatible(data):
+        arch = str(data.get("architecture", "mlp"))
+        raise ValueError(
+            "Legacy or incompatible unified agent weights "
+            f"(architecture={arch!r}); sync a v2 attention release or run "
+            "`fab-bridge agents ensure` to install a bootstrap placeholder."
+        )
+
+
+def ensure_cache_dir(cache_dir: Path | None = None) -> Path:
+    """Create the agent cache directory, with a clear error when not writable."""
+    cache = Path(cache_dir or agent_cache_dir())
+    try:
+        cache.mkdir(parents=True, exist_ok=True)
+    except PermissionError as exc:
+        raise PermissionError(
+            f"Cannot create agent cache at {cache}: {exc}. "
+            "If Docker created results/ as root, run: "
+            f"sudo chown -R \"$USER:$USER\" {cache.parent}"
+        ) from exc
+    return cache
 
 
 def _sha256_file(path: Path) -> str:
@@ -232,6 +272,11 @@ def agent_status(cache_dir: Path | None, game_format: str) -> dict[str, Any]:
     meta_path = unified_agent_meta_path(cache, game_format)
     meta = _read_meta(meta_path)
     exists = weights_path.is_file()
+    if exists:
+        try:
+            validate_weights_file(weights_path)
+        except (ValueError, OSError):
+            exists = False
     return {
         "format": game_format,
         "cache_format": cache_format,
@@ -315,8 +360,7 @@ def sync_agents(
     force: bool = False,
 ) -> list[SyncResult]:
     manifest = load_manifest(manifest_url or default_manifest_url())
-    cache = Path(cache_dir or agent_cache_dir())
-    cache.mkdir(parents=True, exist_ok=True)
+    cache = ensure_cache_dir(cache_dir)
     results: list[SyncResult] = []
 
     entries = manifest.get("agents", [])
@@ -355,14 +399,27 @@ def sync_agents(
         if dest_weights.is_file() and not force:
             local_sha = _sha256_file(dest_weights)
             if expected_sha and local_sha == expected_sha:
-                results.append(
-                    SyncResult(
-                        format=fmt,
-                        action="unchanged",
-                        detail=f"Already synced ({dest_weights})",
+                try:
+                    validate_weights_file(dest_weights)
+                    results.append(
+                        SyncResult(
+                            format=fmt,
+                            action="unchanged",
+                            detail=f"Already synced ({dest_weights})",
+                        )
                     )
-                )
-                continue
+                    continue
+                except ValueError as exc:
+                    dest_weights.unlink(missing_ok=True)
+                    dest_meta.unlink(missing_ok=True)
+                    results.append(
+                        SyncResult(
+                            format=fmt,
+                            action="rejected",
+                            detail=str(exc),
+                        )
+                    )
+                    continue
 
         _download_file(weights_url, dest_weights)
         actual_sha = _sha256_file(dest_weights)
@@ -371,6 +428,14 @@ def sync_agents(
             raise RuntimeError(
                 f"SHA256 mismatch for {fmt}: expected {expected_sha}, got {actual_sha}"
             )
+        try:
+            validate_weights_file(dest_weights)
+        except ValueError as exc:
+            dest_weights.unlink(missing_ok=True)
+            results.append(
+                SyncResult(format=fmt, action="rejected", detail=str(exc)),
+            )
+            continue
         if meta_url:
             _download_file(meta_url, dest_meta)
             meta = _read_meta(dest_meta)
@@ -394,6 +459,97 @@ def sync_agents(
                 detail=f"Installed to {dest_weights}",
             )
         )
+    return results
+
+
+def bootstrap_unified_agent(
+    game_format: str,
+    cache_dir: Path | None = None,
+) -> SyncResult:
+    """Install a randomly-initialised attention agent so the GUI/TUI can load weights."""
+    from rl_agents.ppo import PPOAgent  # noqa: PLC0415
+
+    cache = ensure_cache_dir(cache_dir)
+    fmt = unified_agent_cache_format(game_format)
+    dest_weights = unified_agent_weights_path(cache, game_format)
+    dest_meta = unified_agent_meta_path(cache, game_format)
+    n_actions = 128
+
+    agent = PPOAgent(n_actions=n_actions, obs_dim=PLAYER_OBS_DIM)
+    agent._init_nets(PLAYER_OBS_DIM)
+    dest_weights.parent.mkdir(parents=True, exist_ok=True)
+    agent.save(dest_weights)
+
+    meta = {
+        "obs_schema_version": PLAYER_OBS_SCHEMA_VERSION,
+        "obs_dim": PLAYER_OBS_DIM,
+        "n_actions": n_actions,
+        "architecture": ARCHITECTURE,
+        "weight_version": UNIFIED_AGENT_WEIGHT_VERSION,
+        "game_format": fmt,
+        "source": BOOTSTRAP_SOURCE,
+        "release_id": "bootstrap",
+        "sha256": _sha256_file(dest_weights),
+        "bootstrapped_at": datetime.now(timezone.utc).isoformat(),
+        "total_episodes_trained": 0,
+        "last_updated": datetime.now(timezone.utc).isoformat(),
+    }
+    dest_meta.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+    return SyncResult(
+        format=fmt,
+        action="bootstrapped",
+        detail=(
+            f"Installed untrained attention placeholder at {dest_weights} "
+            "(train or sync official v2 weights for real play)"
+        ),
+    )
+
+
+def ensure_agents_available(
+    *,
+    manifest_url: str | None = None,
+    cache_dir: Path | None = None,
+    formats: list[str] | None = None,
+    force: bool = False,
+) -> list[SyncResult]:
+    """Sync official weights when compatible, then bootstrap any still-missing formats."""
+    manifest = load_manifest(manifest_url or default_manifest_url())
+    cache = ensure_cache_dir(cache_dir)
+    target_formats: list[str]
+    if formats:
+        target_formats = [unified_agent_cache_format(f) for f in formats]
+    else:
+        target_formats = [
+            str(row.get("format", ""))
+            for row in manifest.get("agents", [])
+            if isinstance(row, dict) and row.get("format")
+        ]
+    if not target_formats:
+        target_formats = [str(manifest.get("default_format", "silver_age"))]
+
+    results: list[SyncResult] = []
+    try:
+        results.extend(
+            sync_agents(
+                manifest_url=manifest_url,
+                cache_dir=cache,
+                formats=formats,
+                force=force,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        results.append(
+            SyncResult(
+                format=target_formats[0],
+                action="skipped",
+                detail=f"Public sync failed ({exc})",
+            )
+        )
+
+    for fmt in target_formats:
+        if agent_status(cache, fmt).get("exists"):
+            continue
+        results.append(bootstrap_unified_agent(fmt, cache))
     return results
 
 

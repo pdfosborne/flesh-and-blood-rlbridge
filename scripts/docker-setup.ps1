@@ -18,6 +18,9 @@ if (-not $Eval) {
     }
 }
 
+New-Item -ItemType Directory -Force -Path results\agent_cache | Out-Null
+$env:HOST_UID = [string][Environment]::UserId
+
 . "$Root\scripts\docker-gpu-compose.ps1"
 Initialize-FabDockerGpuCompose
 Write-FabDockerGpuComposeNote

@@ -12,11 +12,17 @@ results/agent_cache/<format>/unified_agent.meta.json
 
 Supported format keys: `silver_age`, `classic_constructed`, `blitz`, `upf` (GUI `sage` maps to `silver_age`).
 
-**Note:** Legacy MLP weights (`unified_agent_v1.json`) are incompatible with the attention policy trunk (`attention_v1`). Retrain or sync v2 weights after upgrading.
+**Note:** Legacy MLP weights (`unified_agent_v1.json` on GitHub release `agents-2026.06.1`) are incompatible with the attention policy trunk (`attention_v1`). `fab-bridge agents ensure` rejects them and installs an untrained v2 bootstrap placeholder until a v2 release is published.
 
 ## For users
 
-Download official weights:
+Download official weights (or install a bootstrap placeholder when the public release is legacy/incompatible):
+
+```bash
+fab-bridge agents ensure
+```
+
+Strict manifest sync only (no bootstrap fallback):
 
 ```bash
 fab-bridge agents sync

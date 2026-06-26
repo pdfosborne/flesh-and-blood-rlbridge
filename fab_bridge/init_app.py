@@ -17,21 +17,35 @@ def run_init(*, start_talishar: bool = True, backend_only: bool = True, sync_age
 
     for sub in ("results", "results/agent_cache"):
         path = root / sub
-        path.mkdir(parents=True, exist_ok=True)
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except PermissionError:
+            print(
+                f"  WARNING: cannot create {path} (permission denied).",
+                file=sys.stderr,
+            )
+            print(
+                f"  Run: sudo chown -R \"$USER:$USER\" {root / 'results'}",
+                file=sys.stderr,
+            )
+            break
         print(f"  ensured {path}")
 
     if sync_agents:
         print()
-        print("Syncing official unified agent weights (best-effort)…")
-        from fab_bridge.agents import agent_cache_dir, default_manifest_url, sync_agents as do_sync  # noqa: PLC0415
+        print("Ensuring unified agent weights (sync + bootstrap fallback)…")
+        from fab_bridge.agents import agent_cache_dir, default_manifest_url, ensure_agents_available  # noqa: PLC0415
 
         try:
-            results = do_sync(manifest_url=default_manifest_url(), cache_dir=agent_cache_dir())
+            results = ensure_agents_available(
+                manifest_url=default_manifest_url(),
+                cache_dir=agent_cache_dir(),
+            )
             for row in results:
                 print(f"  [{row.action}] {row.format}: {row.detail}")
         except Exception as exc:  # noqa: BLE001
-            print(f"  WARNING: agent sync skipped ({exc})")
-            print("  Run later: fab-bridge agents sync")
+            print(f"  WARNING: agent ensure skipped ({exc})")
+            print("  Run later: fab-bridge agents ensure")
 
     assets = talishar_assets_dir()
     if not assets.is_dir() or not any(assets.glob("*.txt")):

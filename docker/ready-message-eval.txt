@@ -13,8 +13,8 @@
   Also running:
     Talishar backend   http://localhost:8080
 
-  Official unified agents are synced at image build (fab-bridge agents sync).
-  To refresh weights: fab-bridge agents sync
+  Official unified agents are installed on container start (fab-bridge agents ensure).
+  To refresh weights: fab-bridge agents ensure
 
   For live play and replay GIFs, use the full stack:
     ./scripts/docker-setup.sh
