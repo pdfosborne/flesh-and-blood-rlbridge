@@ -1188,7 +1188,7 @@ def run_phase3_play(
         p1_bundle = UnifiedPolicyBundle(policy=policy, init_sources=[init_src])
         print("  Unified policy init:", ", ".join(p1_bundle.init_sources))
         p1_agent = p1_bundle.policy
-        p1_tiers = p1_bundle.agents
+        p1_tiers = p1_bundle.shared_tiers()
 
     if opponent_mode == "dual" and p2 is not None:
         if p2.play is not None:

@@ -113,3 +113,43 @@ def test_win_rate_standard_error() -> None:
     assert win_rate_standard_error(0, 0) is None
     assert win_rate_standard_error_from_rate(0.5, 100) == pytest.approx(0.05)
     assert win_rate_standard_error_from_rate(0.5, 0) is None
+
+
+def test_fast_outcome_requires_lethal_hp() -> None:
+    from play_outcome_stats import classify_p1_fast_episode_outcome  # noqa: PLC0415
+
+    outcome, anomaly = classify_p1_fast_episode_outcome(
+        {
+            "terminated": True,
+            "truncated": False,
+            "winner": 0,
+            "p1_health": 18,
+            "p2_health": 12,
+        }
+    )
+    assert outcome == "timeout"
+    assert anomaly is not None
+    assert "disagrees" in anomaly
+
+    outcome, anomaly = classify_p1_fast_episode_outcome(
+        {
+            "terminated": True,
+            "truncated": False,
+            "winner": 0,
+            "p1_health": 20,
+            "p2_health": 0,
+        }
+    )
+    assert outcome == "win"
+    assert anomaly is None
+
+    outcome, _ = classify_p1_fast_episode_outcome(
+        {
+            "terminated": True,
+            "truncated": False,
+            "winner": 1,
+            "p1_health": 0,
+            "p2_health": 15,
+        }
+    )
+    assert outcome == "loss"

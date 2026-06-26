@@ -14,8 +14,10 @@ from agent_cache import AgentCacheStore  # noqa: E402
 from flesh_and_blood_rlbridge.player_observation import PLAYER_OBS_DIM  # noqa: E402
 from rl_agents.ppo import PPOAgent  # noqa: E402
 from train_dual_agent_common import (  # noqa: E402
+    _MAX_WIN_PATH_LEN,
     resolve_checkpoint_interval,
     sample_random_fabrary_matchups,
+    shorten_matchup_dir_name,
 )
 
 
@@ -36,11 +38,36 @@ def test_sample_random_fabrary_matchups_unique_pairs() -> None:
     assert len(names) == 4
     for m in matchups:
         assert m.p1_deck != m.p2_deck
+        assert len(m.dir_name) <= 48
 
 
 def test_resolve_checkpoint_interval_pct() -> None:
     assert resolve_checkpoint_interval(100, checkpoint_interval_pct=10.0) == 10
     assert resolve_checkpoint_interval(37, checkpoint_interval_pct=10.0) == 4
+
+
+def test_long_fabrary_matchup_dir_stays_within_windows_path_limit() -> None:
+    long_name = (
+        "dorinthea_sage_aggro-vs-precon_sage_ch2_arakni_web_of_deceit"
+    )
+    p1 = "fab_dorinthea_sage_aggro"
+    p2 = "fab_precon_sage_ch2_arakni_web_of_deceit"
+    short_dir = shorten_matchup_dir_name(long_name, p1, p2)
+    assert len(short_dir) <= 48
+    assert short_dir != long_name
+
+    run_dir = (
+        Path("C:/Users/phili/Documents/RL/flesh-and-blood-rlbridge")
+        / "results/unified_random_matchups/silver_age/20260626_154553"
+    )
+    package = (
+        run_dir
+        / short_dir
+        / "ppo_p1-12345678"
+        / "weights"
+        / "agent_weights.json"
+    )
+    assert len(str(package)) <= _MAX_WIN_PATH_LEN
 
 
 def test_training_history_stores_checkpoint_win_rates(tmp_path: Path) -> None:

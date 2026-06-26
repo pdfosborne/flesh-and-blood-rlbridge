@@ -34,45 +34,41 @@ def classify_p1_fast_episode_outcome(
     if max_steps_reached or (truncated and not terminated):
         return OUTCOME_TIMEOUT, None
 
+    p1_hp = state.get("p1_health")
+    p2_hp = state.get("p2_health")
+    if p1_hp is None or p2_hp is None:
+        return OUTCOME_ERROR, "missing p1_hp/p2_hp at episode end"
+
+    outcome = classify_p1_episode_outcome(
+        p1_hp=p1_hp,
+        p2_hp=p2_hp,
+        terminated=terminated,
+        truncated=truncated,
+    )
+
+    if not terminated:
+        return outcome, None
+
     winner_raw = state.get("winner", -1)
     try:
         winner = int(winner_raw)
     except (TypeError, ValueError):
         winner = -1
+    if winner < 0:
+        return outcome, None
 
-    p1_hp = state.get("p1_health")
-    p2_hp = state.get("p2_health")
+    winner_outcome = classify_p1_outcome_from_engine_winner(winner)
+    if winner_outcome is None:
+        if outcome != OUTCOME_TIMEOUT:
+            return outcome, f"unexpected winner code {winner}"
+        return outcome, None
 
-    if terminated and winner >= 0:
-        winner_outcome = classify_p1_outcome_from_engine_winner(winner)
-        if winner_outcome is None:
-            return OUTCOME_TIMEOUT, f"unexpected winner code {winner}"
-        if p1_hp is not None and p2_hp is not None:
-            hp_outcome = classify_p1_episode_outcome(
-                p1_hp=p1_hp,
-                p2_hp=p2_hp,
-                terminated=True,
-                truncated=False,
-            )
-            if (
-                hp_outcome in {OUTCOME_WIN, OUTCOME_LOSS, OUTCOME_DRAW}
-                and hp_outcome != winner_outcome
-            ):
-                return winner_outcome, (
-                    f"engine winner={winner} ({winner_outcome}) disagrees with "
-                    f"HP outcome {hp_outcome} (p1_hp={p1_hp}, p2_hp={p2_hp})"
-                )
-        return winner_outcome, None
-
-    if p1_hp is None or p2_hp is None:
-        return OUTCOME_ERROR, "missing p1_hp/p2_hp at episode end"
-
-    return classify_p1_episode_outcome(
-        p1_hp=p1_hp,
-        p2_hp=p2_hp,
-        terminated=terminated,
-        truncated=truncated,
-    ), None
+    if winner_outcome != outcome:
+        return outcome, (
+            f"engine winner={winner} ({winner_outcome}) disagrees with "
+            f"HP outcome {outcome} (p1_hp={p1_hp}, p2_hp={p2_hp})"
+        )
+    return outcome, None
 
 
 def _observation_dict(obs: Any) -> dict[str, Any]:
@@ -173,13 +169,10 @@ def classify_p1_episode_outcome(
 ) -> str:
     """Classify one episode from P1's perspective.
 
-    Wins and losses are decided only by lethal HP (≤ 0). Everything else —
-    step limits, stalls, missing HP, HP advantage without lethal, deck-out
-    without lethal — is a timeout. Draws require both players at ≤ 0 HP.
-
-    ``terminated`` is accepted for API compatibility but does not affect the
-    result. ``truncated`` forces timeout only when the episode did not also
-    ``terminate`` (step cap without a decided game).
+    Wins and losses require lethal HP (opponent ≤ 0 while self > 0, or both ≤ 0
+    for a draw). Termination with both players still above 0 HP is a timeout,
+    even if the engine reports a winner flag. Step limits and missing HP also
+    count as timeouts unless lethal HP is already decided.
     """
     del p1_deck, p2_deck  # HP-only; decks do not decide W/L.
 

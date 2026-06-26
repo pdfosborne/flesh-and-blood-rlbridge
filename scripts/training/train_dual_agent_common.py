@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -105,6 +106,63 @@ FABRARY_ENV_SUFFIX: dict[str, str] = {
     "upf": "UPF",
 }
 
+# Keep nested training artifacts under Windows MAX_PATH (260).
+_MAX_MATCHUP_DIR_LEN = 48
+_MAX_WIN_PATH_LEN = 250
+
+
+def shorten_matchup_dir_name(
+    name: str,
+    p1_deck: str,
+    p2_deck: str,
+    *,
+    max_len: int = _MAX_MATCHUP_DIR_LEN,
+) -> str:
+    """Return a filesystem-safe matchup folder name (hash suffix when truncated)."""
+    safe = re.sub(r"[^\w\-.]", "_", name)
+    if len(safe) <= max_len:
+        return safe
+    digest = hashlib.sha1(f"{p1_deck}|{p2_deck}".encode()).hexdigest()[:10]
+    keep = max(8, max_len - len(digest) - 1)
+    return f"{safe[:keep]}_{digest}"
+
+
+def new_agent_id(role: str) -> str:
+    """Short unique agent id that stays within Windows path limits."""
+    return f"{role}-{uuid.uuid4().hex[:8]}"
+
+
+def matchup_out_dir(out_dir: Path, matchup: "Matchup") -> Path:
+    return out_dir / _resolve_matchup_subdir(out_dir, matchup)
+
+
+def _resolve_matchup_subdir(out_dir: Path, matchup: "Matchup") -> str:
+    if matchup.dir_name:
+        candidate = matchup.dir_name
+    else:
+        candidate = shorten_matchup_dir_name(
+            matchup.name,
+            matchup.p1_deck,
+            matchup.p2_deck,
+        )
+    probe = (
+        out_dir.resolve()
+        / candidate
+        / "ppo_p1-xxxxxxxx"
+        / "weights"
+        / "agent_weights.json"
+    )
+    if len(str(probe)) <= _MAX_WIN_PATH_LEN:
+        return candidate
+    excess = len(str(probe)) - _MAX_WIN_PATH_LEN
+    tighter = max(16, len(candidate) - excess - 4)
+    return shorten_matchup_dir_name(
+        matchup.name,
+        matchup.p1_deck,
+        matchup.p2_deck,
+        max_len=tighter,
+    )
+
 
 def resolve_checkpoint_interval(
     n_episodes: int,
@@ -130,6 +188,7 @@ class Matchup:
     tags: list[str] = field(default_factory=list)
     p1_hero: str = ""
     p2_hero: str = ""
+    dir_name: str = ""
     # Optional override deck names for C++ engine cache lookup.
     # Set these to the original hero/asset IDs when p1_deck/p2_deck are
     # UUID-based (Phase 3) but the compiled engine was built for the hero IDs.
@@ -137,6 +196,11 @@ class Matchup:
     cpp_engine_deck2: Optional[str] = None
     # Explicit engine directory — bypasses key/cache lookup entirely.
     cpp_engine_dir: Optional[str] = None
+
+    def output_subdir(self) -> str:
+        if self.dir_name:
+            return self.dir_name
+        return shorten_matchup_dir_name(self.name, self.p1_deck, self.p2_deck)
 
 
 def make_env(
@@ -1044,14 +1108,18 @@ def _run_parallel_batched_fast_episodes(
     warmup: bool,
     episode_indices: list[int],
     seed_base: Optional[int],
+    swap_envs: Optional[list[TalisharEngineEnvironment]] = None,
 ) -> list[dict[str, Any]]:
     """Run one episode per env slot with batched PPO inference across active slots."""
     slots: list[_FastRolloutSlot] = []
     for worker, env in enumerate(envs):
         ep_index = episode_indices[worker]
         ep_seed = (seed_base + worker) if seed_base is not None else None
+        slot_env = env
+        if swap_envs is not None and ep_index % 2 == 1:
+            slot_env = swap_envs[worker]
         slot = _FastRolloutSlot(
-            env=env,
+            env=slot_env,
             state={},
             p1_rng=np.random.default_rng((ep_seed * 31 + 7) if ep_seed is not None else None),
             p2_rng=np.random.default_rng((ep_seed * 31 + 13) if ep_seed is not None else None),
@@ -1205,7 +1273,42 @@ def _flush_unified_warmup_buffers(
 
 
 def _uses_unified_policy(p1_tiers: list[PPOAgent], p2_tiers: list[PPOAgent]) -> bool:
-    return bool(p1_tiers and p2_tiers and p1_tiers[0] is p2_tiers[0])
+    return bool(
+        p1_tiers
+        and p2_tiers
+        and (p1_tiers is p2_tiers or p1_tiers[0] is p2_tiers[0])
+    )
+
+
+def swapped_matchup(matchup: Matchup) -> Matchup:
+    """Same decks with P1/P2 seats reversed (for alternating self-play)."""
+    return Matchup(
+        name=f"{matchup.name}__swapped",
+        p1_deck=matchup.p2_deck,
+        p2_deck=matchup.p1_deck,
+        description=f"{matchup.description} (swapped seats)",
+        tags=list(matchup.tags),
+        p1_hero=matchup.p2_hero,
+        p2_hero=matchup.p1_hero,
+        dir_name=matchup.dir_name,
+        cpp_engine_deck1=matchup.cpp_engine_deck2,
+        cpp_engine_deck2=matchup.cpp_engine_deck1,
+        cpp_engine_dir=matchup.cpp_engine_dir,
+    )
+
+
+def _training_win_rates_from_outcomes(
+    outcome_summary: dict[str, Any],
+) -> tuple[Optional[float], Optional[float]]:
+    """Seat-based win rates from classified episode outcomes."""
+    episodes = int(outcome_summary.get("episodes", 0) or 0)
+    if episodes <= 0:
+        return None, None
+    wins = int(outcome_summary.get("wins", 0) or 0)
+    losses = int(outcome_summary.get("losses", 0) or 0)
+    p1_wr = wins / episodes
+    p2_wr = losses / episodes
+    return p1_wr, p2_wr
 
 
 def _flush_ppo_buffers_auto(
@@ -1838,11 +1941,26 @@ def train_agents_from_both_perspectives_parallel(
         f"({n_episodes} episodes, batch={batch_parallelism})…"
     )
     envs: list[TalisharEngineEnvironment] = []
+    swap_envs: list[TalisharEngineEnvironment] = []
+    swap_matchup = swapped_matchup(matchup)
     for w in range(batch_parallelism):
         envs.append(
             make_env(matchup, base_url=base_url, game_format=game_format, max_turns=max_steps)
         )
+        swap_envs.append(
+            make_env(
+                swap_matchup,
+                base_url=base_url,
+                game_format=game_format,
+                max_turns=max_steps,
+            )
+        )
     print(f"  [parallel] {batch_parallelism} sessions ready", flush=True)
+    print(
+        "  [parallel] unified self-play: one policy for both seats; "
+        "alternating deck sides each episode",
+        flush=True,
+    )
     use_batched_fast_rollout = _env_supports_fast_training(envs[0])
     if use_batched_fast_rollout:
         print(
@@ -1896,6 +2014,7 @@ def train_agents_from_both_perspectives_parallel(
                         warmup=in_warmup,
                         episode_indices=[completed + w for w in range(batch_size)],
                         seed_base=seed_base,
+                        swap_envs=swap_envs[:batch_size],
                     )
                 else:
                     futures = {}
@@ -1909,9 +2028,12 @@ def train_agents_from_both_perspectives_parallel(
                         p2_rng     = np.random.default_rng(
                             (ep_seed * 31 + 13) if ep_seed is not None else None
                         )
+                        episode_env = envs[w]
+                        if episode_index % 2 == 1:
+                            episode_env = swap_envs[w]
                         fut = pool.submit(
                             _safe_run_one_episode,
-                            envs[w], p1_policy, p2_policy,
+                            episode_env, p1_policy, p2_policy,
                             max_steps, ep_seed, in_warmup, p1_rng, p2_rng,
                             matchup, base_url, game_format,
                             starting_player_id,
@@ -2110,7 +2232,7 @@ def train_agents_from_both_perspectives_parallel(
             _flush_warmup_buffers_auto(p1_tiers, p2_tiers, warmup_p1_accum, warmup_p2_accum)
         if ppo_p1_accum or ppo_p2_accum:
             _flush_ppo_buffers_auto(p1_tiers, p2_tiers, ppo_p1_accum, ppo_p2_accum)
-        for env in envs:
+        for env in envs + swap_envs:
             try:
                 env.close()
             except Exception:
@@ -2462,7 +2584,7 @@ def save_agent(
     avg_reward = float(np.mean(episode_rewards)) if episode_rewards else 0.0
     best_reward = float(max(episode_rewards)) if episode_rewards else 0.0
 
-    package_dir = out_dir / matchup.name / f"ppo_{agent_id}"
+    package_dir = matchup_out_dir(out_dir, matchup) / f"ppo_{agent_id}"
     weights_dir = package_dir / "weights"
     weights_dir.mkdir(parents=True, exist_ok=True)
 
@@ -2606,8 +2728,7 @@ class _CheckpointEvalTracker:
             self.first_win_rate = wr
         self.final_win_rate = wr
         ckpt_dir = (
-            self.out_dir
-            / self.matchup.name
+            matchup_out_dir(self.out_dir, self.matchup)
             / "checkpoint_eval"
             / f"episode_{completed:06d}"
         )
@@ -2697,7 +2818,7 @@ def _save_warmup_handoff_checkpoint(
     baseline: dict[str, Any],
 ) -> Path:
     """Persist policy weights + baseline evaluation right before PPO handoff."""
-    ckpt_dir = out_dir / matchup.name / "warmup_handoff_baseline"
+    ckpt_dir = matchup_out_dir(out_dir, matchup) / "warmup_handoff_baseline"
     p1_dir = ckpt_dir / "p1"
     p2_dir = ckpt_dir / "p2"
     p1_dir.mkdir(parents=True, exist_ok=True)
@@ -2829,8 +2950,8 @@ def _train_matchup_parallel_seeds(
 
     best_p1_row = summary.seed_rows[best_p1_idx]
     best_meta = best_p1_row.get("meta") or {}
-    p1_id = f"{matchup.name}-p1-{uuid.uuid4().hex[:8]}"
-    p2_id = f"{matchup.name}-p2-{uuid.uuid4().hex[:8]}"
+    p1_id = new_agent_id("p1")
+    p2_id = new_agent_id("p2")
     elapsed = float(best_meta.get("p1", {}).get("elapsed_secs", 0.0) or 0.0)
 
     meta_p1 = save_agent(
@@ -2884,6 +3005,28 @@ def _train_matchup_parallel_seeds(
         f"P1={summary.avg_p1_win_rate:.1%}  P2={summary.avg_p2_win_rate:.1%}"
     )
     return {"p1": meta_p1, "p2": meta_p2}
+
+
+def _write_matchup_dir_label(out_dir: Path, matchup: Matchup) -> Path:
+    """Create the matchup output folder and record the full matchup label."""
+    matchup_root = matchup_out_dir(out_dir, matchup)
+    matchup_root.mkdir(parents=True, exist_ok=True)
+    label_path = matchup_root / "matchup_label.json"
+    if not label_path.exists():
+        label_path.write_text(
+            json.dumps(
+                {
+                    "name": matchup.name,
+                    "output_subdir": matchup_root.name,
+                    "p1_deck": matchup.p1_deck,
+                    "p2_deck": matchup.p2_deck,
+                    "description": matchup.description,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    return matchup_root
 
 
 def train_matchup(
@@ -2952,6 +3095,8 @@ def train_matchup(
         print("  Live state image rendering: enabled (no browser tabs)")
     print(f"{'=' * 60}")
 
+    _write_matchup_dir_label(out_dir, matchup)
+
     if matchup.cpp_engine_dir:
         print(f"  C++ engine : {matchup.cpp_engine_dir}")
 
@@ -2987,7 +3132,7 @@ def train_matchup(
                     "best_reward": 0.0,
                     "elapsed_secs": 0.0,
                     "agent_id": "cached_unified",
-                    "package_dir": str(out_dir / matchup.name / "cached_unified"),
+                    "package_dir": str(matchup_out_dir(out_dir, matchup) / "cached_unified"),
                 },
                 "p2": {
                     "matchup": matchup.name,
@@ -2996,7 +3141,7 @@ def train_matchup(
                     "best_reward": 0.0,
                     "elapsed_secs": 0.0,
                     "agent_id": "cached_unified",
-                    "package_dir": str(out_dir / matchup.name / "cached_unified"),
+                    "package_dir": str(matchup_out_dir(out_dir, matchup) / "cached_unified"),
                 },
                 "skipped_training": True,
             }
@@ -3046,13 +3191,23 @@ def train_matchup(
                 raise
 
     unified_bundle = _bootstrap_unified_policy(cache_store, probe_env, seed)
-    p1_bundle = p2_bundle = unified_bundle
+    unified_policy = unified_bundle.policy
+    policy_tiers = unified_bundle.shared_tiers()
     print("  Unified policy init:", ", ".join(unified_bundle.init_sources))
     print(
         f"  obs_schema={PLAYER_OBS_SCHEMA_VERSION} "
-        f"obs_dim={unified_bundle.policy.obs_dim} "
-        f"n_actions={unified_bundle.policy.n_actions}"
+        f"obs_dim={unified_policy.obs_dim} "
+        f"n_actions={unified_policy.n_actions}"
     )
+    print(
+        "  Unified self-play: one shared policy controls both seats; "
+        "PPO updates merge P1+P2 transitions"
+    )
+
+    use_fast_parallel = _env_supports_fast_training(probe_env)
+    rollout_workers = max(1, int(n_workers))
+    if use_fast_parallel and rollout_workers == 1:
+        print("  Using C++ fast-path rollouts (single worker)")
 
     if n_workers <= 1 and probe_env is not None:
         env = probe_env
@@ -3079,7 +3234,7 @@ def train_matchup(
     p1_outcomes: list[str] = []
     live_state_image_path: Optional[Path] = None
     if show_frontend:
-        live_state_image_path = out_dir / matchup.name / "training_live_state.png"
+        live_state_image_path = matchup_out_dir(out_dir, matchup) / "training_live_state.png"
         live_state_image_path.parent.mkdir(parents=True, exist_ok=True)
         print(f"  Live state image path → {live_state_image_path}")
 
@@ -3098,8 +3253,8 @@ def train_matchup(
             n_episodes=n_episodes,
             checkpoint_interval=effective_ckpt_interval,
             checkpoint_eval_episodes=checkpoint_eval_episodes,
-            p1_policy=p1_bundle.policy,
-            p2_policy=p2_bundle.policy,
+            p1_policy=unified_policy,
+            p2_policy=unified_policy,
             seed=seed,
             out_dir=out_dir,
         )
@@ -3108,20 +3263,21 @@ def train_matchup(
             f"{checkpoint_eval_episodes} eval game(s) per checkpoint"
         )
 
-    # ── parallel path ─────────────────────────────────────────────────────────
-    if n_workers > 1:
-        print(f"  [parallel] Using {n_workers} worker game sessions for training")
+    # ── parallel / fast rollout path ────────────────────────────────────────
+    if rollout_workers > 1 or use_fast_parallel:
+        if rollout_workers > 1:
+            print(f"  [parallel] Using {rollout_workers} worker game sessions for training")
         rem_p1, rem_p2, rem_stats = train_agents_from_both_perspectives_parallel(
             matchup=matchup,
             base_url=base_url,
             game_format=game_format,
-            p1_tiers=p1_bundle.agents,
-            p2_tiers=p2_bundle.agents,
+            p1_tiers=policy_tiers,
+            p2_tiers=policy_tiers,
             n_episodes=n_episodes,
             max_steps=max_steps,
             seed=seed,
             warmup_episodes=warmup_count,
-            n_workers=n_workers,
+            n_workers=rollout_workers,
             live_state_image_path=live_state_image_path,
             episode_cache=episode_cache,
             on_episodes_progress=(
@@ -3145,16 +3301,16 @@ def train_matchup(
                 base_url=base_url,
                 game_format=game_format,
                 max_steps=max_steps,
-                p1_policy=p1_bundle.policy,
-                p2_policy=p2_bundle.policy,
+                p1_policy=unified_policy,
+                p2_policy=unified_policy,
                 episodes=warmup_baseline_eval_episodes,
                 seed=(seed + 100_000) if seed is not None else None,
             )
             ckpt_dir = _save_warmup_handoff_checkpoint(
                 out_dir=out_dir,
                 matchup=matchup,
-                p1_policy=p1_bundle.policy,
-                p2_policy=p2_bundle.policy,
+                p1_policy=unified_policy,
+                p2_policy=unified_policy,
                 baseline=baseline,
             )
             warmup_baseline = {**baseline, "checkpoint_dir": str(ckpt_dir)}
@@ -3191,8 +3347,8 @@ def train_matchup(
             print(f"  Warmup  : training first {warmup_count} episode(s) with Talishar default policy")
             warm_p1, warm_p2, warm_stats = train_agents_from_both_perspectives(
                 env,
-                p1_bundle.agents,
-                p2_bundle.agents,
+                policy_tiers,
+                policy_tiers,
                 n_episodes=warmup_count,
                 max_steps=max_steps,
                 seed=seed,
@@ -3218,16 +3374,16 @@ def train_matchup(
                 base_url=base_url,
                 game_format=game_format,
                 max_steps=max_steps,
-                p1_policy=p1_bundle.policy,
-                p2_policy=p2_bundle.policy,
+                p1_policy=unified_policy,
+                p2_policy=unified_policy,
                 episodes=warmup_baseline_eval_episodes,
                 seed=(seed + 100_000) if seed is not None else None,
             )
             ckpt_dir = _save_warmup_handoff_checkpoint(
                 out_dir=out_dir,
                 matchup=matchup,
-                p1_policy=p1_bundle.policy,
-                p2_policy=p2_bundle.policy,
+                p1_policy=unified_policy,
+                p2_policy=unified_policy,
                 baseline=baseline,
             )
             warmup_baseline = {**baseline, "checkpoint_dir": str(ckpt_dir)}
@@ -3245,8 +3401,8 @@ def train_matchup(
             rem_seed = (seed + warmup_count) if seed is not None else None
             rem_p1, rem_p2, rem_stats = train_agents_from_both_perspectives(
                 env,
-                p1_bundle.agents,
-                p2_bundle.agents,
+                policy_tiers,
+                policy_tiers,
                 n_episodes=remaining_episodes,
                 max_steps=max_steps,
                 seed=rem_seed,
@@ -3277,15 +3433,14 @@ def train_matchup(
 
     elapsed = time.time() - t0
 
-    p1_wr = float(np.mean([1.0 if r > 0 else 0.0 for r in p1_rewards])) if p1_rewards else None
-    p2_wr = float(np.mean([1.0 if r > 0 else 0.0 for r in p2_rewards])) if p2_rewards else None
+    p1_wr, p2_wr = _training_win_rates_from_outcomes(outcome_summary)
 
     training_stats = dict(overall_stats)
     if ckpt_tracker is not None and ckpt_tracker.log:
         training_stats["checkpoint_eval_history"] = ckpt_tracker.log
 
     cache_store.persist(
-        unified_bundle.policy,
+        unified_policy,
         episodes_delta=len(p1_rewards),
         training_summary=(
             {
@@ -3322,29 +3477,33 @@ def train_matchup(
         f"({overall_stats['timeout_rate'] * 100:.1f}%)"
     )
     if p1_wr is not None and p2_wr is not None and _seed_run_capture is None:
-        print(f"  Train win%: P1={p1_wr * 100:.1f}  P2={p2_wr * 100:.1f}")
+        print(
+            f"  Train win% (P1 seat / P2 seat): "
+            f"P1={p1_wr * 100:.1f}  P2={p2_wr * 100:.1f}  "
+            f"(same unified policy on both sides)"
+        )
 
     if _seed_run_capture is not None:
         _seed_run_capture.update(
             {
-                "p1_agent": p1_bundle.policy,
-                "p2_agent": p2_bundle.policy,
+                "p1_agent": unified_policy,
+                "p2_agent": unified_policy,
                 "p1_win_rate": float(p1_wr or 0.0),
                 "p2_win_rate": float(p2_wr or 0.0),
             }
         )
 
-    p1_id = f"{matchup.name}-p1-{uuid.uuid4().hex[:8]}"
-    p2_id = f"{matchup.name}-p2-{uuid.uuid4().hex[:8]}"
+    p1_id = new_agent_id("p1")
+    p2_id = new_agent_id("p2")
 
     meta_p1 = save_agent(
-        p1_bundle.policy, p1_id, out_dir, matchup, p1_rewards,
+        unified_policy, p1_id, out_dir, matchup, p1_rewards,
         n_episodes, elapsed, game_format, "p1", eval_env_ids,
         warmup_baseline=warmup_baseline,
         training_stats=overall_stats,
     )
     meta_p2 = save_agent(
-        p2_bundle.policy, p2_id, out_dir, matchup, p2_rewards,
+        unified_policy, p2_id, out_dir, matchup, p2_rewards,
         n_episodes, elapsed, game_format, "p2", eval_env_ids,
         warmup_baseline=warmup_baseline,
         training_stats=overall_stats,
@@ -3660,10 +3819,12 @@ def build_fabrary_matchup(
     entry2: dict,
     format_name: str,
 ) -> Matchup:
+    name = f"{slug1}-vs-{slug2}"
     return Matchup(
-        name=f"{slug1}-vs-{slug2}",
+        name=name,
         p1_deck=stem1,
         p2_deck=stem2,
+        dir_name=shorten_matchup_dir_name(name, stem1, stem2),
         description=(
             f"{entry1.get('name', slug1)} (P1) vs "
             f"{entry2.get('name', slug2)} (P2) — unified self-play"

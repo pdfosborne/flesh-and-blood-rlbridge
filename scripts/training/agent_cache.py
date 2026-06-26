@@ -124,10 +124,17 @@ class UnifiedPolicyBundle:
 
     policy: PPOAgent
     init_sources: list[str]
+    _shared_tiers: list[PPOAgent] | None = None
+
+    def shared_tiers(self) -> list[PPOAgent]:
+        """Return one cached tier list — use for both P1 and P2 in self-play."""
+        if self._shared_tiers is None:
+            self._shared_tiers = [self.policy]
+        return self._shared_tiers
 
     @property
     def agents(self) -> list[PPOAgent]:
-        return [self.policy]
+        return self.shared_tiers()
 
 
 def clone_agent_weights(src: PPOAgent, dst: PPOAgent) -> None:
