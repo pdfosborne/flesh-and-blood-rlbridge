@@ -81,7 +81,12 @@ def _loopback_fe_browser_host(*, fe_host: str, page_host: str | None) -> str:
 
 
 def browser_talishar_fe_url(fe_url: str, *, page_host: str | None = None) -> str:
-    """Map docker-internal Talishar-FE URLs to a host the browser can reach."""
+    """Map docker-internal Talishar-FE URLs to a host the **user's browser** can reach.
+
+    Do not use this for server-side probes or Playwright inside the fab-bridge
+    container — pass ``EnvironmentSettings.talishar_fe_url`` (e.g.
+    ``http://talishar-fe:5173``) directly instead.
+    """
     override = os.environ.get("TALISHAR_FE_BROWSER_URL", "").strip()
     if override:
         return override.rstrip("/")

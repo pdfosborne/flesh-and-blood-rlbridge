@@ -24,7 +24,6 @@ from fab_tui.config import (
     SCRIPTS_EVAL,
     EnvironmentSettings,
     SideboardCompareSpec,
-    browser_talishar_fe_url,
     slugify,
 )
 from fab_tui.decks import (
@@ -1713,8 +1712,10 @@ def start_live_play(
 
     _verify_talishar_reachable(env.talishar_url)
 
-    browser_fe_url = browser_talishar_fe_url(env.talishar_fe_url, page_host=page_host)
-    _verify_frontend_reachable(browser_fe_url)
+    # Probes and Playwright run inside this process (fab-bridge container uses
+    # http://talishar-fe:5173). browser_talishar_fe_url() is for the user's browser only.
+    internal_fe_url = env.talishar_fe_url.rstrip("/")
+    _verify_frontend_reachable(internal_fe_url)
 
     sync_opponent_deck_api(
         env,
@@ -1786,7 +1787,7 @@ def start_live_play(
                 assets_path=env.assets_path,
                 cache_dir=cache_dir,
                 base_url=env.talishar_url,
-                fe_url=browser_fe_url,
+                fe_url=internal_fe_url,
                 human_deck=human_deck,
                 player_deck_label=player_label,
                 opponent_deck_label=opponent_label,

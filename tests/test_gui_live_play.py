@@ -86,6 +86,70 @@ def test_open_live_play_chromium_calls_playwright(monkeypatch) -> None:
     assert session.chromium_opened is True
 
 
+def test_start_live_play_uses_internal_fe_url_for_probe(tmp_path: Path, monkeypatch) -> None:
+    cache_dir = tmp_path / "cache"
+    fmt_dir = cache_dir / "silver_age"
+    fmt_dir.mkdir(parents=True)
+    weights = fmt_dir / f"unified_agent_v{UNIFIED_AGENT_WEIGHT_VERSION}.json"
+    weights.write_text("{}", encoding="utf-8")
+
+    env = EnvironmentSettings(
+        talishar_url="http://web-server/game",
+        talishar_fe_url="http://talishar-fe:5173",
+        assets_path=str(tmp_path / "Assets"),
+    )
+    (tmp_path / "Assets").mkdir()
+
+    probed: list[str] = []
+    passed_fe: list[str] = []
+
+    monkeypatch.setattr(
+        "talishar_live_play._verify_talishar_reachable",
+        lambda _url: None,
+    )
+    monkeypatch.setattr(
+        "talishar_live_play._verify_frontend_reachable",
+        lambda url: probed.append(url),
+    )
+    monkeypatch.setattr(
+        "fab_gui.api.sync_opponent_deck_api",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def _fake_run(**kwargs) -> dict:
+        passed_fe.append(str(kwargs.get("fe_url", "")))
+        return {
+            "record": {"wins": 0, "losses": 0, "draws": 0, "timeouts": 0},
+            "cancelled": True,
+        }
+
+    monkeypatch.setattr(
+        "talishar_live_play.run_embedded_unified_live_play_session",
+        _fake_run,
+    )
+
+    LIVE_PLAY._sessions.clear()
+    LIVE_PLAY._active_id = None
+
+    start_live_play(
+        env,
+        {
+            "deck": {"a_red": 40},
+            "game_format": "silver_age",
+            "equipment_header": "aurora",
+            "opponent_deck": "OppPrecon",
+            "opponent_game_deck": {"b_red": 40},
+            "cache_dir": str(cache_dir),
+            "human_deck": "opponent",
+            "prefer_chromium": False,
+        },
+        page_host="localhost",
+    )
+
+    assert probed == ["http://talishar-fe:5173"]
+    assert passed_fe == ["http://talishar-fe:5173"]
+
+
 def test_start_live_play_missing_unified_agent(tmp_path: Path, monkeypatch) -> None:
     cache_dir = tmp_path / "cache"
     cache_dir.mkdir()
