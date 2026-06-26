@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>FAB RL Bridge — Sideboard Compare</title>
-  <link rel="stylesheet" href="/static/styles.css?v=27" />
+  <link rel="stylesheet" href="/static/styles.css?v=29" />
 </head>
 <body>
   <header>
@@ -151,12 +151,13 @@
 
     <!-- Results -->
     <section id="panel-results" class="panel" role="tabpanel">
-      <h2>Final results</h2>
-      <p class="hint">Ranked comparison after all C++ policy matchups and Talishar evaluation complete. Primary ranking uses C++ agent vs agent.</p>
+      <h2>Evaluation results</h2>
+      <p class="hint">Unified-agent evaluation only (no training). Four C++ policy matchups per list, then Talishar agent vs agent. Primary ranking uses C++ agent vs agent; Talishar breaks ties.</p>
       <div id="results-empty" class="empty-state">Results appear when evaluation finishes.</div>
       <div id="results-content" hidden>
         <div class="card">
           <div id="winner-banner" style="margin-bottom:1rem;font-size:1.05rem"></div>
+          <h3 style="margin-top:0">C++ policy matchups</h3>
           <table class="results-table">
             <thead>
               <tr>
@@ -175,27 +176,52 @@
           </table>
           <p id="results-meta" class="hint" style="margin-top:1rem"></p>
         </div>
+        <div class="card" id="results-logic-summary" style="margin-top:1rem" hidden>
+          <h3>Logic policy vs agent (C++)</h3>
+          <p class="hint">Default Talishar logic on P1 vs your unified agent on P2. Higher agent win % means the list holds better against the baseline policy.</p>
+          <table class="results-table results-table-compact">
+            <thead>
+              <tr>
+                <th>Candidate</th>
+                <th>Agent win %</th>
+                <th>Logic win %</th>
+                <th>Record</th>
+              </tr>
+            </thead>
+            <tbody id="results-logic-tbody"></tbody>
+          </table>
+        </div>
         <div class="card" id="results-damage-panel" style="margin-top:1rem" hidden>
-          <h3>Card impact (final eval)</h3>
-          <p class="hint">Damage dealt vs taken across final evaluation games, aggregated by card.</p>
+          <h3>Card impact comparison</h3>
+          <p class="hint">Average P1 damage per game by source. Talishar agent vs agent plus C++ logic vs logic, agent vs logic, and agent vs agent matchups.</p>
           <label for="results-damage-candidate">Candidate</label>
           <select id="results-damage-candidate"></select>
           <div id="results-damage-summary" class="hint" style="margin-top:0.5rem"></div>
           <div class="results-damage-grid">
             <div>
-              <h4>Top damage dealt</h4>
-              <div id="results-damage-dealt" class="results-damage-list"></div>
+              <h4>Avg damage dealt / game</h4>
+              <div class="results-damage-table-wrap">
+                <table class="results-table results-damage-compare">
+                  <thead id="results-damage-dealt-head"></thead>
+                  <tbody id="results-damage-dealt"></tbody>
+                </table>
+              </div>
             </div>
             <div>
-              <h4>Top damage taken (source)</h4>
-              <div id="results-damage-taken" class="results-damage-list"></div>
+              <h4>Avg damage taken / game</h4>
+              <div class="results-damage-table-wrap">
+                <table class="results-table results-damage-compare">
+                  <thead id="results-damage-taken-head"></thead>
+                  <tbody id="results-damage-taken"></tbody>
+                </table>
+              </div>
             </div>
           </div>
         </div>
         <div class="card" style="margin-top:1rem">
           <h3>Replay</h3>
           <p class="hint">One greedy-policy game rendered through Talishar-FE (Playwright screenshots). Live frames appear during capture, then the GIF replaces them when ready.</p>
-          <div id="results-replay-empty" class="empty-state">Replay GIF will appear here after training finishes.</div>
+          <div id="results-replay-empty" class="empty-state">Replay GIF will appear here after evaluation finishes.</div>
           <div id="results-replay-panel" hidden>
             <img id="results-replay-gif" class="results-replay-gif" alt="Replay animation" />
             <p id="results-replay-meta" class="hint" style="margin-top:0.75rem"></p>

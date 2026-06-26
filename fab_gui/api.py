@@ -1328,6 +1328,40 @@ def _status_from_disk(out_dir: Path, run_id: str) -> dict[str, Any]:
     }
 
 
+def _normalize_damage_breakdown(breakdown: dict[str, Any]) -> dict[str, Any]:
+    """Ensure per-card averages are present for results display."""
+    episodes = max(1, int(breakdown.get("episodes", 0) or 0))
+    normalized = dict(breakdown)
+    for key in ("cards_dealt", "cards_taken_from"):
+        rows = normalized.get(key)
+        if not isinstance(rows, list):
+            continue
+        normalized[key] = [
+            {
+                **row,
+                "avg_damage": round(
+                    float(
+                        row.get("avg_damage")
+                        if row.get("avg_damage") is not None
+                        else int(row.get("damage", 0) or 0) / episodes
+                    ),
+                    2,
+                ),
+            }
+            for row in rows
+            if isinstance(row, dict)
+        ]
+    training_root = REPO_ROOT / "scripts" / "training"
+    if str(training_root) not in sys.path:
+        sys.path.insert(0, str(training_root))
+    try:
+        from eval_damage_stats import _ensure_unattributed_damage_rows  # noqa: PLC0415
+
+        return _ensure_unattributed_damage_rows(normalized)
+    except Exception:
+        return normalized
+
+
 def _load_final_eval_damage_breakdown(out_dir: Path, candidate_id: str) -> dict[str, Any] | None:
     final_eval = out_dir / "candidates" / candidate_id / "final_eval" / "p1_final_eval.json"
     if not final_eval.is_file():
@@ -1337,18 +1371,58 @@ def _load_final_eval_damage_breakdown(out_dir: Path, candidate_id: str) -> dict[
     except (OSError, json.JSONDecodeError):
         return None
     breakdown = (payload.get("analysis") or {}).get("damage_breakdown")
-    return breakdown if isinstance(breakdown, dict) else None
+    if not isinstance(breakdown, dict):
+        return None
+    return _normalize_damage_breakdown(breakdown)
+
+
+_CPP_DAMAGE_VARIANTS = ("logic_vs_logic", "agent_vs_logic", "agent_vs_agent")
+
+
+def _load_cpp_variant_metrics(out_dir: Path, candidate_id: str, variant_key: str) -> dict[str, Any] | None:
+    path = out_dir / "candidates" / candidate_id / "cpp_eval" / f"{variant_key}.json"
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _enrich_cpp_eval_variants(row: dict[str, Any], out_dir: Path, candidate_id: str) -> None:
+    variants = row.get("cpp_eval_variants")
+    if not isinstance(variants, dict):
+        variants = {}
+        row["cpp_eval_variants"] = variants
+    for variant_key in _CPP_DAMAGE_VARIANTS:
+        variant = variants.get(variant_key)
+        if not isinstance(variant, dict):
+            loaded = _load_cpp_variant_metrics(out_dir, candidate_id, variant_key)
+            if loaded is None:
+                continue
+            variant = loaded
+            variants[variant_key] = variant
+        breakdown = variant.get("damage_breakdown")
+        if isinstance(breakdown, dict):
+            variant["damage_breakdown"] = _normalize_damage_breakdown(breakdown)
 
 
 def _enrich_results_damage_breakdown(data: dict[str, Any], out_dir: Path) -> None:
     for row in data.get("ranking") or []:
+        candidate_id = str(row.get("candidate_id") or "")
+        if candidate_id:
+            _enrich_cpp_eval_variants(row, out_dir, candidate_id)
+
         final_eval = row.get("final_eval")
         if not isinstance(final_eval, dict):
             final_eval = {}
             row["final_eval"] = final_eval
         if final_eval.get("damage_breakdown"):
+            final_eval["damage_breakdown"] = _normalize_damage_breakdown(
+                final_eval["damage_breakdown"]
+            )
             continue
-        candidate_id = str(row.get("candidate_id") or "")
         if not candidate_id:
             continue
         breakdown = _load_final_eval_damage_breakdown(out_dir, candidate_id)

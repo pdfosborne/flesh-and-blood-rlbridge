@@ -1820,6 +1820,7 @@ def _evaluate_fast_policy_matchup(
     live_progress_path: Optional[Path] = None,
     progress_interval: int = 100,
     live_phase: str = "cpp_checkpoint",
+    p1_deck_card_ids: Optional[set[str]] = None,
 ) -> Optional[dict[str, Any]]:
     if not _env_supports_fast_training(env):
         return None
@@ -1827,6 +1828,10 @@ def _evaluate_fast_policy_matchup(
     wins = losses = draws = timeouts = errors = 0
     anomalies: list[str] = []
     end_state_keys: set[tuple[Any, ...]] = set()
+    episode_damage_breakdowns: list[dict[str, Any]] = []
+    deck_card_ids = set(p1_deck_card_ids or ())
+    cpp_env = getattr(env, "_cpp_env", None) if hasattr(env, "_cpp_env") else env
+    trace_env = cpp_env if hasattr(cpp_env, "get_combat_trace") else env
     for ep in range(episodes):
         ep_seed = (seed + ep) if seed is not None else ep
         episode_rng = np.random.default_rng(ep_seed)
@@ -1880,6 +1885,10 @@ def _evaluate_fast_policy_matchup(
             timeouts=timeouts,
             errors=errors,
         )
+        if hasattr(trace_env, "get_combat_trace"):
+            damage_acc = EvalDamageAccumulator(deck_card_ids=deck_card_ids)
+            damage_acc.ingest_trace(trace_env.get_combat_trace())
+            episode_damage_breakdowns.append(damage_acc.to_dict())
 
         completed = ep + 1
         if progress_interval > 0 and (
@@ -1930,7 +1939,12 @@ def _evaluate_fast_policy_matchup(
 
     total = max(1, episodes)
     decided = max(1, wins + losses + draws)
-    return {
+    damage_breakdown = (
+        merge_damage_breakdowns(episode_damage_breakdowns)
+        if episode_damage_breakdowns
+        else None
+    )
+    metrics: dict[str, Any] = {
         "episodes": episodes,
         "p1_wins": wins,
         "p2_wins": losses,
@@ -1948,6 +1962,9 @@ def _evaluate_fast_policy_matchup(
         "p1_policy": _policy_label(p1_policy),
         "p2_policy": _policy_label(p2_policy),
     }
+    if damage_breakdown is not None:
+        metrics["damage_breakdown"] = damage_breakdown
+    return metrics
 
 
 def _evaluate_fast_p1_vs_fixed_opponent(
@@ -1988,6 +2005,7 @@ def _evaluate_p1_vs_fixed_opponent(
     backend: str = "auto",
     eval_label: str = "Eval",
     live_progress_path: Optional[Path] = None,
+    p1_deck_card_ids: Optional[set[str]] = None,
 ) -> dict[str, Any]:
     """Evaluate frozen P1/P2 policies against each other.
 
@@ -2027,6 +2045,7 @@ def _evaluate_p1_vs_fixed_opponent(
         max_turns=max_steps,
         use_cpp_engine=use_cpp,
         require_fast_training=(backend == "cpp"),
+        enable_combat_tracker=True,
     )
     if backend in {"auto", "cpp"}:
         fast_metrics = _evaluate_fast_policy_matchup(
@@ -2038,6 +2057,7 @@ def _evaluate_p1_vs_fixed_opponent(
             seed=seed,
             eval_label=eval_label,
             live_progress_path=live_progress_path,
+            p1_deck_card_ids=p1_deck_card_ids,
         )
         if fast_metrics is not None:
             env.close()
@@ -2066,6 +2086,7 @@ def _evaluate_p1_vs_fixed_opponent(
             use_cpp_engine=False,
             require_fast_training=False,
             request_timeout=60.0,
+            enable_combat_tracker=True,
         )
 
     wins = 0
@@ -2073,6 +2094,8 @@ def _evaluate_p1_vs_fixed_opponent(
     draws = 0
     timeouts = 0
     errors = 0
+    episode_damage_breakdowns: list[dict[str, Any]] = []
+    deck_card_ids = set(p1_deck_card_ids or ())
     runtime_backend: Optional[str] = None
     backend_printed = False
     try:
@@ -2187,6 +2210,10 @@ def _evaluate_p1_vs_fixed_opponent(
                 timeouts=timeouts,
                 errors=errors,
             )
+            if hasattr(env, "get_combat_trace"):
+                damage_acc = EvalDamageAccumulator(deck_card_ids=deck_card_ids)
+                damage_acc.ingest_trace(env.get_combat_trace())
+                episode_damage_breakdowns.append(damage_acc.to_dict())
 
             completed = ep + 1
             print(
@@ -2224,8 +2251,13 @@ def _evaluate_p1_vs_fixed_opponent(
     finally:
         env.close()
 
+    damage_breakdown = (
+        merge_damage_breakdowns(episode_damage_breakdowns)
+        if episode_damage_breakdowns
+        else None
+    )
     total = max(1, episodes)
-    return {
+    result = {
         "episodes": episodes,
         "p1_wins": wins,
         "p2_wins": losses,
@@ -2239,6 +2271,9 @@ def _evaluate_p1_vs_fixed_opponent(
         "timeout_rate": (timeouts + errors) / total,
         "runtime_backend": runtime_backend or "HTTP Talishar",
     }
+    if damage_breakdown is not None:
+        result["damage_breakdown"] = damage_breakdown
+    return result
 
 
 def evaluate_policy_matchup(
@@ -2254,6 +2289,7 @@ def evaluate_policy_matchup(
     backend: str = "cpp",
     eval_label: str = "Eval",
     live_progress_path: Optional[Path] = None,
+    p1_deck_card_ids: Optional[set[str]] = None,
 ) -> dict[str, Any]:
     """Evaluate arbitrary P1/P2 seat policies (PPO agent or ``LOGIC_POLICY``)."""
     return _evaluate_p1_vs_fixed_opponent(
@@ -2268,6 +2304,7 @@ def evaluate_policy_matchup(
         backend=backend,
         eval_label=eval_label,
         live_progress_path=live_progress_path,
+        p1_deck_card_ids=p1_deck_card_ids,
     )
 
 
@@ -2283,6 +2320,7 @@ def evaluate_fixed_matchup(
     backend: str = "auto",
     eval_label: str = "Eval",
     live_progress_path: Optional[Path] = None,
+    p1_deck_card_ids: Optional[set[str]] = None,
 ) -> dict[str, Any]:
     """Evaluate a unified/sampled policy on both seats for a fixed deck matchup."""
     from agent_cache import clone_agent_weights  # noqa: PLC0415
@@ -2302,6 +2340,7 @@ def evaluate_fixed_matchup(
         backend=backend,
         eval_label=eval_label,
         live_progress_path=live_progress_path,
+        p1_deck_card_ids=p1_deck_card_ids,
     )
 
 

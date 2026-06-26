@@ -2118,20 +2118,134 @@ function formatCardIdLabel(cardId) {
   return String(cardId || "?").replace(/_/g, " ");
 }
 
-function renderResultsDamageList(container, entries, emptyHint) {
-  if (!container) return;
-  if (!entries?.length) {
-    container.innerHTML = `<div class="hint">${escapeHtml(emptyHint)}</div>`;
+const CPP_DAMAGE_VARIANTS = [
+  { key: "logic_vs_logic", label: "C++ L/L" },
+  { key: "agent_vs_logic", label: "C++ A/L" },
+  { key: "agent_vs_agent", label: "C++ A/A" },
+];
+
+function damageBreakdownForRow(row, source) {
+  if (source === "talishar") {
+    return row.final_eval?.damage_breakdown ?? null;
+  }
+  return row.cpp_eval_variants?.[source]?.damage_breakdown ?? null;
+}
+
+function cardAvgMap(breakdown, field) {
+  const map = new Map();
+  if (!breakdown) return map;
+  for (const entry of breakdown[field] || []) {
+    const cardId = entry?.card_id;
+    if (!cardId) continue;
+    const avg =
+      entry.avg_damage ??
+      (breakdown.episodes
+        ? Number(entry.damage || 0) / Number(breakdown.episodes)
+        : Number(entry.damage || 0));
+    map.set(cardId, avg);
+  }
+  return map;
+}
+
+function rowHasAnyDamageBreakdown(row) {
+  if (row.final_eval?.damage_breakdown) return true;
+  return CPP_DAMAGE_VARIANTS.some(({ key }) => damageBreakdownForRow(row, key));
+}
+
+function formatDamageCell(value) {
+  if (value == null || Number.isNaN(value)) return "—";
+  return Number(value).toFixed(2);
+}
+
+function renderDamageComparisonHead(thead) {
+  if (!thead) return;
+  thead.innerHTML = `<tr><th>Card</th><th>Talishar</th>${CPP_DAMAGE_VARIANTS.map(
+    ({ label }) => `<th>${escapeHtml(label)}</th>`
+  ).join("")}</tr>`;
+}
+
+function renderDamageComparisonTable(tbody, row, field) {
+  if (!tbody) return;
+  const sources = ["talishar", ...CPP_DAMAGE_VARIANTS.map(({ key }) => key)];
+  const maps = Object.fromEntries(
+    sources.map((source) => [source, cardAvgMap(damageBreakdownForRow(row, source), field)])
+  );
+  const totals = new Map();
+  for (const source of sources) {
+    for (const [cardId, avg] of maps[source].entries()) {
+      totals.set(cardId, (totals.get(cardId) || 0) + avg);
+    }
+  }
+  const cards = [...totals.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 12)
+    .map(([cardId]) => cardId);
+  if (!cards.length) {
+    tbody.innerHTML = `<tr><td colspan="${sources.length + 1}" class="hint">No card-attributed damage recorded.</td></tr>`;
     return;
   }
-  container.innerHTML = entries
+  tbody.innerHTML = cards
     .map(
-      (row, index) => `<div class="results-damage-row">
-      <span class="results-damage-rank">${index + 1}</span>
-      <span class="results-damage-name" title="${escapeHtml(formatCardIdLabel(row.card_id))}">${escapeHtml(formatCardIdLabel(row.card_id))}</span>
-      <span class="results-damage-value">${row.damage}</span>
-    </div>`
+      (cardId) => `<tr>
+      <td title="${escapeHtml(formatCardIdLabel(cardId))}">${escapeHtml(formatCardIdLabel(cardId))}</td>
+      <td>${formatDamageCell(maps.talishar.get(cardId))}</td>
+      ${CPP_DAMAGE_VARIANTS.map(
+        ({ key }) => `<td>${formatDamageCell(maps[key].get(cardId))}</td>`
+      ).join("")}
+    </tr>`
     )
+    .join("");
+}
+
+function damageSummaryLine(label, breakdown) {
+  if (!breakdown) return null;
+  const episodes = breakdown.episodes ?? "?";
+  return `${label}: ${episodes} games · ${breakdown.avg_dealt_per_episode ?? "?"} dealt · ${breakdown.avg_taken_per_episode ?? "?"} taken`;
+}
+
+function variantMetrics(row, key) {
+  const variants = row.cpp_eval_variants;
+  if (variants?.[key]) return variants[key];
+  return null;
+}
+
+function agentWinRateLogicVsAgent(row) {
+  const metrics = variantMetrics(row, "logic_vs_agent");
+  if (!metrics) return null;
+  if (metrics.p2_win_rate != null) return metrics.p2_win_rate;
+  const total =
+    (metrics.p1_wins ?? 0) + (metrics.losses ?? 0) + (metrics.draws ?? 0) + (metrics.timeouts ?? 0);
+  if (total > 0) return (metrics.losses ?? 0) / total;
+  return null;
+}
+
+function renderResultsLogicSummary(ranking) {
+  const panel = document.getElementById("results-logic-summary");
+  const tbody = document.getElementById("results-logic-tbody");
+  if (!panel || !tbody) return;
+
+  const rows = (ranking || [])
+    .map((row) => {
+      const metrics = variantMetrics(row, "logic_vs_agent");
+      const agentWr = agentWinRateLogicVsAgent(row);
+      return { row, metrics, agentWr };
+    })
+    .filter((entry) => entry.metrics && entry.agentWr != null);
+
+  if (!rows.length) {
+    panel.hidden = true;
+    tbody.innerHTML = "";
+    return;
+  }
+
+  rows.sort((a, b) => b.agentWr - a.agentWr);
+  panel.hidden = false;
+  tbody.innerHTML = rows
+    .map(({ row, metrics, agentWr }) => {
+      const logicWr = metrics.p1_win_rate != null ? metrics.p1_win_rate : 1 - agentWr;
+      const record = `${metrics.p1_wins ?? 0} logic W · ${metrics.losses ?? 0} agent W · ${metrics.draws ?? 0} D`;
+      return `<tr><td>${escapeHtml(row.label || row.candidate_id)}</td><td>${(agentWr * 100).toFixed(1)}%</td><td>${(logicWr * 100).toFixed(1)}%</td><td>${record}</td></tr>`;
+    })
     .join("");
 }
 
@@ -2139,11 +2253,13 @@ function renderResultsDamagePanel(ranking, candidateId) {
   const panel = document.getElementById("results-damage-panel");
   const select = document.getElementById("results-damage-candidate");
   const summary = document.getElementById("results-damage-summary");
-  const dealtEl = document.getElementById("results-damage-dealt");
-  const takenEl = document.getElementById("results-damage-taken");
-  if (!panel || !select || !summary || !dealtEl || !takenEl) return;
+  const dealtHead = document.getElementById("results-damage-dealt-head");
+  const dealtBody = document.getElementById("results-damage-dealt");
+  const takenHead = document.getElementById("results-damage-taken-head");
+  const takenBody = document.getElementById("results-damage-taken");
+  if (!panel || !select || !summary || !dealtBody || !takenBody) return;
 
-  const withBreakdown = (ranking || []).filter((row) => row.final_eval?.damage_breakdown);
+  const withBreakdown = (ranking || []).filter((row) => rowHasAnyDamageBreakdown(row));
   if (!withBreakdown.length) {
     panel.hidden = true;
     select.innerHTML = "";
@@ -2151,6 +2267,9 @@ function renderResultsDamagePanel(ranking, candidateId) {
   }
 
   panel.hidden = false;
+  renderDamageComparisonHead(dealtHead);
+  renderDamageComparisonHead(takenHead);
+
   const selectedId = candidateId || select.value || withBreakdown[0].candidate_id;
   if (select.options.length !== withBreakdown.length) {
     select.innerHTML = withBreakdown
@@ -2163,17 +2282,15 @@ function renderResultsDamagePanel(ranking, candidateId) {
   select.value = selectedId;
 
   const row = withBreakdown.find((entry) => entry.candidate_id === selectedId) || withBreakdown[0];
-  const breakdown = row.final_eval.damage_breakdown;
-  summary.textContent =
-    `${row.label || row.candidate_id} · ${breakdown.episodes || "?"} eval games · ` +
-    `${breakdown.total_dealt ?? 0} dealt (${breakdown.avg_dealt_per_episode ?? "?"} avg) · ` +
-    `${breakdown.total_taken ?? 0} taken (${breakdown.avg_taken_per_episode ?? "?"} avg)`;
-  renderResultsDamageList(dealtEl, breakdown.cards_dealt, "No card-attributed damage dealt recorded.");
-  renderResultsDamageList(
-    takenEl,
-    breakdown.cards_taken_from,
-    "No card-attributed damage taken recorded."
-  );
+  const summaryParts = [
+    damageSummaryLine("Talishar", damageBreakdownForRow(row, "talishar")),
+    ...CPP_DAMAGE_VARIANTS.map(({ key, label }) =>
+      damageSummaryLine(label, damageBreakdownForRow(row, key))
+    ),
+  ].filter(Boolean);
+  summary.textContent = `${row.label || row.candidate_id} · ${summaryParts.join(" · ")}`;
+  renderDamageComparisonTable(dealtBody, row, "cards_dealt");
+  renderDamageComparisonTable(takenBody, row, "cards_taken_from");
 }
 
 function cppVariantPct(row, key) {
@@ -2204,7 +2321,13 @@ async function loadResults(runId) {
     state.lastResultsRanking = ranking;
     const winner = data.winner || {};
     document.getElementById("winner-banner").innerHTML = winner.candidate_id
-      ? `<strong>Winner:</strong> ${winner.candidate_id} — ${winner.label || ""} <span class="status-pill completed">C++ A/A ${cppVariantPct(winner, "agent_vs_agent")}</span> <span class="status-pill completed">Talishar ${((winner.final_eval_win_rate || 0) * 100).toFixed(1)}%</span>`
+      ? `<strong>Winner:</strong> ${winner.candidate_id} — ${winner.label || ""} ` +
+        `<span class="status-pill completed">C++ A/A ${cppVariantPct(winner, "agent_vs_agent")}</span> ` +
+        `<span class="status-pill completed">Logic vs agent ${(() => {
+          const wr = agentWinRateLogicVsAgent(winner);
+          return wr != null ? `${(wr * 100).toFixed(1)}% agent` : "n/a";
+        })()}</span> ` +
+        `<span class="status-pill completed">Talishar ${((winner.final_eval_win_rate || 0) * 100).toFixed(1)}%</span>`
       : "";
     const tbody = document.getElementById("results-tbody");
     tbody.innerHTML = ranking
@@ -2219,6 +2342,7 @@ async function loadResults(runId) {
       .join("");
     document.getElementById("results-meta").textContent =
       `Output: ${data.out_dir} · Winning deck asset: ${data.winning_deck_asset || "n/a"}`;
+    renderResultsLogicSummary(ranking);
     renderResultsDamagePanel(ranking, winner.candidate_id);
     renderReplayPanel(data, runId);
   } catch (e) {

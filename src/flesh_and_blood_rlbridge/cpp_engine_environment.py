@@ -440,6 +440,20 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             return None
         return playability[self._acting_player]
 
+    def _sync_flow_phase_from_cpp(self) -> None:
+        """Keep Talishar-like flow phase aligned when using the fast path."""
+        if self._gs is None:
+            return
+        turn_no = int(getattr(self._gs, "turn_no", 0) or 0)
+        cpp_phase = self._phase_code_from_cpp()
+        if turn_no <= 0 and self._steps <= 0 and cpp_phase in {"startturn", "M"}:
+            self._flow_phase = "OPENING_MAIN"
+            return
+        if cpp_phase == "startturn":
+            self._flow_phase = "M"
+        elif cpp_phase:
+            self._flow_phase = cpp_phase
+
     def _reset_flow_state(self) -> None:
         self._flow_phase = "OPENING_MAIN"
         self._arsenal_complete = set()
@@ -987,6 +1001,27 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         legal_count = len(self._filter_legal_actions(self._legal_actions()))
         obs_vec = self._obs_vec_for_fast_path()
         self._last_observation_vec = obs_vec
+        legal = self._filter_legal_actions(self._legal_actions())
+        if self._enable_combat_tracker:
+            self._synthetic_combat_log = [
+                f"matchup {self._deck1 or 'P1'} vs {self._deck2 or 'P2'}"
+            ]
+            self._combat_tracker.reset(
+                initial_snapshot=self._tracker_state_snapshot(legal),
+                initial_legal_actions=self._legal_to_dicts(legal),
+                combat_log_lines=self._synthetic_combat_log,
+                metadata={
+                    "engine": "cpp",
+                    "engine_dir": str(self._engine_dir),
+                    "deck1": self._deck1,
+                    "deck2": self._deck2,
+                    "fast_path": True,
+                },
+            )
+        else:
+            self._combat_tracker.clear()
+            self._synthetic_combat_log = []
+        self._sync_flow_phase_from_cpp()
         return {
             "obs_vec": obs_vec,
             "legal_count": legal_count,
@@ -1005,6 +1040,17 @@ class CppEngineEnvironment(rlbridgeEnvironment):
     def fast_step_index(self, action_index: int) -> dict[str, Any]:
         """Step by compact legal-action index without building JSON or pybind actions."""
         assert self._gs is not None, "call fast_reset() first"
+        legal = self._filter_legal_actions(self._legal_actions())
+        before_snapshot = (
+            self._tracker_state_snapshot(legal) if self._enable_combat_tracker else None
+        )
+        legal_before = self._legal_to_dicts(legal) if self._enable_combat_tracker else []
+        prev_p1 = int(self._p1_hp)
+        prev_p2 = int(self._p2_hp)
+        chosen_dict: dict[str, Any] = {}
+        if legal:
+            idx = min(max(0, int(action_index)), len(legal) - 1)
+            chosen_dict = self._action_to_dict(legal[idx])
         result = self._gs.fast_step_index(int(action_index))
         self._steps += 1
         terminated = bool(result.terminated)
@@ -1017,6 +1063,31 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         self._p2_hp = int(result.p2_health)
         obs_vec = self._obs_vec_for_fast_path()
         self._last_observation_vec = obs_vec
+        if self._enable_combat_tracker and before_snapshot is not None:
+            new_legal = self._filter_legal_actions(self._legal_actions())
+            after_snapshot = self._tracker_state_snapshot(new_legal)
+            contract_legal = self._contract_legal_actions(new_legal)
+            self._append_synthetic_log(
+                before_snapshot,
+                chosen_dict,
+                after_snapshot,
+                prev_p1,
+                prev_p2,
+                terminated,
+                truncated,
+            )
+            self._combat_tracker.record_step(
+                before_snapshot=before_snapshot,
+                after_snapshot=after_snapshot,
+                action=chosen_dict,
+                legal_before=legal_before,
+                legal_after=contract_legal,
+                reward=float(reward),
+                terminated=terminated,
+                truncated=truncated,
+                combat_log_lines=self._synthetic_combat_log,
+            )
+        self._sync_flow_phase_from_cpp()
         return {
             "obs_vec": obs_vec,
             "legal_count": len(self._filter_legal_actions(self._legal_actions())),
@@ -1467,13 +1538,28 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         return reward + repeat_penalty
 
     def _action_to_dict(self, action: Any) -> dict[str, Any]:
+        card_id = self._resolve_action_card_id(action)
         return {
             "action_code": int(getattr(action, "action_code", 0) or 0),
             "button_input": str(getattr(action, "button_input", "") or ""),
-            "card_id": str(getattr(action, "card_id", "") or ""),
+            "card_id": card_id,
             "zone": str(getattr(action, "zone", "") or ""),
-            "label": str(getattr(action, "label", "") or ""),
+            "label": str(getattr(action, "label", "") or getattr(action, "name", "") or ""),
         }
+
+    def _resolve_action_card_id(self, action: Any) -> str:
+        card_id = str(getattr(action, "card_id", "") or "").strip()
+        if card_id:
+            return card_id
+        zone = str(getattr(action, "zone", "") or "").strip().lower()
+        code = int(getattr(action, "action_code", 0) or 0)
+        button = str(getattr(action, "button_input", "") or "").strip()
+        if zone == "hand" and code in {4, 27} and button.isdigit():
+            hand = self._hand_cards()
+            idx = int(button)
+            if 0 <= idx < len(hand):
+                return str(getattr(hand[idx], "card_id", "") or "").strip()
+        return ""
 
     def _legal_to_dicts(self, legal: list[Any]) -> list[dict[str, Any]]:
         return [self._action_to_dict(a) for a in legal]
@@ -1485,6 +1571,8 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             "acting_player_id": acting,
             "turn_no": int(getattr(gs, "turn_no", 0) or 0),
             "phase": self._phase_code(),
+            "p1_health": int(gs.p1_health),
+            "p2_health": int(gs.p2_health),
             "player_health": int(gs.p1_health if acting == 1 else gs.p2_health),
             "opponent_health": int(gs.p2_health if acting == 1 else gs.p1_health),
             "player_hand_size": int(gs.p1_hand_size if acting == 1 else gs.p2_hand_size),

@@ -396,6 +396,7 @@ def _eval_candidate(
                 backend="cpp",
                 eval_label=variant_label,
                 live_progress_path=eval_live_path,
+                p1_deck_card_ids=set(candidate.game_deck.keys()),
             )
             cpp_variant_metrics[variant_key] = metrics
             (cpp_eval_dir / f"{variant_key}.json").write_text(
@@ -487,9 +488,11 @@ def _eval_candidate(
             backend="http",
             eval_label="Talishar final eval",
             live_progress_path=final_live_path,
+            p1_deck_card_ids=set(candidate.game_deck.keys()),
         )
         eval_dir = candidate_dir / "final_eval"
         eval_dir.mkdir(parents=True, exist_ok=True)
+        damage_breakdown = talishar_metrics.get("damage_breakdown")
         (eval_dir / "p1_final_eval.json").write_text(
             json.dumps(
                 {
@@ -503,6 +506,11 @@ def _eval_candidate(
                             "runtime_backend", "HTTP Talishar"
                         ),
                     },
+                    "analysis": (
+                        {"damage_breakdown": damage_breakdown}
+                        if damage_breakdown
+                        else None
+                    ),
                 },
                 indent=2,
             ),
@@ -541,6 +549,7 @@ def _eval_candidate(
                 "runtime_backend": talishar_metrics.get(
                     "runtime_backend", "HTTP Talishar"
                 ),
+                "damage_breakdown": talishar_metrics.get("damage_breakdown"),
             }
             if talishar_metrics
             else None
