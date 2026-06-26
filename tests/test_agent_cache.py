@@ -86,3 +86,28 @@ def test_training_history_in_meta(tmp_path: Path) -> None:
     assert len(meta["training_history"]) == 1
     assert meta["training_history"][0]["matchup_name"] == "briar_vs_kayo"
     assert MatchupTrainingRecord.from_dict(meta["training_history"][0]).p1_win_rate == 0.55
+
+
+def test_load_required_reads_unified_weights(tmp_path: Path) -> None:
+    cache_root = tmp_path / "agent_cache"
+    store = AgentCacheStore(cache_root, "silver_age")
+
+    agent = PPOAgent()
+    agent.obs_dim = 524
+    agent.n_actions = 18
+    agent._init_nets(524)
+    store.persist(agent, episodes_delta=1)
+
+    loaded = store.load_required(obs_dim=524, n_actions=18)
+    assert loaded._actor is not None
+    assert loaded.obs_dim == 524
+    assert loaded.n_actions == 18
+
+
+def test_load_required_raises_when_missing(tmp_path: Path) -> None:
+    store = AgentCacheStore(tmp_path / "agent_cache", "silver_age")
+    try:
+        store.load_required(obs_dim=524, n_actions=18)
+        raise AssertionError("expected FileNotFoundError")
+    except FileNotFoundError as exc:
+        assert "Unified agent weights not found" in str(exc)

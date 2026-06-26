@@ -10,7 +10,7 @@
   <header>
     <div>
       <h1>FAB RL Bridge</h1>
-      <div class="subtitle">Sideboard comparison — deck import, edit, train &amp; evaluate</div>
+      <div class="subtitle">Sideboard comparison — deck import, edit &amp; evaluate</div>
     </div>
     <div id="run-status"></div>
   </header>
@@ -118,41 +118,41 @@
           <div id="deck-grid" class="deck-grid deck-grid--slots"></div>
         </div>
         <aside class="card editor-sidebar">
-          <h3>Evaluation &amp; training</h3>
-          <p class="hint">Edit your deck, save alternates to compare, then start training. The current editor deck is the baseline.</p>
+          <h3>Evaluation</h3>
+          <p class="hint">Edit your deck, save alternates to compare, then run unified-agent evaluation. The current editor deck is the baseline.</p>
           <div class="row">
             <button type="button" id="btn-save-eval">Save for evaluation</button>
           </div>
           <div id="eval-candidates-list" class="eval-candidates-list"></div>
           <div class="training-params" style="margin-top:1rem">
             <div>
-              <label for="play-episodes">Play episodes per list</label>
-              <input id="play-episodes" type="number" min="100" step="100" value="5000" />
+              <label for="cpp-eval-episodes">C++ eval games per list</label>
+              <input id="cpp-eval-episodes" type="number" min="10" step="10" value="1000" />
             </div>
             <div>
-              <label for="final-eval-episodes">Final eval games per list</label>
-              <input id="final-eval-episodes" type="number" min="10" step="10" value="50" />
+              <label for="talishar-eval-episodes">Talishar eval games per list</label>
+              <input id="talishar-eval-episodes" type="number" min="1" step="1" value="10" />
             </div>
           </div>
           <div id="train-review" class="hint" style="margin-top:0.75rem"></div>
-          <button type="button" id="btn-start-training" style="margin-top:0.75rem">Start sideboard comparison</button>
+          <button type="button" id="btn-start-evaluation" style="margin-top:0.75rem">Start evaluation</button>
         </aside>
       </div>
     </section>
 
     <!-- Dashboard -->
     <section id="panel-dashboard" class="panel" role="tabpanel">
-      <h2>Training dashboard</h2>
-      <p class="hint">Live training progress from the sideboard compare dashboard. Refreshes automatically while training runs.</p>
-      <div id="dashboard-empty" class="empty-state">Start a training run to see live progress here.</div>
+      <h2>Evaluation dashboard</h2>
+      <p class="hint">Live evaluation progress. Refreshes automatically while a run is active.</p>
+      <div id="dashboard-empty" class="empty-state">Start an evaluation run to see live progress here.</div>
       <iframe id="dashboard-frame" title="Sideboard compare dashboard" hidden></iframe>
     </section>
 
     <!-- Results -->
     <section id="panel-results" class="panel" role="tabpanel">
       <h2>Final results</h2>
-      <p class="hint">Ranked comparison after training and final Talishar evaluation completes. Includes a Talishar FE replay GIF for the winning list when Talishar-FE is running.</p>
-      <div id="results-empty" class="empty-state">Results appear when training finishes.</div>
+      <p class="hint">Ranked comparison after C++ and Talishar evaluation completes.</p>
+      <div id="results-empty" class="empty-state">Results appear when evaluation finishes.</div>
       <div id="results-content" hidden>
         <div class="card">
           <div id="winner-banner" style="margin-bottom:1rem;font-size:1.05rem"></div>
@@ -161,8 +161,8 @@
               <tr>
                 <th>#</th>
                 <th>Candidate</th>
-                <th>Train WR</th>
-                <th>Final eval</th>
+                <th>C++ eval</th>
+                <th>Talishar eval</th>
                 <th>Δ vs baseline</th>
                 <th>Label</th>
               </tr>

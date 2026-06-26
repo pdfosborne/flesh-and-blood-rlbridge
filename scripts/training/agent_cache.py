@@ -238,6 +238,38 @@ class AgentCacheStore:
     def has_agent(self) -> bool:
         return self.load_if_exists() is not None
 
+    def load_required(
+        self,
+        *,
+        obs_dim: int,
+        n_actions: int,
+        mask_actions: bool = True,
+    ) -> PPOAgent:
+        """Load unified policy weights from cache or raise if missing/incompatible."""
+        path = self._weights_path()
+        agent = self.load_if_exists()
+        meta = self.load_meta()
+        if agent is None or agent._actor is None:
+            raise FileNotFoundError(
+                f"Unified agent weights not found at {path} "
+                f"(format={self.game_format}, schema=v{self.obs_schema_version})"
+            )
+        schema = int(meta.get("obs_schema_version", -1))
+        if schema not in (-1, self.obs_schema_version):
+            raise RuntimeError(
+                f"Unified agent schema mismatch at {path}: "
+                f"cache v{schema}, expected v{self.obs_schema_version}"
+            )
+        if agent.obs_dim != obs_dim:
+            cached = int(meta.get("obs_dim", agent.obs_dim))
+            raise RuntimeError(
+                f"Unified agent obs_dim mismatch at {path}: "
+                f"loaded={agent.obs_dim}, meta={cached}, expected={obs_dim}"
+            )
+        agent.n_actions = n_actions
+        agent._mask_actions = mask_actions
+        return agent
+
     def should_skip_training(
         self,
         *,

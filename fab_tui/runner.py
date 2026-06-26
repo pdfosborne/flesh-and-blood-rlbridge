@@ -585,6 +585,65 @@ def run_sideboard_compare(
             stop_background_process(dashboard_proc)
 
 
+def run_eval_sideboard_compare(
+    spec: SideboardCompareSpec,
+    env: EnvironmentSettings,
+    *,
+    starting_deck: Path,
+    candidates_json: Path,
+    cpp_eval_episodes: int = 1000,
+    talishar_eval_episodes: int = 10,
+) -> int:
+    """Evaluate sideboard candidates via unified agent (no training)."""
+    from runscripts._common import read_deck_meta  # noqa: PLC0415
+
+    env.apply_to_environ()
+    deck_meta = read_deck_meta(starting_deck, spec.game_format)
+    out_dir = spec.resolved_out_dir()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    cmd = [
+        _python(),
+        str(SCRIPTS_EVAL / "eval_sideboard_compare.py"),
+        "--format",
+        normalize_pipeline_format(spec.game_format),
+        "--hero-id",
+        spec.hero_id or deck_meta.hero_id,
+        "--hero-class",
+        spec.hero_class or deck_meta.hero_class,
+        "--equipment-header",
+        spec.equipment_header or deck_meta.equipment_header,
+        "--opponent-hero-id",
+        spec.opponent_hero_id,
+        "--opponent-deck",
+        spec.opponent_deck,
+        "--starting-deck",
+        str(starting_deck),
+        "--candidates-json",
+        str(candidates_json),
+        "--out-dir",
+        str(out_dir),
+        "--cache-dir",
+        str(REPO_ROOT / "results" / "agent_cache"),
+        "--cpp-eval-episodes",
+        str(cpp_eval_episodes),
+        "--talishar-eval-episodes",
+        str(talishar_eval_episodes),
+        "--max-eval-steps",
+        str(spec.final_eval_max_steps),
+        "--max-parallel",
+        str(spec.max_parallel),
+        "--talishar-url",
+        env.talishar_url,
+        "--assets-path",
+        env.assets_path,
+    ]
+    if not spec.build_cpp_engine:
+        cmd.append("--no-build-cpp-engine")
+        cmd.append("--no-require-cpp-engine")
+    return run_streaming(cmd)
+
+
 def run_unified_random_matchups(
     spec: UnifiedRandomMatchupSpec,
     env: EnvironmentSettings,

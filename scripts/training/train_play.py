@@ -1740,8 +1740,15 @@ def _evaluate_p1_vs_fixed_opponent(
     max_steps: int,
     episodes: int,
     seed: Optional[int] = None,
+    backend: str = "auto",
 ) -> dict[str, Any]:
-    """Evaluate frozen P1/P2 policies against each other (C++ when available)."""
+    """Evaluate frozen P1/P2 policies against each other.
+
+    *backend*:
+    - ``auto`` — C++ fast path when available, else HTTP Talishar
+    - ``cpp`` — C++ fast path only (raises if unavailable)
+    - ``http`` — HTTP Talishar only
+    """
     empty = {
         "episodes": 0,
         "p1_wins": 0,
@@ -1757,24 +1764,56 @@ def _evaluate_p1_vs_fixed_opponent(
     if not _DUAL_AGENT_AVAILABLE or episodes <= 0:
         return empty
 
+    backend = str(backend or "auto").lower()
+    if backend not in {"auto", "cpp", "http"}:
+        backend = "auto"
+
+    use_cpp = backend != "http"
     env = make_env(
         matchup,
         base_url=base_url,
         game_format=game_format,
         max_turns=max_steps,
+        use_cpp_engine=use_cpp,
+        cpp_engine_dir=matchup.cpp_engine_dir,
+        require_fast_training=(backend == "cpp"),
     )
-    fast_metrics = _evaluate_fast_p1_vs_fixed_opponent(
-        env,
-        p1_agent,
-        p2_agent=p2_agent,
-        max_steps=max_steps,
-        episodes=episodes,
-        seed=seed,
-    )
-    if fast_metrics is not None:
+    if backend in {"auto", "cpp"}:
+        fast_metrics = _evaluate_fast_p1_vs_fixed_opponent(
+            env,
+            p1_agent,
+            p2_agent=p2_agent,
+            max_steps=max_steps,
+            episodes=episodes,
+            seed=seed,
+        )
+        if fast_metrics is not None:
+            env.close()
+            print("  Eval backend: C++ engine fast sampled eval")
+            return fast_metrics
+        if backend == "cpp":
+            env.close()
+            raise RuntimeError(
+                f"C++ fast eval required for {matchup.name} but unavailable"
+            )
+
+    if backend == "cpp":
         env.close()
-        print("  Checkpoint eval backend: C++ engine fast sampled eval")
-        return fast_metrics
+        return empty
+
+    if backend == "http":
+        try:
+            env.close()
+        except Exception:
+            pass
+        env = make_env(
+            matchup,
+            base_url=base_url,
+            game_format=game_format,
+            max_turns=max_steps,
+            use_cpp_engine=False,
+            require_fast_training=False,
+        )
 
     wins = 0
     losses = 0
@@ -1854,6 +1893,36 @@ def _evaluate_p1_vs_fixed_opponent(
         "timeout_rate": timeouts / total,
         "runtime_backend": runtime_backend or "HTTP Talishar",
     }
+
+
+def evaluate_fixed_matchup(
+    matchup: "Matchup",
+    agent: Any,
+    *,
+    base_url: str,
+    game_format: str,
+    max_steps: int,
+    episodes: int,
+    seed: Optional[int] = None,
+    backend: str = "auto",
+) -> dict[str, Any]:
+    """Evaluate a unified/sampled policy on both seats for a fixed deck matchup."""
+    from agent_cache import clone_agent_weights  # noqa: PLC0415
+    from rl_agents.ppo import PPOAgent  # noqa: PLC0415
+
+    p2_agent = PPOAgent()
+    clone_agent_weights(agent, p2_agent)
+    return _evaluate_p1_vs_fixed_opponent(
+        matchup,
+        agent,
+        p2_agent=p2_agent,
+        base_url=base_url,
+        game_format=game_format,
+        max_steps=max_steps,
+        episodes=episodes,
+        seed=seed,
+        backend=backend,
+    )
 
 
 def _run_warmup_baseline(

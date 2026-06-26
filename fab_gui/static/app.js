@@ -1863,14 +1863,14 @@ function saveForEvaluation() {
 
 document.getElementById("btn-save-eval").onclick = () => saveForEvaluation();
 
-["play-episodes", "final-eval-episodes"].forEach((id) => {
+["cpp-eval-episodes", "talishar-eval-episodes"].forEach((id) => {
   document.getElementById(id)?.addEventListener("input", () => renderTrainReview());
 });
 
 function renderTrainReview() {
   const el = document.getElementById("train-review");
   if (!state.deck || !state.opponent) {
-    el.textContent = "Import your deck and select an opponent before training.";
+    el.textContent = "Import your deck and select an opponent before evaluation.";
     return;
   }
   const required = requiredDeckSize(state.deck.game_format);
@@ -1886,10 +1886,10 @@ function renderTrainReview() {
     <div><strong>Baseline:</strong> ${state.deck.baseline_label || "Baseline"}</div>
     <div><strong>Lists:</strong> 1 baseline + ${state.evalCandidates.length} saved alternate(s)</div>
     <div><strong>Deck:</strong> ${count} / ${required} cards${deckOk ? "" : " — complete the deck in the editor"}</div>
-    <div><strong>Training:</strong> ${document.getElementById("play-episodes")?.value || "?"} play episodes, ${document.getElementById("final-eval-episodes")?.value || "?"} final eval games per list</div>`;
+    <div><strong>Evaluation:</strong> ${document.getElementById("cpp-eval-episodes")?.value || "?"} C++ games, ${document.getElementById("talishar-eval-episodes")?.value || "?"} Talishar games per list</div>`;
 }
 
-document.getElementById("btn-start-training").onclick = async () => {
+document.getElementById("btn-start-evaluation").onclick = async () => {
   if (!state.deck || !state.opponent) return toast("Deck and opponent required", true);
   const required = requiredDeckSize(state.deck.game_format);
   const count = deckCardCount();
@@ -1901,7 +1901,7 @@ document.getElementById("btn-start-training").onclick = async () => {
   if (oppCount !== oppRequired) {
     return toast(`Opponent deck must be exactly ${oppRequired} cards (currently ${oppCount})`, true);
   }
-  const btn = document.getElementById("btn-start-training");
+  const btn = document.getElementById("btn-start-evaluation");
   btn.disabled = true;
   try {
     const variants = state.evalCandidates.map(({ candidate_id, label, game_deck, swaps, equipment_header }) => ({
@@ -1911,7 +1911,7 @@ document.getElementById("btn-start-training").onclick = async () => {
       swaps,
       equipment_header: equipment_header || "",
     }));
-    const run = await api("/api/training/start", {
+    const run = await api("/api/evaluation/start", {
       method: "POST",
       body: JSON.stringify({
         session_id: crypto.randomUUID?.() || String(Date.now()),
@@ -1928,8 +1928,8 @@ document.getElementById("btn-start-training").onclick = async () => {
         opponent_game_deck: state.opponent.deck,
         opponent_equipment_header: state.opponent.equipment_header || state.opponent.opponent_hero_id || "",
         variants,
-        play_episodes: +document.getElementById("play-episodes").value,
-        final_eval_episodes: +document.getElementById("final-eval-episodes").value,
+        cpp_eval_episodes: +document.getElementById("cpp-eval-episodes").value,
+        talishar_eval_episodes: +document.getElementById("talishar-eval-episodes").value,
         max_parallel: 0,
         build_cpp_engine: true,
       }),
@@ -1938,7 +1938,7 @@ document.getElementById("btn-start-training").onclick = async () => {
     updateRunStatus(run);
     startPolling();
     switchTab("dashboard");
-    toast("Training started");
+    toast("Evaluation started");
   } catch (e) {
     toast(e.message, true);
   } finally {
@@ -2184,7 +2184,7 @@ async function loadResults(runId) {
     if (!data.complete) {
       empty.hidden = false;
       content.hidden = true;
-      empty.textContent = "Training still in progress…";
+      empty.textContent = "Evaluation still in progress…";
       return;
     }
     empty.hidden = true;
@@ -2193,18 +2193,18 @@ async function loadResults(runId) {
     state.lastResultsRanking = ranking;
     const winner = data.winner || {};
     document.getElementById("winner-banner").innerHTML = winner.candidate_id
-      ? `<strong>Winner:</strong> ${winner.candidate_id} — ${winner.label || ""} <span class="status-pill completed">final eval ${((winner.final_eval_win_rate || 0) * 100).toFixed(1)}%</span>`
+      ? `<strong>Winner:</strong> ${winner.candidate_id} — ${winner.label || ""} <span class="status-pill completed">C++ ${(((winner.cpp_eval_win_rate ?? winner.play_win_rate) || 0) * 100).toFixed(1)}%</span> <span class="status-pill completed">Talishar ${((winner.final_eval_win_rate || 0) * 100).toFixed(1)}%</span>`
       : "";
     const tbody = document.getElementById("results-tbody");
     tbody.innerHTML = ranking
       .map((row, i) => {
-        const train = ((row.play_win_rate || 0) * 100).toFixed(1);
-        const final = row.final_eval_win_rate != null ? `${(row.final_eval_win_rate * 100).toFixed(1)}%` : "n/a";
+        const cpp = (((row.cpp_eval_win_rate ?? row.play_win_rate) || 0) * 100).toFixed(1);
+        const talishar = row.final_eval_win_rate != null ? `${(row.final_eval_win_rate * 100).toFixed(1)}%` : "n/a";
         const delta = row.final_eval_delta_vs_baseline != null
           ? `${(row.final_eval_delta_vs_baseline * 100).toFixed(1)}%`
           : "n/a";
         const winCls = i === 0 ? "winner" : "";
-        return `<tr class="${winCls}"><td>${i + 1}</td><td>${row.candidate_id}</td><td>${train}%</td><td>${final}</td><td>${delta}</td><td>${row.label || ""}</td></tr>`;
+        return `<tr class="${winCls}"><td>${i + 1}</td><td>${row.candidate_id}</td><td>${cpp}%</td><td>${talishar}</td><td>${delta}</td><td>${row.label || ""}</td></tr>`;
       })
       .join("");
     document.getElementById("results-meta").textContent =
@@ -2217,7 +2217,7 @@ async function loadResults(runId) {
 }
 
 document.getElementById("btn-render-replay").onclick = async () => {
-  if (!state.activeRun) return toast("No completed training run", true);
+  if (!state.activeRun) return toast("No completed evaluation run", true);
   const btn = document.getElementById("btn-render-replay");
   btn.disabled = true;
   btn.textContent = "Rendering replay…";

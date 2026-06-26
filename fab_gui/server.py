@@ -400,6 +400,53 @@ class GuiRequestHandler(BaseHTTPRequestHandler):
             except Exception as exc:  # noqa: BLE001
                 return _json_response(self, {"error": str(exc)}, status=400)
 
+        if path == "/api/evaluation/start":
+            try:
+                opponent_deck = str(body.get("opponent_deck") or "")
+                opponent_game_deck = body.get("opponent_game_deck")
+                if opponent_deck and isinstance(opponent_game_deck, dict) and opponent_game_deck:
+                    gui_api.sync_opponent_deck_api(
+                        self.env,
+                        opponent_deck=opponent_deck,
+                        game_deck={
+                            str(k): int(v) for k, v in opponent_game_deck.items() if int(v) > 0
+                        },
+                        equipment_header=str(body.get("opponent_equipment_header") or ""),
+                    )
+                session_path = gui_api.persist_session_deck(body)
+                variants = body.get("variants") or []
+                spec_kwargs = {
+                    "max_parallel": int(body.get("max_parallel", 0)),
+                    "build_cpp_engine": bool(body.get("build_cpp_engine", True)),
+                    "workers": body.get("workers"),
+                }
+                if spec_kwargs["workers"] is not None:
+                    spec_kwargs["workers"] = int(spec_kwargs["workers"])
+                run = gui_api.start_evaluation(
+                    env=self.env,
+                    starting_deck_path=session_path,
+                    opponent_hero_id=str(body.get("opponent_hero_id") or ""),
+                    opponent_deck=str(body.get("opponent_deck") or ""),
+                    baseline_deck={str(k): int(v) for k, v in (body.get("deck") or {}).items()},
+                    card_pool={str(k): int(v) for k, v in (body.get("card_pool") or {}).items()},
+                    equipment_header=str(body.get("equipment_header") or ""),
+                    baseline_label=str(body.get("baseline_label") or "Baseline"),
+                    variants=variants,
+                    spec_kwargs={
+                        **spec_kwargs,
+                        "cpp_eval_episodes": int(body.get("cpp_eval_episodes", 1000)),
+                        "talishar_eval_episodes": int(body.get("talishar_eval_episodes", 10)),
+                    },
+                )
+                manifest_path = run.out_dir / "candidates_manifest.json"
+                if manifest_path.is_file():
+                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    manifest["gui_run_id"] = run.run_id
+                    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+                return _json_response(self, run.to_dict())
+            except Exception as exc:  # noqa: BLE001
+                return _json_response(self, {"error": str(exc)}, status=500)
+
         if path == "/api/training/start":
             try:
                 opponent_deck = str(body.get("opponent_deck") or "")

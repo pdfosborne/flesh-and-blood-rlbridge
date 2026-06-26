@@ -1059,6 +1059,109 @@ def start_replay_render(run_id: str, env: EnvironmentSettings) -> dict[str, Any]
     return {"run_id": run_id, "status": "running"}
 
 
+def start_evaluation(
+    *,
+    env: EnvironmentSettings,
+    starting_deck_path: Path,
+    opponent_hero_id: str,
+    opponent_deck: str,
+    baseline_deck: dict[str, int],
+    card_pool: dict[str, int],
+    equipment_header: str,
+    baseline_label: str,
+    variants: list[dict[str, Any]],
+    spec_kwargs: dict[str, Any],
+) -> TrainingRun:
+    """Run unified-agent deck evaluation (C++ + Talishar) without PPO training."""
+    player_info = read_deck_hero_info(starting_deck_path)
+    game_format = read_deck_format(starting_deck_path)
+    cpp_eval_episodes = int(spec_kwargs.pop("cpp_eval_episodes", 1000))
+    talishar_eval_episodes = int(spec_kwargs.pop("talishar_eval_episodes", 10))
+    spec_kwargs.pop("render_replay_gif", None)
+    spec_kwargs.pop("play_episodes", None)
+    spec_kwargs.pop("final_eval_episodes", None)
+    spec = SideboardCompareSpec(
+        starting_deck=str(starting_deck_path),
+        opponent_hero_id=opponent_hero_id,
+        opponent_deck=opponent_deck,
+        hero_id=player_info.hero_id if player_info else "",
+        hero_class=player_info.hero_class if player_info else "",
+        equipment_header=equipment_header,
+        game_format=game_format,  # type: ignore[arg-type]
+        play_episodes=0,
+        final_eval_episodes=talishar_eval_episodes,
+        skip_final_eval=talishar_eval_episodes <= 0,
+        no_render_gif=True,
+        **spec_kwargs,
+    )
+    out_dir = spec.resolved_out_dir()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    manual_variants: list[ManualSwapVariant] = []
+    for index, row in enumerate(variants, start=1):
+        swaps = [tuple(pair) for pair in row.get("swaps") or []]
+        manual_variants.append(
+            ManualSwapVariant(
+                candidate_id=str(row.get("candidate_id") or f"manual_{index:02d}"),
+                label=str(row.get("label") or f"Manual variant {index}"),
+                game_deck={str(k): int(v) for k, v in (row.get("game_deck") or {}).items()},
+                swaps=swaps,  # type: ignore[arg-type]
+            )
+        )
+
+    candidates_path = write_candidates_manifest(
+        out_dir / "candidates_manifest.json",
+        baseline_deck=baseline_deck,
+        card_pool=card_pool,
+        variants=manual_variants,
+        baseline_label=baseline_label,
+        equipment_header=equipment_header,
+    )
+    spec.candidates_json = str(candidates_path)
+    spec.num_options = 1 + len(manual_variants)
+    if equipment_header:
+        spec.equipment_header = equipment_header
+
+    run_id = uuid.uuid4().hex[:12]
+    manifest = json.loads(candidates_path.read_text(encoding="utf-8"))
+    manifest["gui_run_id"] = run_id
+    manifest["eval_only"] = True
+    manifest["cpp_eval_episodes"] = cpp_eval_episodes
+    manifest["talishar_eval_episodes"] = talishar_eval_episodes
+    candidates_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+    run = TrainingRun(run_id=run_id, out_dir=out_dir)
+    RUNS.add(run)
+
+    def _worker() -> None:
+        from fab_tui.runner import run_eval_sideboard_compare  # noqa: PLC0415
+
+        run.status = "running"
+        try:
+            rc = run_eval_sideboard_compare(
+                spec,
+                env,
+                starting_deck=starting_deck_path,
+                candidates_json=candidates_path,
+                cpp_eval_episodes=cpp_eval_episodes,
+                talishar_eval_episodes=talishar_eval_episodes,
+            )
+            run.exit_code = rc
+            run.status = "completed" if rc == 0 else "failed"
+        except Exception:
+            run.exit_code = 1
+            run.status = "failed"
+            raise
+        finally:
+            run.finished_at = datetime.now(timezone.utc).isoformat()
+            _write_dashboard_once(out_dir)
+
+    thread = threading.Thread(target=_worker, name=f"sideboard-eval-{run_id}", daemon=True)
+    run._thread = thread
+    thread.start()
+    return run
+
+
 def start_training(
     *,
     env: EnvironmentSettings,
