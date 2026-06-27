@@ -81,6 +81,25 @@ def _write_unified_checkpoint(
     return ckpt_dir
 
 
+def test_resolve_fabrary_equipment_header_uses_richest_asset() -> None:
+    repo = Path(__file__).resolve().parents[1]
+    assets = repo / "Talishar" / "Assets"
+    arakni = assets / "ArakniWebOfDeceitSAGEPrecon.txt"
+    if not arakni.is_file():
+        return
+
+    sys.path.insert(0, str(repo / "scripts" / "training"))
+    from train_dual_agent_common import resolve_fabrary_equipment_header  # noqa: E402
+
+    header = resolve_fabrary_equipment_header(
+        {"hero_id": "hero_arakni_web_of_deceit", "id": "fab_precon_sage_ch2_arakni_web_of_deceit"},
+        assets,
+    )
+    assert header.startswith("arakni_web_of_deceit")
+    assert len(header.split()) > 1
+    assert "blade_beckoner_boots" in header
+
+
 def test_latest_checkpoint_from_unified_run_root(tmp_path: Path) -> None:
     run_dir = tmp_path / "20260626_215125"
     run_dir.mkdir()
@@ -101,7 +120,7 @@ def test_latest_checkpoint_from_unified_run_root(tmp_path: Path) -> None:
     assert bundle.episodes_completed == 700
 
 
-def test_eval_dashboard_dir_uses_checkpoint_matchup(tmp_path: Path) -> None:
+def test_eval_dashboard_dir_at_unified_run_root(tmp_path: Path) -> None:
     run_dir = tmp_path / "20260626_215125"
     run_dir.mkdir()
     (run_dir / "run_manifest.json").write_text("{}", encoding="utf-8")
@@ -114,4 +133,4 @@ def test_eval_dashboard_dir_uses_checkpoint_matchup(tmp_path: Path) -> None:
     )
 
     eval_dir = _resolve_eval_dashboard_dir(run_dir, bundle)
-    assert eval_dir == run_dir / "match_b" / "eval_dashboard"
+    assert eval_dir == run_dir / "eval_dashboard"

@@ -81,6 +81,28 @@ def test_collect_and_render_dashboard(tmp_path: Path) -> None:
         ),
         encoding="utf-8",
     )
+    done_dir = run_dir / "done_match"
+    done_dir.mkdir()
+    (done_dir / "matchup_label.json").write_text(
+        json.dumps({"name": "c-vs-d"}),
+        encoding="utf-8",
+    )
+    ppo = done_dir / "ppo_test"
+    ppo.mkdir()
+    (ppo / "training_results.json").write_text(
+        json.dumps(
+            {
+                "n_episodes": 1000,
+                "episode_rewards": [0.1] * 1000,
+                "training_stats": {
+                    "episodes": 1000,
+                    "p1_win_rate": 0.55,
+                    "p2_win_rate": 0.45,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
 
     state = collect_unified_run_state(run_dir)
     assert state["matchups_total"] == 3
@@ -90,7 +112,10 @@ def test_collect_and_render_dashboard(tmp_path: Path) -> None:
     assert len(state["checkpoint_points"]) == 2
 
     html = render_unified_random_matchups_html(state, auto_refresh_seconds=5.0)
-    assert "Unified random matchups" in html
+    assert "Training AI agents with random matchups" in html
+    assert html.count("<th>Matchup</th>") == 1
+    assert "<th>Episode</th><th>P1 win%</th><th>P1 wins</th><th>P2 wins</th>" in html
+    assert "c-vs-d" in html
     assert "a-vs-b" in html
     assert "1/3" in html
     assert "250/1000" in html

@@ -202,6 +202,9 @@ class Matchup:
     cpp_engine_deck2: Optional[str] = None
     # Explicit engine directory — bypasses key/cache lookup entirely.
     cpp_engine_dir: Optional[str] = None
+    # FaBrary deck entries for unified random matchup sideboarding.
+    p1_fabrary_entry: Optional[dict[str, Any]] = None
+    p2_fabrary_entry: Optional[dict[str, Any]] = None
 
     def output_subdir(self) -> str:
         if self.dir_name:
@@ -2692,6 +2695,15 @@ def _talishar_deck_spec(deck_stem: str) -> dict[str, Any]:
     _hero_id, counts = _read_asset_deck(assets, resolved)
     if not equipment_header and _hero_id:
         equipment_header = _hero_id
+    from flesh_and_blood_rlbridge.talishar_deck_assets import (  # noqa: PLC0415
+        resolve_equipment_header_line,
+    )
+
+    equipment_header = resolve_equipment_header_line(
+        _hero_id or equipment_header.split()[0] if equipment_header else "",
+        assets,
+        fallback=equipment_header,
+    )
     return {"equipment_header": equipment_header, "cards": counts}
 
 
@@ -3255,6 +3267,18 @@ def train_matchup(
     _unified_matchups_completed: int = 0,
     _unified_matchups_total: Optional[int] = None,
 ) -> dict:
+    if matchup.p1_fabrary_entry and matchup.p2_fabrary_entry:
+        from runtime_defaults import RUNTIME  # noqa: PLC0415
+
+        apply_unified_matchup_sideboards(
+            matchup,
+            game_format=game_format,
+            base_url=base_url,
+            out_dir=out_dir,
+            max_sideboard_steps=RUNTIME.full_pipeline.max_sideboard_steps,
+        )
+        matchup.cpp_engine_dir = None
+
     ensure_matchup_cpp_engine(
         matchup,
         base_url=base_url,
@@ -3963,27 +3987,173 @@ def load_fabrary_decks_for_format(format_name: str) -> list[dict]:
 
 
 def _build_assets_hero_map(assets_path: Path) -> dict[str, str]:
-    result: dict[str, str] = {}
-    if not assets_path.is_dir():
-        return result
-    for txt_file in sorted(assets_path.glob("*.txt")):
-        try:
-            lines = txt_file.read_text(encoding="utf-8").splitlines()
-            if not lines:
-                continue
-            first_line = lines[0].strip()
-            if not first_line:
-                continue
-            hero_id = first_line.split()[0]
-            result[hero_id] = first_line
-        except (OSError, IndexError):
-            continue
-    return result
+    from flesh_and_blood_rlbridge.talishar_deck_assets import (  # noqa: PLC0415
+        build_assets_equipment_headers,
+    )
+
+    return build_assets_equipment_headers(assets_path)
 
 
 def _get_hero_header(hero_id: str, assets_map: dict[str, str]) -> str:
     base = hero_id.removeprefix("hero_")
-    return assets_map.get(hero_id) or assets_map.get(base) or base
+    return assets_map.get(base) or assets_map.get(hero_id) or base
+
+
+def _hero_talishar_id(hero_slug: str) -> str:
+    return hero_slug.replace("-", "_").strip()
+
+
+def fabrary_sideboard_card_pool(
+    deck_entry: dict,
+    format_name: str,
+    assets_path: Path,
+) -> dict[str, int]:
+    """Registered card pool for guide sideboarding (prefers full SAGE precon when available)."""
+    from flesh_and_blood_rlbridge.deck_context import _read_asset_deck  # noqa: PLC0415
+    from flesh_and_blood_rlbridge.talishar_deck_assets import (  # noqa: PLC0415
+        SAGE_PRECON_BY_HERO,
+        resolve_talishar_deck_stem,
+    )
+
+    hero_token = str(deck_entry.get("hero_id", "")).removeprefix("hero_")
+    deck_id = str(deck_entry.get("id", ""))
+    candidates = [
+        SAGE_PRECON_BY_HERO.get(hero_token),
+        resolve_talishar_deck_stem(assets_path, deck_id),
+        deck_id,
+    ]
+    best: dict[str, int] = {}
+    for stem in candidates:
+        if not stem:
+            continue
+        try:
+            _, counts = _read_asset_deck(assets_path, stem)
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        normalized = {str(k): int(v) for k, v in counts.items() if int(v) > 0}
+        if sum(normalized.values()) > sum(best.values()):
+            best = normalized
+    if best:
+        return best
+
+    card_ids = resolve_fabrary_deck_cards(deck_entry, format_name)
+    pool: dict[str, int] = {}
+    for cid in card_ids:
+        pool[cid] = pool.get(cid, 0) + 1
+    return pool
+
+
+def resolve_fabrary_equipment_header(deck_entry: dict, assets_path: Path) -> str:
+    from flesh_and_blood_rlbridge.talishar_deck_assets import (  # noqa: PLC0415
+        resolve_equipment_header_line,
+    )
+
+    hero_id = str(deck_entry.get("hero_id", "")).removeprefix("hero_")
+    explicit = str(deck_entry.get("equipment_header", "") or "").strip()
+    return resolve_equipment_header_line(
+        hero_id,
+        assets_path,
+        fallback=explicit or hero_id,
+    )
+
+
+def apply_unified_matchup_sideboards(
+    matchup: Matchup,
+    *,
+    game_format: str,
+    base_url: str,
+    out_dir: Path,
+    max_sideboard_steps: int = 100,
+) -> None:
+    """Run guide sideboard for both seats and write Talishar asset decks."""
+    from flesh_and_blood_rlbridge.opponent_deck import hero_class_for_id  # noqa: PLC0415
+
+    from train_pipeline_common import (  # noqa: PLC0415
+        PhaseAgents,
+        _write_deck_file,
+        apply_guide_sideboard_for_matchup,
+        greedy_game_deck_cut,
+    )
+
+    entry1 = matchup.p1_fabrary_entry
+    entry2 = matchup.p2_fabrary_entry
+    if not entry1 or not entry2:
+        return
+
+    assets_path = talishar_assets_path()
+    p1_hero = _hero_talishar_id(matchup.p1_hero)
+    p2_hero = _hero_talishar_id(matchup.p2_hero)
+    p1_equipment = resolve_fabrary_equipment_header(entry1, assets_path)
+    p2_equipment = resolve_fabrary_equipment_header(entry2, assets_path)
+    p1_pool = fabrary_sideboard_card_pool(entry1, game_format, assets_path)
+    p2_pool = fabrary_sideboard_card_pool(entry2, game_format, assets_path)
+
+    print(
+        f"\n{'=' * 60}\n"
+        f"  Guide sideboard (pre-match)  {matchup.name}\n"
+        f"  P1 pool: {sum(p1_pool.values())} cards  |  "
+        f"P2 pool: {sum(p2_pool.values())} cards\n"
+        f"{'=' * 60}"
+    )
+
+    p1_agents = PhaseAgents(player="p1", card_pool=p1_pool)
+    p2_agents = PhaseAgents(player="p2", card_pool=p2_pool)
+    assets_str = str(assets_path)
+
+    apply_guide_sideboard_for_matchup(
+        p1_agents,
+        [p2_hero],
+        hero_id=p1_hero,
+        hero_class=hero_class_for_id(p1_hero),
+        equipment_header=p1_equipment,
+        game_format=game_format,
+        opponent_deck_name=matchup.p2_deck,
+        max_sideboard_steps=max_sideboard_steps,
+        assets_path=assets_str,
+        base_url=base_url,
+        cpp_engine_dir=matchup.cpp_engine_dir,
+    )
+    apply_guide_sideboard_for_matchup(
+        p2_agents,
+        [p1_hero],
+        hero_id=p2_hero,
+        hero_class=hero_class_for_id(p2_hero),
+        equipment_header=p2_equipment,
+        game_format=game_format,
+        opponent_deck_name=matchup.p1_deck,
+        max_sideboard_steps=max_sideboard_steps,
+        assets_path=assets_str,
+        base_url=base_url,
+        cpp_engine_dir=matchup.cpp_engine_dir,
+    )
+
+    min_size = FORMAT_DECK_RULES.get(game_format, FORMAT_DECK_RULES["silver_age"])[
+        "deck_size"
+    ]
+    p1_game = p1_agents.active_decks.get(p2_hero) or greedy_game_deck_cut(
+        p1_pool, min_size
+    )
+    p2_game = p2_agents.active_decks.get(p1_hero) or greedy_game_deck_cut(
+        p2_pool, min_size
+    )
+
+    _write_deck_file(p1_game, p1_equipment, matchup.p1_deck, assets_str)
+    _write_deck_file(p2_game, p2_equipment, matchup.p2_deck, assets_str)
+
+    sideboard_record = {
+        "matchup": matchup.name,
+        "p1_hero": p1_hero,
+        "p2_hero": p2_hero,
+        "p1_equipment_header": p1_equipment,
+        "p2_equipment_header": p2_equipment,
+        "p1_pool_size": sum(p1_pool.values()),
+        "p2_pool_size": sum(p2_pool.values()),
+        "p1_game_deck_size": sum(p1_game.values()),
+        "p2_game_deck_size": sum(p2_game.values()),
+    }
+    record_path = matchup_out_dir(out_dir, matchup) / "guide_sideboard.json"
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+    record_path.write_text(json.dumps(sideboard_record, indent=2), encoding="utf-8")
 
 
 def resolve_fabrary_deck_cards(deck_entry: dict, format_name: str) -> list[str]:
@@ -4044,7 +4214,15 @@ def write_fabrary_deck_file(
 ) -> Optional[str]:
     deck_id = str(deck_entry["id"])
     hero_id = str(deck_entry.get("hero_id", ""))
-    hero_header = _get_hero_header(hero_id, assets_map)
+    from flesh_and_blood_rlbridge.talishar_deck_assets import (  # noqa: PLC0415
+        resolve_equipment_header_line,
+    )
+
+    hero_header = resolve_equipment_header_line(
+        hero_id.removeprefix("hero_"),
+        assets_path,
+        fallback=_get_hero_header(hero_id, assets_map),
+    )
     card_ids = resolve_fabrary_deck_cards(deck_entry, format_name)
     if not card_ids:
         print(f"  Error: deck {deck_id} resolved to zero cards; skipping.")
@@ -4092,6 +4270,8 @@ def build_fabrary_matchups(
                     tags=[slug1, slug2, format_name],
                     p1_hero=hero_slug(str(entry1.get("hero_id", slug1))),
                     p2_hero=hero_slug(str(entry2.get("hero_id", slug2))),
+                    p1_fabrary_entry=entry1,
+                    p2_fabrary_entry=entry2,
                 )
             )
     return matchups
@@ -4123,6 +4303,8 @@ def build_fabrary_matchup(
         tags=[slug1, slug2, format_name],
         p1_hero=hero_slug(str(entry1.get("hero_id", slug1))),
         p2_hero=hero_slug(str(entry2.get("hero_id", slug2))),
+        p1_fabrary_entry=entry1,
+        p2_fabrary_entry=entry2,
     )
 
 

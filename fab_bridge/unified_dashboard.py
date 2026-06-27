@@ -352,20 +352,19 @@ def render_unified_random_matchups_html(
             f"<tr><td>{int(row.get('episode', 0))}</td>"
             f"<td>{_pct(row.get('win_rate'))}</td>"
             f"<td>{int(row.get('p1_wins', 0))}</td>"
-            f"<td>{int(row.get('p2_wins', 0))}</td>"
-            f"<td>{html.escape(str(row.get('matchup') or '—'))}</td></tr>"
+            f"<td>{int(row.get('p2_wins', 0))}</td></tr>"
         )
     ckpt_table = (
         f'<table class="history"><thead><tr>'
-        f"<th>Episode</th><th>P1 win%</th><th>P1 wins</th><th>P2 wins</th><th>Matchup</th>"
-        f"</tr></thead><tbody>{ckpt_rows or '<tr><td colspan=\"5\" class=\"muted\">No checkpoint eval yet</td></tr>'}</tbody></table>"
+        f"<th>Episode</th><th>P1 win%</th><th>P1 wins</th><th>P2 wins</th>"
+        f"</tr></thead><tbody>{ckpt_rows or '<tr><td colspan=\"4\" class=\"muted\">No checkpoint eval yet</td></tr>'}</tbody></table>"
     )
 
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Unified random matchups</title>
+  <title>Training AI agents with random matchups</title>
   {refresh_tag}
   <style>
     :root {{
@@ -408,7 +407,7 @@ def render_unified_random_matchups_html(
 </head>
 <body>
   <div class="wrap">
-    <h1>Unified random matchups</h1>
+    <h1>Training AI agents with random matchups</h1>
     <p class="sub">{html.escape(str(state.get('format', '—')).replace('_', ' '))} ·
       <span class="status-pill{' complete' if status == 'complete' else ''}">{html.escape(status_label)}</span>
     </p>

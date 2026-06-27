@@ -70,6 +70,8 @@ from fab_bridge.unified_results import (  # noqa: E402
 )
 from scripts.training.train_pipeline_common import _write_deck_file  # noqa: E402
 
+UNIFIED_LIVE_RENDER_IMAGE = "optimal_policy_live.png"
+
 
 @dataclass
 class CheckpointBundle:
@@ -249,12 +251,7 @@ def _resolve_eval_dashboard_dir(
             if idx + 1 < len(parts):
                 return root / _SIDEBOARD_CANDIDATES_DIR / parts[idx + 1] / "eval_dashboard"
     if is_unified_random_matchup_run(root):
-        matchup_dir = matchup_dir_from_unified_checkpoint(p1_bundle.checkpoint_dir)
-        if matchup_dir is not None and matchup_dir.is_dir():
-            return matchup_dir / "eval_dashboard"
-        fallback = resolve_latest_unified_matchup_dir(root)
-        if fallback is not None:
-            return fallback / "eval_dashboard"
+        return root / "eval_dashboard"
     return root / "eval_dashboard"
 
 
@@ -390,7 +387,7 @@ def _deck_cards(bundle: CheckpointBundle, *, assets_path: str = "") -> dict[str,
     return {}
 
 
-def _equipment_header(bundle: CheckpointBundle) -> str:
+def _equipment_header(bundle: CheckpointBundle, *, assets_path: str = "") -> str:
     header = str(bundle.deck_spec.get("equipment_header", "") or "")
     # The hero ID must be the first token on the equipment header line so
     # Talishar knows which hero card to load.  Older checkpoints may store
@@ -402,6 +399,12 @@ def _equipment_header(bundle: CheckpointBundle) -> str:
         .replace("-", "_")                      # API stores dashes, header uses underscores
         .strip()
     )
+    if assets_path:
+        from flesh_and_blood_rlbridge.talishar_deck_assets import (  # noqa: PLC0415
+            resolve_equipment_header_line,
+        )
+
+        header = resolve_equipment_header_line(hero_id, assets_path, fallback=header)
     if hero_id and not header.startswith(hero_id):
         header = (hero_id + " " + header).strip()
     return header
@@ -459,14 +462,21 @@ def _run_render_episode(
     max_steps: int,
     render_dir: Path,
     player_label: str,
+    live_frame_path: Optional[Path] = None,
 ) -> tuple[list[Path], str]:
     """Run one Playwright render episode using render_mode='rgb_array'.
 
     Returns ``(frame_paths, outcome)`` where outcome is one of
     ``"win"``, ``"loss"``, ``"draw"``, or ``"timeout"``.
+
+    When *live_frame_path* is set, every captured frame overwrites that file
+    instead of writing numbered PNGs (for real-time viewing during unified runs).
     """
     _ensure_playwright()
-    _prepare_render_dir(render_dir)
+    if live_frame_path is not None:
+        live_frame_path.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        _prepare_render_dir(render_dir)
     frame_paths: list[Path] = []
     outcome = "timeout"
 
@@ -481,13 +491,22 @@ def _run_render_episode(
         render_mode="rgb_array",
         use_cpp_engine=False,
     )
+
+    def _record_frame(obs: Any, path: Path) -> None:
+        if _save_state_image(env, obs, path):
+            if not frame_paths or frame_paths[-1] != path:
+                frame_paths.append(path)
+
     try:
         result = env.reset()
         obs = result.observation
 
-        frame_path = render_dir / "frame_0000_reset.png"
-        if _save_state_image(env, obs, frame_path):
-            frame_paths.append(frame_path)
+        if live_frame_path is not None:
+            _record_frame(obs, live_frame_path)
+        else:
+            frame_path = render_dir / "frame_0000_reset.png"
+            if _save_state_image(env, obs, frame_path):
+                frame_paths.append(frame_path)
 
         step_no = 0
         terminated = False
@@ -511,23 +530,33 @@ def _run_render_episode(
 
             # Only capture P1's turn frames — the board is always shown from P1's perspective.
             if acting == 1:
-                fpath = render_dir / f"frame_{step_no:04d}.png"
-                if _save_state_image(env, obs, fpath):
-                    frame_paths.append(fpath)
+                if live_frame_path is not None:
+                    _record_frame(obs, live_frame_path)
+                else:
+                    fpath = render_dir / f"frame_{step_no:04d}.png"
+                    if _save_state_image(env, obs, fpath):
+                        frame_paths.append(fpath)
 
         outcome = _infer_render_outcome(
             obs, terminated=terminated, truncated=truncated, env=env,
         )
-        end_path = render_dir / f"frame_{step_no + 1:04d}_end_{outcome}.png"
-        if _save_end_state_frame(env, obs, end_path, outcome=outcome, steps=step_no):
-            frame_paths.append(end_path)
+        if live_frame_path is not None:
+            end_path = live_frame_path
+            if _save_end_state_frame(env, obs, end_path, outcome=outcome, steps=step_no):
+                if not frame_paths or frame_paths[-1] != end_path:
+                    frame_paths.append(end_path)
+        else:
+            end_path = render_dir / f"frame_{step_no + 1:04d}_end_{outcome}.png"
+            if _save_end_state_frame(env, obs, end_path, outcome=outcome, steps=step_no):
+                frame_paths.append(end_path)
 
     except Exception as exc:
         print(f"  [{player_label}] Render error: {exc}")
     finally:
         env.close()
 
-    print(f"  [{player_label}] Render episode: {outcome}  ({len(frame_paths)} frames) → {render_dir}")
+    dest = live_frame_path if live_frame_path is not None else render_dir
+    print(f"  [{player_label}] Render episode: {outcome}  ({len(frame_paths)} frames) → {dest}")
     return frame_paths, outcome
 
 
@@ -1185,7 +1214,9 @@ def _evaluate_checkpoint(
 
     print("  Writing deck files...", flush=True)
     p1_deck_name = f"eval_p1_{uuid.uuid4().hex[:8]}"
-    p1_deck_file = _write_deck_file(p1_cards, _equipment_header(p1_bundle), p1_deck_name, assets_path)
+    p1_deck_file = _write_deck_file(
+        p1_cards, _equipment_header(p1_bundle, assets_path=assets_path), p1_deck_name, assets_path
+    )
 
     opponent_mode = str(p1_bundle.metadata.get("opponent_mode", "preset") or "preset")
     p2_deck_file: Optional[Path] = None
@@ -1194,7 +1225,7 @@ def _evaluate_checkpoint(
         p2_deck_name = f"eval_p2_{uuid.uuid4().hex[:8]}"
         p2_deck_file = _write_deck_file(
             _deck_cards(p2_bundle, assets_path=assets_path),
-            _equipment_header(p2_bundle),
+            _equipment_header(p2_bundle, assets_path=assets_path),
             p2_deck_name,
             assets_path,
         )
@@ -1344,31 +1375,56 @@ def _evaluate_checkpoint(
 
     gif_path: Optional[Path] = None
     render_dir: Optional[Path] = None
+    live_frame_path: Optional[Path] = None
     render_outcome: Optional[str] = None
+    unified_live_render = is_unified_random_matchup_run(results_dir)
     try:
         if render_gif:
-            gif_path = eval_dir / "optimal_policy.gif"
-            if render_only:
-                print("  [render] Running optimal-policy replay episode…")
+            if unified_live_render:
+                live_frame_path = eval_dir / UNIFIED_LIVE_RENDER_IMAGE
+                if render_only:
+                    print("  [render] Running optimal-policy replay (unified live frame)…")
+                else:
+                    print(
+                        "  [render] Evaluation complete; replay overwrites "
+                        f"{UNIFIED_LIVE_RENDER_IMAGE} in real time…"
+                    )
+                frame_paths, render_outcome = _run_render_episode(
+                    p1_agent=p1_agent,
+                    p2_agent=p2_agent,
+                    base_url=base_url,
+                    fe_url=fe_url,
+                    game_format=p1_bundle.game_format,
+                    p1_deck_name=p1_deck_name,
+                    p2_deck_name=p2_deck_name,
+                    max_steps=render_max_steps,
+                    render_dir=eval_dir,
+                    player_label=p1_bundle.role,
+                    live_frame_path=live_frame_path,
+                )
             else:
-                print("  [render] Evaluation complete; running a single dedicated replay episode…")
-            render_dir = eval_dir / "optimal_policy_frames"
-            frame_paths, render_outcome = _run_render_episode(
-                p1_agent=p1_agent,
-                p2_agent=p2_agent,
-                base_url=base_url,
-                fe_url=fe_url,
-                game_format=p1_bundle.game_format,
-                p1_deck_name=p1_deck_name,
-                p2_deck_name=p2_deck_name,
-                max_steps=render_max_steps,
-                render_dir=render_dir,
-                player_label=p1_bundle.role,
-            )
-            if frame_paths:
-                _frames_to_gif(frame_paths, gif_path, fps=gif_fps)
-            else:
-                gif_path = None
+                gif_path = eval_dir / "optimal_policy.gif"
+                if render_only:
+                    print("  [render] Running optimal-policy replay episode…")
+                else:
+                    print("  [render] Evaluation complete; running a single dedicated replay episode…")
+                render_dir = eval_dir / "optimal_policy_frames"
+                frame_paths, render_outcome = _run_render_episode(
+                    p1_agent=p1_agent,
+                    p2_agent=p2_agent,
+                    base_url=base_url,
+                    fe_url=fe_url,
+                    game_format=p1_bundle.game_format,
+                    p1_deck_name=p1_deck_name,
+                    p2_deck_name=p2_deck_name,
+                    max_steps=render_max_steps,
+                    render_dir=render_dir,
+                    player_label=p1_bundle.role,
+                )
+                if frame_paths:
+                    _frames_to_gif(frame_paths, gif_path, fps=gif_fps)
+                else:
+                    gif_path = None
     finally:
         for file_path in cleanup_files:
             try:
@@ -1409,6 +1465,7 @@ def _evaluate_checkpoint(
         "eval": eval_section,
         "render": {
             "frames_dir": str(render_dir) if render_dir is not None else None,
+            "live_frame": str(live_frame_path) if live_frame_path is not None else None,
             "gif": str(gif_path) if gif_path is not None else None,
             "outcome": render_outcome,
             "max_steps": render_max_steps if render_gif else None,
@@ -1418,7 +1475,9 @@ def _evaluate_checkpoint(
     }
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(f"\nSaved evaluation summary -> {summary_path}")
-    if gif_path is not None:
+    if live_frame_path is not None:
+        print(f"Unified live render frame -> {live_frame_path}")
+    elif gif_path is not None:
         print(f"Saved optimal-policy GIF -> {gif_path}")
 
     if render_only:
@@ -1608,7 +1667,12 @@ def main() -> None:
     if args.render_only:
         print(f"  Render GIF    : yes")
     else:
-        print(f"  Render GIF    : {'yes' if not args.no_render_gif else 'no'}")
+        render_label = (
+            f"live frame ({UNIFIED_LIVE_RENDER_IMAGE})"
+            if is_unified_random_matchup_run(results_dir) and not args.no_render_gif
+            else ("yes" if not args.no_render_gif else "no")
+        )
+        print(f"  Render output : {render_label}")
         if not args.no_render_gif:
             print(f"  Render steps  : {render_max_steps}")
     if args.render_only:

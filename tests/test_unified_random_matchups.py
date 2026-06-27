@@ -15,6 +15,7 @@ from flesh_and_blood_rlbridge.player_observation import PLAYER_OBS_DIM  # noqa: 
 from rl_agents.ppo import PPOAgent  # noqa: E402
 from train_dual_agent_common import (  # noqa: E402
     _MAX_WIN_PATH_LEN,
+    build_fabrary_matchup,
     resolve_checkpoint_interval,
     resolve_fabrary_deck_cards,
     sample_random_fabrary_matchups,
@@ -30,6 +31,14 @@ def _fake_deck(slug: str, hero: str) -> tuple[str, str, dict]:
     )
 
 
+def test_build_fabrary_matchup_carries_fabrary_entries() -> None:
+    entry1 = {"id": "fab_a", "hero_id": "hero_a", "name": "A"}
+    entry2 = {"id": "fab_b", "hero_id": "hero_b", "name": "B"}
+    matchup = build_fabrary_matchup("a", "fab_a", entry1, "b", "fab_b", entry2, "silver_age")
+    assert matchup.p1_fabrary_entry is entry1
+    assert matchup.p2_fabrary_entry is entry2
+
+
 def test_sample_random_fabrary_matchups_unique_pairs() -> None:
     decks = [_fake_deck(f"deck_{i}", f"hero_{i}") for i in range(6)]
     rng = random.Random(7)
@@ -40,6 +49,8 @@ def test_sample_random_fabrary_matchups_unique_pairs() -> None:
     for m in matchups:
         assert m.p1_deck != m.p2_deck
         assert len(m.dir_name) <= 48
+        assert m.p1_fabrary_entry is not None
+        assert m.p2_fabrary_entry is not None
 
 
 def test_resolve_checkpoint_interval_pct() -> None:

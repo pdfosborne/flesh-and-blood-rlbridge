@@ -1895,12 +1895,11 @@ def _evaluate_fast_policy_matchup(
             timeouts=timeouts,
             errors=errors,
         )
-        if hasattr(trace_env, "get_combat_trace"):
-            ep_trace_env = getattr(active_env, "_cpp_env", active_env)
-            if hasattr(ep_trace_env, "get_combat_trace"):
-                damage_acc = EvalDamageAccumulator(deck_card_ids=deck_card_ids)
-                damage_acc.ingest_trace(ep_trace_env.get_combat_trace())
-                episode_damage_breakdowns.append(damage_acc.to_dict())
+        ep_trace_env = getattr(active_env, "_cpp_env", active_env)
+        if hasattr(ep_trace_env, "get_combat_trace"):
+            damage_acc = EvalDamageAccumulator(deck_card_ids=deck_card_ids)
+            damage_acc.ingest_trace(ep_trace_env.get_combat_trace())
+            episode_damage_breakdowns.append(damage_acc.to_dict())
 
         completed = ep + 1
         if progress_interval > 0 and (

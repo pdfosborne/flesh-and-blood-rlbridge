@@ -16,6 +16,7 @@ SAGE_PRECON_BY_HERO: dict[str, str] = {
     "azalea": "AzaleaSAGEPrecon",
     "boltyn": "BoltynSAGEPrecon",
     "enigma": "EnigmaSAGEPrecon",
+    "arakni_web_of_deceit": "ArakniWebOfDeceitSAGEPrecon",
     "gravy": "GravyBonesSAGEPrecon",
     "gravy_bones": "GravyBonesSAGEPrecon",
     "lyath": "LyathGoldmaneSAGEPrecon",
@@ -24,6 +25,48 @@ SAGE_PRECON_BY_HERO: dict[str, str] = {
     "blaze_firemind": "BlazeSAGEPrecon",
     "ira": "Ira",
 }
+
+
+def build_assets_equipment_headers(assets_dir: str | Path) -> dict[str, str]:
+    """Map hero id -> fullest equipment header line found in ``Assets/*.txt``."""
+    assets = Path(assets_dir)
+    result: dict[str, str] = {}
+    if not assets.is_dir():
+        return result
+    for txt_file in sorted(assets.glob("*.txt")):
+        try:
+            lines = txt_file.read_text(encoding="utf-8").splitlines()
+            if not lines:
+                continue
+            first_line = lines[0].strip()
+            if not first_line:
+                continue
+            hero_id = first_line.split()[0]
+            prev = result.get(hero_id, "")
+            if len(first_line.split()) > len(prev.split()):
+                result[hero_id] = first_line
+        except (OSError, IndexError):
+            continue
+    return result
+
+
+def resolve_equipment_header_line(
+    hero_id: str,
+    assets_dir: str | Path,
+    *,
+    fallback: str = "",
+) -> str:
+    """Return the best Talishar equipment header line for *hero_id*."""
+    token = hero_id.removeprefix("hero_").replace("-", "_").strip()
+    headers = build_assets_equipment_headers(assets_dir)
+    best = (fallback or "").strip()
+    for key in (token, hero_id):
+        line = headers.get(key, "").strip()
+        if len(line.split()) > len(best.split()):
+            best = line
+    if best:
+        return best
+    return token or hero_id
 
 
 def _asset_exists(assets_dir: Path, stem: str) -> bool:
@@ -56,6 +99,8 @@ def resolve_talishar_deck_stem(assets_dir: str | Path, name: str) -> str:
 
     add(token)
     add(title)
+    if token in SAGE_PRECON_BY_HERO:
+        add(SAGE_PRECON_BY_HERO[token])
     if hero in SAGE_PRECON_BY_HERO:
         add(SAGE_PRECON_BY_HERO[hero])
     add(f"{title}SAGEPrecon")
