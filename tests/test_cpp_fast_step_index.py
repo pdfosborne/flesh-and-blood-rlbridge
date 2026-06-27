@@ -14,6 +14,7 @@ from flesh_and_blood_rlbridge.cpp_engine_environment import CppEngineEnvironment
 from flesh_and_blood_rlbridge.deck_context import EpisodeContext
 from flesh_and_blood_rlbridge.legal_action_filter import filter_legal_actions
 from flesh_and_blood_rlbridge.player_observation import PLAYER_OBS_DIM, SCALAR_OFF
+from flesh_and_blood_rlbridge.state_loop_guard import TurnLoopGuard
 from flesh_and_blood_rlbridge.talishar_default_policy import RepeatActionTracker
 
 
@@ -137,6 +138,7 @@ def _build_fast_env(*, acting_player: int = 1) -> CppEngineEnvironment:
     env._synthetic_combat_log = []
     env._last_observation_vec = None
     env._repeat_tracker = RepeatActionTracker()
+    env._loop_guard = TurnLoopGuard()
     env._deck1 = "deck_a"
     env._deck2 = "deck_b"
     ctx_p1 = EpisodeContext(

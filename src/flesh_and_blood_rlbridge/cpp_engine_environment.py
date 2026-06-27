@@ -90,11 +90,7 @@ from .talishar_default_policy import (
     choose_talishar_action_index,
 )
 
-# Reward constants mirror talishar_engine_environment.py
-_TRUNCATION_PENALTY = -0.1
-_STEP_PENALTY = -0.001
-
-
+# Reward defaults mirror MetaEngineControls in runtime_defaults.py (training wires RUNTIME.engine).
 def _matchup_key(deck1: str, deck2: str) -> str:
     """Normalised cache-directory key for a deck pair."""
     return f"{deck1}_vs_{deck2}"
@@ -272,6 +268,12 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         max_turns: int = 2000,
         max_steps_per_turn: int = DEFAULT_MAX_STEPS_PER_TURN,
         loop_repeat_threshold: int = DEFAULT_LOOP_REPEAT_THRESHOLD,
+        step_penalty: float = -0.001,
+        truncation_penalty: float = -0.1,
+        repeat_action_threshold: int = 3,
+        repeat_action_penalty: float = -0.1,
+        damage_reward_scale: float = 0.01,
+        max_consecutive_passes: int = 20,
         deck1: str = "",
         deck2: str = "",
         enable_combat_tracker: bool = False,
@@ -280,6 +282,12 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         self._max_turns = max_turns
         self._max_steps_per_turn = max_steps_per_turn
         self._loop_repeat_threshold = loop_repeat_threshold
+        self._step_penalty = float(step_penalty)
+        self._truncation_penalty = float(truncation_penalty)
+        self._repeat_action_threshold = int(repeat_action_threshold)
+        self._repeat_action_penalty = float(repeat_action_penalty)
+        self._damage_reward_scale = float(damage_reward_scale)
+        self._max_consecutive_passes = int(max_consecutive_passes)
         self._deck1 = deck1
         self._deck2 = deck2
         self._enable_combat_tracker = bool(enable_combat_tracker)
@@ -818,7 +826,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             1: "M",
             2: "p",
             3: "a",
-            4: "d",
+            4: "b",
             5: "damage",
             6: "endphase",
             7: "OVER",
@@ -931,12 +939,17 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             self._gs.set_priority(defender - 1)
         self.clear_talishar_state()
 
+    def _apply_gs_engine_settings(self, gs: Any) -> None:
+        if hasattr(gs, "max_consecutive_passes"):
+            gs.max_consecutive_passes = int(self._max_consecutive_passes)
+
     def _new_gamestate(
         self,
         options: Optional[dict[str, Any]] = None,
         seed: Optional[int] = None,
     ) -> Any:
         gs = self._fab.GameState()
+        self._apply_gs_engine_settings(gs)
         if seed is not None and hasattr(gs, "seed_rng"):
             gs.seed_rng(int(seed) & 0xFFFFFFFF)
         gs.register_all_cards()
@@ -1119,8 +1132,6 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         reward = float(
             self._compute_reward(prev_p1, prev_p2, terminated, truncated, repeat_pen)
         )
-        if truncated:
-            reward += float(_TRUNCATION_PENALTY)
         self._p1_hp = int(self._gs.p1_health)
         self._p2_hp = int(self._gs.p2_health)
         obs_vec = self._obs_vec_for_fast_path()
@@ -1197,9 +1208,17 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         self._steps += 1
         terminated = bool(result.terminated)
         truncated = not terminated and self._steps >= self._max_turns
-        reward = float(result.reward)
-        if truncated:
-            reward += float(_TRUNCATION_PENALTY)
+        if terminated:
+            reward = float(result.reward)
+        elif truncated:
+            reward = float(self._truncation_penalty)
+        else:
+            p1_now = int(result.p1_health)
+            p2_now = int(result.p2_health)
+            dmg_dealt = max(0, prev_p2 - p2_now)
+            dmg_taken = max(0, prev_p1 - p1_now)
+            scale = self._damage_reward_scale
+            reward = dmg_dealt * scale - dmg_taken * scale + self._step_penalty
         self._acting_player = int(result.acting_player_id)
         self._p1_hp = int(result.p1_health)
         self._p2_hp = int(result.p2_health)
@@ -1256,6 +1275,41 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         label = str(getattr(action, "label", "") or "").strip().lower()
         return any(tok in label for tok in ("pass", "end turn", "no block", "skip"))
 
+    def _hand_zone_cards_for_player(self, player_id: int) -> list[dict[str, Any]]:
+        prefix = "p1" if int(player_id) == 1 else "p2"
+        cards = getattr(self._gs, f"{prefix}_hand", None) if self._gs is not None else None
+        if not isinstance(cards, list):
+            return []
+        return self._zone_cards_from_cpp(cards)
+
+    def _board_state_for_loop_guard(self) -> dict[str, Any]:
+        """Talishar-shaped snapshot with enough zones for board-revert detection."""
+        state: dict[str, Any] = dict(self._raw_state_from_gs())
+        state.update(self._synthetic_talishar_state())
+        gs = self._gs
+        if gs is None:
+            return state
+
+        acting = int(self._acting_player)
+        opp = 2 if acting == 1 else 1
+        state["turnNo"] = self._obs_turn_no()
+        state["playerHealth"] = int(gs.p1_health if acting == 1 else gs.p2_health)
+        state["opponentHealth"] = int(gs.p2_health if acting == 1 else gs.p1_health)
+        state["playerDeckCount"] = int(
+            getattr(gs, f"p{acting}_deck_size", 0) or 0
+        )
+        state["opponentDeckCount"] = int(getattr(gs, f"p{opp}_deck_size", 0) or 0)
+        state["opponentPitchCount"] = int(
+            getattr(gs, f"p{opp}_pitch_size", 0) or 0
+        )
+        state["playerHandSize"] = int(getattr(gs, f"p{acting}_hand_size", 0) or 0)
+        state["opponentHandSize"] = int(getattr(gs, f"p{opp}_hand_size", 0) or 0)
+        state["pendingAttackPower"] = int(getattr(gs, "pending_attack_power", 0) or 0)
+        state["pendingBlockValue"] = int(getattr(gs, "pending_block_value", 0) or 0)
+        state["playerHand"] = self._hand_zone_cards_for_player(acting)
+        state["opponentHand"] = self._hand_zone_cards_for_player(opp)
+        return state
+
     def _synthetic_talishar_state(self) -> dict[str, Any]:
         """Build a Talishar-shaped state dict for shared affordability helpers."""
         hand_entries: list[dict[str, Any]] = []
@@ -1284,9 +1338,18 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             if label:
                 entry["label"] = label
             hand_entries.append(entry)
+        pitch_count = 0
+        if self._gs is not None:
+            pitch_count = int(
+                getattr(self._gs, f"p{self._acting_player}_pitch_size", 0) or 0
+            )
         return {
             "turnPhase": {"turnPhase": self._phase_code()},
+            "playerPitchCount": pitch_count,
             "playerHand": hand_entries,
+            "pendingAttackPower": int(getattr(self._gs, "pending_attack_power", 0) or 0)
+            if self._gs is not None
+            else 0,
         }
 
     def _ensure_playable_hand_actions(
@@ -1368,7 +1431,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         return align_filtered_actions(working, filtered_dicts, to_descriptor=self._action_to_dict)
 
     def _loop_guard_for_step(self, legal: list[Any]) -> LoopGuardResult:
-        state = self._synthetic_talishar_state()
+        state = self._board_state_for_loop_guard()
         return self._loop_guard.check(
             state,
             [self._action_to_dict(action) for action in legal],
@@ -1670,6 +1733,8 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             (action_code, button_input),
             turn_no=int(getattr(self._gs, "turn_no", 0) or 0),
             acting_player_id=int(self._acting_player),
+            threshold=self._repeat_action_threshold,
+            penalty=self._repeat_action_penalty,
         )
 
     def _is_game_over(self) -> bool:
@@ -1695,14 +1760,15 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             else:
                 reward = 0.0  # draw / unresolved
         elif truncated:
-            reward = float(_TRUNCATION_PENALTY)
+            reward = float(self._truncation_penalty)
         else:
             # P1-centric intermediate shaping: positive when P2 takes damage,
             # negative when P1 takes damage, regardless of who is acting.
             p1_now, p2_now = gs.p1_health, gs.p2_health
-            dmg_dealt = max(0, prev_p2 - p2_now)  # P2 HP lost  â†’ good for P1
-            dmg_taken = max(0, prev_p1 - p1_now)  # P1 HP lost  â†’ bad for P1
-            reward = dmg_dealt * 0.01 - dmg_taken * 0.01 + _STEP_PENALTY
+            dmg_dealt = max(0, prev_p2 - p2_now)  # P2 HP lost  → good for P1
+            dmg_taken = max(0, prev_p1 - p1_now)  # P1 HP lost  → bad for P1
+            scale = self._damage_reward_scale
+            reward = dmg_dealt * scale - dmg_taken * scale + self._step_penalty
         return reward + repeat_penalty
 
     def _action_to_dict(self, action: Any) -> dict[str, Any]:
@@ -2040,14 +2106,6 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         if not flow_handled:
             if cpp_action is not None:
                 self._gs.apply_action(cpp_action)
-                if int(getattr(cpp_action, "action_code", 0) or 0) == 27:
-                    try:
-                        hand_index = int(str(getattr(cpp_action, "button_input", "") or ""))
-                    except (TypeError, ValueError):
-                        hand_index = -1
-                    hand_cards = self._hand_cards()
-                    if 0 <= hand_index < len(hand_cards):
-                        self._maybe_enter_block_phase(hand_cards[hand_index])
                 self._acting_player = self._gs.priority + 1
             elif self._talishar_mirror_state is not None:
                 flow_handled = True
@@ -2246,6 +2304,12 @@ def get_or_none(
     max_turns: int = 2000,
     max_steps_per_turn: int = DEFAULT_MAX_STEPS_PER_TURN,
     loop_repeat_threshold: int = DEFAULT_LOOP_REPEAT_THRESHOLD,
+    step_penalty: float = -0.001,
+    truncation_penalty: float = -0.1,
+    repeat_action_threshold: int = 3,
+    repeat_action_penalty: float = -0.1,
+    damage_reward_scale: float = 0.01,
+    max_consecutive_passes: int = 20,
     enable_combat_tracker: bool = False,
 ) -> Optional["CppEngineEnvironment"]:
     """Return a :class:`CppEngineEnvironment` if one is compiled for this matchup.
@@ -2262,6 +2326,12 @@ def get_or_none(
             max_turns=max_turns,
             max_steps_per_turn=max_steps_per_turn,
             loop_repeat_threshold=loop_repeat_threshold,
+            step_penalty=step_penalty,
+            truncation_penalty=truncation_penalty,
+            repeat_action_threshold=repeat_action_threshold,
+            repeat_action_penalty=repeat_action_penalty,
+            damage_reward_scale=damage_reward_scale,
+            max_consecutive_passes=max_consecutive_passes,
             deck1=deck1,
             deck2=deck2,
             enable_combat_tracker=enable_combat_tracker,

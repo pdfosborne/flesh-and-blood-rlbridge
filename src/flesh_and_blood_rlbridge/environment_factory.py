@@ -75,6 +75,18 @@ class TalisharEngineFactory(rlbridgeEnvironmentFactory):
 
         local_deck = kwargs.get("local_deck_name", "Ira")
         opponent_deck = kwargs.get("opponent_deck_name", None)
+        engine_keys = (
+            "max_steps_per_turn",
+            "loop_repeat_threshold",
+            "step_penalty",
+            "truncation_penalty",
+            "repeat_action_threshold",
+            "repeat_action_penalty",
+            "damage_reward_scale",
+            "max_consecutive_passes",
+            "request_timeout",
+        )
+        engine_kw = {key: kwargs[key] for key in engine_keys if key in kwargs}
         return TalisharEngineEnvironment(
             base_url=kwargs.get("base_url"),
             frontend_url=kwargs.get("frontend_url"),
@@ -90,6 +102,7 @@ class TalisharEngineFactory(rlbridgeEnvironmentFactory):
             use_cpp_engine=bool(kwargs.get("use_cpp_engine", True)),
             cpp_engine_cache_dir=kwargs.get("cpp_engine_cache_dir"),
             enable_combat_tracker=bool(kwargs.get("enable_combat_tracker", False)),
+            **engine_kw,
         )
 
 

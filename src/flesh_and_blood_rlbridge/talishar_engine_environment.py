@@ -150,8 +150,6 @@ except Exception:  # pragma: no cover
 _DEFAULT_DECK_LINK = "https://fabrary.net/decks/01GJG7Z4WGWSZ95FY74KX4M557"
 _DEFAULT_RENDER_WIDTH = 1920
 _DEFAULT_RENDER_HEIGHT = 1080
-_TRUNCATION_PENALTY = -0.1  # negative reward for hitting max_turns without a winner
-_STEP_PENALTY = -0.001  # small per-step penalty to encourage faster game completion
 _PRIORITY_POLL_INTERVAL = 0.15
 _PRIORITY_MAX_POLLS = 120
 _PRIORITY_DEADLOCK_POLLS = 12
@@ -255,6 +253,12 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         max_turns: int = 2000,
         max_steps_per_turn: int = DEFAULT_MAX_STEPS_PER_TURN,
         loop_repeat_threshold: int = DEFAULT_LOOP_REPEAT_THRESHOLD,
+        step_penalty: float = -0.001,
+        truncation_penalty: float = -0.1,
+        repeat_action_threshold: int = 3,
+        repeat_action_penalty: float = -0.1,
+        damage_reward_scale: float = 0.01,
+        max_consecutive_passes: int = 20,
         render_mode: Optional[str] = None,
         local_deck_name: Optional[str] = "Ira",
         opponent_deck_name: Optional[str] = None,
@@ -311,6 +315,12 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         self._max_turns = max_turns
         self._max_steps_per_turn = max_steps_per_turn
         self._loop_repeat_threshold = loop_repeat_threshold
+        self._step_penalty = float(step_penalty)
+        self._truncation_penalty = float(truncation_penalty)
+        self._repeat_action_threshold = int(repeat_action_threshold)
+        self._repeat_action_penalty = float(repeat_action_penalty)
+        self._damage_reward_scale = float(damage_reward_scale)
+        self._max_consecutive_passes = int(max_consecutive_passes)
         self._block_max_pitch_value = block_max_pitch_value
         self._block_min_resource_cost = block_min_resource_cost
         self._render_mode = render_mode
@@ -407,6 +417,12 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                             max_turns=max_turns,
                             max_steps_per_turn=max_steps_per_turn,
                             loop_repeat_threshold=loop_repeat_threshold,
+                            step_penalty=step_penalty,
+                            truncation_penalty=truncation_penalty,
+                            repeat_action_threshold=repeat_action_threshold,
+                            repeat_action_penalty=repeat_action_penalty,
+                            damage_reward_scale=damage_reward_scale,
+                            max_consecutive_passes=max_consecutive_passes,
                             deck1=lookup_deck1,
                             deck2=lookup_deck2,
                             enable_combat_tracker=self._enable_combat_tracker,
@@ -430,6 +446,12 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                     max_turns=max_turns,
                     max_steps_per_turn=max_steps_per_turn,
                     loop_repeat_threshold=loop_repeat_threshold,
+                    step_penalty=step_penalty,
+                    truncation_penalty=truncation_penalty,
+                    repeat_action_threshold=repeat_action_threshold,
+                    repeat_action_penalty=repeat_action_penalty,
+                    damage_reward_scale=damage_reward_scale,
+                    max_consecutive_passes=max_consecutive_passes,
                     enable_combat_tracker=self._enable_combat_tracker,
                 )
             if self._cpp_env is not None:
@@ -1041,7 +1063,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             step_info["observation_vec"] = self._last_observation_vec
         return StepResult(
             observation=obs,
-            reward=_STEP_PENALTY,
+            reward=self._step_penalty,
             terminated=self._is_game_over(state),
             truncated=False,
             info=step_info,
@@ -1325,6 +1347,8 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             action_key,
             turn_no=turn_no,
             acting_player_id=acting_player_id,
+            threshold=self._repeat_action_threshold,
+            penalty=self._repeat_action_penalty,
         )
 
     def _extract_legal_actions(self, state: dict[str, Any]) -> list[dict[str, Any]]:
@@ -2199,11 +2223,12 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             else:
                 reward = 1.0 if won else -1.0
         elif truncated:
-            reward = _TRUNCATION_PENALTY
+            reward = self._truncation_penalty
         else:
             dmg_dealt = max(0, self._opp_hp - new_opp_hp)
             dmg_taken = max(0, self._player_hp - new_player_hp)
-            reward = dmg_dealt * 0.01 - dmg_taken * 0.01 + _STEP_PENALTY
+            scale = self._damage_reward_scale
+            reward = dmg_dealt * scale - dmg_taken * scale + self._step_penalty
         reward += repeat_penalty
 
         self._player_hp = new_player_hp

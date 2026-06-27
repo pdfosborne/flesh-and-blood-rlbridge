@@ -20,6 +20,36 @@ class MetaGameControls:
 
 
 @dataclass
+class MetaEngineControls:
+    """Shared C++ / Talishar RL environment reward and stall-prevention knobs.
+
+    Episode length is controlled by :attr:`MetaRuntime.max_play_steps` (and
+    workflow-specific ``max_steps`` fields), passed to envs as ``max_turns``.
+    """
+
+    # ── Loop / stall guards (TurnLoopGuard) ─────────────────────────────────
+    max_steps_per_turn: int = 100
+    loop_repeat_threshold: int = 4
+
+    # ── Reward shaping ──────────────────────────────────────────────────────
+    step_penalty: float = -0.001
+    truncation_penalty: float = -0.1
+    repeat_action_threshold: int = 3
+    repeat_action_penalty: float = -0.1
+    damage_reward_scale: float = 0.01
+
+    # ── C++ engine ──────────────────────────────────────────────────────────
+    max_consecutive_passes: int = 20
+
+    # ── Talishar HTTP ───────────────────────────────────────────────────────
+    talishar_request_timeout: float = 30.0
+
+    # ── Parallel training episode wall-clock limits ─────────────────────────
+    episode_timeout_seconds_per_step: float = 3.0
+    episode_timeout_floor_seconds: float = 180.0
+
+
+@dataclass
 class MetaUnifiedRandomMatchups:
     """Unified random fabrary matchup training (``train_unified_random_matchups.py``)."""
 
@@ -76,6 +106,9 @@ class MetaRuntime:
     # ── Game controls (stall / force-skip) ───────────────────────────────────
     game: MetaGameControls = field(default_factory=MetaGameControls)
 
+    # ── C++ / Talishar environment (reward + loop guards) ───────────────────
+    engine: MetaEngineControls = field(default_factory=MetaEngineControls)
+
     # ── Dashboard / rendering ────────────────────────────────────────────────
     dashboard_poll_seconds: float = 5.0
     eval_poll_seconds: int = 30
@@ -88,6 +121,23 @@ class MetaRuntime:
     )
 
 # ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class EngineDefaults:
+    """C++ and Talishar environment reward / stall-prevention settings."""
+
+    max_steps_per_turn: int
+    loop_repeat_threshold: int
+    step_penalty: float
+    truncation_penalty: float
+    repeat_action_threshold: int
+    repeat_action_penalty: float
+    damage_reward_scale: float
+    max_consecutive_passes: int
+    talishar_request_timeout: float
+    episode_timeout_seconds_per_step: float
+    episode_timeout_floor_seconds: float
+
 
 @dataclass(frozen=True)
 class GameControlsDefaults:
@@ -248,6 +298,7 @@ META = MetaRuntime()
 @dataclass(frozen=True)
 class RuntimeDefaults:
     meta: MetaRuntime
+    engine: EngineDefaults
     game: GameControlsDefaults
     play: PlayDefaults
     sideboard_compare: SideboardCompareDefaults
@@ -258,6 +309,70 @@ class RuntimeDefaults:
     ppo: PpoDefaults
     tui: TuiDefaults
     unified_random_matchups: UnifiedRandomMatchupsDefaults
+
+def _engine_controls(meta: MetaRuntime) -> EngineDefaults:
+    e = meta.engine
+    return EngineDefaults(
+        max_steps_per_turn=e.max_steps_per_turn,
+        loop_repeat_threshold=e.loop_repeat_threshold,
+        step_penalty=e.step_penalty,
+        truncation_penalty=e.truncation_penalty,
+        repeat_action_threshold=e.repeat_action_threshold,
+        repeat_action_penalty=e.repeat_action_penalty,
+        damage_reward_scale=e.damage_reward_scale,
+        max_consecutive_passes=e.max_consecutive_passes,
+        talishar_request_timeout=e.talishar_request_timeout,
+        episode_timeout_seconds_per_step=e.episode_timeout_seconds_per_step,
+        episode_timeout_floor_seconds=e.episode_timeout_floor_seconds,
+    )
+
+
+def engine_env_kwargs(engine: EngineDefaults | MetaEngineControls) -> dict[str, object]:
+    """Keyword arguments for :class:`TalisharEngineEnvironment` / :class:`CppEngineEnvironment`."""
+    if isinstance(engine, MetaEngineControls):
+        return {
+            "max_steps_per_turn": engine.max_steps_per_turn,
+            "loop_repeat_threshold": engine.loop_repeat_threshold,
+            "step_penalty": engine.step_penalty,
+            "truncation_penalty": engine.truncation_penalty,
+            "repeat_action_threshold": engine.repeat_action_threshold,
+            "repeat_action_penalty": engine.repeat_action_penalty,
+            "damage_reward_scale": engine.damage_reward_scale,
+            "max_consecutive_passes": engine.max_consecutive_passes,
+            "request_timeout": engine.talishar_request_timeout,
+        }
+    return {
+        "max_steps_per_turn": engine.max_steps_per_turn,
+        "loop_repeat_threshold": engine.loop_repeat_threshold,
+        "step_penalty": engine.step_penalty,
+        "truncation_penalty": engine.truncation_penalty,
+        "repeat_action_threshold": engine.repeat_action_threshold,
+        "repeat_action_penalty": engine.repeat_action_penalty,
+        "damage_reward_scale": engine.damage_reward_scale,
+        "max_consecutive_passes": engine.max_consecutive_passes,
+        "request_timeout": engine.talishar_request_timeout,
+    }
+
+
+def episode_timeout_seconds(
+    max_steps: int,
+    engine: EngineDefaults | MetaEngineControls | None = None,
+) -> float:
+    """Wall-clock budget for one parallel training episode."""
+    if engine is None:
+        cfg = RUNTIME.engine
+    elif isinstance(engine, MetaEngineControls):
+        cfg = engine
+    else:
+        return max(
+            float(engine.episode_timeout_floor_seconds),
+            int(max_steps) * float(engine.episode_timeout_seconds_per_step),
+        )
+    return max(
+        float(cfg.episode_timeout_floor_seconds),
+        int(max_steps) * float(cfg.episode_timeout_seconds_per_step),
+    )
+
 
 def _game_controls(meta: MetaRuntime) -> GameControlsDefaults:
     g = meta.game
@@ -272,6 +387,7 @@ def _game_controls(meta: MetaRuntime) -> GameControlsDefaults:
 def build_runtime(meta: MetaRuntime) -> RuntimeDefaults:
     """Derive per-script defaults from shared ``MetaRuntime`` settings."""
     dual_workers = 1 if meta.workers is None else meta.workers
+    engine = _engine_controls(meta)
     game = _game_controls(meta)
     urm = meta.unified_random_matchups
     urm_checkpoint_eval = urm.checkpoint_eval_episodes
@@ -294,6 +410,7 @@ def build_runtime(meta: MetaRuntime) -> RuntimeDefaults:
 
     return RuntimeDefaults(
         meta=meta,
+        engine=engine,
         game=game,
         play=play,
         sideboard_compare=SideboardCompareDefaults(
@@ -374,6 +491,18 @@ DEFAULT_STALL_LOW_HAND_TURNS = RUNTIME.game.stall_low_hand_turns
 DEFAULT_STALL_MAX_SINGLE_LOW_HAND_TURNS = RUNTIME.game.stall_max_single_low_hand_turns
 DEFAULT_STALL_MIN_ATTACK_HAND = RUNTIME.game.stall_min_attack_hand
 
+DEFAULT_MAX_STEPS_PER_TURN = RUNTIME.engine.max_steps_per_turn
+DEFAULT_LOOP_REPEAT_THRESHOLD = RUNTIME.engine.loop_repeat_threshold
+DEFAULT_STEP_PENALTY = RUNTIME.engine.step_penalty
+DEFAULT_TRUNCATION_PENALTY = RUNTIME.engine.truncation_penalty
+DEFAULT_REPEAT_ACTION_THRESHOLD = RUNTIME.engine.repeat_action_threshold
+DEFAULT_REPEAT_ACTION_PENALTY = RUNTIME.engine.repeat_action_penalty
+DEFAULT_DAMAGE_REWARD_SCALE = RUNTIME.engine.damage_reward_scale
+DEFAULT_MAX_CONSECUTIVE_PASSES = RUNTIME.engine.max_consecutive_passes
+DEFAULT_TALISHAR_REQUEST_TIMEOUT = RUNTIME.engine.talishar_request_timeout
+DEFAULT_EPISODE_TIMEOUT_SECONDS_PER_STEP = RUNTIME.engine.episode_timeout_seconds_per_step
+DEFAULT_EPISODE_TIMEOUT_FLOOR_SECONDS = RUNTIME.engine.episode_timeout_floor_seconds
+
 DEFAULT_N_EPISODES = RUNTIME.dual_matchup.episodes
 DEFAULT_HIDDEN_SIZE = RUNTIME.ppo.hidden_size
 DEFAULT_N_LAYERS = RUNTIME.ppo.n_layers
@@ -405,6 +534,12 @@ def apply_meta(**overrides: object) -> RuntimeDefaults:
     global DEFAULT_WARMUP_BASELINE_EVAL_EPISODES, DEFAULT_N_EPISODES  # noqa: PLW0603
     global DEFAULT_STALL_NO_DAMAGE_TURNS, DEFAULT_STALL_LOW_HAND_TURNS  # noqa: PLW0603
     global DEFAULT_STALL_MAX_SINGLE_LOW_HAND_TURNS, DEFAULT_STALL_MIN_ATTACK_HAND  # noqa: PLW0603
+    global DEFAULT_MAX_STEPS_PER_TURN, DEFAULT_LOOP_REPEAT_THRESHOLD  # noqa: PLW0603
+    global DEFAULT_STEP_PENALTY, DEFAULT_TRUNCATION_PENALTY  # noqa: PLW0603
+    global DEFAULT_REPEAT_ACTION_THRESHOLD, DEFAULT_REPEAT_ACTION_PENALTY  # noqa: PLW0603
+    global DEFAULT_DAMAGE_REWARD_SCALE, DEFAULT_MAX_CONSECUTIVE_PASSES  # noqa: PLW0603
+    global DEFAULT_TALISHAR_REQUEST_TIMEOUT  # noqa: PLW0603
+    global DEFAULT_EPISODE_TIMEOUT_SECONDS_PER_STEP, DEFAULT_EPISODE_TIMEOUT_FLOOR_SECONDS  # noqa: PLW0603
     global DEFAULT_HIDDEN_SIZE, DEFAULT_N_LAYERS, DEFAULT_N_HEADS, DEFAULT_LR, DEFAULT_GAMMA, DEFAULT_LAM  # noqa: PLW0603
     global DEFAULT_CLIP_EPS, DEFAULT_N_STEPS, DEFAULT_PPO_EPOCHS  # noqa: PLW0603
     global DEFAULT_MINI_BATCH, DEFAULT_PPO_ROLLOUT_BATCH  # noqa: PLW0603
@@ -425,6 +560,17 @@ def apply_meta(**overrides: object) -> RuntimeDefaults:
     DEFAULT_STALL_LOW_HAND_TURNS = RUNTIME.game.stall_low_hand_turns
     DEFAULT_STALL_MAX_SINGLE_LOW_HAND_TURNS = RUNTIME.game.stall_max_single_low_hand_turns
     DEFAULT_STALL_MIN_ATTACK_HAND = RUNTIME.game.stall_min_attack_hand
+    DEFAULT_MAX_STEPS_PER_TURN = RUNTIME.engine.max_steps_per_turn
+    DEFAULT_LOOP_REPEAT_THRESHOLD = RUNTIME.engine.loop_repeat_threshold
+    DEFAULT_STEP_PENALTY = RUNTIME.engine.step_penalty
+    DEFAULT_TRUNCATION_PENALTY = RUNTIME.engine.truncation_penalty
+    DEFAULT_REPEAT_ACTION_THRESHOLD = RUNTIME.engine.repeat_action_threshold
+    DEFAULT_REPEAT_ACTION_PENALTY = RUNTIME.engine.repeat_action_penalty
+    DEFAULT_DAMAGE_REWARD_SCALE = RUNTIME.engine.damage_reward_scale
+    DEFAULT_MAX_CONSECUTIVE_PASSES = RUNTIME.engine.max_consecutive_passes
+    DEFAULT_TALISHAR_REQUEST_TIMEOUT = RUNTIME.engine.talishar_request_timeout
+    DEFAULT_EPISODE_TIMEOUT_SECONDS_PER_STEP = RUNTIME.engine.episode_timeout_seconds_per_step
+    DEFAULT_EPISODE_TIMEOUT_FLOOR_SECONDS = RUNTIME.engine.episode_timeout_floor_seconds
     DEFAULT_N_EPISODES = RUNTIME.dual_matchup.episodes
     DEFAULT_HIDDEN_SIZE = RUNTIME.ppo.hidden_size
     DEFAULT_N_LAYERS = RUNTIME.ppo.n_layers

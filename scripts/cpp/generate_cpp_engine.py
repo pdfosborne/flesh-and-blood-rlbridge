@@ -782,6 +782,9 @@ struct GameState {{
     int         max_consecutive_passes = 20;
     int         format_idx = 0;
     int         first_player = 1;
+    int         active_player = 0;   // player who owns the current turn
+    int         pending_attack_power = 0;
+    int         pending_block_value = 0;
     std::array<double, 80> deck_indices_p1{{}};
     std::array<double, 80> deck_indices_p2{{}};
     std::mt19937 rng = std::mt19937(0xFAB123u);
@@ -804,6 +807,11 @@ struct GameState {{
     void set_priority(int player_idx);
 
 private:
+    bool _is_attack_card(const Card& card) const;
+    bool _is_block_card(const Card& card) const;
+    void _apply_hand_play_main(size_t idx);
+    void _apply_block_index(size_t idx);
+    void _resolve_combat();
     void _apply_hand_index(size_t idx);
     void _apply_pass();
     void _check_game_over();
@@ -821,23 +829,62 @@ _GAMESTATE_CPP = """\
 
 __PLAYER_OBS_IMPL__
 
+namespace {{
+constexpr int kMinBlockDefense = 3;
+}}
+
+bool GameState::_is_attack_card(const Card& card) const {{
+    const std::string lowered = _lower_copy(card.card_type);
+    return lowered.find("attack") != std::string::npos;
+}}
+
+bool GameState::_is_block_card(const Card& card) const {{
+    return card.defense >= kMinBlockDefense;
+}}
+
 std::vector<LegalAction> GameState::get_legal_actions() const {{
     std::vector<LegalAction> actions;
     actions.reserve(static_cast<size_t>(fast_legal_count()));
     const auto& p = players[priority];
 
-    // Play affordable cards from hand: pitch available = sum of pitch of all
-    // OTHER cards (by position) in hand.
-    for (size_t i = 0; i < p.hand.size(); ++i) {{
-        int avail = 0;
-        for (size_t j = 0; j < p.hand.size(); ++j) {{
-            if (j != i) avail += p.hand[j].pitch;
+    if (phase == TurnPhase::MAIN) {{
+        for (size_t i = 0; i < p.hand.size(); ++i) {{
+            int avail = 0;
+            for (size_t j = 0; j < p.hand.size(); ++j) {{
+                if (j != i) avail += p.hand[j].pitch;
+            }}
+            if (p.hand[i].cost <= avail) {{
+                actions.push_back(LegalAction{{
+                    27,
+                    std::to_string(i),
+                    p.hand[i].card_id,
+                    "hand",
+                    p.hand[i].name,
+                }});
+            }}
         }}
-        if (p.hand[i].cost <= avail) {{
-            actions.push_back(LegalAction{{27, std::to_string(i), p.hand[i].card_id, "hand", p.hand[i].name}});
-        }}
+        actions.push_back(LegalAction{{99, "", "", "button", "Pass"}});
+        return actions;
     }}
-    // Always include pass
+
+    if (phase == TurnPhase::BLOCK) {{
+        if (pending_block_value <= 0) {{
+            for (size_t i = 0; i < p.hand.size(); ++i) {{
+                if (_is_block_card(p.hand[i])) {{
+                    actions.push_back(LegalAction{{
+                        27,
+                        std::to_string(i),
+                        p.hand[i].card_id,
+                        "hand",
+                        p.hand[i].name,
+                    }});
+                }}
+            }}
+        }}
+        actions.push_back(LegalAction{{99, "", "", "button", "Pass"}});
+        return actions;
+    }}
+
     actions.push_back(LegalAction{{99, "", "", "button", "Pass"}});
     return actions;
 }}
@@ -845,13 +892,27 @@ std::vector<LegalAction> GameState::get_legal_actions() const {{
 int GameState::fast_legal_count() const {{
     const auto& p = players[priority];
     int count = 1;  // pass
-    for (size_t i = 0; i < p.hand.size(); ++i) {{
-        int avail = 0;
-        for (size_t j = 0; j < p.hand.size(); ++j) {{
-            if (j != i) avail += p.hand[j].pitch;
+
+    if (phase == TurnPhase::MAIN) {{
+        for (size_t i = 0; i < p.hand.size(); ++i) {{
+            int avail = 0;
+            for (size_t j = 0; j < p.hand.size(); ++j) {{
+                if (j != i) avail += p.hand[j].pitch;
+            }}
+            if (p.hand[i].cost <= avail) ++count;
         }}
-        if (p.hand[i].cost <= avail) ++count;
+        return count;
     }}
+
+    if (phase == TurnPhase::BLOCK) {{
+        if (pending_block_value <= 0) {{
+            for (size_t i = 0; i < p.hand.size(); ++i) {{
+                if (_is_block_card(p.hand[i])) ++count;
+            }}
+        }}
+        return count;
+    }}
+
     return count;
 }}
 
@@ -863,23 +924,71 @@ void GameState::seed_rng(uint32_t seed) {{
     rng.seed(seed);
 }}
 
+void GameState::_resolve_combat() {{
+    const int defender = priority;
+    const int dmg = std::max(0, pending_attack_power - pending_block_value);
+    players[static_cast<size_t>(defender)].health -= dmg;
+    pending_attack_power = 0;
+    pending_block_value = 0;
+    phase = TurnPhase::MAIN;
+    priority = active_player;
+    _check_game_over();
+}}
+
 void GameState::_apply_pass() {{
     consecutive_passes += 1;
+    if (phase == TurnPhase::BLOCK) {{
+        _resolve_combat();
+        consecutive_passes = 0;
+        return;
+    }}
     _advance_phase();
 }}
 
-void GameState::_apply_hand_index(size_t idx) {{
+void GameState::_apply_hand_play_main(size_t idx) {{
     consecutive_passes = 0;
     auto& hand = players[priority].hand;
-    if (idx < hand.size()) {{
-        Card card = hand[idx];
-        hand.erase(hand.begin() + static_cast<std::ptrdiff_t>(idx));
-        auto it = effects.find(card.card_id);
-        if (it != effects.end()) {{
-            it->second(*this, priority);
-        }}
+    if (idx >= hand.size()) return;
+
+    Card card = hand[static_cast<size_t>(idx)];
+    hand.erase(hand.begin() + static_cast<std::ptrdiff_t>(idx));
+
+    if (_is_attack_card(card)) {{
+        players[active_player].discard.push_back(card);
+        pending_attack_power = card.power;
+        pending_block_value = 0;
+        phase = TurnPhase::BLOCK;
+        priority = 1 - active_player;
+        return;
     }}
+
+    auto it = effects.find(card.card_id);
+    if (it != effects.end()) {{
+        it->second(*this, active_player);
+    }}
+    players[active_player].discard.push_back(card);
     _check_game_over();
+}}
+
+void GameState::_apply_block_index(size_t idx) {{
+    consecutive_passes = 0;
+    auto& hand = players[priority].hand;
+    if (idx >= hand.size()) return;
+    if (!_is_block_card(hand[idx])) return;
+
+    Card card = hand[static_cast<size_t>(idx)];
+    hand.erase(hand.begin() + static_cast<std::ptrdiff_t>(idx));
+    players[priority].discard.push_back(card);
+    pending_block_value += card.defense;
+    _check_game_over();
+}}
+
+void GameState::_apply_hand_index(size_t idx) {{
+    if (phase == TurnPhase::BLOCK) {{
+        _apply_block_index(idx);
+        return;
+    }}
+    _apply_hand_play_main(idx);
 }}
 
 void GameState::_check_game_over() {{
@@ -916,26 +1025,13 @@ void GameState::apply_action(const LegalAction& action) {{
 FastStepResult GameState::fast_step_index(int action_index) {{
     const int prev_p1 = players[0].health;
     const int prev_p2 = players[1].health;
-    const int actor = priority;
 
-    int legal_cursor = 0;
-    bool applied = false;
-    auto& p = players[priority];
-    for (size_t i = 0; i < p.hand.size(); ++i) {{
-        int avail = 0;
-        for (size_t j = 0; j < p.hand.size(); ++j) {{
-            if (j != i) avail += p.hand[j].pitch;
-        }}
-        if (p.hand[i].cost <= avail) {{
-            if (legal_cursor == action_index) {{
-                _apply_hand_index(i);
-                applied = true;
-                break;
-            }}
-            ++legal_cursor;
-        }}
-    }}
-    if (!applied) {{
+    const auto legal = get_legal_actions();
+    if (action_index >= 0 && action_index < static_cast<int>(legal.size())) {{
+        apply_action(legal[static_cast<size_t>(action_index)]);
+    }} else if (!legal.empty()) {{
+        apply_action(legal[0]);
+    }} else {{
         _apply_pass();
     }}
 
@@ -949,7 +1045,6 @@ FastStepResult GameState::fast_step_index(int action_index) {{
         const int dmg_taken = std::max(0, prev_p1 - players[0].health);
         reward = dmg_dealt * 0.01 - dmg_taken * 0.01 - 0.001;
     }}
-    (void)actor;
 
     FastStepResult result;
     result.legal_count = fast_legal_count();
@@ -1006,26 +1101,26 @@ void GameState::set_priority(int player_idx) {{
         throw std::runtime_error("player_idx must be 0 or 1");
     }}
     priority = player_idx;
+    if (turn_no == 0 && pending_attack_power == 0) {{
+        active_player = player_idx;
+    }}
 }}
 
 void GameState::_advance_phase() {{
     switch (phase) {{
         case TurnPhase::START:  phase = TurnPhase::MAIN;   break;
         case TurnPhase::MAIN:   phase = TurnPhase::END;    break;
-        case TurnPhase::ATTACK: phase = TurnPhase::BLOCK;  break;
-        case TurnPhase::BLOCK:  phase = TurnPhase::DAMAGE; break;
-        case TurnPhase::DAMAGE: phase = TurnPhase::END;    break;
         case TurnPhase::END: {{
-            // Discard active player's remaining hand
-            auto& active = players[priority];
+            auto& active = players[active_player];
             for (auto& c : active.hand) active.discard.push_back(c);
             active.hand.clear();
-            // Switch priority
-            phase    = TurnPhase::MAIN;
+            active_player = 1 - active_player;
+            priority = active_player;
+            phase = TurnPhase::MAIN;
             turn_no += 1;
-            priority = 1 - priority;
-            // New active player draws 4 cards (intellect)
-            _draw_cards(priority, 4);
+            _draw_cards(active_player, players[active_player].intellect);
+            pending_attack_power = 0;
+            pending_block_value = 0;
             break;
         }}
         default: break;
@@ -1096,6 +1191,9 @@ void GameState::init_standard_decks() {{
     phase = TurnPhase::MAIN;
     turn_no = 0;
     priority = 0;
+    active_player = 0;
+    pending_attack_power = 0;
+    pending_block_value = 0;
     game_over = false;
     winner = -1;
     consecutive_passes = 0;
@@ -1233,6 +1331,14 @@ PYBIND11_MODULE(fab_engine, m) {{
             [](const GameState& g) {{ return g.turn_no; }})
         .def_property_readonly("priority",
             [](const GameState& g) {{ return g.priority; }})
+        .def_property_readonly("phase",
+            [](const GameState& g) {{ return static_cast<int>(g.phase); }})
+        .def_property_readonly("active_player",
+            [](const GameState& g) {{ return g.active_player; }})
+        .def_property_readonly("pending_attack_power",
+            [](const GameState& g) {{ return g.pending_attack_power; }})
+        .def_property_readonly("pending_block_value",
+            [](const GameState& g) {{ return g.pending_block_value; }})
         .def_property_readonly("p1_health",
             [](const GameState& g) {{ return g.players[0].health; }})
         .def_property_readonly("p2_health",

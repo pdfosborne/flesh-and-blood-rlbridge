@@ -15,6 +15,7 @@ from runtime_defaults import (  # noqa: E402
     DEFAULT_CHECKPOINT_INTERVAL_PCT,
     DEFAULT_PARALLEL_SEEDS,
     META,
+    MetaEngineControls,
     MetaGameControls,
     MetaUnifiedRandomMatchups,
     RUNTIME,
@@ -71,6 +72,51 @@ def test_build_runtime_propagates_meta_workers() -> None:
     assert runtime.matchup_sim.workers == 8
     assert runtime.dual_matchup.workers == 8
     assert runtime.eval_dashboard.parallel_workers == META.eval_parallel_workers
+
+
+def test_engine_controls_from_meta() -> None:
+    runtime = build_runtime(
+        replace(
+            META,
+            engine=MetaEngineControls(
+                max_steps_per_turn=50,
+                step_penalty=-0.002,
+                truncation_penalty=-0.2,
+                talishar_request_timeout=45.0,
+            ),
+        )
+    )
+    assert runtime.engine.max_steps_per_turn == 50
+    assert runtime.engine.step_penalty == -0.002
+    assert runtime.engine.truncation_penalty == -0.2
+    assert runtime.engine.talishar_request_timeout == 45.0
+    assert runtime.engine.loop_repeat_threshold == META.engine.loop_repeat_threshold
+
+
+def test_engine_env_kwargs_from_runtime() -> None:
+    kw = rd.engine_env_kwargs(RUNTIME.engine)
+    assert kw["max_steps_per_turn"] == RUNTIME.engine.max_steps_per_turn
+    assert kw["step_penalty"] == RUNTIME.engine.step_penalty
+    assert kw["request_timeout"] == RUNTIME.engine.talishar_request_timeout
+
+
+def test_episode_timeout_seconds_from_meta() -> None:
+    engine = MetaEngineControls(
+        episode_timeout_seconds_per_step=2.0,
+        episode_timeout_floor_seconds=100.0,
+    )
+    assert rd.episode_timeout_seconds(200, engine) == 400.0
+    assert rd.episode_timeout_seconds(10, engine) == 100.0
+
+
+def test_apply_meta_updates_engine_aliases() -> None:
+    original = META.engine.step_penalty
+    try:
+        apply_meta(engine=MetaEngineControls(step_penalty=-0.005))
+        assert rd.DEFAULT_STEP_PENALTY == -0.005
+        assert rd.RUNTIME.engine.step_penalty == -0.005
+    finally:
+        apply_meta(engine=replace(META.engine, step_penalty=original))
 
 
 def test_game_controls_from_meta() -> None:

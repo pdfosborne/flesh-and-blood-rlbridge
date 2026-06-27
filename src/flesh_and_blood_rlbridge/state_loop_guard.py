@@ -1,8 +1,9 @@
 """Per-turn step limits and decision-point loop detection for RL environments.
 
-When an agent revisits the same decision point repeatedly, or exceeds a per-turn
-step budget, environments force Pass instead of accumulating bug-specific filter
-rules.
+When an agent revisits the same decision point repeatedly, returns to a prior
+board configuration within the same turn (undo / action-chain loops), or exceeds
+a per-turn step budget, environments force Pass instead of accumulating
+bug-specific filter rules.
 """
 
 from __future__ import annotations
@@ -15,6 +16,36 @@ from .talishar_default_policy import _get_phase, _is_pass_action, _to_int
 DEFAULT_MAX_STEPS_PER_TURN = 100
 DEFAULT_LOOP_REPEAT_THRESHOLD = 4
 
+# Talishar JSON keys included in the per-turn board fingerprint (order matters).
+_BOARD_ZONE_KEYS: tuple[str, ...] = (
+    "playerHand",
+    "opponentHand",
+    "playerEquipment",
+    "opponentEquipment",
+    "playerArse",
+    "opponentArse",
+    "playerPitch",
+    "opponentPitch",
+    "playerDiscard",
+    "opponentDiscard",
+    "playerBanish",
+    "opponentBanish",
+    "playerAuras",
+    "opponentAuras",
+    "playerAllies",
+    "opponentAllies",
+    "playerItems",
+    "opponentItems",
+    "playerPermanents",
+    "opponentPermanents",
+)
+
+_COMBAT_CHAIN_KEYS: tuple[str, ...] = (
+    "combatChain",
+    "activeChainLink",
+    "chainLinks",
+)
+
 
 def legal_actions_fingerprint(legal_actions: list[dict[str, Any]]) -> str:
     """Stable fingerprint of the filtered legal-action set."""
@@ -26,17 +57,96 @@ def legal_actions_fingerprint(legal_actions: list[dict[str, Any]]) -> str:
     )
 
 
+def _card_key(card: dict[str, Any]) -> str:
+    return str(
+        card.get("cardNumber")
+        or card.get("cardID")
+        or card.get("card_id")
+        or card.get("id")
+        or ""
+    )
+
+
+def _card_fingerprint(card: Any) -> str:
+    if not isinstance(card, dict):
+        return ""
+    parts = [_card_key(card)]
+    for field in ("counters", "counter", "tapped", "facing", "action", "mod"):
+        value = card.get(field)
+        if value in (None, "", 0, False):
+            continue
+        parts.append(f"{field}={value}")
+    counters_map = card.get("countersMap")
+    if isinstance(counters_map, dict) and counters_map:
+        items = ",".join(
+            f"{key}:{_to_int(val)}"
+            for key, val in sorted(counters_map.items(), key=lambda item: str(item[0]))
+        )
+        parts.append(f"countersMap={items}")
+    return ":".join(parts)
+
+
+def _zone_fingerprint(cards: Any) -> str:
+    if not isinstance(cards, list):
+        return ""
+    return ",".join(_card_fingerprint(card) for card in cards)
+
+
+def _chain_fingerprint(value: Any) -> str:
+    if isinstance(value, list):
+        return _zone_fingerprint(value)
+    if isinstance(value, dict):
+        if value.get("cardID") or value.get("cardNumber"):
+            return _card_fingerprint(value)
+        nested = value.get("links") or value.get("chainLinks")
+        if isinstance(nested, list):
+            return _zone_fingerprint(nested)
+        return "|".join(f"{key}={value[key]}" for key in sorted(value))
+    return str(value or "")
+
+
+def board_state_fingerprint(state: dict[str, Any]) -> str:
+    """Fingerprint public zones and scalars — ignores legal actions.
+
+    Revisiting the same fingerprint within one player-turn window means actions
+    reverted the game state (undo chains, equipment toggles, etc.).
+    """
+    phase = _get_phase(state)
+    parts = [
+        phase,
+        str(_to_int(state.get("playerHealth", 0), 0)),
+        str(_to_int(state.get("opponentHealth", 0), 0)),
+        str(_to_int(state.get("playerPitchCount", 0), 0)),
+        str(_to_int(state.get("opponentPitchCount", 0), 0)),
+        str(_to_int(state.get("playerDeckCount", 0), 0)),
+        str(_to_int(state.get("opponentDeckCount", 0), 0)),
+        str(_to_int(state.get("playerHandSize", 0), 0)),
+        str(_to_int(state.get("opponentHandSize", 0), 0)),
+        str(_to_int(state.get("pendingAttackPower", 0), 0)),
+        str(_to_int(state.get("pendingBlockValue", 0), 0)),
+    ]
+    for key in _BOARD_ZONE_KEYS:
+        if key in state:
+            parts.append(f"{key}={_zone_fingerprint(state[key])}")
+    if "opponentHand" not in state and state.get("opponentHandSize") is not None:
+        parts.append(f"opponentHandSize={_to_int(state.get('opponentHandSize', 0), 0)}")
+    for key in _COMBAT_CHAIN_KEYS:
+        if key in state:
+            parts.append(f"{key}={_chain_fingerprint(state[key])}")
+    return "|".join(parts)
+
+
 def decision_point_fingerprint(
     state: dict[str, Any],
     legal_actions: list[dict[str, Any]],
 ) -> str:
     """Hash phase, turn, coarse resources, and legal actions for loop detection."""
-    phase = _get_phase(state)
     turn_no = _to_int(state.get("turnNo", state.get("turn_no", 0)), 0)
     pitch = _to_int(state.get("playerPitchCount", 0), 0)
     hand = state.get("playerHand", [])
     hand_size = len(hand) if isinstance(hand, list) else 0
     legal_fp = legal_actions_fingerprint(legal_actions)
+    phase = _get_phase(state)
     return f"{turn_no}|{phase}|{pitch}|{hand_size}|{legal_fp}"
 
 
@@ -59,7 +169,7 @@ class LoopGuardResult:
 
 
 class TurnLoopGuard:
-    """Track per-turn steps and repeated decision points within a turn."""
+    """Track per-turn steps, repeated decision points, and board-state reverts."""
 
     def __init__(
         self,
@@ -77,6 +187,15 @@ class TurnLoopGuard:
         self._steps_this_turn: int = 0
         self._last_fingerprint: Optional[str] = None
         self._loop_streak: int = 0
+        self._board_history: list[str] = []
+
+    def _reset_turn_window(self, *, turn_no: int, acting_player_id: int) -> None:
+        self._turn_no = turn_no
+        self._acting_player = acting_player_id
+        self._steps_this_turn = 0
+        self._last_fingerprint = None
+        self._loop_streak = 0
+        self._board_history = []
 
     def check(
         self,
@@ -91,13 +210,23 @@ class TurnLoopGuard:
             turn_no != self._turn_no
             or acting_player_id != self._acting_player
         ):
-            self._turn_no = turn_no
-            self._acting_player = acting_player_id
-            self._steps_this_turn = 0
-            self._last_fingerprint = None
-            self._loop_streak = 0
+            self._reset_turn_window(
+                turn_no=turn_no,
+                acting_player_id=acting_player_id,
+            )
 
         self._steps_this_turn += 1
+
+        board_fp = board_state_fingerprint(state)
+        if self._board_history and board_fp in self._board_history[:-1]:
+            return LoopGuardResult(
+                force_pass=True,
+                turn_steps=self._steps_this_turn,
+                loop_streak=self._loop_streak,
+                reason="board_revert",
+            )
+        if not self._board_history or board_fp != self._board_history[-1]:
+            self._board_history.append(board_fp)
 
         fingerprint = decision_point_fingerprint(state, legal_actions)
         if fingerprint == self._last_fingerprint:

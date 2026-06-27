@@ -93,6 +93,9 @@ from runtime_defaults import (  # noqa: E402
     DEFAULT_WARMUP_EPISODES,
     DEFAULT_CHECKPOINT_INTERVAL_PCT,
     DEFAULT_CHECKPOINT_EVAL_EPISODES,
+    RUNTIME,
+    engine_env_kwargs,
+    episode_timeout_seconds,
 )
 from parallel_seed_training import (  # noqa: E402
     run_parallel_seed_jobs,
@@ -220,7 +223,7 @@ def make_env(
     *,
     show_frontend: bool = False,
     frontend_url: Optional[str] = None,
-    request_timeout: float = 30.0,
+    request_timeout: Optional[float] = None,
     use_cpp_engine: bool = True,
     cpp_engine_cache_dir: Optional[str] = None,
     enable_combat_tracker: bool = False,
@@ -261,6 +264,10 @@ def make_env(
     if effective_cache_dir is None:
         effective_cache_dir = str(REPO_ROOT / "results" / "cpp_engines")
 
+    engine_kw = dict(engine_env_kwargs(RUNTIME.engine))
+    if request_timeout is not None:
+        engine_kw["request_timeout"] = request_timeout
+
     env = TalisharEngineEnvironment(
         base_url=base_url,
         frontend_url=resolved_frontend_url,
@@ -270,13 +277,13 @@ def make_env(
         self_play=True,
         max_turns=max_turns,
         render_mode=("rgb_array" if show_frontend else None),
-        request_timeout=request_timeout,
         use_cpp_engine=use_cpp_engine,
         cpp_engine_cache_dir=effective_cache_dir,
         cpp_engine_deck1=matchup.cpp_engine_deck1,
         cpp_engine_deck2=matchup.cpp_engine_deck2,
         cpp_engine_dir=matchup.cpp_engine_dir,
         enable_combat_tracker=enable_combat_tracker,
+        **engine_kw,
     )
     if require_fast_training is None:
         require_fast_training = use_cpp_engine or bool(matchup.cpp_engine_dir)
@@ -2037,7 +2044,7 @@ def train_agents_from_both_perspectives_parallel(
     # Per-episode wall-clock timeout: max_steps * 5 s per step, floor at 120 s.
     # Per-episode wall-clock timeout: 3 s per step (down from 5 s) is sufficient
     # for a local Docker server.  Floor raised to 180 s to cover game setup time.
-    episode_timeout_secs = max(180, max_steps * 3)
+    episode_timeout_secs = episode_timeout_seconds(max_steps, RUNTIME.engine)
     shutdown_flag = False
     warmup_p1_accum: list[dict[str, Any]] = []
     warmup_p2_accum: list[dict[str, Any]] = []
