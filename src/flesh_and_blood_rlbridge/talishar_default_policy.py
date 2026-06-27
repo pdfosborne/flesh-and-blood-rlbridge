@@ -134,6 +134,99 @@ def _load_card_resource_stats() -> dict[str, tuple[int, int]]:
 _CARD_STATS: dict[str, tuple[int, int]] = _load_card_stats()
 _CARD_RESOURCE_STATS: dict[str, tuple[int, int]] = _load_card_resource_stats()
 
+_ABILITY_COST_CASE_RE = re.compile(r'case\s+"([^"]+)"')
+_ABILITY_RETURN_INT_RE = re.compile(r"return\s+(\d+)\s*;")
+_EQUIPMENT_CARD_TYPES = frozenset({"utility_item", "equipment", "weapon"})
+
+
+def _activation_cost_from_text(text: str) -> Optional[int]:
+    """Parse resource cost from Action/Instant ability text (``{r}`` before ``:``)."""
+    if not text:
+        return None
+    costs: list[int] = []
+    for segment in text.split("{br}"):
+        if not re.search(r"\b(?:Action|Instant)\b", segment, re.IGNORECASE):
+            continue
+        match = re.search(r"--\s*([^:]+):", segment)
+        if not match:
+            continue
+        costs.append(len(re.findall(r"\{r\}", match.group(1))))
+    if not costs:
+        return None
+    return min(costs)
+
+
+def _parse_php_ability_cost_function(body: str, costs: dict[str, int]) -> None:
+    """Extract ``case "card_id": return N`` pairs from a PHP AbilityCost function body."""
+    pending: list[str] = []
+    for line in body.splitlines():
+        stripped = line.split("//", 1)[0].strip()
+        if not stripped:
+            continue
+        for match in _ABILITY_COST_CASE_RE.finditer(stripped):
+            pending.append(match.group(1))
+        ret = _ABILITY_RETURN_INT_RE.search(stripped)
+        if ret is not None and pending:
+            value = int(ret.group(1))
+            for card_id in pending:
+                costs.setdefault(card_id, value)
+            pending = []
+        elif ret is not None:
+            pending = []
+
+
+def _load_talishar_ability_costs() -> dict[str, int]:
+    """Load equipment activation costs from vendored Talishar ``*AbilityCost`` PHP."""
+    talishar_root = Path(__file__).resolve().parents[2] / "Talishar"
+    costs: dict[str, int] = {}
+    if not talishar_root.is_dir():
+        return costs
+
+    fn_pattern = re.compile(r"function\s+\w*AbilityCost\s*\([^)]*\)\s*\{", re.MULTILINE)
+    for path in sorted(talishar_root.rglob("*.php")):
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for match in fn_pattern.finditer(text):
+            start = match.end()
+            depth = 1
+            pos = start
+            while pos < len(text) and depth:
+                if text[pos] == "{":
+                    depth += 1
+                elif text[pos] == "}":
+                    depth -= 1
+                pos += 1
+            _parse_php_ability_cost_function(text[start : pos - 1], costs)
+    return costs
+
+
+def _load_equipment_activation_costs() -> dict[str, int]:
+    """Merge Talishar AbilityCost data with card-text parsing from cards.json."""
+    costs = _load_talishar_ability_costs()
+    db_path = Path(__file__).parent / "card_db" / "cards.json"
+    try:
+        records = json.loads(db_path.read_text(encoding="utf-8"))
+    except Exception:
+        return costs
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        card_types = rec.get("card_types") or []
+        if not _EQUIPMENT_CARD_TYPES.intersection(card_types):
+            continue
+        cid = str(rec.get("id", "") or "")
+        if not cid or cid in costs:
+            continue
+        parsed = _activation_cost_from_text(str(rec.get("text", "") or ""))
+        if parsed is not None:
+            costs[cid] = parsed
+    return costs
+
+
+_EQUIPMENT_ACTIVATION_COSTS: dict[str, int] = _load_equipment_activation_costs()
+
 
 def _to_int(value: Any, default: int = 0) -> int:
     try:
@@ -509,6 +602,39 @@ def _is_affordable_arsenal_play(
 
     card = _match_action_card(action, state)
     cost = _card_cost(card, action)
+    if cost <= 0:
+        return True
+
+    return cost <= _play_resource_budget(state)
+
+
+def _equipment_activation_cost(
+    card: Optional[dict[str, Any]],
+    action: Optional[dict[str, Any]] = None,
+) -> int:
+    """Return the resource cost to activate equipment (Talishar ``AbilityCost``)."""
+    cid = _card_id_from(card, action)
+    if cid in _EQUIPMENT_ACTIVATION_COSTS:
+        return _EQUIPMENT_ACTIVATION_COSTS[cid]
+    if isinstance(card, dict):
+        parsed = _activation_cost_from_text(str(card.get("text", "") or ""))
+        if parsed is not None:
+            return parsed
+    return 0
+
+
+def _is_affordable_equipment_play(
+    action: dict[str, Any],
+    state: dict[str, Any],
+) -> bool:
+    """Return True when an equipment/weapon activation can be paid from hand pitch + pool."""
+    zone = _normalize(action.get("zone", ""))
+    code = _to_int(action.get("action_code", 0))
+    if zone != "equipment" or code != 3:
+        return True
+
+    card = _match_action_card(action, state)
+    cost = _equipment_activation_cost(card, action)
     if cost <= 0:
         return True
 

@@ -11,7 +11,9 @@ from flesh_and_blood_rlbridge.legal_action_filter import filter_legal_actions
 from flesh_and_blood_rlbridge.talishar_default_policy import (
     _apply_block_phase_filter,
     _card_cost,
+    _equipment_activation_cost,
     _is_affordable_arsenal_play,
+    _is_affordable_equipment_play,
     _is_affordable_hand_play,
     _strip_revert_actions,
 )
@@ -299,6 +301,133 @@ def test_is_affordable_arsenal_play_with_enough_hand_pitch() -> None:
         "label": "Adrenaline Rush",
     }
     assert _is_affordable_arsenal_play(action, state)
+
+
+def test_equipment_activation_cost_from_talishar() -> None:
+    assert _equipment_activation_cost({"cardNumber": "reaping_blade"}, None) == 1
+    assert _equipment_activation_cost({"cardNumber": "dawnblade"}, None) == 1
+    assert _equipment_activation_cost({"cardNumber": "romping_club"}, None) == 2
+
+
+def test_is_affordable_equipment_play_requires_hand_pitch() -> None:
+    state = {
+        "playerPitchCount": 0,
+        "playerHand": [],
+        "playerEquipment": [
+            {
+                "action": 3,
+                "actionDataOverride": "0",
+                "cardNumber": "reaping_blade",
+            }
+        ],
+    }
+    action = {
+        "action_code": 3,
+        "button_input": "0",
+        "zone": "equipment",
+        "card_id": "reaping_blade",
+        "label": "Reaping Blade",
+    }
+    assert not _is_affordable_equipment_play(action, state)
+
+
+def test_is_affordable_equipment_play_with_floating_resources() -> None:
+    state = {
+        "playerPitchCount": 1,
+        "playerHand": [],
+        "playerEquipment": [
+            {
+                "action": 3,
+                "actionDataOverride": "0",
+                "cardNumber": "reaping_blade",
+            }
+        ],
+    }
+    action = {
+        "action_code": 3,
+        "button_input": "0",
+        "zone": "equipment",
+        "card_id": "reaping_blade",
+        "label": "Reaping Blade",
+    }
+    assert _is_affordable_equipment_play(action, state)
+
+
+def test_filter_strips_unaffordable_equipment_play_with_empty_hand() -> None:
+    state = {
+        "turnPhase": {"turnPhase": "M"},
+        "playerPitchCount": 0,
+        "playerHand": [],
+        "playerEquipment": [
+            {
+                "action": 3,
+                "actionDataOverride": "0",
+                "cardNumber": "reaping_blade",
+            }
+        ],
+    }
+    legal = [
+        {
+            "action_code": 3,
+            "button_input": "0",
+            "zone": "equipment",
+            "card_id": "reaping_blade",
+            "label": "Reaping Blade",
+        },
+        {
+            "action_code": 99,
+            "button_input": "",
+            "zone": "button",
+            "label": "Pass",
+        },
+    ]
+
+    filtered = filter_legal_actions(state, legal)
+    codes = {a["action_code"] for a in filtered}
+
+    assert 3 not in codes
+    assert 99 in codes
+
+
+def test_filter_keeps_affordable_equipment_play_when_hand_can_pitch() -> None:
+    state = {
+        "turnPhase": {"turnPhase": "M"},
+        "playerPitchCount": 0,
+        "playerHand": [
+            {
+                "action": 27,
+                "actionDataOverride": "0",
+                "cardNumber": "nimblism_blue",
+            }
+        ],
+        "playerEquipment": [
+            {
+                "action": 3,
+                "actionDataOverride": "0",
+                "cardNumber": "reaping_blade",
+            }
+        ],
+    }
+    legal = [
+        {
+            "action_code": 3,
+            "button_input": "0",
+            "zone": "equipment",
+            "card_id": "reaping_blade",
+            "label": "Reaping Blade",
+        },
+        {
+            "action_code": 99,
+            "button_input": "",
+            "zone": "button",
+            "label": "Pass",
+        },
+    ]
+
+    filtered = filter_legal_actions(state, legal)
+    codes = {a["action_code"] for a in filtered}
+
+    assert 3 in codes
 
 
 def test_filter_strips_unaffordable_arsenal_play_with_empty_hand() -> None:

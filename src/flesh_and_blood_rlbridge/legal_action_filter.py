@@ -19,6 +19,7 @@ from .talishar_default_policy import (
     _BLOCK_PHASES,
     _get_phase,
     _is_affordable_arsenal_play,
+    _is_affordable_equipment_play,
     _is_affordable_hand_play,
     _is_pass_action,
     _is_revert_action,
@@ -234,12 +235,18 @@ def filter_legal_actions(
     produce an empty set.
 
     **Rule 1 — main-phase affordability** (phase ``m``):
-        Strip action-27 hand-card and action-5 arsenal plays whose resource
-        cost exceeds floated resources plus pitch value available in hand.
+        Strip action-27 hand-card, action-5 arsenal, and action-3 equipment
+        plays whose resource cost exceeds floated resources plus pitch value
+        available in hand.
 
     **Rule 1b — arsenal pitch requirement** (phase ``m``):
         Playing from arsenal (action 5) requires enough hand pitch (and any
         floated resources) to pay the card's cost; the arsenal card itself
+        cannot be pitched for that payment.
+
+    **Rule 1c — equipment activation pitch requirement** (phase ``m``):
+        Activating equipment/weapons (action 3) requires enough hand pitch (and
+        any floated resources) to pay the activation cost; the equipment itself
         cannot be pitched for that payment.
 
     **Rule 2 — undo / cancel removal** (all phases, applied first and last):
@@ -287,6 +294,8 @@ def filter_legal_actions(
             if not _is_affordable_hand_play(action, state):
                 continue
             if not _is_affordable_arsenal_play(action, state):
+                continue
+            if not _is_affordable_equipment_play(action, state):
                 continue
             affordable.append(action)
         if affordable:

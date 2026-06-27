@@ -2394,7 +2394,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         # Track the last card played so we can blacklist it after an empty pitch.
         if _phase != "p":
             _chosen = legal[idx] if 0 <= idx < len(legal) else None
-            if _chosen is not None and int(_chosen.get("action_code", 0)) in (5, 27, 36, 37, 38):
+            if _chosen is not None and int(_chosen.get("action_code", 0)) in (3, 5, 27, 36, 37, 38):
                 _label = str(
                     _chosen.get("label", "")
                     or _chosen.get("card_id", "")
@@ -2402,8 +2402,8 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                 )
                 if _label:
                     if (
-                        int(_chosen.get("action_code", 0)) == 27
-                        and _chosen.get("zone") == "hand"
+                        int(_chosen.get("action_code", 0)) in (3, 27)
+                        and _chosen.get("zone") in ("equipment", "hand")
                         and _phase == "m"
                     ):
                         self._last_m_label = _label
