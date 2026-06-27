@@ -81,6 +81,57 @@ def _write_unified_checkpoint(
     return ckpt_dir
 
 
+def test_equipment_header_from_deck_stem_reads_asset_first_line(tmp_path: Path) -> None:
+    from flesh_and_blood_rlbridge.talishar_deck_assets import (  # noqa: E402
+        equipment_header_from_deck_stem,
+    )
+
+    assets = tmp_path / "Assets"
+    assets.mkdir()
+    (assets / "fab_oscilio_omn.txt").write_text(
+        "oscilio_omn nullrune_hood nullrune_robe star_fall\n"
+        "cosmic_flare_red nebula_duality_red\n",
+        encoding="utf-8",
+    )
+
+    header = equipment_header_from_deck_stem(
+        "fab_oscilio_omn",
+        assets,
+        fallback="oscilio",
+    )
+    assert header.startswith("oscilio_omn")
+    assert "nullrune_hood" in header
+
+
+def test_eval_equipment_header_uses_deck_stem(tmp_path: Path) -> None:
+    from eval_phase3_checkpoint import _equipment_header  # noqa: E402
+
+    assets = tmp_path / "Assets"
+    assets.mkdir()
+    (assets / "fab_oscilio_omn.txt").write_text(
+        "oscilio_omn nullrune_hood nullrune_robe star_fall\n"
+        "cosmic_flare_red\n",
+        encoding="utf-8",
+    )
+    bundle = CheckpointBundle(
+        role="p1",
+        checkpoint_dir=tmp_path,
+        metadata={
+            "matchup": "test",
+            "episodes_completed": 1,
+            "game_format": "silver_age",
+            "p1_hero": "oscilio",
+            "p1_deck": "fab_oscilio_omn",
+            "deck_spec": {"equipment_header": "oscilio", "cards": {"cosmic_flare_red": 1}},
+        },
+        weights_path=tmp_path / "weights.json",
+    )
+
+    header = _equipment_header(bundle, assets_path=str(assets))
+    assert header.startswith("oscilio_omn")
+    assert "nullrune_hood" in header
+
+
 def test_resolve_fabrary_equipment_header_uses_richest_asset() -> None:
     repo = Path(__file__).resolve().parents[1]
     assets = repo / "Talishar" / "Assets"

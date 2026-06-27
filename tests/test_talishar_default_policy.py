@@ -165,8 +165,8 @@ def test_choosemultizone_picks_popup_card() -> None:
     assert result == 1, f"Expected popup card (index 1) in choosemultizone, got {result}"
 
 
-def test_main_phase_skips_unaffordable_card() -> None:
-    """Main phase: cards in the unaffordable blacklist should be skipped."""
+def test_main_phase_prefers_higher_power_attack() -> None:
+    """Main phase: policy should prefer the stronger attack when both are legal."""
     state = {
         "turnPhase": {"turnPhase": "M"},
         "playerHand": [
@@ -179,31 +179,8 @@ def test_main_phase_skips_unaffordable_card() -> None:
         {"action_code": 27, "button_input": "1", "zone": "hand", "label": "other_attack_red"},
         {"action_code": 99, "button_input": "",  "zone": "button", "label": "Pass"},
     ]
-    # Without blacklist: should prefer other_attack_red (higher power) or oasis_respite_red
-    result_no_blacklist = choose_talishar_action_index(legal, state)
-    assert result_no_blacklist in (0, 1), f"Expected an attack card, got {result_no_blacklist}"
-
-    # With oasis_respite_red blacklisted: must skip it and play other_attack_red
-    result_blacklisted = choose_talishar_action_index(
-        legal, state, unaffordable=frozenset({"oasis_respite_red"})
-    )
-    assert result_blacklisted == 1, (
-        f"Expected other_attack_red (index 1) when oasis_respite_red is blacklisted, "
-        f"got {result_blacklisted}"
-    )
-
-
-def test_main_phase_passes_when_all_attacks_unaffordable() -> None:
-    """Main phase: if all attack cards are blacklisted, policy should pass."""
-    state = {"turnPhase": {"turnPhase": "M"}}
-    legal = [
-        {"action_code": 27, "button_input": "0", "zone": "hand", "label": "oasis_respite_red"},
-        {"action_code": 99, "button_input": "",  "zone": "button", "label": "Pass"},
-    ]
-    result = choose_talishar_action_index(
-        legal, state, unaffordable=frozenset({"oasis_respite_red"})
-    )
-    assert result == 1, f"Expected pass (index 1) when only attack is blacklisted, got {result}"
+    result = choose_talishar_action_index(legal, state)
+    assert result == 1, f"Expected other_attack_red (index 1), got {result}"
 
 
 def test_choosehand_picks_first_hand_card() -> None:

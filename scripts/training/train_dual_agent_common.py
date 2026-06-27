@@ -2760,27 +2760,15 @@ def _talishar_deck_spec(deck_stem: str) -> dict[str, Any]:
 
     assets = talishar_assets_path()
     resolved = resolve_talishar_deck_stem(assets, deck_stem)
-    asset_file = assets / f"{resolved}.txt"
-    equipment_header = ""
-    if asset_file.is_file():
-        lines = [
-            line.strip()
-            for line in asset_file.read_text(encoding="utf-8", errors="replace").splitlines()
-            if line.strip()
-        ]
-        if lines:
-            equipment_header = lines[0]
     _hero_id, counts = _read_asset_deck(assets, resolved)
-    if not equipment_header and _hero_id:
-        equipment_header = _hero_id
     from flesh_and_blood_rlbridge.talishar_deck_assets import (  # noqa: PLC0415
-        resolve_equipment_header_line,
+        equipment_header_from_deck_stem,
     )
 
-    equipment_header = resolve_equipment_header_line(
-        _hero_id or equipment_header.split()[0] if equipment_header else "",
+    equipment_header = equipment_header_from_deck_stem(
+        deck_stem,
         assets,
-        fallback=equipment_header,
+        fallback=_hero_id,
     )
     return {"equipment_header": equipment_header, "cards": counts}
 
@@ -2975,6 +2963,11 @@ class _CheckpointEvalTracker:
                 "(both seats must use the trained agent, not pass-only fallback)"
             )
         from train_play import _evaluate_p1_vs_fixed_opponent  # noqa: PLC0415
+        from fab_bridge.cpp_eval_live_dashboard import (  # noqa: PLC0415
+            unified_checkpoint_eval_live_path,
+        )
+
+        live_progress_path = unified_checkpoint_eval_live_path(self.out_dir)
 
         metrics = _evaluate_p1_vs_fixed_opponent(
             self.matchup,
@@ -2987,11 +2980,14 @@ class _CheckpointEvalTracker:
             seed=(self.seed + completed) if self.seed is not None else None,
             backend="cpp" if self.matchup.cpp_engine_dir else "auto",
             eval_label="Checkpoint eval (self-play)",
+            live_progress_path=live_progress_path,
         )
         vs_logic: Optional[dict[str, Any]] = None
+        logic_vs_logic: Optional[dict[str, Any]] = None
         if self.matchup.cpp_engine_dir:
             from train_play import (  # noqa: PLC0415
                 evaluate_agent_vs_logic_both_seats,
+                evaluate_logic_vs_logic,
             )
 
             vs_logic = evaluate_agent_vs_logic_both_seats(
@@ -3004,6 +3000,18 @@ class _CheckpointEvalTracker:
                 seed=(self.seed + completed) if self.seed is not None else None,
                 backend="cpp",
                 eval_label_prefix="Checkpoint eval vs logic",
+                live_progress_path=live_progress_path,
+            )
+            logic_vs_logic = evaluate_logic_vs_logic(
+                self.matchup,
+                base_url=self.base_url,
+                game_format=self.game_format,
+                max_steps=self.max_steps,
+                episodes=self.checkpoint_eval_episodes,
+                seed=(self.seed + completed + 100_000) if self.seed is not None else None,
+                backend="cpp",
+                eval_label="Checkpoint eval logic vs logic",
+                live_progress_path=live_progress_path,
             )
         else:
             print(
@@ -3018,6 +3026,7 @@ class _CheckpointEvalTracker:
             "eval_mode": "self_play",
             **metrics,
             "vs_logic": vs_logic,
+            "logic_vs_logic": logic_vs_logic,
         }
         self.log.append(record)
         wr = float(metrics["p1_win_rate"])
@@ -3066,6 +3075,13 @@ class _CheckpointEvalTracker:
                 f"  Checkpoint eval vs logic @ ep {completed}: "
                 f"agent@P1={p1_logic_wr:.1%}  agent@P2={p2_logic_wr:.1%} "
                 f"({self.checkpoint_eval_episodes} games per seat)"
+            )
+        if logic_vs_logic is not None:
+            logic_p1_wr = float(logic_vs_logic.get("p1_win_rate", 0.0) or 0.0)
+            print(
+                f"  Checkpoint eval logic vs logic @ ep {completed}: "
+                f"P1 win%={logic_p1_wr:.1%} "
+                f"({self.checkpoint_eval_episodes} games)"
             )
         maybe_refresh_unified_dashboard(self.out_dir, min_interval_seconds=0.0)
 
@@ -4159,15 +4175,23 @@ def fabrary_sideboard_card_pool(
 
 def resolve_fabrary_equipment_header(deck_entry: dict, assets_path: Path) -> str:
     from flesh_and_blood_rlbridge.talishar_deck_assets import (  # noqa: PLC0415
+        ensure_full_equipment_header,
         resolve_equipment_header_line,
     )
 
     hero_id = str(deck_entry.get("hero_id", "")).removeprefix("hero_")
     explicit = str(deck_entry.get("equipment_header", "") or "").strip()
-    return resolve_equipment_header_line(
+    header = resolve_equipment_header_line(
         hero_id,
         assets_path,
         fallback=explicit or hero_id,
+    )
+    deck_stem = str(deck_entry.get("id", "") or deck_entry.get("deck_id", "") or "").strip()
+    return ensure_full_equipment_header(
+        hero_id,
+        header,
+        assets_path,
+        deck_stem=deck_stem,
     )
 
 

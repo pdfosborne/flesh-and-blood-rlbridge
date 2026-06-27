@@ -182,7 +182,7 @@ def test_talishar_keeps_affordable_play_when_other_cards_can_pitch() -> None:
 
 
 def test_talishar_empty_pitch_window_offers_pass_only() -> None:
-    state = {"turnPhase": {"turnPhase": "P"}, "playerHand": []}
+    state = {"turnPhase": {"turnPhase": "P"}, "playerHand": [], "canPassPhase": True}
     legal = [
         {
             "action_code": 10000,
@@ -204,7 +204,77 @@ def test_talishar_empty_pitch_window_offers_pass_only() -> None:
     assert filtered[0]["action_code"] == 99
 
 
-def test_cpp_empty_pitch_window_offers_pass_only() -> None:
+def test_talishar_empty_pitch_window_offers_cancel_when_pass_ignored() -> None:
+    state = {"turnPhase": {"turnPhase": "P"}, "playerHand": []}
+    legal = [
+        {
+            "action_code": 10000,
+            "button_input": "",
+            "zone": "button",
+            "label": "Cancel",
+        },
+        {
+            "action_code": 99,
+            "button_input": "",
+            "zone": "button",
+            "label": "Pass",
+        },
+    ]
+
+    filtered = filter_legal_actions(state, legal)
+
+    assert len(filtered) == 1
+    assert filtered[0]["action_code"] == 10000
+
+
+def test_instant_strips_unaffordable_hand_play_from_active_layers() -> None:
+    state = {
+        "turnPhase": {"turnPhase": "INSTANT"},
+        "playerPitchCount": 0,
+        "playerHand": [
+            {
+                "action": 27,
+                "actionDataOverride": "0",
+                "cardNumber": "cosmic_flare_red",
+                "cost": 0,
+                "resource": 1,
+            },
+            {
+                "action": 27,
+                "actionDataOverride": "1",
+                "cardNumber": "nebula_duality_red",
+                "cost": 2,
+                "resource": 2,
+            },
+        ],
+        "activeLayers": [
+            {"caption": "Choose an instant"},
+        ],
+    }
+    legal = [
+        {
+            "action_code": 27,
+            "button_input": "1",
+            "zone": "hand",
+            "card_id": "nebula_duality_red",
+            "label": "Nebula Duality",
+        },
+        {
+            "action_code": 99,
+            "button_input": "",
+            "zone": "button",
+            "label": "Pass",
+        },
+    ]
+
+    filtered = filter_legal_actions(state, legal)
+    codes = {_a["action_code"] for _a in filtered}
+
+    assert 27 not in codes
+    assert 99 in codes
+
+
+def test_cpp_empty_pitch_window_offers_cancel_when_pass_ignored() -> None:
     env = _build_cpp_env([], phase=2)
     legal = [
         _FakeAction(
@@ -226,7 +296,7 @@ def test_cpp_empty_pitch_window_offers_pass_only() -> None:
     filtered = env._filter_legal_actions(legal)
 
     assert len(filtered) == 1
-    assert filtered[0].action_code == 99
+    assert filtered[0].action_code == 10000
 
 
 def test_is_affordable_hand_play_helper() -> None:
@@ -839,8 +909,17 @@ def test_talishar_block_phase_strips_undo_even_with_viable_blockers() -> None:
     assert 99 in codes
 
 
-def _bloodrot_yesno_legal() -> list[dict]:
-    return [
+def test_yesno_popup_keeps_both_buttons() -> None:
+    """YESNO prompts are not regex-filtered; loop guard handles stalls instead."""
+    state = {
+        "turnPhase": {"turnPhase": "YESNO"},
+        "playerPitchCount": 0,
+        "playerHand": [],
+        "playerPrompt": {
+            "helpText": "Choose if you want to pay 3 to avoid taking 2 damage",
+        },
+    }
+    legal = [
         {
             "action_code": 20,
             "button_input": "YES",
@@ -856,70 +935,10 @@ def _bloodrot_yesno_legal() -> list[dict]:
             "label": "No",
         },
     ]
-
-
-def test_yesno_strips_yes_when_hand_pitch_cannot_pay_bloodrot() -> None:
-    state = {
-        "turnPhase": {"turnPhase": "YESNO"},
-        "playerPitchCount": 0,
-        "playerHand": [
-            {
-                "cardNumber": "nimblism_red",
-                "action": 27,
-                "actionDataOverride": "0",
-                "resource": 1,
-            }
-        ],
-        "playerPrompt": {
-            "helpText": "Choose if you want to pay 3 to avoid taking 2 damage",
-        },
-        "playerInputPopUp": {
-            "active": True,
-            "popup": {
-                "title": "Choose if you want to pay 3 to avoid taking 2 damage",
-            },
-        },
-    }
-    filtered = filter_legal_actions(state, _bloodrot_yesno_legal())
-
-    assert len(filtered) == 1
-    assert filtered[0]["button_input"] == "NO"
-
-
-def test_yesno_keeps_yes_when_hand_pitch_can_pay_bloodrot() -> None:
-    state = {
-        "turnPhase": {"turnPhase": "YESNO"},
-        "playerPitchCount": 0,
-        "playerHand": [
-            {
-                "cardNumber": "evergreen_blue",
-                "action": 27,
-                "actionDataOverride": "0",
-            }
-        ],
-        "playerPrompt": {
-            "helpText": "Choose if you want to pay 3 to avoid taking 2 damage",
-        },
-    }
-    filtered = filter_legal_actions(state, _bloodrot_yesno_legal())
+    filtered = filter_legal_actions(state, legal)
     buttons = {action["button_input"] for action in filtered}
 
     assert buttons == {"YES", "NO"}
-
-
-def test_yesno_strips_yes_when_only_pool_resources_are_insufficient() -> None:
-    state = {
-        "turnPhase": {"turnPhase": "YESNO"},
-        "playerPitchCount": 2,
-        "playerHand": [],
-        "playerPrompt": {
-            "helpText": "Choose if you want to pay 3 to avoid taking 2 damage",
-        },
-    }
-    filtered = filter_legal_actions(state, _bloodrot_yesno_legal())
-
-    assert len(filtered) == 1
-    assert filtered[0]["button_input"] == "NO"
 
 
 def test_filter_strips_undo_but_keeps_equipment_outside_main_phase() -> None:
@@ -1011,35 +1030,6 @@ def test_filter_strips_revert_to_prior_turn() -> None:
     assert 99 in codes
 
 
-def test_filter_blacklists_arsenal_play_after_abort() -> None:
-    state = {"turnPhase": {"turnPhase": "M"}}
-    legal = [
-        {
-            "action_code": 5,
-            "button_input": "0",
-            "zone": "arsenal",
-            "card_id": "spellblade_assault_red",
-            "label": "Spellblade Assault",
-        },
-        {
-            "action_code": 99,
-            "button_input": "",
-            "zone": "button",
-            "label": "Pass",
-        },
-    ]
-
-    filtered = filter_legal_actions(
-        state,
-        legal,
-        block_blacklist=frozenset({"Spellblade Assault"}),
-    )
-    codes = {_a["action_code"] for _a in filtered}
-
-    assert 5 not in codes
-    assert 99 in codes
-
-
 def test_talishar_sanitize_blocks_undo_submission() -> None:
     env = _build_talishar_env()
     state = {"turnPhase": {"turnPhase": "INSTANT"}, "playerHand": []}
@@ -1054,3 +1044,70 @@ def test_talishar_sanitize_blocks_undo_submission() -> None:
     mode, button = env._sanitize_revert_submission(10000, "", legal, state)
     assert mode == 99
     assert button == ""
+
+
+def test_no_priority_waiting_prompt_collapses_to_pass_only() -> None:
+    state = {
+        "turnPhase": {"turnPhase": "INSTANT"},
+        "havePriority": False,
+        "playerPrompt": {
+            "helpText": "Waiting for other player to choose an instant",
+        },
+        "playerHand": [
+            {
+                "action": 27,
+                "actionDataOverride": "0",
+                "cardNumber": "stroke_of_foresight_yellow",
+                "cost": 0,
+                "resource": 2,
+            },
+        ],
+    }
+    legal = [
+        {
+            "action_code": 27,
+            "button_input": "0",
+            "zone": "hand",
+            "card_id": "stroke_of_foresight_yellow",
+            "label": "Stroke of Foresight",
+        },
+        {
+            "action_code": 99,
+            "button_input": "",
+            "zone": "button",
+            "label": "Pass",
+        },
+    ]
+
+    filtered = filter_legal_actions(state, legal)
+
+    assert len(filtered) == 1
+    assert filtered[0]["action_code"] == 99
+
+
+def test_have_priority_false_without_waiting_text_still_pass_only() -> None:
+    state = {
+        "turnPhase": {"turnPhase": "INSTANT"},
+        "havePriority": False,
+        "playerHand": [],
+    }
+    legal = [
+        {
+            "action_code": 27,
+            "button_input": "0",
+            "zone": "hand",
+            "card_id": "some_card",
+            "label": "Some Card",
+        },
+        {
+            "action_code": 99,
+            "button_input": "",
+            "zone": "button",
+            "label": "Pass",
+        },
+    ]
+
+    filtered = filter_legal_actions(state, legal)
+
+    assert len(filtered) == 1
+    assert filtered[0]["action_code"] == 99

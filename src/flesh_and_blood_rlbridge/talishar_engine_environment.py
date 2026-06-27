@@ -89,12 +89,27 @@ from .frontend_action_overlay import (
     playwright_update_overlay_script,
 )
 from .deck_context import load_episode_context
+from .obs_alignment import (
+    align_observation_for_cpp_training,
+    cpp_obs_alignment_enabled,
+)
 from .player_observation import (
     PLAYER_OBS_SCHEMA_VERSION,
     player_observation_payload,
     player_observation_vector,
 )
-from .legal_action_filter import filter_legal_actions
+from .legal_action_filter import (
+    filter_legal_actions,
+    is_waiting_for_other_player,
+    player_choosing_in_snapshot,
+    player_must_wait,
+)
+from .state_loop_guard import (
+    DEFAULT_LOOP_REPEAT_THRESHOLD,
+    DEFAULT_MAX_STEPS_PER_TURN,
+    TurnLoopGuard,
+    first_pass_action,
+)
 from .talishar_default_policy import (
     choose_talishar_action_index,
     RepeatActionTracker,
@@ -137,6 +152,10 @@ _DEFAULT_RENDER_WIDTH = 1920
 _DEFAULT_RENDER_HEIGHT = 1080
 _TRUNCATION_PENALTY = -0.1  # negative reward for hitting max_turns without a winner
 _STEP_PENALTY = -0.001  # small per-step penalty to encourage faster game completion
+_PRIORITY_POLL_INTERVAL = 0.15
+_PRIORITY_MAX_POLLS = 120
+_PRIORITY_DEADLOCK_POLLS = 12
+_PRIORITY_STEP_SYNC_POLLS = 40
 _HTTP_REQUEST_RETRIES = 6
 _HTTP_RETRY_BASE_SLEEP_S = 0.5
 _DISABLE_CARD_HOVER_STORAGE_KEY = "talishar-disable-card-hover"
@@ -205,6 +224,10 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         Maximum number of agent steps before the episode is truncated.
         Truncation (no winner) applies a negative reward to discourage idle loops.
         Repeating the same action within a turn (3+ times) incurs a small penalty.
+    max_steps_per_turn:
+        Maximum agent decisions per player turn before Pass is forced automatically.
+    loop_repeat_threshold:
+        Force Pass after this many visits to the same decision point in one turn.
     render_mode:
         Rendering mode (``"human"``, ``"ansi"``, or ``None``).
     frontend_url:
@@ -230,6 +253,8 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         timeout: float = 15.0,
         request_timeout: float = 30.0,
         max_turns: int = 2000,
+        max_steps_per_turn: int = DEFAULT_MAX_STEPS_PER_TURN,
+        loop_repeat_threshold: int = DEFAULT_LOOP_REPEAT_THRESHOLD,
         render_mode: Optional[str] = None,
         local_deck_name: Optional[str] = "Ira",
         opponent_deck_name: Optional[str] = None,
@@ -255,6 +280,9 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         verbose: bool = False,
         # Record per-step combat/turn traces and board-state action stats.
         enable_combat_tracker: bool = False,
+        # When True (default), apply the same obs neutralization used by the C++
+        # fast engine so policies trained on C++ see matching inputs here.
+        cpp_obs_alignment: Optional[bool] = None,
         # When ``render_mode="rgb_array"``, launch Playwright headless (default) or
         # visible for live viewing.
         playwright_headless: bool = True,
@@ -281,6 +309,8 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         self._timeout = timeout
         self._request_timeout = request_timeout
         self._max_turns = max_turns
+        self._max_steps_per_turn = max_steps_per_turn
+        self._loop_repeat_threshold = loop_repeat_threshold
         self._block_max_pitch_value = block_max_pitch_value
         self._block_min_resource_cost = block_min_resource_cost
         self._render_mode = render_mode
@@ -304,6 +334,11 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             engine_name="talishar_http",
             enabled=self._enable_combat_tracker,
         )
+        self._cpp_obs_alignment = (
+            cpp_obs_alignment_enabled()
+            if cpp_obs_alignment is None
+            else bool(cpp_obs_alignment)
+        )
 
         # HTTP session with connection pooling and automatic retry on transient
         # server errors.  One persistent TCP connection is reused for all steps
@@ -323,20 +358,15 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         self._opp_hp: int = 20
         self._initialized: bool = False
         self._repeat_tracker = RepeatActionTracker()
-        # Cycle-breaker for sample_action: tracks (legal_action_fingerprint, last_idx)
-        self._sample_action_last_fp: Optional[str] = None
-        self._sample_action_repeat: int = 0
+        self._loop_guard = TurnLoopGuard(
+            max_steps_per_turn=max_steps_per_turn,
+            loop_repeat_threshold=loop_repeat_threshold,
+        )
         # Whether playerDeckCount > 0 has ever been observed this episode.
         # Guards deck-exhaustion game-over checks so they do NOT fire during the
         # pre-game equipment-selection phase, when Talishar returns
         # playerDeckCount=0 / empty playerHand before decks are shuffled.
         self._deck_nonzero_ever_seen: bool = False
-        # Pitch-window "unaffordable card" loop prevention
-        self._last_m_label: Optional[str] = None
-        self._last_block_label: Optional[str] = None
-        self._last_played_label: Optional[str] = None
-        self._unaffordable_labels: set[str] = set()
-        self._last_turn_no_for_unaffordable: int = -1
         # Multi-select popup tracking (mode=16 picks + mode=19 submit payload)
         self._multi_select_inputs: list[str] = []
         self._pending_chk_inputs: Optional[list[str]] = None
@@ -375,6 +405,8 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                         self._cpp_env = _CppEnv(
                             engine_dir=cpp_engine_dir,
                             max_turns=max_turns,
+                            max_steps_per_turn=max_steps_per_turn,
+                            loop_repeat_threshold=loop_repeat_threshold,
                             deck1=lookup_deck1,
                             deck2=lookup_deck2,
                             enable_combat_tracker=self._enable_combat_tracker,
@@ -396,6 +428,8 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                     lookup_deck2,
                     cache_dir=cpp_engine_cache_dir,
                     max_turns=max_turns,
+                    max_steps_per_turn=max_steps_per_turn,
+                    loop_repeat_threshold=loop_repeat_threshold,
                     enable_combat_tracker=self._enable_combat_tracker,
                 )
             if self._cpp_env is not None:
@@ -590,6 +624,12 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             self._cpp_env.clear_combat_tracker()  # type: ignore[union-attr]
             return
         self._combat_tracker.clear()
+
+    def live_display_snapshot(self) -> dict[str, Any]:
+        """JSON-safe board snapshot for live eval dashboards (C++ engine only)."""
+        if self._using_cpp and self._cpp_env is not None:
+            return self._cpp_env.live_display_snapshot()  # type: ignore[union-attr]
+        return {"engine": "talishar_http", "status": "unsupported"}
 
     # ── HTTP helpers ──────────────────────────────────────────────────────────
 
@@ -876,18 +916,140 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         except (ValueError, TypeError):
             pass
 
+    def _fetch_both_player_states(self) -> dict[int, dict[str, Any]]:
+        """Return full snapshots for P1 and P2."""
+        return {
+            pid: self._fetch_state(player_id=pid, last_update=0)
+            for pid in (1, 2)
+        }
+
+    def _infer_priority_player(
+        self,
+        states: dict[int, dict[str, Any]],
+    ) -> Optional[int]:
+        """Guess who should act when ``havePriority`` is missing on both seats."""
+        for pid in (1, 2):
+            state = states.get(pid, {})
+            if state.get("havePriority", False):
+                return pid
+            if self._is_game_over(state):
+                return pid
+
+        waiting = [
+            pid
+            for pid in (1, 2)
+            if is_waiting_for_other_player(states.get(pid, {}))
+        ]
+        if len(waiting) == 1:
+            return 3 - waiting[0]
+
+        choosing = [
+            pid
+            for pid in (1, 2)
+            if player_choosing_in_snapshot(states.get(pid, {}))
+        ]
+        if len(choosing) == 1:
+            return choosing[0]
+        if len(choosing) == 2 and len(waiting) == 1:
+            return next(pid for pid in choosing if pid != waiting[0])
+        return None
+
+    def _adopt_player_state(
+        self,
+        state: dict[str, Any],
+        acting_player_id: int,
+    ) -> dict[str, Any]:
+        """Sync wrapper bookkeeping to *acting_player_id*'s snapshot."""
+        self._acting_player_id = acting_player_id
+        self._auth_key = self._auth_key_for(acting_player_id)
+        self._apply_last_update(state)
+        return state
+
+    def _resolve_priority_holder(self) -> dict[str, Any]:
+        """Find whichever player should act, using priority flags and prompts."""
+        states = self._fetch_both_player_states()
+        for pid in (1, 2):
+            state = states[pid]
+            if state.get("havePriority", False) or self._is_game_over(state):
+                return self._adopt_player_state(state, pid)
+
+        inferred = self._infer_priority_player(states)
+        if inferred is not None:
+            return self._adopt_player_state(states[inferred], inferred)
+
+        return self._adopt_player_state(
+            states.get(self._acting_player_id, states[1]),
+            self._acting_player_id,
+        )
+
+    def _ensure_acting_priority(
+        self,
+        *,
+        max_polls: int = _PRIORITY_STEP_SYNC_POLLS,
+    ) -> dict[str, Any]:
+        """Poll until some player has priority or we can infer who should act."""
+        interval = _PRIORITY_POLL_INTERVAL
+        for i in range(max_polls):
+            states = self._fetch_both_player_states()
+            error_count = 0
+            for pid in (1, 2):
+                state = states[pid]
+                err_msg = state.get("error", "")
+                is_transient_error = (
+                    isinstance(err_msg, str) and "too short" in err_msg and i < 10
+                )
+                if state.get("havePriority", False) or self._is_game_over(state):
+                    if not is_transient_error:
+                        return self._adopt_player_state(state, pid)
+                if err_msg and not is_transient_error:
+                    error_count += 1
+            if error_count == 2:
+                return self._adopt_player_state({"error": "game_crashed"}, 1)
+            if i >= _PRIORITY_DEADLOCK_POLLS and i % 3 == 0:
+                inferred = self._infer_priority_player(states)
+                if inferred is not None:
+                    inferred_state = states[inferred]
+                    if (
+                        inferred_state.get("havePriority", False)
+                        or player_choosing_in_snapshot(inferred_state)
+                        or not is_waiting_for_other_player(inferred_state)
+                    ):
+                        return self._adopt_player_state(inferred_state, inferred)
+            time.sleep(interval)
+        return self._resolve_priority_holder()
+
+    def _return_priority_resync(self, state: dict[str, Any]) -> StepResult:
+        """Return an observation for the priority holder without submitting."""
+        self._player_hp = int(state.get("playerHealth", self._player_hp))
+        self._opp_hp = int(state.get("opponentHealth", self._opp_hp))
+        self._last_state = state
+        legal_actions = self._legal_actions(state)
+        obs = self._encode_observation(state, legal_actions)
+        step_info: dict[str, Any] = {
+            "legal_actions": legal_actions,
+            "turn": state.get("turnNo", 0),
+            "player_hp": self._player_hp,
+            "opponent_hp": self._opp_hp,
+            "acting_player_id": self._acting_player_id,
+            "self_play": self._self_play,
+            "repeat_streak": self._repeat_tracker.repeat_streak,
+            "repeat_penalty": 0.0,
+            "priority_resync": True,
+            "combat_tracker": self._tracker_stub(),
+        }
+        if self._last_observation_vec is not None:
+            step_info["observation_vec"] = self._last_observation_vec
+        return StepResult(
+            observation=obs,
+            reward=_STEP_PENALTY,
+            terminated=self._is_game_over(state),
+            truncated=False,
+            info=step_info,
+        )
+
     def _sync_acting_player(self) -> dict[str, Any]:
         """Set ``_acting_player_id`` to whichever player currently has priority."""
-        # Full snapshots per player — sharing ``_last_update`` across player IDs
-        # returns empty deltas and breaks priority detection.
-        for pid in (1, 2):
-            probe = self._fetch_state(player_id=pid, last_update=0)
-            if probe.get("havePriority", False) or self._is_game_over(probe):
-                self._acting_player_id = pid
-                self._auth_key = self._auth_key_for(pid)
-                self._apply_last_update(probe)
-                return probe
-        return self._fetch_state(player_id=self._acting_player_id, last_update=0)
+        return self._resolve_priority_holder()
 
     def _adopt_server_state(self, state: dict[str, Any], acting_player_id: int) -> str:
         """Sync wrapper state from a GetNextTurn snapshot and return observation."""
@@ -978,8 +1140,8 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
 
     def _wait_for_any_priority(
         self,
-        max_polls: int = 60,
-        interval: float = 0.15,
+        max_polls: int = _PRIORITY_MAX_POLLS,
+        interval: float = _PRIORITY_POLL_INTERVAL,
     ) -> dict[str, Any]:
         """Self-play step helper: check BOTH players each poll until either has priority.
 
@@ -1002,18 +1164,21 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         between P1 and P2 on every iteration so it finds the acting player
         within one round-trip after the server processes the submitted action.
 
-        Timeout: ``max_polls * interval`` seconds (default 9 s) before
-        falling back to ``_sync_acting_player``.
+        When neither seat reports priority for several polls, prompt/caption
+        heuristics infer the correct acting player (e.g. instant windows where
+        one seat shows "waiting for other player").
+
+        Timeout: ``max_polls * interval`` seconds (default 18 s) before
+        falling back to ``_resolve_priority_holder``.
         """
         for i in range(max_polls):
+            states = self._fetch_both_player_states()
             error_count = 0
             for pid in (1, 2):
-                state = self._fetch_state(player_id=pid, last_update=0)
+                state = states[pid]
                 has_priority = state.get("havePriority", False)
                 is_over = self._is_game_over(state)
                 err_msg = state.get("error", "")
-                # "gamestate too short" is a transient file-write race — keep polling.
-                # Only count it as a hard error when it persists past the first few polls.
                 is_transient_error = (
                     isinstance(err_msg, str) and "too short" in err_msg
                     and i < 10
@@ -1027,28 +1192,37 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                           + (f"  ERROR: {err_msg!r}" if err_msg else ""),
                           flush=True)
                 if (has_priority or is_over) and not is_transient_error:
-                    self._acting_player_id = pid
-                    self._auth_key = self._auth_key_for(pid)
-                    self._apply_last_update(state)
-                    return state
+                    return self._adopt_player_state(state, pid)
                 if err_msg and not is_transient_error:
                     error_count += 1
-            # If BOTH players returned non-transient error states the game has
-            # crashed — return immediately rather than burning the full timeout.
             if error_count == 2:
                 if self._verbose:
                     print("    [wait] both players returned fatal error — "
                           "ending episode", flush=True)
                 return {"error": "game_crashed"}
+            if i >= _PRIORITY_DEADLOCK_POLLS and i % 3 == 0:
+                inferred = self._infer_priority_player(states)
+                if inferred is not None:
+                    inferred_state = states[inferred]
+                    if (
+                        inferred_state.get("havePriority", False)
+                        or player_choosing_in_snapshot(inferred_state)
+                        or not is_waiting_for_other_player(inferred_state)
+                    ):
+                        if self._verbose:
+                            print(
+                                f"    [wait] inferred priority → P{inferred}",
+                                flush=True,
+                            )
+                        return self._adopt_player_state(inferred_state, inferred)
             if self._verbose and i > 0 and i % 5 == 0:
                 print(f"    [wait] poll {i+1}/{max_polls}: no priority yet...",
                       flush=True)
             time.sleep(interval)
         if self._verbose:
-            print(f"    [wait] timed out after {max_polls} polls — falling back to sync",
+            print(f"    [wait] timed out after {max_polls} polls — resolving holder",
                   flush=True)
-        # Fallback — should rarely be reached
-        return self._sync_acting_player()
+        return self._resolve_priority_holder()
 
     # ── State helpers ─────────────────────────────────────────────────────────
 
@@ -1342,11 +1516,32 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         legal_actions: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         """Delegate to :func:`legal_action_filter.filter_legal_actions`."""
-        return filter_legal_actions(
+        return filter_legal_actions(state, legal_actions)
+
+    def _loop_guard_for_step(
+        self,
+        state: dict[str, Any],
+        legal_actions: list[dict[str, Any]],
+    ) -> Any:
+        turn_no = int(state.get("turnNo", 0) or 0)
+        return self._loop_guard.check(
             state,
             legal_actions,
-            block_blacklist=frozenset(getattr(self, "_unaffordable_labels", set())),
+            turn_no=turn_no,
+            acting_player_id=self._acting_player_id,
         )
+
+    def _force_pass_submission(
+        self,
+        legal_actions: list[dict[str, Any]],
+    ) -> tuple[int, str]:
+        pass_action = first_pass_action(legal_actions)
+        if pass_action is not None:
+            return (
+                _dp_to_int(pass_action.get("action_code", 0)),
+                str(pass_action.get("button_input", "") or ""),
+            )
+        return self._first_pass_action(legal_actions)
 
     def _first_pass_action(
         self,
@@ -1516,6 +1711,10 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             game_over=self._is_game_over(state),
             raw_talishar_state=state,
         )
+        if self._cpp_obs_alignment:
+            self._last_observation_vec = align_observation_for_cpp_training(
+                self._last_observation_vec
+            )
         obs["observationVec"] = player_observation_payload(self._last_observation_vec)
         return json.dumps(obs, separators=(",", ":"))
 
@@ -1833,13 +2032,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         self._opp_hp = int(self._last_state.get("opponentHealth", 20))
         self._steps = 0
         self._deck_nonzero_ever_seen = False
-        self._sample_action_last_fp = None
-        self._sample_action_repeat = 0
-        self._last_m_label = None
-        self._last_block_label = None
-        self._last_played_label = None
-        self._unaffordable_labels = set()
-        self._last_turn_no_for_unaffordable = -1
+        self._loop_guard.reset()
         self._multi_select_inputs = []
         self._pending_chk_inputs = None
         self._reset_repeat_tracking(
@@ -1901,11 +2094,31 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             return result
 
         state = self._last_state
+        if not self._is_game_over(state):
+            prior_acting = self._acting_player_id
+            if not state.get("havePriority", False) or player_must_wait(state):
+                state = self._ensure_acting_priority()
+                if (
+                    (not state.get("havePriority", False) or player_must_wait(state))
+                    and self._self_play
+                ):
+                    state = self._wait_for_any_priority(
+                        max_polls=_PRIORITY_STEP_SYNC_POLLS,
+                    )
+            if player_must_wait(state):
+                return self._return_priority_resync(state)
+            if self._acting_player_id != prior_acting:
+                return self._return_priority_resync(state)
+            self._last_state = state
+
         legal_actions = self._legal_actions(state)
-        phase_before = _dp_get_phase(state)
         before_snapshot = self._tracker_state_snapshot(state, legal_actions)
 
+        loop_guard = self._loop_guard_for_step(state, legal_actions)
+
         mode, button_input = self._parse_action(action, legal_actions)
+        if loop_guard.force_pass:
+            mode, button_input = self._force_pass_submission(legal_actions)
         mode, button_input = self._sanitize_revert_submission(
             mode,
             button_input,
@@ -1917,32 +2130,6 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             mode,
             button_input,
         )
-
-        if phase_before in _dp_block_phases and mode == 27:
-            chosen = next(
-                (a for a in legal_actions
-                 if _dp_to_int(a.get("action_code", 0)) == mode
-                 and str(a.get("button_input", "")) == button_input),
-                None,
-            )
-            if chosen is not None and chosen.get("zone") == "hand":
-                self._last_block_label = str(chosen.get("label", "") or "")
-
-        if phase_before != "p" and mode in (5, 27, 36, 37, 38):
-            chosen = next(
-                (a for a in legal_actions
-                 if _dp_to_int(a.get("action_code", 0)) == mode
-                 and str(a.get("button_input", "")) == button_input),
-                None,
-            )
-            if chosen is not None:
-                label = str(
-                    chosen.get("label", "")
-                    or chosen.get("card_id", "")
-                    or ""
-                )
-                if label:
-                    self._last_played_label = label
 
         if self._verbose:
             print(f"    [step {self._steps + 1}] P{self._acting_player_id} "
@@ -2023,18 +2210,6 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         self._opp_hp = new_opp_hp
         self._last_state = new_state
 
-        if phase_before == "p" and mode in (99, 10000):
-            for label in (
-                self._last_block_label,
-                self._last_m_label,
-                self._last_played_label,
-            ):
-                if label:
-                    self._unaffordable_labels.add(label)
-            self._last_block_label = None
-            self._last_m_label = None
-            self._last_played_label = None
-
         new_phase = _dp_get_phase(new_state)
         if not (
             new_phase.startswith("multichoose")
@@ -2070,6 +2245,10 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                 "self_play": self._self_play,
                 "repeat_streak": self._repeat_tracker.repeat_streak,
                 "repeat_penalty": repeat_penalty,
+                "loop_guard_forced_pass": loop_guard.force_pass,
+                "loop_guard_reason": loop_guard.reason,
+                "turn_steps": loop_guard.turn_steps,
+                "decision_loop_streak": loop_guard.loop_streak,
                 "combat_tracker": self._tracker_stub(tracker_event),
         }
         if self._last_observation_vec is not None:
@@ -2314,12 +2493,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         return self._render_ansi()
 
     def sample_action(self) -> str:
-        """Return a heuristic legal action index as a string.
-
-        Includes a safety cycle-breaker: if the identical set of legal actions
-        is presented 5 times in a row (same codes + labels) the policy is
-        clearly looping, so pick a uniformly random legal action to break out.
-        """
+        """Return a heuristic legal action index as a string."""
         # ── Fast-path: delegate to C++ engine ─────────────────────────────────
         if self._using_cpp:
             return self._cpp_env.sample_action()  # type: ignore[union-attr]
@@ -2330,89 +2504,25 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         if not legal:
             return "pass"
 
-        # Fingerprint the legal-action set (codes + labels, order-stable)
-        fp = "|".join(
-            f"{a.get('action_code',0)}:{a.get('label','')}" for a in legal
-        )
-        if fp == self._sample_action_last_fp:
-            self._sample_action_repeat += 1
-        else:
-            self._sample_action_last_fp = fp
-            self._sample_action_repeat = 1
-
-        if self._sample_action_repeat >= 4:
-            # Stuck: policy keeps choosing the same action on the same state.
-            # Pick a uniformly random legal action to break the loop.
-            self._sample_action_repeat = 0
-            import random as _random
-            return str(_random.randrange(len(legal)))
-
-        # Detect turn change — reset unaffordable card blacklist each turn.
-        _turn_no = int(self._last_state.get("turnNo", 0) or 0)
-        if _turn_no != self._last_turn_no_for_unaffordable:
-            self._last_turn_no_for_unaffordable = _turn_no
-            self._unaffordable_labels = set()
-
-        # Extract current phase inline (mirrors _get_phase in the policy module).
-        _tp = self._last_state.get("turnPhase", {})
-        _phase = str(
-            (_tp.get("turnPhase", "") if isinstance(_tp, dict) else _tp) or ""
-        ).strip().lower()
-
-        # ── Empty pitch window: abort with Pass and blacklist the card ────────
-        # Cancel (10000) is Talishar undo and must never be submitted.  Pass also
-        # reverts the pending play, so blacklist hand/arsenal labels first.
-        if _phase == "p":
-            _pitch_cards = [
-                a for a in legal
-                if a.get("zone") == "hand" and int(a.get("action_code", 0)) == 27
-            ]
-            if not _pitch_cards:
-                _abort_label = (
-                    self._last_block_label
-                    or self._last_m_label
-                    or self._last_played_label
-                )
-                if _abort_label:
-                    self._unaffordable_labels.add(_abort_label)
-                    self._last_block_label = None
-                    self._last_m_label = None
-                    self._last_played_label = None
-                _pi = next(
-                    (i for i, a in enumerate(legal) if int(a.get("action_code", 0)) == 99),
-                    0,
-                )
-                return str(_pi)
+        loop_guard = self._loop_guard_for_step(self._last_state, legal)
+        if loop_guard.force_pass:
+            pass_action = first_pass_action(legal)
+            if pass_action is not None:
+                for index, action in enumerate(legal):
+                    if action is pass_action or action == pass_action:
+                        return str(index)
+            pass_index = next(
+                (i for i, a in enumerate(legal) if _is_pass_action(a)),
+                0,
+            )
+            return str(pass_index)
 
         idx = choose_talishar_action_index(
-            legal, self._last_state,
-            unaffordable=frozenset(self._unaffordable_labels),
+            legal,
+            self._last_state,
             max_pitch_value=self._block_max_pitch_value,
             min_resource_cost=self._block_min_resource_cost,
         )
-
-        # Track the last card played so we can blacklist it after an empty pitch.
-        if _phase != "p":
-            _chosen = legal[idx] if 0 <= idx < len(legal) else None
-            if _chosen is not None and int(_chosen.get("action_code", 0)) in (3, 5, 27, 36, 37, 38):
-                _label = str(
-                    _chosen.get("label", "")
-                    or _chosen.get("card_id", "")
-                    or ""
-                )
-                if _label:
-                    if (
-                        int(_chosen.get("action_code", 0)) in (3, 27)
-                        and _chosen.get("zone") in ("equipment", "hand")
-                        and _phase == "m"
-                    ):
-                        self._last_m_label = _label
-                    self._last_played_label = _label
-                else:
-                    self._last_m_label = None
-            else:
-                self._last_m_label = None
-
         return str(idx)
 
 

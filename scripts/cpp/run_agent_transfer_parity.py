@@ -16,6 +16,10 @@ sys.path.insert(0, str(REPO_ROOT))
 
 import numpy as np  # noqa: E402
 
+from flesh_and_blood_rlbridge.obs_alignment import (  # noqa: E402
+    align_observation_for_cpp_training,
+    observation_vectors_aligned,
+)
 from flesh_and_blood_rlbridge.cpp_engine_environment import (  # noqa: E402
     CppEngineEnvironment,
     is_cpp_engine_available,
@@ -88,6 +92,7 @@ def _run_talishar_eval(
         max_turns=max_steps,
         self_play=True,
         use_cpp_engine=False,
+        cpp_obs_alignment=True,
     )
     outcomes: list[str] = []
     steps_list: list[int] = []
@@ -160,7 +165,12 @@ def run_policy_agreement_episode(
             step_tal = env_tal.step(str(action_index))
             set_mirror = getattr(_cpp_inner_env(env_cpp), "set_talishar_mirror_state", None)
             if callable(set_mirror):
-                set_mirror(_talishar_parity_snapshot(step_tal))
+                set_mirror(
+                    _talishar_parity_snapshot(
+                        step_tal,
+                        raw_state=getattr(env_tal, "_last_state", None),
+                    )
+                )
             step_cpp = env_cpp.step(action_descriptor)
         except Exception as exc:
             return {
@@ -178,20 +188,15 @@ def run_policy_agreement_episode(
 
         tal_vec = _obs_vec(env_tal)
         cpp_vec = _obs_vec(env_cpp)
-        if tal_vec.shape != (PLAYER_OBS_DIM,) or cpp_vec.shape != (PLAYER_OBS_DIM,):
-            obs_vec_mismatches.append(
-                f"step {step}: vec shape tal={tal_vec.shape} cpp={cpp_vec.shape}"
-            )
-        else:
-            max_delta = float(np.max(np.abs(tal_vec - cpp_vec)))
-            if max_delta > 0.05:
-                obs_vec_mismatches.append(f"step {step}: max_vec_delta={max_delta:.4f}")
+        ok_aligned, align_msg = observation_vectors_aligned(tal_vec, cpp_vec, atol=0.05)
+        if not ok_aligned:
+            obs_vec_mismatches.append(f"step {step}: {align_msg}")
 
         legal_tal = len(step_tal.info.get("legal_actions", []) or [])
         legal_cpp = len(step_cpp.info.get("legal_actions", []) or [])
         legal = max(legal_tal, legal_cpp, 1)
-        act_tal = _policy_action(agent, tal_vec, legal)
-        act_cpp = _policy_action(agent, cpp_vec, legal)
+        act_tal = _policy_action(agent, align_observation_for_cpp_training(tal_vec), legal)
+        act_cpp = _policy_action(agent, align_observation_for_cpp_training(cpp_vec), legal)
         steps += 1
         if act_tal == act_cpp:
             policy_matches += 1
@@ -315,6 +320,7 @@ def main() -> int:
         max_turns=80,
         self_play=True,
         use_cpp_engine=False,
+        cpp_obs_alignment=True,
     )
     env_cpp = CppEngineEnvironment(
         engine_dir=str(engine_dir),

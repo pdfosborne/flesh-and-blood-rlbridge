@@ -25,10 +25,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
+import numpy as np
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from flesh_and_blood_rlbridge.talishar_engine_environment import TalisharEngineEnvironment
 from flesh_and_blood_rlbridge.cpp_engine_environment import get_engine_dir
+from flesh_and_blood_rlbridge.obs_alignment import (
+    align_observation_for_cpp_training,
+    observation_vectors_aligned,
+)
 from flesh_and_blood_rlbridge.player_observation import (
     COMBAT_CHAIN_END,
     COMBAT_CHAIN_OFF,
@@ -317,7 +323,15 @@ def _compare_observation_vec_slices(tal: dict[str, Any], cpp: dict[str, Any]) ->
             f"expected={PLAYER_OBS_DIM}",
         )
 
-    mismatches: list[str] = []
+    aligned_ok, aligned_msg = observation_vectors_aligned(
+        np.asarray(tal_vec, dtype=np.float64),
+        np.asarray(cpp_vec, dtype=np.float64),
+        atol=OBS_VEC_TOLERANCE,
+    )
+    if aligned_ok:
+        return True, ""
+
+    mismatches: list[str] = [f"aligned: {aligned_msg}"]
     for idx in range(min(CONTEXT_DIM + SCALAR_COUNT, OBS_VEC_HAND_OFF)):
         tal_v = float(tal_vec[idx])
         cpp_v = float(cpp_vec[idx])
@@ -683,10 +697,12 @@ def _cpp_inner_env(env_cpp: Any) -> Any:
     return getattr(env_cpp, "_cpp_env", None) or env_cpp
 
 
-def _talishar_parity_snapshot(result: Any) -> dict[str, Any]:
+def _talishar_parity_snapshot(result: Any, *, raw_state: Any = None) -> dict[str, Any]:
     """Build a parity payload from a Talishar reset/step result."""
     parsed, _ = _parse_observation("Talishar", getattr(result, "observation", {}))
     snapshot: dict[str, Any] = {"state": parsed or {}}
+    if isinstance(raw_state, dict) and raw_state:
+        snapshot["raw_state"] = raw_state
     info = getattr(result, "info", None)
     if isinstance(info, dict):
         legal_actions = info.get("legal_actions")
@@ -738,10 +754,19 @@ def _cpp_observation_after_mirror(env_cpp: Any) -> str:
     return str(encode(legal))
 
 
-def _align_cpp_reset_result(env_cpp: Any, reset_tal: Any, reset_cpp: Any) -> Any:
+def _align_cpp_reset_result(
+    env_cpp: Any,
+    reset_tal: Any,
+    reset_cpp: Any,
+    *,
+    env_tal: Any = None,
+) -> Any:
     inner = _cpp_inner_env(env_cpp)
     apply_payload = getattr(inner, "apply_talishar_mirror_payload", None)
-    snapshot = _talishar_parity_snapshot(reset_tal)
+    snapshot = _talishar_parity_snapshot(
+        reset_tal,
+        raw_state=getattr(env_tal, "_last_state", None) if env_tal is not None else None,
+    )
     if callable(apply_payload):
         apply_payload(snapshot)
     else:
@@ -935,7 +960,7 @@ def run_parity_episode(
             }
         )
         reset_tal = _build_talishar_reset_snapshot(env_tal)
-        reset_cpp = _align_cpp_reset_result(env_cpp, reset_tal, reset_cpp)
+        reset_cpp = _align_cpp_reset_result(env_cpp, reset_tal, reset_cpp, env_tal=env_tal)
     except Exception as exc:
         report.episodes_failed += 1
         _record_discrepancy(
@@ -963,7 +988,12 @@ def run_parity_episode(
             step_tal = env_tal.step(str(action_index))
             set_mirror = getattr(_cpp_inner_env(env_cpp), "set_talishar_mirror_state", None)
             if callable(set_mirror):
-                set_mirror(_talishar_parity_snapshot(step_tal))
+                set_mirror(
+                    _talishar_parity_snapshot(
+                        step_tal,
+                        raw_state=getattr(env_tal, "_last_state", None),
+                    )
+                )
             step_cpp = env_cpp.step(action_descriptor)
         except Exception as exc:
             episode_failed = True
@@ -1177,6 +1207,7 @@ def _create_parity_envs(
         "max_turns": max_turns,
         "self_play": True,
         "enable_combat_tracker": True,
+        "cpp_obs_alignment": True,
     }
     env_tal = TalisharEngineEnvironment(**common, use_cpp_engine=False)
     env_cpp = TalisharEngineEnvironment(

@@ -667,8 +667,6 @@ def _is_viable_block_action(
 def _apply_block_phase_filter(
     state: dict[str, Any],
     filtered: list[dict[str, Any]],
-    *,
-    block_blacklist: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     """During block/defense phases, only offer viable blocks or pass."""
     filtered = [a for a in filtered if not _is_revert_action(a)]
@@ -683,7 +681,6 @@ def _apply_block_phase_filter(
         a for a in filtered
         if _is_hand_block_action(a)
         and _is_viable_block_action(a, state)
-        and str(a.get("label", "") or "") not in block_blacklist
     ]
     if viable_blocks:
         return viable_blocks + pass_actions + auxiliary
@@ -705,7 +702,6 @@ def choose_talishar_action_index(
     legal_actions: list[dict[str, Any]],
     state: Optional[dict[str, Any]] = None,
     *,
-    unaffordable: frozenset[str] = frozenset(),
     max_pitch_value: int = _MAX_PITCH_VALUE,
     min_resource_cost: int = _MIN_RESOURCE_COST,
 ) -> int:
@@ -717,9 +713,6 @@ def choose_talishar_action_index(
         List of legal action dicts from ``_extract_legal_actions``.
     state:
         Current Talishar game-state dict.
-    unaffordable:
-        Set of card labels known to cause an empty pitch window — skip them
-        in the main phase to avoid an infinite loop.
     max_pitch_value:
         Block phase filter — only use cards whose pitch/resource value is
         **≤ this** as blockers.  Default 999 (no filter).
@@ -744,7 +737,7 @@ def choose_talishar_action_index(
       7. DEFENSE phase (D) → block with highest-defense card ≥ threshold, else pass.
       8. MAIN phase (M) and unrecognised:
          a. Yes/confirm popup buttons.
-         b. Best attack (action-27 hand card, scored by power, minus unaffordable).
+         b. Best attack (action-27 hand card, scored by power).
          c. Other non-pass button/popup actions.
          d. Pass.
          NOTE: Equip (action 3) is intentionally skipped — the pitch window it
@@ -989,9 +982,6 @@ def choose_talishar_action_index(
     for i in non_pass:
         action = legal_actions[i]
         if _to_int(action.get("action_code", 0)) != 27:
-            continue
-        # Skip cards known to be unaffordable (returned empty pitch window).
-        if action.get("label", "") in unaffordable:
             continue
         card = _match_action_card(action, state, zone_cache)
         av = float(_estimate_attack(action, state, card))

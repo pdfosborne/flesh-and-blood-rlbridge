@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from fab_bridge.cpp_eval_live_dashboard import CPP_EVAL_LIVE_DASHBOARD
 from fab_bridge.unified_results import (
     RUN_MANIFEST,
     iter_unified_matchup_dirs,
@@ -60,6 +61,36 @@ def _vs_logic_win_rates(row: dict[str, Any]) -> tuple[Optional[float], Optional[
     if p2_wr is not None:
         return None, p2_wr, p2_wr
     return None, None, None
+
+
+def _logic_vs_logic_win_rate(row: dict[str, Any]) -> Optional[float]:
+    """P1-seat win rate when both seats use the C++ logic policy."""
+    logic_vs_logic = row.get("logic_vs_logic")
+    if not isinstance(logic_vs_logic, dict):
+        return None
+    if logic_vs_logic.get("p1_win_rate") is not None:
+        return float(logic_vs_logic["p1_win_rate"])
+    return None
+
+
+def _logic_vs_agent_win_rate(row: dict[str, Any]) -> Optional[float]:
+    """Average logic-policy win rate vs the trained agent (both seats)."""
+    vs_logic = row.get("vs_logic")
+    if not isinstance(vs_logic, dict):
+        return None
+    p1_seat = vs_logic.get("agent_p1_seat")
+    p2_seat = vs_logic.get("agent_p2_seat")
+    rates: list[float] = []
+    if isinstance(p1_seat, dict) and p1_seat.get("p2_win_rate") is not None:
+        rates.append(float(p1_seat["p2_win_rate"]))
+    if isinstance(p2_seat, dict) and p2_seat.get("p1_win_rate") is not None:
+        rates.append(float(p2_seat["p1_win_rate"]))
+    if not rates:
+        _, _, agent_avg = _vs_logic_win_rates(row)
+        if agent_avg is not None:
+            return 1.0 - agent_avg
+        return None
+    return sum(rates) / len(rates)
 
 
 def _apply_checkpoint_history_to_row(
@@ -245,6 +276,9 @@ def collect_unified_run_state(run_dir: Path) -> dict[str, Any]:
         if not isinstance(row, dict) or row.get("episodes_completed") is None:
             continue
         vs_p1, vs_p2, vs_avg = _vs_logic_win_rates(row)
+        timeout_rate: Optional[float] = None
+        if row.get("timeout_rate") is not None:
+            timeout_rate = float(row["timeout_rate"])
         checkpoint_points.append(
             {
                 "episode": int(row.get("episodes_completed") or 0),
@@ -255,6 +289,10 @@ def collect_unified_run_state(run_dir: Path) -> dict[str, Any]:
                 "vs_logic_agent_p1": vs_p1,
                 "vs_logic_agent_p2": vs_p2,
                 "vs_logic_win_rate": vs_avg,
+                "logic_vs_agent_win_rate": _logic_vs_agent_win_rate(row),
+                "logic_vs_logic_win_rate": _logic_vs_logic_win_rate(row),
+                "agent_vs_agent_win_rate": float(row.get("p1_win_rate") or 0.0),
+                "timeout_rate": timeout_rate,
             }
         )
 
@@ -281,6 +319,11 @@ def collect_unified_run_state(run_dir: Path) -> dict[str, Any]:
         )
         overall_pct = ((matchups_completed + intra) / matchups_total) * 100.0
 
+    cpp_eval_live_dashboard = run_dir / CPP_EVAL_LIVE_DASHBOARD
+    cpp_eval_live_dashboard_path = (
+        str(cpp_eval_live_dashboard) if cpp_eval_live_dashboard.is_file() else ""
+    )
+
     return {
         "run_dir": str(run_dir),
         "format": str(manifest.get("format") or "—"),
@@ -305,6 +348,7 @@ def collect_unified_run_state(run_dir: Path) -> dict[str, Any]:
         "completed_matchups": completed_rows,
         "overall_pct": overall_pct,
         "complete": status == "complete",
+        "cpp_eval_live_dashboard_path": cpp_eval_live_dashboard_path,
     }
 
 
@@ -382,6 +426,19 @@ def render_unified_random_matchups_html(
         "complete": "Complete",
     }.get(status, status.title())
 
+    cpp_live_path = str(state.get("cpp_eval_live_dashboard_path") or "").strip()
+    if cpp_live_path:
+        cpp_live_link = (
+            f'<p class="muted">C++ checkpoint eval replay: '
+            f'<a href="{html.escape(CPP_EVAL_LIVE_DASHBOARD)}">'
+            f"{html.escape(CPP_EVAL_LIVE_DASHBOARD)}</a></p>"
+        )
+    else:
+        cpp_live_link = (
+            '<p class="muted">C++ checkpoint eval replay appears here during checkpoint eval '
+            f"({html.escape(CPP_EVAL_LIVE_DASHBOARD)}).</p>"
+        )
+
     ckpt_chart = _svg_winrate_chart(
         state.get("checkpoint_points") or [],
         target_episodes=target_eps,
@@ -408,28 +465,23 @@ def render_unified_random_matchups_html(
 
     ckpt_rows = ""
     for row in reversed(state.get("checkpoint_points") or []):
-        vs_p1 = row.get("vs_logic_agent_p1")
-        vs_p2 = row.get("vs_logic_agent_p2")
-        vs_detail = ""
-        if vs_p1 is not None or vs_p2 is not None:
-            vs_detail = (
-                f' title="P1 seat: {_pct(vs_p1)}, P2 seat: {_pct(vs_p2)}"'
-            )
         ckpt_rows += (
             f"<tr><td>{int(row.get('episode', 0))}</td>"
-            f"<td>{_pct(row.get('win_rate'))}</td>"
-            f"<td{vs_detail}>{_pct(row.get('vs_logic_win_rate'))}</td>"
-            f"<td>{_pct(vs_p1)}</td>"
-            f"<td>{_pct(vs_p2)}</td>"
-            f"<td>{int(row.get('p1_wins', 0))}</td>"
-            f"<td>{int(row.get('p2_wins', 0))}</td></tr>"
+            f"<td>{_pct(row.get('logic_vs_logic_win_rate'))}</td>"
+            f"<td>{_pct(row.get('vs_logic_win_rate'))}</td>"
+            f"<td>{_pct(row.get('logic_vs_agent_win_rate'))}</td>"
+            f"<td>{_pct(row.get('agent_vs_agent_win_rate'))}</td>"
+            f"<td>{_pct(row.get('timeout_rate'))}</td></tr>"
         )
     ckpt_table = (
         f'<table class="history"><thead><tr>'
-        f"<th>Episode</th><th>Self-play P1%</th>"
-        f"<th>Vs logic avg%</th><th>Vs logic P1 seat</th><th>Vs logic P2 seat</th>"
-        f"<th>Self-play P1 wins</th><th>Self-play P2 wins</th>"
-        f"</tr></thead><tbody>{ckpt_rows or '<tr><td colspan=\"7\" class=\"muted\">No checkpoint eval yet</td></tr>'}</tbody></table>"
+        f"<th>Episode</th>"
+        f"<th>Logic win% vs logic</th>"
+        f"<th>Agent win% vs logic</th>"
+        f"<th>Logic vs agent win%</th>"
+        f"<th>Agent win% vs agent</th>"
+        f"<th>Timeout %</th>"
+        f"</tr></thead><tbody>{ckpt_rows or '<tr><td colspan=\"6\" class=\"muted\">No checkpoint eval yet</td></tr>'}</tbody></table>"
     )
 
     return f"""<!DOCTYPE html>
@@ -468,6 +520,8 @@ def render_unified_random_matchups_html(
     .history th, .history td {{ text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }}
     .history th {{ color: var(--muted); font-weight: 500; }}
     .muted {{ color: var(--muted); }}
+    a {{ color: var(--primary); text-decoration: none; }}
+    a:hover {{ text-decoration: underline; }}
     .chart {{ width: 100%; max-width: 520px; }}
     .chart-line {{ stroke: var(--primary); stroke-width: 2; }}
     .chart-dot {{ fill: var(--primary); }}
@@ -507,6 +561,7 @@ def render_unified_random_matchups_html(
 
     <div class="card">
       <h2>Checkpoint eval (current matchup)</h2>
+      {cpp_live_link}
       {ckpt_chart}
       {ckpt_table}
     </div>

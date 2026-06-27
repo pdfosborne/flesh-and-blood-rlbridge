@@ -389,24 +389,45 @@ def _deck_cards(bundle: CheckpointBundle, *, assets_path: str = "") -> dict[str,
 
 def _equipment_header(bundle: CheckpointBundle, *, assets_path: str = "") -> str:
     header = str(bundle.deck_spec.get("equipment_header", "") or "")
-    # The hero ID must be the first token on the equipment header line so
-    # Talishar knows which hero card to load.  Older checkpoints may store
-    # the header without the hero ID prefix (e.g. just the equipment pieces).
-    # Recover it from the p1_hero / p2_hero fields saved in metadata.
     hero_key = f"{bundle.role}_hero"           # "p1_hero" or "p2_hero"
+    deck_key = f"{bundle.role}_deck"           # "p1_deck" or "p2_deck"
     hero_id = (
         str(bundle.metadata.get(hero_key, "") or "")
         .replace("-", "_")                      # API stores dashes, header uses underscores
         .strip()
     )
+    deck_stem = str(bundle.metadata.get(deck_key, "") or "").strip()
     if assets_path:
         from flesh_and_blood_rlbridge.talishar_deck_assets import (  # noqa: PLC0415
+            ensure_full_equipment_header,
+            equipment_header_from_deck_stem,
             resolve_equipment_header_line,
         )
 
-        header = resolve_equipment_header_line(hero_id, assets_path, fallback=header)
+        if deck_stem:
+            header = equipment_header_from_deck_stem(
+                deck_stem,
+                assets_path,
+                fallback=header,
+            )
+        else:
+            header = resolve_equipment_header_line(hero_id, assets_path, fallback=header)
+        header = ensure_full_equipment_header(
+            hero_id or header.split()[0] if header else "",
+            header,
+            assets_path,
+            deck_stem=deck_stem,
+        )
+    if hero_id and header:
+        first = header.split()[0]
+        if first == hero_id or first.startswith(f"{hero_id}_") or hero_id.startswith(first):
+            return header
+        if len(header.split()) > 1:
+            return header
+    if hero_id and not header:
+        return hero_id
     if hero_id and not header.startswith(hero_id):
-        header = (hero_id + " " + header).strip()
+        return (hero_id + " " + header).strip()
     return header
 
 
@@ -1237,15 +1258,49 @@ def _evaluate_checkpoint(
         p2_agent = p1_agent
     else:
         # Preset mode or dual mode where P2 deck cards weren't stored.
-        # Resolve to a valid Talishar Assets deck name from hero metadata.
-        p2_deck_name = _resolve_p2_preset_deck_name(p1_bundle, p2_bundle)
+        # Always write a fresh asset deck so line-1 equipment is complete.
+        preset_stem = _resolve_p2_preset_deck_name(p1_bundle, p2_bundle)
+        p2_hero = (
+            (p2_bundle.own_hero if p2_bundle is not None else "")
+            or p1_bundle.p2_hero
+            or preset_stem
+        ).replace("-", "_")
+        p2_cards = (
+            _deck_cards(p2_bundle, assets_path=assets_path)
+            if p2_bundle is not None
+            else {}
+        )
+        if not p2_cards:
+            from flesh_and_blood_rlbridge.deck_context import _read_asset_deck  # noqa: PLC0415
+
+            _, counts = _read_asset_deck(Path(assets_path), preset_stem)
+            p2_cards = {str(card_id): int(count) for card_id, count in counts.items()}
+        from flesh_and_blood_rlbridge.talishar_deck_assets import (  # noqa: PLC0415
+            ensure_full_equipment_header,
+            equipment_header_from_deck_stem,
+        )
+
+        p2_header = ensure_full_equipment_header(
+            p2_hero,
+            equipment_header_from_deck_stem(preset_stem, assets_path),
+            assets_path,
+            deck_stem=preset_stem,
+        )
+        p2_deck_name = f"eval_p2_{uuid.uuid4().hex[:8]}"
+        p2_deck_file = _write_deck_file(
+            p2_cards,
+            p2_header,
+            p2_deck_name,
+            assets_path,
+        )
+        cleanup_files.append(p2_deck_file)
         if p2_agent is not None:
             opponent_label = (
-                f"preset deck {p2_deck_name} "
+                f"preset deck {preset_stem} "
                 f"+ trained P2 agent ({p2_bundle.episodes_completed} eps)"  # type: ignore[union-attr]
             )
         else:
-            opponent_label = f"preset deck {p2_deck_name} (P2 default heuristic)"
+            opponent_label = f"preset deck {preset_stem} (P2 default heuristic)"
 
     print(f"  P1 deck      : {p1_deck_name}")
     print(f"  P2 deck      : {p2_deck_name}")

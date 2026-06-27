@@ -1716,6 +1716,87 @@ def _maybe_refresh_sideboard_dashboard(
         pass
 
 
+def _cpp_eval_live_aggregate(
+    *,
+    episodes_completed: int,
+    wins: int,
+    losses: int,
+    draws: int,
+    timeouts: int,
+    errors: int,
+) -> dict[str, Any]:
+    return {
+        "episodes_completed": int(episodes_completed),
+        "wins": int(wins),
+        "losses": int(losses),
+        "draws": int(draws),
+        "timeouts": int(timeouts),
+        "errors": int(errors),
+    }
+
+
+def _touch_cpp_eval_live_replay(
+    live_progress_path: Optional[Path],
+    env: Any,
+    *,
+    episode: int,
+    episodes_total: int,
+    step: int,
+    action_index: Optional[int] = None,
+    eval_label: str,
+    p1_policy: Any,
+    p2_policy: Any,
+    aggregate: dict[str, Any],
+    episode_done: bool = False,
+    force_html: bool = False,
+) -> None:
+    if live_progress_path is None:
+        return
+    try:
+        from fab_bridge.cpp_eval_live_dashboard import (  # noqa: PLC0415
+            collect_cpp_eval_live_state,
+            cpp_eval_live_paths,
+            update_cpp_eval_live_replay,
+            write_cpp_eval_live_dashboard,
+            write_cpp_eval_live_state,
+        )
+
+        if force_html:
+            state_path, html_path = cpp_eval_live_paths(live_progress_path)
+            state = collect_cpp_eval_live_state(
+                env,
+                episode=episode,
+                episodes_total=episodes_total,
+                step=step,
+                action_index=action_index,
+                eval_label=eval_label,
+                p1_policy=_policy_label(p1_policy),
+                p2_policy=_policy_label(p2_policy),
+                aggregate=aggregate,
+                episode_done=episode_done,
+            )
+            if episode_done and int(aggregate.get("episodes_completed", 0) or 0) >= episodes_total:
+                state["complete"] = True
+            write_cpp_eval_live_state(state_path, state)
+            write_cpp_eval_live_dashboard(state_path, html_path)
+            return
+        update_cpp_eval_live_replay(
+            live_progress_path,
+            env,
+            episode=episode,
+            episodes_total=episodes_total,
+            step=step,
+            action_index=action_index,
+            eval_label=eval_label,
+            p1_policy=_policy_label(p1_policy),
+            p2_policy=_policy_label(p2_policy),
+            aggregate=aggregate,
+            episode_done=episode_done,
+        )
+    except Exception:
+        pass
+
+
 def _reset_talishar_http_session(env: Any) -> None:
     reset = getattr(env, "_reset_http_session", None)
     if callable(reset):
@@ -1838,6 +1919,24 @@ def _evaluate_fast_policy_matchup(
         state = active_env.fast_reset(seed=ep_seed, starting_player_id=1 + (ep % 2))
         terminated = truncated = False
         steps = 0
+        _touch_cpp_eval_live_replay(
+            live_progress_path,
+            active_env,
+            episode=ep + 1,
+            episodes_total=episodes,
+            step=0,
+            eval_label=eval_label,
+            p1_policy=p1_policy,
+            p2_policy=p2_policy,
+            aggregate=_cpp_eval_live_aggregate(
+                episodes_completed=ep,
+                wins=wins,
+                losses=losses,
+                draws=draws,
+                timeouts=timeouts,
+                errors=errors,
+            ),
+        )
 
         while steps < max_steps:
             acting = int(state.get("acting_player_id", 1) or 1)
@@ -1865,6 +1964,26 @@ def _evaluate_fast_policy_matchup(
             terminated = bool(state.get("terminated", False))
             truncated = bool(state.get("truncated", False))
             steps += 1
+            _touch_cpp_eval_live_replay(
+                live_progress_path,
+                active_env,
+                episode=ep + 1,
+                episodes_total=episodes,
+                step=steps,
+                action_index=action,
+                eval_label=eval_label,
+                p1_policy=p1_policy,
+                p2_policy=p2_policy,
+                aggregate=_cpp_eval_live_aggregate(
+                    episodes_completed=ep,
+                    wins=wins,
+                    losses=losses,
+                    draws=draws,
+                    timeouts=timeouts,
+                    errors=errors,
+                ),
+                episode_done=terminated or truncated,
+            )
             if terminated or truncated:
                 break
 
@@ -1937,6 +2056,27 @@ def _evaluate_fast_policy_matchup(
                 total=episodes,
                 progress_interval=progress_interval,
             )
+            if completed == episodes:
+                _touch_cpp_eval_live_replay(
+                    live_progress_path,
+                    active_env,
+                    episode=ep + 1,
+                    episodes_total=episodes,
+                    step=steps,
+                    eval_label=eval_label,
+                    p1_policy=p1_policy,
+                    p2_policy=p2_policy,
+                    aggregate=_cpp_eval_live_aggregate(
+                        episodes_completed=completed,
+                        wins=wins,
+                        losses=losses,
+                        draws=draws,
+                        timeouts=timeouts,
+                        errors=errors,
+                    ),
+                    episode_done=True,
+                    force_html=True,
+                )
 
     if episodes > 1 and len(end_state_keys) <= 2 and (wins == 0 or losses == 0):
         print(
@@ -2390,6 +2530,55 @@ def evaluate_fixed_matchup(
     )
 
 
+def evaluate_logic_vs_logic(
+    matchup: "Matchup",
+    *,
+    base_url: str,
+    game_format: str,
+    max_steps: int,
+    episodes: int,
+    seed: Optional[int] = None,
+    backend: str = "cpp",
+    eval_label: str = "Eval logic vs logic",
+    live_progress_path: Optional[Path] = None,
+) -> dict[str, Any]:
+    """Evaluate C++ logic policy on both seats (deck matchup baseline)."""
+    empty: dict[str, Any] = {
+        "episodes": 0,
+        "p1_wins": 0,
+        "p2_wins": 0,
+        "draws": 0,
+        "timeouts": 0,
+        "errors": 0,
+        "p1_win_rate": 0.0,
+        "p2_win_rate": 0.0,
+        "draw_rate": 0.0,
+        "timeout_rate": 0.0,
+        "p1_policy": "logic",
+        "p2_policy": "logic",
+    }
+    if episodes <= 0:
+        return empty
+    metrics = evaluate_policy_matchup(
+        matchup,
+        LOGIC_POLICY,
+        LOGIC_POLICY,
+        base_url=base_url,
+        game_format=game_format,
+        max_steps=max_steps,
+        episodes=episodes,
+        seed=seed,
+        backend=backend,
+        eval_label=eval_label,
+        live_progress_path=live_progress_path,
+    )
+    return {
+        **metrics,
+        "p1_policy": "logic",
+        "p2_policy": "logic",
+    }
+
+
 def evaluate_agent_vs_logic_both_seats(
     matchup: "Matchup",
     agent: Any,
@@ -2401,6 +2590,7 @@ def evaluate_agent_vs_logic_both_seats(
     seed: Optional[int] = None,
     backend: str = "cpp",
     eval_label_prefix: str = "Eval vs logic",
+    live_progress_path: Optional[Path] = None,
 ) -> dict[str, Any]:
     """Evaluate an agent against the C++ logic policy from both seats."""
     empty: dict[str, Any] = {
@@ -2426,6 +2616,7 @@ def evaluate_agent_vs_logic_both_seats(
         seed=seed,
         backend=backend,
         eval_label=f"{eval_label_prefix} (agent @ P1)",
+        live_progress_path=live_progress_path,
     )
     agent_as_p2 = evaluate_policy_matchup(
         matchup,
@@ -2438,6 +2629,7 @@ def evaluate_agent_vs_logic_both_seats(
         seed=(seed + 50_000) if seed is not None else None,
         backend=backend,
         eval_label=f"{eval_label_prefix} (agent @ P2)",
+        live_progress_path=live_progress_path,
     )
     return {
         "agent_p1_seat": {

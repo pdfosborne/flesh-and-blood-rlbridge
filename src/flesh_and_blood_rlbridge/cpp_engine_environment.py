@@ -73,7 +73,18 @@ from .player_observation import (
     player_observation_vector,
 )
 from .legal_action_filter import align_filtered_actions, filter_legal_actions
+from .obs_alignment import (
+    align_observation_for_cpp_training,
+    cpp_obs_alignment_enabled,
+    merge_talishar_raw_state,
+)
 from .obs_encoding import observation_fingerprint
+from .state_loop_guard import (
+    DEFAULT_LOOP_REPEAT_THRESHOLD,
+    DEFAULT_MAX_STEPS_PER_TURN,
+    LoopGuardResult,
+    TurnLoopGuard,
+)
 from .talishar_default_policy import (
     RepeatActionTracker,
     choose_talishar_action_index,
@@ -241,6 +252,10 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         (i.e. ``results/cpp_engines/<matchup_key>/``).
     max_turns:
         Maximum steps before episode truncation.
+    max_steps_per_turn:
+        Maximum agent decisions per player turn before Pass is forced.
+    loop_repeat_threshold:
+        Force Pass after this many visits to the same decision point in one turn.
     deck1, deck2:
         Deck names recorded in info dicts (cosmetic only).
     enable_combat_tracker:
@@ -255,12 +270,16 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         *,
         engine_dir: str | Path,
         max_turns: int = 2000,
+        max_steps_per_turn: int = DEFAULT_MAX_STEPS_PER_TURN,
+        loop_repeat_threshold: int = DEFAULT_LOOP_REPEAT_THRESHOLD,
         deck1: str = "",
         deck2: str = "",
         enable_combat_tracker: bool = False,
     ) -> None:
         self._engine_dir = Path(engine_dir).resolve()
         self._max_turns = max_turns
+        self._max_steps_per_turn = max_steps_per_turn
+        self._loop_repeat_threshold = loop_repeat_threshold
         self._deck1 = deck1
         self._deck2 = deck2
         self._enable_combat_tracker = bool(enable_combat_tracker)
@@ -276,6 +295,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         self._turn_no_override: Optional[int] = None
         self._talishar_overlay: Optional[dict[str, Any]] = None
         self._talishar_mirror_state: Optional[dict[str, Any]] = None
+        self._talishar_raw_state: Optional[dict[str, Any]] = None
         self._talishar_parity_extra: Optional[dict[str, Any]] = None
 
         # Load the compiled module once at construction time
@@ -288,6 +308,10 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         self._p2_hp: int = 20
         self._acting_player: int = 1  # 1-indexed to match Talishar convention
         self._repeat_tracker = RepeatActionTracker()
+        self._loop_guard = TurnLoopGuard(
+            max_steps_per_turn=max_steps_per_turn,
+            loop_repeat_threshold=loop_repeat_threshold,
+        )
         self._last_observation_vec: Optional[np.ndarray] = None
         self._p1_episode_context: Optional[EpisodeContext] = None
         self._p2_episode_context: Optional[EpisodeContext] = None
@@ -352,7 +376,8 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             getattr(gs, "p1_pitch_size" if opp == 1 else "p2_pitch_size", 0) or 0
         )
 
-        return {
+        return merge_talishar_raw_state(
+            {
             "playerEquipment": self._cpp_zone_cards(acting, "equipment"),
             "opponentEquipment": self._cpp_zone_cards(opp, "equipment"),
             "playerArse": self._cpp_zone_cards(acting, "arsenal"),
@@ -374,8 +399,12 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             "playerAP": 0,
             "opponentAP": 0,
             "canPassPhase": True,
+            "amIActivePlayer": True,
+            "turnPlayer": acting,
             "firstPlayer": int(getattr(gs, "first_player", 1) or 1),
-        }
+            },
+            getattr(self, "_talishar_raw_state", None),
+        )
 
     def _obs_vec_from_cpp(self, legal_count: Optional[int] = None) -> Optional[np.ndarray]:
         """Use native C++ player_observation_vector when the engine provides it."""
@@ -412,6 +441,8 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             else 0,
             raw_talishar_state=self._raw_state_from_gs(),
         )
+        if cpp_obs_alignment_enabled():
+            vec = align_observation_for_cpp_training(vec)
         self._last_observation_vec = vec
         return vec
 
@@ -461,6 +492,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         self._turn_no_override = None
         self._talishar_overlay = None
         self._talishar_mirror_state = None
+        self._talishar_raw_state = None
         self._talishar_parity_extra = None
 
     def _observation_shaped_state(self, state: dict[str, Any]) -> dict[str, Any]:
@@ -569,6 +601,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         self._hand_playability = {self._acting_player: shaped["playable_indices"]}
         self._flow_phase = str(shaped["turn_phase"] or self._flow_phase)
         self._turn_no_override = int(shaped["turn_no"])
+        self._talishar_raw_state = dict(state)
         self._talishar_overlay = {
             "acting_player_id": self._acting_player,
             "turn_phase": self._flow_phase,
@@ -587,6 +620,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
 
     def clear_talishar_state(self) -> None:
         self._talishar_overlay = None
+        self._talishar_raw_state = None
         self._talishar_parity_extra = None
 
     def set_talishar_mirror_state(self, state: Optional[dict[str, Any]]) -> None:
@@ -617,6 +651,10 @@ class CppEngineEnvironment(rlbridgeEnvironment):
 
         if state:
             self.apply_talishar_state(state)
+
+        raw_state = payload.get("raw_state")
+        if isinstance(raw_state, dict) and raw_state:
+            self._talishar_raw_state = dict(raw_state)
 
         info_legal = extra.get("legal_actions")
         if isinstance(info_legal, list) and self._talishar_overlay is not None:
@@ -942,13 +980,10 @@ class CppEngineEnvironment(rlbridgeEnvironment):
 
     def _obs_vec_for_fast_path(self) -> np.ndarray:
         legal = self._filter_legal_actions(self._legal_actions())
-        legal_count = len(legal)
-        vec = self._obs_vec_from_cpp(legal_count)
+        obs_json = self._encode_observation(legal)
+        vec = self._last_observation_vec
         if vec is None:
-            obs_json = self._encode_observation(legal)
-            vec = self._last_observation_vec
-            if vec is None:
-                vec = observation_fingerprint(obs_json)
+            vec = observation_fingerprint(obs_json)
         self._last_observation_vec = np.asarray(vec, dtype=np.float64)
         return self._last_observation_vec
 
@@ -998,6 +1033,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             turn_no=int(getattr(self._gs, "turn_no", 0) or 0),
             acting_player_id=int(self._acting_player),
         )
+        self._loop_guard.reset()
         legal_count = len(self._filter_legal_actions(self._legal_actions()))
         obs_vec = self._obs_vec_for_fast_path()
         self._last_observation_vec = obs_vec
@@ -1037,21 +1073,127 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             "turn_no": int(getattr(self._gs, "turn_no", 0) or 0),
         }
 
+    def _cpp_fast_index_for_chosen(self, chosen: Any) -> int:
+        """Map a filtered legal action onto the C++ ``fast_step_index`` cursor."""
+        cpp_action = self._resolve_cpp_action(chosen)
+        raw_legal = list(self._gs.get_legal_actions())
+        if cpp_action is not None:
+            chosen_dict = self._action_to_dict(cpp_action)
+            for index, candidate in enumerate(raw_legal):
+                if candidate is cpp_action:
+                    return index
+                if self._action_to_dict(candidate) == chosen_dict:
+                    return index
+        if self._is_pass_like(chosen):
+            for index, candidate in enumerate(raw_legal):
+                if self._is_pass_like(candidate):
+                    return index
+        return 0
+
+    def _fast_step_scripted_flow(
+        self,
+        chosen: Any,
+        *,
+        prev_p1: int,
+        prev_p2: int,
+        before_snapshot: Optional[dict[str, Any]],
+        legal_before: list[dict[str, Any]],
+        chosen_dict: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Apply opening/block flow actions without the C++ fast-step cursor."""
+        flow_handled = False
+        if self._is_pass_like(chosen):
+            flow_handled = self._handle_flow_pass()
+        elif self._handle_flow_hand_action(chosen):
+            flow_handled = True
+        if not flow_handled:
+            flow_handled = self._handle_flow_pass()
+
+        self._steps += 1
+        terminated = self._is_game_over()
+        truncated = not terminated and self._steps >= self._max_turns
+        repeat_pen = self._repeat_penalty(
+            int(chosen_dict.get("action_code", 0) or 0),
+            str(chosen_dict.get("button_input", "") or ""),
+        )
+        reward = float(
+            self._compute_reward(prev_p1, prev_p2, terminated, truncated, repeat_pen)
+        )
+        if truncated:
+            reward += float(_TRUNCATION_PENALTY)
+        self._p1_hp = int(self._gs.p1_health)
+        self._p2_hp = int(self._gs.p2_health)
+        obs_vec = self._obs_vec_for_fast_path()
+        self._last_observation_vec = obs_vec
+        if self._enable_combat_tracker and before_snapshot is not None:
+            new_legal = self._filter_legal_actions(self._legal_actions())
+            after_snapshot = self._tracker_state_snapshot(new_legal)
+            contract_legal = self._contract_legal_actions(new_legal)
+            self._append_synthetic_log(
+                before_snapshot,
+                chosen_dict,
+                after_snapshot,
+                prev_p1,
+                prev_p2,
+                terminated,
+                truncated,
+            )
+            self._combat_tracker.record_step(
+                before_snapshot=before_snapshot,
+                after_snapshot=after_snapshot,
+                action=chosen_dict,
+                legal_before=legal_before,
+                legal_after=contract_legal,
+                reward=float(reward),
+                terminated=terminated,
+                truncated=truncated,
+                combat_log_lines=self._synthetic_combat_log,
+            )
+        return {
+            "obs_vec": obs_vec,
+            "legal_count": len(self._filter_legal_actions(self._legal_actions())),
+            "acting_player_id": self._acting_player,
+            "reward": reward,
+            "terminated": terminated,
+            "truncated": truncated,
+            "winner": int(getattr(self._gs, "winner", -1) or -1),
+            "p1_health": int(self._p1_hp),
+            "p2_health": int(self._p2_hp),
+            "p1_deck": int(getattr(self._gs, "p1_deck_size", 0) or 0),
+            "p2_deck": int(getattr(self._gs, "p2_deck_size", 0) or 0),
+            "turn_no": self._obs_turn_no(),
+        }
+
     def fast_step_index(self, action_index: int) -> dict[str, Any]:
         """Step by compact legal-action index without building JSON or pybind actions."""
         assert self._gs is not None, "call fast_reset() first"
         legal = self._filter_legal_actions(self._legal_actions())
+        loop_guard = self._loop_guard_for_step(legal)
         before_snapshot = (
             self._tracker_state_snapshot(legal) if self._enable_combat_tracker else None
         )
         legal_before = self._legal_to_dicts(legal) if self._enable_combat_tracker else []
         prev_p1 = int(self._p1_hp)
         prev_p2 = int(self._p2_hp)
-        chosen_dict: dict[str, Any] = {}
-        if legal:
+        if legal and not loop_guard.force_pass:
             idx = min(max(0, int(action_index)), len(legal) - 1)
-            chosen_dict = self._action_to_dict(legal[idx])
-        result = self._gs.fast_step_index(int(action_index))
+            chosen = legal[idx]
+        else:
+            chosen = self._pass_like_action_from_legal(legal)
+        chosen_dict = self._action_to_dict(chosen)
+
+        if self._synthetic_flow_legal_actions() is not None:
+            return self._fast_step_scripted_flow(
+                chosen,
+                prev_p1=prev_p1,
+                prev_p2=prev_p2,
+                before_snapshot=before_snapshot,
+                legal_before=legal_before,
+                chosen_dict=chosen_dict,
+            )
+
+        cpp_idx = self._cpp_fast_index_for_chosen(chosen)
+        result = self._gs.fast_step_index(int(cpp_idx))
         self._steps += 1
         terminated = bool(result.terminated)
         truncated = not terminated and self._steps >= self._max_turns
@@ -1101,6 +1243,10 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             "p1_deck": int(getattr(self._gs, "p1_deck_size", 0) or 0),
             "p2_deck": int(getattr(self._gs, "p2_deck_size", 0) or 0),
             "turn_no": int(result.turn_no),
+            "loop_guard_forced_pass": loop_guard.force_pass,
+            "loop_guard_reason": loop_guard.reason,
+            "turn_steps": loop_guard.turn_steps,
+            "decision_loop_streak": loop_guard.loop_streak,
         }
 
     def _is_pass_like(self, action: Any) -> bool:
@@ -1221,6 +1367,21 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         )
         return align_filtered_actions(working, filtered_dicts, to_descriptor=self._action_to_dict)
 
+    def _loop_guard_for_step(self, legal: list[Any]) -> LoopGuardResult:
+        state = self._synthetic_talishar_state()
+        return self._loop_guard.check(
+            state,
+            [self._action_to_dict(action) for action in legal],
+            turn_no=self._obs_turn_no(),
+            acting_player_id=self._acting_player,
+        )
+
+    def _pass_like_action_from_legal(self, legal: list[Any]) -> Any:
+        for action in legal:
+            if self._is_pass_like(action):
+                return action
+        return self._make_pass_action()
+
     def _phase_code(self) -> str:
         """Return the Talishar-like phase token exposed in observations."""
         return self._effective_turn_phase()
@@ -1247,6 +1408,16 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         except (TypeError, ValueError):
             return 0
 
+    def _playable_indices_from_legal(self, legal: list[Any]) -> set[str]:
+        playable: set[str] = set()
+        for action in legal:
+            if int(getattr(action, "action_code", 0) or 0) != 27:
+                continue
+            if str(getattr(action, "zone", "") or "").strip().lower() != "hand":
+                continue
+            playable.add(str(getattr(action, "button_input", "") or ""))
+        return playable
+
     def _hand_entry_from_legal(
         self,
         legal: list[Any],
@@ -1255,6 +1426,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         card_id: str,
     ) -> dict[str, Any]:
         key = str(index)
+        playable = self._playable_indices_from_legal(legal)
         for action in legal:
             if str(getattr(action, "zone", "") or "").strip().lower() != "hand":
                 continue
@@ -1265,13 +1437,13 @@ class CppEngineEnvironment(rlbridgeEnvironment):
                 override = button if code == 4 else key
                 return {
                     "cardID": card_id,
-                    "action": code,
+                    "action": 27 if key in playable else code,
                     "actionDataOverride": override,
-                    "label": "",
+                    "label": str(getattr(action, "label", "") or ""),
                 }
         return {
             "cardID": card_id,
-            "action": 0,
+            "action": 27 if key in playable else 0,
             "actionDataOverride": key,
             "label": "",
         }
@@ -1418,11 +1590,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             "legalActions": legal_entries,
             "legal_actions": self._legal_to_dicts(legal),
         }
-        cpp_vec = self._obs_vec_from_cpp(len(legal))
-        if cpp_vec is not None:
-            obs_vec = cpp_vec
-        else:
-            obs_vec = self._obs_vec_for_state(obs, legal)
+        obs_vec = self._obs_vec_for_state(obs, legal)
         obs["obsSchemaVersion"] = PLAYER_OBS_SCHEMA_VERSION
         obs["observationVec"] = player_observation_payload(obs_vec)
         obs_json = json.dumps(obs, separators=(",", ":"))
@@ -1658,6 +1826,50 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         self._combat_tracker.clear()
         self._synthetic_combat_log = []
 
+    def _card_display_rows(self, cards: Any) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        if not isinstance(cards, list):
+            return rows
+        for card in cards:
+            rows.append(
+                {
+                    "card_id": str(getattr(card, "card_id", "") or ""),
+                    "name": str(getattr(card, "name", "") or ""),
+                    "cost": int(getattr(card, "cost", 0) or 0),
+                    "pitch": int(getattr(card, "pitch", 0) or 0),
+                    "power": int(getattr(card, "power", 0) or 0),
+                    "defense": int(getattr(card, "defense", 0) or 0),
+                }
+            )
+        return rows
+
+    def live_display_snapshot(self) -> dict[str, Any]:
+        """JSON-safe board snapshot for live C++ eval dashboards."""
+        gs = self._gs
+        if gs is None:
+            return {"engine": "cpp", "status": "no_game"}
+        legal = self._filter_legal_actions(self._legal_actions())
+        return {
+            "engine": "cpp",
+            "status": "active",
+            "turn_no": int(getattr(gs, "turn_no", 0) or 0),
+            "acting_player_id": int(self._acting_player),
+            "phase": str(self._phase_code()),
+            "p1_health": int(gs.p1_health),
+            "p2_health": int(gs.p2_health),
+            "p1_hand": self._card_display_rows(getattr(gs, "p1_hand", None)),
+            "p2_hand": self._card_display_rows(getattr(gs, "p2_hand", None)),
+            "p1_deck_size": int(getattr(gs, "p1_deck_size", 0) or 0),
+            "p2_deck_size": int(getattr(gs, "p2_deck_size", 0) or 0),
+            "p1_pitch_size": int(getattr(gs, "p1_pitch_size", 0) or 0),
+            "p2_pitch_size": int(getattr(gs, "p2_pitch_size", 0) or 0),
+            "legal_actions": self._legal_to_dicts(legal),
+            "game_over": bool(getattr(gs, "game_over", False)),
+            "winner": int(getattr(gs, "winner", -1) or -1),
+            "deck1": str(self._deck1 or ""),
+            "deck2": str(self._deck2 or ""),
+        }
+
     # â”€â”€ rlbridge interface â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     def reset(
@@ -1688,6 +1900,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             turn_no=int(getattr(self._gs, "turn_no", 0) or 0),
             acting_player_id=int(self._acting_player),
         )
+        self._loop_guard.reset()
 
         legal = self._filter_legal_actions(self._legal_actions())
         obs = self._encode_observation(legal)
@@ -1798,12 +2011,20 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             return self._step_from_talishar_mirror(action)
 
         legal = self._filter_legal_actions(self._legal_actions())
+        loop_guard = self._loop_guard_for_step(legal)
         before_snapshot = (
             self._tracker_state_snapshot(legal) if self._enable_combat_tracker else None
         )
         legal_before = self._legal_to_dicts(legal) if self._enable_combat_tracker else []
 
         idx, chosen = self._parse_action(action, legal)
+        if loop_guard.force_pass:
+            chosen = self._pass_like_action_from_legal(legal)
+            idx = 0
+            for candidate_index, candidate in enumerate(legal):
+                if candidate is chosen:
+                    idx = candidate_index
+                    break
         chosen_dict = self._action_to_dict(chosen)
 
         prev_p1 = self._gs.p1_health
@@ -1902,6 +2123,10 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             "self_play": True,
             "repeat_streak": repeat_streak,
             "repeat_penalty": repeat_pen,
+            "loop_guard_forced_pass": loop_guard.force_pass,
+            "loop_guard_reason": loop_guard.reason,
+            "turn_steps": loop_guard.turn_steps,
+            "decision_loop_streak": loop_guard.loop_streak,
             "combat_tracker": self._tracker_stub(tracker_event),
         }
         if self._last_observation_vec is not None:
@@ -2019,6 +2244,8 @@ def get_or_none(
     deck2: str,
     cache_dir: str | Path | None = None,
     max_turns: int = 2000,
+    max_steps_per_turn: int = DEFAULT_MAX_STEPS_PER_TURN,
+    loop_repeat_threshold: int = DEFAULT_LOOP_REPEAT_THRESHOLD,
     enable_combat_tracker: bool = False,
 ) -> Optional["CppEngineEnvironment"]:
     """Return a :class:`CppEngineEnvironment` if one is compiled for this matchup.
@@ -2033,6 +2260,8 @@ def get_or_none(
         return CppEngineEnvironment(
             engine_dir=engine_dir,
             max_turns=max_turns,
+            max_steps_per_turn=max_steps_per_turn,
+            loop_repeat_threshold=loop_repeat_threshold,
             deck1=deck1,
             deck2=deck2,
             enable_combat_tracker=enable_combat_tracker,

@@ -92,6 +92,7 @@ def _build_env_for_encode(phase: int = 1) -> CppEngineEnvironment:
     env._gs = _FakeGS(phase=phase)
     env._acting_player = 1
     env._talishar_overlay = None
+    env._talishar_raw_state = None
     env._flow_phase = ""
     env._hand_playability = {}
     env._turn_no_override = None
@@ -165,7 +166,7 @@ def test_cpp_observation_contract_matches_talishar_field_shapes() -> None:
             "cardID": "WTR001",
             "action": 27,
             "actionDataOverride": "0",
-            "label": "",
+            "label": "Blue Attack",
         },
         {
             "cardID": "WTR002",

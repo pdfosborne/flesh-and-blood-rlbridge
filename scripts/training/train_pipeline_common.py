@@ -646,6 +646,20 @@ def _write_deck_file(
     deck_name: str,
     assets_path: str,
 ) -> Path:
+    from flesh_and_blood_rlbridge.talishar_deck_assets import (  # noqa: PLC0415
+        ensure_full_equipment_header,
+    )
+
+    hero_token = (equipment_header or "").split()[0] if equipment_header else deck_name
+    assets_root = Path(assets_path)
+    deck_stem = deck_name if (assets_root / f"{deck_name}.txt").is_file() else ""
+    equipment_header = ensure_full_equipment_header(
+        hero_token,
+        equipment_header,
+        assets_path,
+        deck_stem=deck_stem,
+    )
+
     # ── Equipment fallback extraction ─────────────────────────────────────────
     # When the header only contains a hero ID (no equipment pieces), scan the
     # deck list for equipment-type cards and promote them to the header line.
