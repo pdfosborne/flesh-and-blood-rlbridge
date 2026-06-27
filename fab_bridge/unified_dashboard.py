@@ -62,6 +62,30 @@ def _vs_logic_win_rates(row: dict[str, Any]) -> tuple[Optional[float], Optional[
     return None, None, None
 
 
+def _apply_checkpoint_history_to_row(
+    row: dict[str, Any],
+    ckpt_hist: list[Any],
+) -> None:
+    """Fill first/last self-play and vs-logic checkpoint win rates on *row*."""
+    entries = [entry for entry in ckpt_hist if isinstance(entry, dict)]
+    if not entries:
+        return
+    first = entries[0]
+    last = entries[-1]
+    if first.get("p1_win_rate") is not None:
+        row["first_checkpoint_win_rate"] = float(first["p1_win_rate"])
+    if last.get("p1_win_rate") is not None:
+        row["checkpoint_win_rate"] = float(last["p1_win_rate"])
+    _, _, first_vs_logic = _vs_logic_win_rates(first)
+    _, _, last_vs_logic = _vs_logic_win_rates(last)
+    if first_vs_logic is not None:
+        row["first_checkpoint_vs_logic_win_rate"] = first_vs_logic
+    if last_vs_logic is not None:
+        row["checkpoint_vs_logic_win_rate"] = last_vs_logic
+    if last.get("episodes_completed") is not None:
+        row["episodes_completed"] = int(last["episodes_completed"])
+
+
 def _matchup_label(matchup_dir: Path) -> str:
     raw = _read_json(matchup_dir / "matchup_label.json")
     if isinstance(raw, dict):
@@ -97,6 +121,8 @@ def _matchup_summary_row(matchup_dir: Path, target_episodes: int) -> dict[str, A
         "cached": (matchup_dir / "cached_unified").is_dir(),
         "train_p1_win_rate": None,
         "train_p2_win_rate": None,
+        "first_checkpoint_win_rate": None,
+        "first_checkpoint_vs_logic_win_rate": None,
         "checkpoint_win_rate": None,
         "checkpoint_vs_logic_win_rate": None,
         "episodes_completed": 0,
@@ -118,24 +144,10 @@ def _matchup_summary_row(matchup_dir: Path, target_episodes: int) -> dict[str, A
         )
         ckpt_hist = stats.get("checkpoint_eval_history")
         if isinstance(ckpt_hist, list) and ckpt_hist:
-            last = ckpt_hist[-1]
-            if isinstance(last, dict) and last.get("p1_win_rate") is not None:
-                row["checkpoint_win_rate"] = float(last["p1_win_rate"])
-            if isinstance(last, dict):
-                _p1, _p2, avg = _vs_logic_win_rates(last)
-                if avg is not None:
-                    row["checkpoint_vs_logic_win_rate"] = avg
+            _apply_checkpoint_history_to_row(row, ckpt_hist)
     per_matchup_ckpt = _read_json(matchup_dir / "checkpoint_eval_history.json")
     if isinstance(per_matchup_ckpt, list) and per_matchup_ckpt:
-        last = per_matchup_ckpt[-1]
-        if isinstance(last, dict) and last.get("p1_win_rate") is not None:
-            row["checkpoint_win_rate"] = float(last["p1_win_rate"])
-        if isinstance(last, dict):
-            _p1, _p2, avg = _vs_logic_win_rates(last)
-            if avg is not None:
-                row["checkpoint_vs_logic_win_rate"] = avg
-        if last.get("episodes_completed") is not None:
-            row["episodes_completed"] = int(last["episodes_completed"])
+        _apply_checkpoint_history_to_row(row, per_matchup_ckpt)
     return row
 
 
@@ -380,16 +392,15 @@ def render_unified_random_matchups_html(
         history_rows = "\n".join(
             f"<tr>"
             f"<td>{html.escape(str(row.get('name', '')))}</td>"
-            f"<td>{_pct(row.get('train_p1_win_rate'))}</td>"
+            f"<td>{_pct(row.get('first_checkpoint_win_rate'))}</td>"
             f"<td>{_pct(row.get('checkpoint_win_rate'))}</td>"
             f"<td>{_pct(row.get('checkpoint_vs_logic_win_rate'))}</td>"
-            f"<td>{'cached' if row.get('cached') else 'trained'}</td>"
             f"</tr>"
             for row in completed_rows
         )
         history_table = f"""
 <table class="history">
-  <thead><tr><th>Matchup</th><th>Train P1 win%</th><th>Last self-play ckpt</th><th>Last vs logic</th><th>Status</th></tr></thead>
+  <thead><tr><th>Matchup</th><th>First self-play ckpt</th><th>Last self-play ckpt</th><th>Last vs logic</th></tr></thead>
   <tbody>{history_rows}</tbody>
 </table>"""
     else:

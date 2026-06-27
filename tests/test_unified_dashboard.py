@@ -113,6 +113,31 @@ def test_collect_and_render_dashboard(tmp_path: Path) -> None:
         ),
         encoding="utf-8",
     )
+    (done_dir / "checkpoint_eval_history.json").write_text(
+        json.dumps(
+            [
+                {
+                    "matchup": "c-vs-d",
+                    "episodes_completed": 100,
+                    "p1_win_rate": 0.40,
+                    "vs_logic": {
+                        "agent_p1_seat": {"agent_win_rate": 0.30},
+                        "agent_p2_seat": {"agent_win_rate": 0.32},
+                    },
+                },
+                {
+                    "matchup": "c-vs-d",
+                    "episodes_completed": 1000,
+                    "p1_win_rate": 0.55,
+                    "vs_logic": {
+                        "agent_p1_seat": {"agent_win_rate": 0.42},
+                        "agent_p2_seat": {"agent_win_rate": 0.41},
+                    },
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
 
     state = collect_unified_run_state(run_dir)
     assert state["matchups_total"] == 3
@@ -129,6 +154,13 @@ def test_collect_and_render_dashboard(tmp_path: Path) -> None:
     assert "Vs logic avg%" in html
     assert "Vs logic P1 seat" in html
     assert "Latest vs logic" in html
+    assert "First self-play ckpt" in html
+    assert "Train P1 win%" not in html
+    assert ">Status<" not in html
+    completed = state["completed_matchups"][0]
+    assert completed["first_checkpoint_win_rate"] == 0.40
+    assert completed["checkpoint_win_rate"] == 0.55
+    assert completed["checkpoint_vs_logic_win_rate"] == pytest.approx(0.415)
     assert "c-vs-d" in html
     assert "a-vs-b" in html
     assert "1/3" in html
