@@ -44,7 +44,7 @@ def test_unified_store_save_load_round_trip(tmp_path: Path) -> None:
     assert reloaded.obs_dim == PLAYER_OBS_DIM
 
     meta = store.load_meta()
-    assert meta["obs_schema_version"] == 1
+    assert meta["obs_schema_version"] == 2
     assert meta["weight_version"] == UNIFIED_AGENT_WEIGHT_VERSION
     assert meta["architecture"] == ARCHITECTURE
     assert meta["total_episodes_trained"] == 10

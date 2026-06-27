@@ -9,7 +9,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from fab_bridge.agents import (
-    PLAYER_OBS_SCHEMA_VERSION,
     agent_status,
     bootstrap_unified_agent,
     ensure_agents_available,
@@ -24,6 +23,7 @@ from fab_bridge.agents import (
     validate_weights_file,
     weights_are_compatible,
 )
+from flesh_and_blood_rlbridge.player_observation import PLAYER_OBS_SCHEMA_VERSION
 from flesh_and_blood_rlbridge.player_observation import PLAYER_OBS_DIM
 from rl_agents.ppo import PPOAgent, UNIFIED_AGENT_WEIGHT_VERSION
 
@@ -66,7 +66,7 @@ def test_list_local_agents_finds_weights(tmp_path: Path) -> None:
     meta = {
         "obs_dim": PLAYER_OBS_DIM,
         "obs_schema_version": PLAYER_OBS_SCHEMA_VERSION,
-        "architecture": "attention_v1",
+        "architecture": "attention_v2_text",
         "weight_version": UNIFIED_AGENT_WEIGHT_VERSION,
         "total_episodes_trained": 42,
         "last_updated": "2026-01-01T00:00:00+00:00",
@@ -117,9 +117,17 @@ def test_summarize_public_agent_sync_states(tmp_path: Path) -> None:
     _init_agent(agent, n_actions=128)
     weights = unified_agent_weights_path(cache, "silver_age")
     agent.save(weights)
+    (fmt_dir / "unified_agent.meta.json").write_text(
+        json.dumps({"release_id": "agents-2026.06.1", "sha256": ""}),
+        encoding="utf-8",
+    )
     from fab_bridge import agents as agents_mod
 
     sha = agents_mod._sha256_file(weights)
+    (fmt_dir / "unified_agent.meta.json").write_text(
+        json.dumps({"release_id": "agents-2026.06.1", "sha256": sha}),
+        encoding="utf-8",
+    )
     manifest = {
         "agents": [
             {
@@ -130,12 +138,14 @@ def test_summarize_public_agent_sync_states(tmp_path: Path) -> None:
         ]
     }
     rows = summarize_public_agent_sync(cache_dir=cache, manifest=manifest)
-    assert rows[0]["state"] == "up to date"
+    silver = next(row for row in rows if row["format"] == "silver_age")
+    assert silver["state"] == "up to date"
 
     manifest["agents"][0]["release"] = "agents-2026.06.2"
     manifest["agents"][0]["sha256"] = "0" * 64
     rows = summarize_public_agent_sync(cache_dir=cache, manifest=manifest)
-    assert rows[0]["state"] == "outdated"
+    silver = next(row for row in rows if row["format"] == "silver_age")
+    assert silver["state"] == "outdated"
 
 
 def test_sync_agents_downloads_and_installs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -168,7 +178,8 @@ def test_sync_agents_downloads_and_installs(tmp_path: Path, monkeypatch: pytest.
 
     monkeypatch.setattr(agents_mod.requests, "get", fail_get)
     results = sync_agents(manifest_url=str(manifest_path), cache_dir=cache)
-    assert results[0].action == "unchanged"
+    weight_results = [r for r in results if r.format == "silver_age"]
+    assert weight_results[0].action == "unchanged"
 
 
 def test_validate_weights_file_rejects_legacy_mlp(tmp_path: Path) -> None:
@@ -209,7 +220,8 @@ def test_sync_agents_rejects_legacy_download(tmp_path: Path, monkeypatch: pytest
 
     monkeypatch.setattr(agents_mod.requests, "get", lambda *_a, **_k: FakeResponse())
     results = sync_agents(manifest_url=str(manifest_path), cache_dir=cache)
-    assert results[0].action == "rejected"
+    weight_results = [r for r in results if r.format == "silver_age"]
+    assert weight_results[0].action == "rejected"
     assert not unified_agent_weights_path(cache, "silver_age").is_file()
 
 

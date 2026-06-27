@@ -1905,6 +1905,11 @@ function renderTrainReview() {
     if (agent.exists) {
       const release = agent.release_id ? ` (${agent.release_id})` : "";
       agentLine = `<div><strong>Unified agent:</strong> installed${escapeHtml(release)}</div>`;
+      if (!agent.text_embed_ready) {
+        agentLine += `<div><strong>Card embeddings:</strong> <span style="color:var(--warn,#c90)">missing</span> — run <code>fab-bridge agents ensure</code></div>`;
+      } else if (agent.text_embed_version) {
+        agentLine += `<div><strong>Card embeddings:</strong> ${escapeHtml(agent.text_embed_version)}</div>`;
+      }
     } else {
       const cacheFmt = agent.cache_format && agent.cache_format !== agent.format
         ? ` (cache key ${agent.cache_format})`
@@ -1938,6 +1943,12 @@ document.getElementById("btn-start-evaluation").onclick = async () => {
   if (state.unifiedAgentStatus && !state.unifiedAgentStatus.exists) {
     return toast(
       `No unified agent for ${state.deck.game_format}. Run: fab-bridge agents ensure`,
+      true,
+    );
+  }
+  if (state.unifiedAgentStatus && state.unifiedAgentStatus.exists && !state.unifiedAgentStatus.text_embed_ready) {
+    return toast(
+      "Card text embeddings missing. Run: fab-bridge agents ensure",
       true,
     );
   }

@@ -9,12 +9,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from fab_bridge.agents import (
-    PLAYER_OBS_SCHEMA_VERSION,
     prepare_publish_bundle,
     publish_to_github_release,
     update_manifest_entry,
 )
-from flesh_and_blood_rlbridge.player_observation import PLAYER_OBS_DIM
+from flesh_and_blood_rlbridge.player_observation import PLAYER_OBS_DIM, PLAYER_OBS_SCHEMA_VERSION
 from rl_agents.ppo import ARCHITECTURE, PPOAgent, UNIFIED_AGENT_WEIGHT_VERSION
 
 
@@ -52,7 +51,9 @@ def test_prepare_publish_bundle(tmp_path: Path) -> None:
         assert meta["source"] == "fab-rlbridge-official"
         assert meta["architecture"] == ARCHITECTURE
         assert meta["weight_version"] == UNIFIED_AGENT_WEIGHT_VERSION
-        assert len(bundle.sha256) == 64
+        assert meta["text_embed_version"] == "v1"
+        assert bundle.text_embed_staging_path is not None
+        assert bundle.text_embed_staging_path.is_file()
     finally:
         from fab_bridge.agents import cleanup_publish_bundle
 
@@ -69,7 +70,7 @@ def test_update_manifest_entry_replaces_format() -> None:
     bundle = MagicMock()
     bundle.format = "silver_age"
     bundle.release_id = "agents-2026.06.2"
-    bundle.obs_schema_version = 1
+    bundle.obs_schema_version = PLAYER_OBS_SCHEMA_VERSION
     bundle.obs_dim = PLAYER_OBS_DIM
     bundle.weights_asset_name = f"silver_age-unified_agent_v{UNIFIED_AGENT_WEIGHT_VERSION}.json"
     bundle.meta_asset_name = f"silver_age-unified_agent_v{UNIFIED_AGENT_WEIGHT_VERSION}.meta.json"

@@ -27,7 +27,7 @@ try:
 except ImportError:  # pragma: no cover
     raise ImportError("PPO agent requires PyTorch. Install with: pip install torch")
 
-from .attention_policy import _AttentionPolicyValue
+from .attention_policy_v2 import _AttentionPolicyValueV2
 from ._agent_base import (
     AgentBase,
     TrainResult,
@@ -42,12 +42,14 @@ from ._agent_base import (
 _DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 _TORCH_DTYPE = torch.float32
 
-ARCHITECTURE = _AttentionPolicyValue.ARCHITECTURE
-UNIFIED_AGENT_WEIGHT_VERSION = 2
-_LEGACY_ARCHITECTURES = frozenset({"mlp", ""})
+from flesh_and_blood_rlbridge.card_text import TEXT_EMBED_VERSION
+
+ARCHITECTURE = _AttentionPolicyValueV2.ARCHITECTURE
+UNIFIED_AGENT_WEIGHT_VERSION = 3
+_LEGACY_ARCHITECTURES = frozenset({"mlp", "", "attention_v1"})
 
 
-def _encoder_params(shared: _AttentionPolicyValue) -> list[nn.Parameter]:
+def _encoder_params(shared: _AttentionPolicyValueV2) -> list[nn.Parameter]:
     return [
         param
         for name, param in shared.named_parameters()
@@ -76,7 +78,7 @@ class PPOTrainResult(TrainResult):
 
 
 class _ActorForward(nn.Module):
-    def __init__(self, shared: _AttentionPolicyValue) -> None:
+    def __init__(self, shared: _AttentionPolicyValueV2) -> None:
         super().__init__()
         self._shared = shared
 
@@ -85,7 +87,7 @@ class _ActorForward(nn.Module):
 
 
 class _CriticForward(nn.Module):
-    def __init__(self, shared: _AttentionPolicyValue) -> None:
+    def __init__(self, shared: _AttentionPolicyValueV2) -> None:
         super().__init__()
         self._shared = shared
 
@@ -96,7 +98,7 @@ class _CriticForward(nn.Module):
 class _PolicyShim:
     """Actor/critic view over :class:`_AttentionPolicyValue` for optimisers."""
 
-    def __init__(self, shared: _AttentionPolicyValue, role: str, lr: float) -> None:
+    def __init__(self, shared: _AttentionPolicyValueV2, role: str, lr: float) -> None:
         if role not in ("actor", "critic"):
             raise ValueError(f"unknown role: {role!r}")
         self._shared = shared
@@ -183,7 +185,7 @@ def _reject_legacy_weights(data: dict[str, Any]) -> None:
     arch = str(data.get("architecture", "mlp"))
     if arch in _LEGACY_ARCHITECTURES or "actor_weights" in data:
         raise ValueError(
-            "Legacy MLP weights are unsupported; retrain with attention_v1 "
+            "Legacy or incompatible unified agent weights; retrain with attention_v2_text "
             f"(found architecture={arch!r})"
         )
     if arch != ARCHITECTURE:
@@ -237,13 +239,13 @@ class PPOAgent(AgentBase):
 
         self._actor: Optional[_PolicyShim] = None
         self._critic: Optional[_PolicyShim] = None
-        self._shared: Optional[_AttentionPolicyValue] = None
+        self._shared: Optional[_AttentionPolicyValueV2] = None
 
     def _init_nets(self, obs_dim: int) -> None:
         if self._shared is not None:
             return
         self.obs_dim = obs_dim
-        self._shared = _AttentionPolicyValue(
+        self._shared = _AttentionPolicyValueV2(
             self.n_actions,
             d_model=self.hidden_size,
             n_layers=self.n_layers,
@@ -488,6 +490,7 @@ class PPOAgent(AgentBase):
             "agent": self.name,
             "architecture": ARCHITECTURE,
             "weight_version": UNIFIED_AGENT_WEIGHT_VERSION,
+            "text_embed_version": TEXT_EMBED_VERSION,
             "n_actions": self.n_actions,
             "mask_actions": self._mask_actions,
             "obs_dim": self.obs_dim,

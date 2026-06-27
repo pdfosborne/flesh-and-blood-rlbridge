@@ -20,13 +20,23 @@ from fab_bridge.paths import configure_import_paths, repo_root
 
 configure_import_paths()
 
+from flesh_and_blood_rlbridge.card_text import (  # noqa: E402
+    TEXT_EMBED_FILENAME,
+    TEXT_EMBED_META_FILENAME,
+    TEXT_EMBED_MODEL,
+    TEXT_EMBED_VERSION,
+    copy_package_embeddings_to_cache,
+    embedding_status,
+    shared_text_embed_meta_path,
+    shared_text_embed_path,
+)
 from flesh_and_blood_rlbridge.player_observation import (  # noqa: E402
     PLAYER_OBS_DIM,
     PLAYER_OBS_SCHEMA_VERSION,
 )
 from rl_agents.ppo import ARCHITECTURE, UNIFIED_AGENT_WEIGHT_VERSION  # noqa: E402
 
-_LEGACY_ARCHITECTURES = frozenset({"mlp", ""})
+_LEGACY_ARCHITECTURES = frozenset({"mlp", "", "attention_v1"})
 BOOTSTRAP_SOURCE = "fab-rlbridge-bootstrap"
 
 DEFAULT_REPOSITORY = "pdfosborne/flesh-and-blood-rlbridge"
@@ -61,6 +71,11 @@ class PublishBundle:
     sha256: str
     meta: dict[str, Any]
     staging_dir: Path = field(repr=False)
+    text_embed_asset_name: str = TEXT_EMBED_FILENAME
+    text_embed_meta_asset_name: str = TEXT_EMBED_META_FILENAME
+    text_embed_staging_path: Path | None = None
+    text_embed_meta_staging_path: Path | None = None
+    text_embed_sha256: str = ""
 
 
 @dataclass
@@ -122,6 +137,83 @@ def release_asset_names(
     return weights, meta
 
 
+def text_embed_release_asset_names() -> tuple[str, str]:
+    return TEXT_EMBED_FILENAME, TEXT_EMBED_META_FILENAME
+
+
+def manifest_text_embeddings(manifest: dict[str, Any]) -> dict[str, Any]:
+    block = manifest.get("text_embeddings")
+    return block if isinstance(block, dict) else {}
+
+
+def sync_text_embeddings(
+    *,
+    manifest: dict[str, Any] | None = None,
+    cache_dir: Path | None = None,
+    force: bool = False,
+) -> SyncResult:
+    """Download or copy shared card text embeddings into agent cache."""
+    data = manifest or load_manifest()
+    cache = ensure_cache_dir(cache_dir)
+    block = manifest_text_embeddings(data)
+    dest_npz = shared_text_embed_path(cache)
+    dest_meta = shared_text_embed_meta_path(cache)
+
+    if dest_npz.is_file() and not force:
+        status = embedding_status(cache)
+        expected_sha = str(block.get("sha256", "")).strip().lower()
+        local_sha = str(status.get("sha256", "")).lower()
+        if not expected_sha or (local_sha and local_sha == expected_sha):
+            return SyncResult(
+                format="shared",
+                action="unchanged",
+                detail=f"Text embeddings already present ({dest_npz})",
+            )
+
+    url = str(block.get("url", "")).strip()
+    meta_url = str(block.get("meta_url", "")).strip()
+    if url:
+        _download_file(url, dest_npz)
+        expected_sha = str(block.get("sha256", "")).strip().lower()
+        actual_sha = _sha256_file(dest_npz).lower()
+        if expected_sha and actual_sha != expected_sha:
+            dest_npz.unlink(missing_ok=True)
+            raise RuntimeError(
+                f"Text embedding SHA256 mismatch: expected {expected_sha}, got {actual_sha}"
+            )
+        if meta_url:
+            _download_file(meta_url, dest_meta)
+        return SyncResult(
+            format="shared",
+            action="downloaded",
+            detail=f"Installed text embeddings to {dest_npz}",
+        )
+
+    copy_package_embeddings_to_cache(cache)
+    return SyncResult(
+        format="shared",
+        action="copied",
+        detail=f"Installed bundled text embeddings to {dest_npz}",
+    )
+
+
+def ensure_text_embeddings_available(
+    *,
+    manifest: dict[str, Any] | None = None,
+    cache_dir: Path | None = None,
+    force: bool = False,
+) -> SyncResult:
+    cache = ensure_cache_dir(cache_dir)
+    dest_npz = shared_text_embed_path(cache)
+    if dest_npz.is_file() and not force:
+        return SyncResult(
+            format="shared",
+            action="unchanged",
+            detail=f"Text embeddings present ({dest_npz})",
+        )
+    return sync_text_embeddings(manifest=manifest, cache_dir=cache, force=force)
+
+
 def weights_are_compatible(data: dict[str, Any]) -> bool:
     """Return True when weights use the attention policy trunk expected by this package."""
     arch = str(data.get("architecture", "mlp"))
@@ -137,8 +229,14 @@ def validate_weights_file(path: Path) -> None:
         arch = str(data.get("architecture", "mlp"))
         raise ValueError(
             "Legacy or incompatible unified agent weights "
-            f"(architecture={arch!r}); sync a v2 attention release or run "
+            f"(architecture={arch!r}); sync an attention_v2_text release or run "
             "`fab-bridge agents ensure` to install a bootstrap placeholder."
+        )
+    embed_version = str(data.get("text_embed_version", TEXT_EMBED_VERSION))
+    if embed_version != TEXT_EMBED_VERSION:
+        raise ValueError(
+            f"Checkpoint text_embed_version={embed_version!r} does not match "
+            f"expected {TEXT_EMBED_VERSION!r}; run fab-bridge agents sync"
         )
 
 
@@ -277,7 +375,12 @@ def agent_status(cache_dir: Path | None, game_format: str) -> dict[str, Any]:
             validate_weights_file(weights_path)
         except (ValueError, OSError):
             exists = False
-    return {
+    sha256 = ""
+    if weights_path.is_file():
+        sha256 = _sha256_file(weights_path)
+    elif meta:
+        sha256 = str(meta.get("sha256", ""))
+    status = {
         "format": game_format,
         "cache_format": cache_format,
         "exists": exists,
@@ -291,8 +394,14 @@ def agent_status(cache_dir: Path | None, game_format: str) -> dict[str, Any]:
         "source": str(meta.get("source", "")) if meta else "",
         "total_episodes_trained": int(meta.get("total_episodes_trained", 0)) if meta else 0,
         "last_updated": str(meta.get("last_updated", "")) if meta else "",
-        "sha256": str(meta.get("sha256", "")) if meta else "",
+        "sha256": sha256,
+        "architecture": str(meta.get("architecture", ARCHITECTURE)) if meta else ARCHITECTURE,
+        "text_embed_version": str(meta.get("text_embed_version", TEXT_EMBED_VERSION)),
+        "requires_text_embed_version": TEXT_EMBED_VERSION,
     }
+    status.update(embedding_status(cache))
+    status["text_embed_ready"] = bool(status.get("text_embed_present"))
+    return status
 
 
 def _manifest_entry_for_format(manifest: dict[str, Any], game_format: str) -> Optional[dict[str, Any]]:
@@ -323,7 +432,7 @@ def summarize_public_agent_sync(
         public_sha = str(entry.get("sha256", "")).lower()
         weights_path = Path(str(local.get("weights_path", "")))
         file_sha = _sha256_file(weights_path).lower() if weights_path.is_file() else ""
-        local_sha = str(local.get("sha256", "")).lower() or file_sha
+        local_sha = file_sha or str(local.get("sha256", "")).lower()
         local_release = str(local.get("release_id", ""))
         if not local.get("exists"):
             state = "missing"
@@ -362,6 +471,17 @@ def sync_agents(
     manifest = load_manifest(manifest_url or default_manifest_url())
     cache = ensure_cache_dir(cache_dir)
     results: list[SyncResult] = []
+
+    try:
+        results.append(sync_text_embeddings(manifest=manifest, cache_dir=cache, force=force))
+    except Exception as exc:  # noqa: BLE001
+        results.append(
+            SyncResult(
+                format="shared",
+                action="skipped",
+                detail=f"Text embedding sync failed ({exc})",
+            )
+        )
 
     entries = manifest.get("agents", [])
     if formats:
@@ -445,6 +565,8 @@ def sync_agents(
             meta = {}
         meta.setdefault("obs_schema_version", row.get("obs_schema_version", PLAYER_OBS_SCHEMA_VERSION))
         meta.setdefault("obs_dim", row.get("obs_dim"))
+        meta.setdefault("text_embed_version", TEXT_EMBED_VERSION)
+        meta.setdefault("architecture", ARCHITECTURE)
         meta.setdefault("game_format", fmt)
         meta["release_id"] = str(row.get("release", ""))
         meta["source"] = OFFICIAL_SOURCE
@@ -479,12 +601,14 @@ def bootstrap_unified_agent(
     agent._init_nets(PLAYER_OBS_DIM)
     dest_weights.parent.mkdir(parents=True, exist_ok=True)
     agent.save(dest_weights)
+    ensure_text_embeddings_available(cache_dir=cache)
 
     meta = {
         "obs_schema_version": PLAYER_OBS_SCHEMA_VERSION,
         "obs_dim": PLAYER_OBS_DIM,
         "n_actions": n_actions,
         "architecture": ARCHITECTURE,
+        "text_embed_version": TEXT_EMBED_VERSION,
         "weight_version": UNIFIED_AGENT_WEIGHT_VERSION,
         "game_format": fmt,
         "source": BOOTSTRAP_SOURCE,
@@ -499,8 +623,8 @@ def bootstrap_unified_agent(
         format=fmt,
         action="bootstrapped",
         detail=(
-            f"Installed untrained attention placeholder at {dest_weights} "
-            "(train or sync official v2 weights for real play)"
+            f"Installed untrained attention_v2_text placeholder at {dest_weights} "
+            "(train or sync official v3 weights for real play)"
         ),
     )
 
@@ -588,11 +712,25 @@ def prepare_publish_bundle(
     sha256 = _sha256_file(weights_path)
     tag = release_id or suggest_next_release_tag()
     weights_asset, meta_asset = release_asset_names(fmt)
+    embed_asset, embed_meta_asset = text_embed_release_asset_names()
 
     staging_dir = Path(tempfile.mkdtemp(prefix="fab-agent-publish-"))
     weights_staging = staging_dir / weights_asset
     meta_staging = staging_dir / meta_asset
+    embed_staging = staging_dir / embed_asset
+    embed_meta_staging = staging_dir / embed_meta_asset
     shutil.copy2(weights_path, weights_staging)
+    ensure_text_embeddings_available(cache_dir=cache)
+    embed_src = shared_text_embed_path(cache)
+    embed_meta_src = shared_text_embed_meta_path(cache)
+    if not embed_src.is_file():
+        copy_package_embeddings_to_cache(cache)
+        embed_src = shared_text_embed_path(cache)
+        embed_meta_src = shared_text_embed_meta_path(cache)
+    shutil.copy2(embed_src, embed_staging)
+    if embed_meta_src.is_file():
+        shutil.copy2(embed_meta_src, embed_meta_staging)
+    embed_sha256 = _sha256_file(embed_staging)
 
     enriched = dict(meta)
     enriched.update(
@@ -600,6 +738,9 @@ def prepare_publish_bundle(
             "obs_schema_version": PLAYER_OBS_SCHEMA_VERSION,
             "weight_version": UNIFIED_AGENT_WEIGHT_VERSION,
             "architecture": str(agent_data.get("architecture", meta.get("architecture", ARCHITECTURE))),
+            "text_embed_version": str(
+                agent_data.get("text_embed_version", meta.get("text_embed_version", TEXT_EMBED_VERSION))
+            ),
             "obs_dim": obs_dim,
             "n_actions": int(agent_data.get("n_actions", meta.get("n_actions", 0))),
             "d_model": int(agent_data.get("d_model", meta.get("d_model", agent_data.get("hidden_size", 0)))),
@@ -626,6 +767,11 @@ def prepare_publish_bundle(
         sha256=sha256,
         meta=enriched,
         staging_dir=staging_dir,
+        text_embed_asset_name=embed_asset,
+        text_embed_meta_asset_name=embed_meta_asset,
+        text_embed_staging_path=embed_staging,
+        text_embed_meta_staging_path=embed_meta_staging if embed_meta_src.is_file() else None,
+        text_embed_sha256=embed_sha256,
     )
 
 
@@ -692,13 +838,21 @@ def publish_to_github_release(
         bundle.release_id,
         str(bundle.weights_staging_path),
         str(bundle.meta_staging_path),
-        "--repo",
-        repo,
-        "--title",
-        title,
-        "--notes",
-        body,
     ]
+    if bundle.text_embed_staging_path is not None:
+        cmd.append(str(bundle.text_embed_staging_path))
+    if bundle.text_embed_meta_staging_path is not None:
+        cmd.append(str(bundle.text_embed_meta_staging_path))
+    cmd.extend(
+        [
+            "--repo",
+            repo,
+            "--title",
+            title,
+            "--notes",
+            body,
+        ]
+    )
     if draft:
         cmd.append("--draft")
 
@@ -708,12 +862,18 @@ def publish_to_github_release(
         raise RuntimeError(f"gh release create failed: {err}")
 
     base = f"https://github.com/{repo}/releases/download/{bundle.release_id}"
-    return {
+    urls = {
         "weights_url": f"{base}/{bundle.weights_asset_name}",
         "meta_url": f"{base}/{bundle.meta_asset_name}",
         "repository": repo,
         "release_id": bundle.release_id,
     }
+    if bundle.text_embed_staging_path is not None:
+        urls["text_embed_url"] = f"{base}/{bundle.text_embed_asset_name}"
+        urls["text_embed_sha256"] = bundle.text_embed_sha256
+    if bundle.text_embed_meta_staging_path is not None:
+        urls["text_embed_meta_url"] = f"{base}/{bundle.text_embed_meta_asset_name}"
+    return urls
 
 
 def update_manifest_entry(
@@ -733,11 +893,25 @@ def update_manifest_entry(
         "weights_url": urls["weights_url"],
         "meta_url": urls["meta_url"],
         "sha256": bundle.sha256,
+        "requires_text_embed_version": TEXT_EMBED_VERSION,
         "min_package_version": min_package_version,
     }
     agents = [row for row in manifest.get("agents", []) if row.get("format") != bundle.format]
     agents.append(entry)
     manifest["agents"] = agents
+    manifest["manifest_version"] = max(int(manifest.get("manifest_version", 1)), 2)
+    manifest["obs_schema_version"] = PLAYER_OBS_SCHEMA_VERSION
+    if urls.get("text_embed_url"):
+        manifest["text_embeddings"] = {
+            "version": TEXT_EMBED_VERSION,
+            "filename": bundle.text_embed_asset_name,
+            "meta_filename": bundle.text_embed_meta_asset_name,
+            "url": urls["text_embed_url"],
+            "meta_url": urls.get("text_embed_meta_url", ""),
+            "sha256": urls.get("text_embed_sha256", bundle.text_embed_sha256),
+            "embed_dim": int(bundle.meta.get("embed_dim", 384)),
+            "model": TEXT_EMBED_MODEL,
+        }
     manifest["repository"] = urls.get("repository", manifest.get("repository", DEFAULT_REPOSITORY))
     return manifest
 

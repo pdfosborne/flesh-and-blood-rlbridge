@@ -162,7 +162,7 @@ class AgentCacheStore:
         cache_root: Path,
         game_format: str,
         *,
-        obs_schema_version: int = 1,
+        obs_schema_version: int = 2,
     ) -> None:
         self.user_cache_root = cache_root
         self.cache_root = cache_root / _safe_key(game_format)

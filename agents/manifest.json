@@ -1,20 +1,17 @@
 {
-  "manifest_version": 1,
-  "obs_schema_version": 1,
+  "manifest_version": 2,
+  "obs_schema_version": 2,
   "repository": "pdfosborne/flesh-and-blood-rlbridge",
   "default_format": "silver_age",
-  "agents": [
-    {
-      "format": "silver_age",
-      "release": "agents-2026.06.2",
-      "obs_schema_version": 1,
-      "obs_dim": 524,
-      "weights_filename": "silver_age-unified_agent_v2.json",
-      "meta_filename": "silver_age-unified_agent_v2.meta.json",
-      "weights_url": "https://github.com/pdfosborne/flesh-and-blood-rlbridge/releases/download/agents-2026.06.2/silver_age-unified_agent_v2.json",
-      "meta_url": "https://github.com/pdfosborne/flesh-and-blood-rlbridge/releases/download/agents-2026.06.2/silver_age-unified_agent_v2.meta.json",
-      "sha256": "9e3aa52d01a3247da8069bcc9828e4cd3fff5761401c3732ca5780a1daa3049e",
-      "min_package_version": "0.1.0"
-    }
-  ]
+  "text_embeddings": {
+    "version": "v1",
+    "filename": "card_text_embeddings_v1.npz",
+    "meta_filename": "card_text_embeddings_v1.meta.json",
+    "url": "",
+    "meta_url": "",
+    "sha256": "",
+    "embed_dim": 384,
+    "model": "sentence-transformers/all-MiniLM-L6-v2"
+  },
+  "agents": []
 }

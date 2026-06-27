@@ -1,0 +1,9 @@
+{
+  "text_embed_version": "v1",
+  "model": "sentence-transformers/all-MiniLM-L6-v2",
+  "embed_dim": 384,
+  "vocab_size": 5183,
+  "cards_json_sha256": "dda48647585534d8713747ea5e298e9a534207720204e21594ee1712b69c2362",
+  "built_at": "2026-06-27T15:17:37.686209+00:00",
+  "card_count": 5182
+}

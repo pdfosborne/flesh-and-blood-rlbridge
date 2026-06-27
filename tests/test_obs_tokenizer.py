@@ -57,13 +57,13 @@ def test_tokenizer_slices_match_obs_vector() -> None:
     assert batch.hero_opp_ids.shape == (1,)
     assert batch.deck_card_ids.shape[1] == CONTEXT_DIM - DECK_OFF
     assert batch.scalars.shape == (1, 26)
-    assert batch.hand.shape == (1, HAND_SLOTS, 6)
+    assert batch.hand.shape == (1, HAND_SLOTS, 7)
     assert batch.zones.shape[1] == ObsTokenLayout().zone_slots_total
-    assert batch.combat_chain.shape == (1, 8, 2)
+    assert batch.combat_chain.shape == (1, 8, 3)
     assert batch.board_padding_mask.shape == (1, ObsTokenLayout().board_token_count)
 
     assert float(obs[0, SCALAR_OFF].item()) == float(batch.scalars[0, 0].item())
-    assert torch.allclose(obs[0, HAND_OFF : HAND_OFF + 12], batch.hand[0, :2].reshape(-1))
+    assert torch.allclose(obs[0, HAND_OFF : HAND_OFF + 14], batch.hand[0, :2].reshape(-1))
 
 
 def test_empty_hand_slots_are_padded() -> None:

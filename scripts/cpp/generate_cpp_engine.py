@@ -563,14 +563,20 @@ void _write_zone_block(
     std::vector<double>& out,
     int& offset,
     const std::vector<Card>& cards,
-    int max_slots
+    int max_slots,
+    bool reveal_all_ids
 ) {{
     for (int slot = 0; slot < max_slots; ++slot) {{
         if (slot < static_cast<int>(cards.size())) {{
-            out[static_cast<size_t>(offset++)] = _norm_card_id(cards[static_cast<size_t>(slot)].card_id);
-            out[static_cast<size_t>(offset++)] = 0.0;
-            out[static_cast<size_t>(offset++)] = 0.0;
-            out[static_cast<size_t>(offset++)] = 0.0;
+            const auto& c = cards[static_cast<size_t>(slot)];
+            const bool hidden = c.card_id.empty() ||
+                c.card_id.find("cardback") != std::string::npos;
+            const bool reveal = reveal_all_ids && !hidden;
+            out[static_cast<size_t>(offset++)] = reveal ? _norm_card_id(c.card_id) : 0.0;
+            out[static_cast<size_t>(offset++)] = 0.0;  // counters
+            out[static_cast<size_t>(offset++)] = 0.0;  // tapped
+            out[static_cast<size_t>(offset++)] = hidden ? 1.0 : 0.0;  // face_down
+            out[static_cast<size_t>(offset++)] = reveal ? 1.0 : 0.0;  // conditional_active
         }} else {{
             offset += kZoneSlotDim;
         }}
@@ -643,6 +649,7 @@ std::vector<double> GameState::player_observation_vector(int legal_count) const 
             out[static_cast<size_t>(hand++)] = _scaled(c.power, 12.0);
             out[static_cast<size_t>(hand++)] = _scaled(c.defense, 5.0);
             out[static_cast<size_t>(hand++)] = playable ? 1.0 : 0.0;
+            out[static_cast<size_t>(hand++)] = 1.0;  // conditional_active
         }} else {{
             hand += kHandSlotDim;
         }}
@@ -660,10 +667,11 @@ std::vector<double> GameState::player_observation_vector(int legal_count) const 
     for (int side = 0; side < 2; ++side) {{
         for (int z = 0; z < kZoneCount; ++z) {{
             const int max_slots = kZoneMaxSlots[z];
+            const bool reveal_ids = side == 0 && z == 1;  // self arsenal
             if (side == 0 && self_zones[static_cast<size_t>(z)] != nullptr) {{
-                _write_zone_block(out, zone, *self_zones[static_cast<size_t>(z)], max_slots);
+                _write_zone_block(out, zone, *self_zones[static_cast<size_t>(z)], max_slots, reveal_ids);
             }} else if (side == 1 && opp_zones[static_cast<size_t>(z)] != nullptr) {{
-                _write_zone_block(out, zone, *opp_zones[static_cast<size_t>(z)], max_slots);
+                _write_zone_block(out, zone, *opp_zones[static_cast<size_t>(z)], max_slots, false);
             }} else {{
                 zone += max_slots * kZoneSlotDim;
             }}

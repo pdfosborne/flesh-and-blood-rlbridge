@@ -9,8 +9,10 @@ import torch
 
 from .card_vocab import hero_vocab_size, vocab_size
 from .player_observation import (
+    COMBAT_CHAIN_END,
     COMBAT_CHAIN_OFF,
     COMBAT_CHAIN_SLOTS,
+    COMBAT_CHAIN_SLOT_DIM,
     COMBAT_SCALAR_OFF,
     COMBAT_SCALAR_COUNT,
     CONTEXT_DIM,
@@ -104,7 +106,7 @@ class TokenBatch:
     zone_type_ids: torch.Tensor       # (zone_slots,)
     side_ids: torch.Tensor            # (zone_slots,)
     combat_scalars: torch.Tensor      # (B, COMBAT_SCALAR_COUNT)
-    combat_chain: torch.Tensor        # (B, COMBAT_CHAIN_SLOTS, 2)
+    combat_chain: torch.Tensor        # (B, COMBAT_CHAIN_SLOTS, COMBAT_CHAIN_SLOT_DIM)
     board_padding_mask: torch.Tensor  # (B, board_token_count) True = ignore
 
 
@@ -131,7 +133,9 @@ def build_token_features(
     hand = obs[:, HAND_OFF:HAND_END].reshape(b, HAND_SLOTS, HAND_SLOT_DIM)
     zones = obs[:, ZONE_OFF:ZONE_END].reshape(b, layout.zone_slots_total, ZONE_SLOT_DIM)
     combat_scalars = obs[:, COMBAT_SCALAR_OFF : COMBAT_SCALAR_OFF + COMBAT_SCALAR_COUNT]
-    combat_chain = obs[:, COMBAT_CHAIN_OFF:].reshape(b, COMBAT_CHAIN_SLOTS, 2)
+    combat_chain = obs[:, COMBAT_CHAIN_OFF:COMBAT_CHAIN_END].reshape(
+        b, COMBAT_CHAIN_SLOTS, COMBAT_CHAIN_SLOT_DIM
+    )
 
     zone_type_ids, side_ids = _zone_type_side_ids(device)
 

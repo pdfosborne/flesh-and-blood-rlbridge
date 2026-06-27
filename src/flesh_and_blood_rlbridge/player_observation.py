@@ -12,6 +12,7 @@ from typing import Any, Optional
 
 import numpy as np
 
+from .card_conditionals import evaluate_conditional_active
 from .card_vocab import (
     card_index_normalized,
     format_index_normalized,
@@ -20,14 +21,14 @@ from .card_vocab import (
 )
 from .deck_context import EpisodeContext, hero_from_equipment
 
-PLAYER_OBS_SCHEMA_VERSION = 1
+PLAYER_OBS_SCHEMA_VERSION = 2
 ACTION_CAPACITY = 128
 
 DECK_SLOTS = 80
 HAND_SLOTS = 8
-HAND_SLOT_DIM = 6  # card_idx, cost, pitch, power, defense, playable
+HAND_SLOT_DIM = 7  # card_idx, cost, pitch, power, defense, playable, conditional_active
 
-ZONE_SLOT_DIM = 4  # card_idx, counters, tapped, face_down
+ZONE_SLOT_DIM = 5  # card_idx, counters, tapped, face_down, conditional_active
 
 # (zone_name, max_slots) per player perspective
 ZONE_SPECS: tuple[tuple[str, int], ...] = (
@@ -43,7 +44,7 @@ ZONE_SPECS: tuple[tuple[str, int], ...] = (
 
 COMBAT_SCALAR_COUNT = 6
 COMBAT_CHAIN_SLOTS = 8
-COMBAT_CHAIN_SLOT_DIM = 2  # card_idx, controller (1=P1, 2=P2)
+COMBAT_CHAIN_SLOT_DIM = 3  # card_idx, controller, conditional_active
 
 SCALAR_COUNT = 26
 
@@ -120,6 +121,7 @@ class NormalizedCard:
     face_down: bool = False
     playable: bool = False
     controller: int = 0
+    card_visible: bool = True
 
 
 def _to_int(value: Any, default: int = 0) -> int:
@@ -199,6 +201,9 @@ def _is_face_down(card: dict[str, Any]) -> bool:
     cid = _card_key(card).lower()
     if "cardback" in cid or cid in {"", "wtr000"}:
         return True
+    facing = str(card.get("facing", "") or "").upper()
+    if facing == "DOWN":
+        return True
     overlay = str(card.get("overlay", "") or "").lower()
     if overlay in {"disabled", "hidden"}:
         return True
@@ -206,11 +211,25 @@ def _is_face_down(card: dict[str, Any]) -> bool:
     return mod.startswith("down") or mod == "facedown"
 
 
-def normalize_talishar_card(card: Any, *, playable: bool = False) -> NormalizedCard:
+def _reveal_card_id(*, side: str, zone: str, card: dict[str, Any]) -> bool:
+    if side == "self" and zone == "arsenal":
+        cid = _card_key(card).lower()
+        return bool(cid and "cardback" not in cid and cid not in {"", "wtr000"})
+    return not _is_face_down(card)
+
+
+def normalize_talishar_card(
+    card: Any,
+    *,
+    playable: bool = False,
+    side: str = "self",
+    zone: str = "hand",
+) -> NormalizedCard:
     if not isinstance(card, dict):
         return NormalizedCard()
     face_down = _is_face_down(card)
-    cid = "" if face_down else _card_key(card)
+    visible = _reveal_card_id(side=side, zone=zone, card=card)
+    cid = _card_key(card) if visible else ""
     counters = _to_int(card.get("counters") or card.get("counter") or 0)
     if counters <= 0 and isinstance(card.get("countersMap"), dict):
         counters = sum(_to_int(v) for v in card["countersMap"].values())
@@ -226,10 +245,17 @@ def normalize_talishar_card(card: Any, *, playable: bool = False) -> NormalizedC
         face_down=face_down,
         playable=playable or bool(_to_int(card.get("action", 0))),
         controller=_to_int(card.get("controller"), 0),
+        card_visible=visible,
     )
 
 
-def normalize_zone_cards(cards: Any, *, playable_ids: Optional[set[str]] = None) -> list[NormalizedCard]:
+def normalize_zone_cards(
+    cards: Any,
+    *,
+    playable_ids: Optional[set[str]] = None,
+    side: str = "self",
+    zone: str = "hand",
+) -> list[NormalizedCard]:
     if not isinstance(cards, list):
         return []
     out: list[NormalizedCard] = []
@@ -238,7 +264,9 @@ def normalize_zone_cards(cards: Any, *, playable_ids: Optional[set[str]] = None)
             continue
         cid = _card_key(card)
         playable = bool(playable_ids and cid and cid in playable_ids)
-        out.append(normalize_talishar_card(card, playable=playable))
+        out.append(
+            normalize_talishar_card(card, playable=playable, side=side, zone=zone)
+        )
     return out
 
 
@@ -277,20 +305,59 @@ def _parse_pitch_resources(state: dict[str, Any], phase_token: str) -> tuple[int
     return available, required
 
 
-def _encode_card_slot(card: NormalizedCard) -> list[float]:
-    if card.face_down or not card.card_id:
-        return [0.0, _scaled(card.counters, 10.0), 1.0 if card.tapped else 0.0, 1.0]
+def _conditional_active(
+    card: NormalizedCard,
+    state: dict[str, Any],
+    *,
+    zone: str,
+    side: str,
+    phase: str,
+) -> float:
+    return evaluate_conditional_active(
+        card.card_id,
+        state,
+        zone=zone,
+        side=side,
+        phase=phase,
+        card_visible=card.card_visible and bool(card.card_id),
+    )
+
+
+def _encode_card_slot(
+    card: NormalizedCard,
+    state: dict[str, Any],
+    *,
+    zone: str,
+    side: str,
+    phase: str,
+) -> list[float]:
+    cond = _conditional_active(card, state, zone=zone, side=side, phase=phase)
+    if not card.card_visible or not card.card_id:
+        return [
+            0.0,
+            _scaled(card.counters, 10.0),
+            1.0 if card.tapped else 0.0,
+            1.0 if card.face_down else 0.0,
+            cond if card.card_visible else 0.0,
+        ]
     return [
         card_index_normalized(card.card_id),
         _scaled(card.counters, 10.0),
         1.0 if card.tapped else 0.0,
-        0.0,
+        1.0 if card.face_down else 0.0,
+        cond,
     ]
 
 
-def _encode_hand_slot(card: Optional[NormalizedCard]) -> list[float]:
+def _encode_hand_slot(
+    card: Optional[NormalizedCard],
+    state: dict[str, Any],
+    *,
+    phase: str,
+) -> list[float]:
     if card is None:
         return [0.0] * HAND_SLOT_DIM
+    cond = _conditional_active(card, state, zone="hand", side="self", phase=phase)
     return [
         card_index_normalized(card.card_id) if card.card_id else 0.0,
         _scaled(card.cost, 10.0),
@@ -298,17 +365,26 @@ def _encode_hand_slot(card: Optional[NormalizedCard]) -> list[float]:
         _scaled(card.power, 12.0),
         _scaled(card.defense, 5.0),
         1.0 if card.playable else 0.0,
+        cond,
     ]
 
 
-def _encode_zone_block(cards: list[NormalizedCard], max_slots: int) -> list[float]:
+def _encode_zone_block(
+    cards: list[NormalizedCard],
+    max_slots: int,
+    state: dict[str, Any],
+    *,
+    zone: str,
+    side: str,
+    phase: str,
+) -> list[float]:
     out: list[float] = []
     for slot in range(max_slots):
         card = cards[slot] if slot < len(cards) else None
         if card is None:
             out.extend([0.0] * ZONE_SLOT_DIM)
         else:
-            out.extend(_encode_card_slot(card))
+            out.extend(_encode_card_slot(card, state, zone=zone, side=side, phase=phase))
     return out
 
 
@@ -347,7 +423,7 @@ def _zone_state_keys(side: str, zone: str) -> str:
     return mapping[zone]
 
 
-def _encode_combat(state: dict[str, Any]) -> list[float]:
+def _encode_combat(state: dict[str, Any], *, phase: str) -> list[float]:
     out: list[float] = [0.0] * (COMBAT_SCALAR_COUNT + COMBAT_CHAIN_SLOTS * COMBAT_CHAIN_SLOT_DIM)
     link = state.get("activeChainLink", {})
     if not isinstance(link, dict):
@@ -372,10 +448,13 @@ def _encode_combat(state: dict[str, Any]) -> list[float]:
         offset = base + slot * COMBAT_CHAIN_SLOT_DIM
         if slot >= len(chain_cards):
             continue
-        norm = normalize_talishar_card(chain_cards[slot])
+        norm = normalize_talishar_card(chain_cards[slot], zone="combat", side="self")
         out[offset] = card_index_normalized(norm.card_id) if norm.card_id else 0.0
         ctrl = norm.controller or _to_int(chain_cards[slot].get("controller"), 0)
         out[offset + 1] = float(ctrl) / 2.0 if ctrl else 0.0
+        out[offset + 2] = _conditional_active(
+            norm, state, zone="combat", side="self", phase=phase
+        )
     return out
 
 
@@ -419,7 +498,9 @@ def player_observation_vector(
             cid = _card_key(card)
             if cid:
                 playable_hand.add(cid)
-    hand = normalize_zone_cards(hand_raw, playable_ids=playable_hand)
+    hand = normalize_zone_cards(
+        hand_raw, playable_ids=playable_hand, side="self", zone="hand"
+    )
 
     resources_avail, resources_required = _parse_pitch_resources(raw, phase_str)
     legal_count = len(legal_actions or [])
@@ -477,15 +558,19 @@ def player_observation_vector(
     out.extend(scalars)
     for slot in range(HAND_SLOTS):
         card = hand[slot] if slot < len(hand) else None
-        out.extend(_encode_hand_slot(card))
+        out.extend(_encode_hand_slot(card, raw, phase=phase_str))
 
     for side in ("self", "opp"):
         for zone_name, max_slots in ZONE_SPECS:
             key = _zone_state_keys(side, zone_name)
-            cards = normalize_zone_cards(raw.get(key, []))
-            out.extend(_encode_zone_block(cards, max_slots))
+            cards = normalize_zone_cards(raw.get(key, []), side=side, zone=zone_name)
+            out.extend(
+                _encode_zone_block(
+                    cards, max_slots, raw, zone=zone_name, side=side, phase=phase_str
+                )
+            )
 
-    out.extend(_encode_combat(raw))
+    out.extend(_encode_combat(raw, phase=phase_str))
     if len(out) != PLAYER_OBS_DIM:
         raise RuntimeError(f"observation dim mismatch: {len(out)} != {PLAYER_OBS_DIM}")
     return np.asarray(out, dtype=np.float64)

@@ -30,11 +30,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from flesh_and_blood_rlbridge.talishar_engine_environment import TalisharEngineEnvironment
 from flesh_and_blood_rlbridge.cpp_engine_environment import get_engine_dir
 from flesh_and_blood_rlbridge.player_observation import (
+    COMBAT_CHAIN_END,
+    COMBAT_CHAIN_OFF,
     CONTEXT_DIM,
+    HAND_END,
     HAND_SLOT_DIM,
     HAND_SLOTS,
     PLAYER_OBS_DIM,
     SCALAR_COUNT,
+    ZONE_END,
+    ZONE_OFF,
 )
 
 
@@ -272,6 +277,31 @@ def compare_legal_actions(
 OBS_VEC_TOLERANCE = 0.05
 OBS_VEC_HAND_OFF = CONTEXT_DIM + SCALAR_COUNT
 OBS_VEC_HAND_END = OBS_VEC_HAND_OFF + HAND_SLOTS * HAND_SLOT_DIM
+OBS_VEC_ZONE_OFF = ZONE_OFF
+OBS_VEC_ZONE_END = ZONE_END
+OBS_VEC_COMBAT_OFF = COMBAT_CHAIN_OFF
+OBS_VEC_COMBAT_END = COMBAT_CHAIN_END
+
+
+def _append_vec_mismatches(
+    mismatches: list[str],
+    tal_vec: list[Any],
+    cpp_vec: list[Any],
+    start: int,
+    end: int,
+    label: str,
+    *,
+    max_checks: int = 24,
+) -> None:
+    checked = 0
+    for idx in range(start, end):
+        if checked >= max_checks:
+            break
+        tal_v = float(tal_vec[idx])
+        cpp_v = float(cpp_vec[idx])
+        if abs(tal_v - cpp_v) > OBS_VEC_TOLERANCE:
+            mismatches.append(f"{label}[{idx}]: Talishar={tal_v:.4f}, C++={cpp_v:.4f}")
+            checked += 1
 
 
 def _compare_observation_vec_slices(tal: dict[str, Any], cpp: dict[str, Any]) -> tuple[bool, str]:
@@ -294,12 +324,11 @@ def _compare_observation_vec_slices(tal: dict[str, Any], cpp: dict[str, Any]) ->
         if abs(tal_v - cpp_v) > OBS_VEC_TOLERANCE:
             mismatches.append(f"vec[{idx}]: Talishar={tal_v:.4f}, C++={cpp_v:.4f}")
 
-    for idx in range(OBS_VEC_HAND_OFF, OBS_VEC_HAND_END):
-        tal_v = float(tal_vec[idx])
-        cpp_v = float(cpp_vec[idx])
-        if abs(tal_v - cpp_v) > OBS_VEC_TOLERANCE:
-            mismatches.append(f"hand_vec[{idx}]: Talishar={tal_v:.4f}, C++={cpp_v:.4f}")
-            break
+    _append_vec_mismatches(mismatches, tal_vec, cpp_vec, OBS_VEC_HAND_OFF, OBS_VEC_HAND_END, "hand_vec")
+    _append_vec_mismatches(mismatches, tal_vec, cpp_vec, OBS_VEC_ZONE_OFF, OBS_VEC_ZONE_END, "zone_vec")
+    _append_vec_mismatches(
+        mismatches, tal_vec, cpp_vec, OBS_VEC_COMBAT_OFF, OBS_VEC_COMBAT_END, "combat_vec"
+    )
 
     if mismatches:
         shown = "; ".join(mismatches[:8])

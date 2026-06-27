@@ -36,7 +36,7 @@ dependencies = [
 [project.optional-dependencies]
 gui = ["torch"]
 eval = ["torch", "pybind11"]
-train = ["torch"]
+train = ["torch", "sentence-transformers>=2.2.0"]
 cpp = ["pybind11"]
 dev = [
     "pytest>=8.0.0",
@@ -77,6 +77,9 @@ packages = [
 "runscripts" = "runscripts"
 "start_talishar.py" = "start_talishar.py"
 "agents/manifest.json" = "agents/manifest.json"
+"src/flesh_and_blood_rlbridge/card_db/card_text_embeddings_v1.npz" = "flesh_and_blood_rlbridge/card_db/card_text_embeddings_v1.npz"
+"src/flesh_and_blood_rlbridge/card_db/card_text_embeddings_v1.meta.json" = "flesh_and_blood_rlbridge/card_db/card_text_embeddings_v1.meta.json"
+"src/flesh_and_blood_rlbridge/card_db/conditional_patterns.json" = "flesh_and_blood_rlbridge/card_db/conditional_patterns.json"
 
 [tool.hatch.build.targets.sdist]
 include = [

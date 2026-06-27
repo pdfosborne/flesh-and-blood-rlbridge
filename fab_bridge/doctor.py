@@ -110,6 +110,7 @@ def run_doctor(*, require_docker: bool = True) -> DoctorReport:
         default_fmt = str(manifest.get("default_format", "silver_age"))
         status = agent_status(agent_cache_dir(), default_fmt)
         agent_ok = bool(status.get("exists"))
+        embed_ok = bool(status.get("text_embed_present"))
         release = status.get("release_id") or "not installed"
         manifest_has_entry = any(
             isinstance(row, dict) and str(row.get("format", "")) == status.get("cache_format")
@@ -126,6 +127,12 @@ def run_doctor(*, require_docker: bool = True) -> DoctorReport:
                 else "No published agent in manifest yet"
             ),
             required=require_docker and manifest_has_entry,
+        )
+        report.add(
+            "Card text embeddings",
+            embed_ok,
+            str(status.get("text_embed_path", "")),
+            required=require_docker and agent_ok,
         )
     except Exception as exc:  # noqa: BLE001
         report.add(
