@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from fab_bridge.unified_dashboard import (
     UNIFIED_DASHBOARD_NAME,
     UNIFIED_LIVE_STATE,
@@ -69,6 +71,10 @@ def test_collect_and_render_dashboard(tmp_path: Path) -> None:
                     "p1_win_rate": 0.45,
                     "p1_wins": 45,
                     "p2_wins": 55,
+                    "vs_logic": {
+                        "agent_p1_seat": {"agent_win_rate": 0.62},
+                        "agent_p2_seat": {"agent_win_rate": 0.58},
+                    },
                 },
                 {
                     "matchup": "a-vs-b",
@@ -76,6 +82,10 @@ def test_collect_and_render_dashboard(tmp_path: Path) -> None:
                     "p1_win_rate": 0.51,
                     "p1_wins": 51,
                     "p2_wins": 49,
+                    "vs_logic": {
+                        "agent_p1_seat": {"agent_win_rate": 0.65},
+                        "agent_p2_seat": {"agent_win_rate": 0.61},
+                    },
                 },
             ]
         ),
@@ -110,11 +120,15 @@ def test_collect_and_render_dashboard(tmp_path: Path) -> None:
     assert state["episodes_completed"] == 250
     assert state["train_p1_win_rate"] == 0.52
     assert len(state["checkpoint_points"]) == 2
+    assert state["checkpoint_points"][-1]["vs_logic_agent_p1"] == 0.65
+    assert state["checkpoint_points"][-1]["vs_logic_win_rate"] == pytest.approx(0.63)
 
     html = render_unified_random_matchups_html(state, auto_refresh_seconds=5.0)
     assert "Training AI agents with random matchups" in html
     assert html.count("<th>Matchup</th>") == 1
-    assert "<th>Episode</th><th>P1 win%</th><th>P1 wins</th><th>P2 wins</th>" in html
+    assert "Vs logic avg%" in html
+    assert "Vs logic P1 seat" in html
+    assert "Latest vs logic" in html
     assert "c-vs-d" in html
     assert "a-vs-b" in html
     assert "1/3" in html

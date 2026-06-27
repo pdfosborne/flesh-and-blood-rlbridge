@@ -40,6 +40,28 @@ def _pct(value: object) -> str:
         return "—"
 
 
+def _vs_logic_win_rates(row: dict[str, Any]) -> tuple[Optional[float], Optional[float], Optional[float]]:
+    """Return (agent@P1 seat, agent@P2 seat, average) win rates vs logic policy."""
+    vs_logic = row.get("vs_logic")
+    if not isinstance(vs_logic, dict):
+        return None, None, None
+    p1_seat = vs_logic.get("agent_p1_seat")
+    p2_seat = vs_logic.get("agent_p2_seat")
+    p1_wr: Optional[float] = None
+    p2_wr: Optional[float] = None
+    if isinstance(p1_seat, dict) and p1_seat.get("agent_win_rate") is not None:
+        p1_wr = float(p1_seat["agent_win_rate"])
+    if isinstance(p2_seat, dict) and p2_seat.get("agent_win_rate") is not None:
+        p2_wr = float(p2_seat["agent_win_rate"])
+    if p1_wr is not None and p2_wr is not None:
+        return p1_wr, p2_wr, (p1_wr + p2_wr) / 2.0
+    if p1_wr is not None:
+        return p1_wr, None, p1_wr
+    if p2_wr is not None:
+        return None, p2_wr, p2_wr
+    return None, None, None
+
+
 def _matchup_label(matchup_dir: Path) -> str:
     raw = _read_json(matchup_dir / "matchup_label.json")
     if isinstance(raw, dict):
@@ -76,6 +98,7 @@ def _matchup_summary_row(matchup_dir: Path, target_episodes: int) -> dict[str, A
         "train_p1_win_rate": None,
         "train_p2_win_rate": None,
         "checkpoint_win_rate": None,
+        "checkpoint_vs_logic_win_rate": None,
         "episodes_completed": 0,
         "target_episodes": target_episodes,
     }
@@ -98,11 +121,19 @@ def _matchup_summary_row(matchup_dir: Path, target_episodes: int) -> dict[str, A
             last = ckpt_hist[-1]
             if isinstance(last, dict) and last.get("p1_win_rate") is not None:
                 row["checkpoint_win_rate"] = float(last["p1_win_rate"])
+            if isinstance(last, dict):
+                _p1, _p2, avg = _vs_logic_win_rates(last)
+                if avg is not None:
+                    row["checkpoint_vs_logic_win_rate"] = avg
     per_matchup_ckpt = _read_json(matchup_dir / "checkpoint_eval_history.json")
     if isinstance(per_matchup_ckpt, list) and per_matchup_ckpt:
         last = per_matchup_ckpt[-1]
         if isinstance(last, dict) and last.get("p1_win_rate") is not None:
             row["checkpoint_win_rate"] = float(last["p1_win_rate"])
+        if isinstance(last, dict):
+            _p1, _p2, avg = _vs_logic_win_rates(last)
+            if avg is not None:
+                row["checkpoint_vs_logic_win_rate"] = avg
         if last.get("episodes_completed") is not None:
             row["episodes_completed"] = int(last["episodes_completed"])
     return row
@@ -197,17 +228,31 @@ def collect_unified_run_state(run_dir: Path) -> dict[str, Any]:
     elif not current_name and matchups_completed >= matchups_total > 0:
         status = "complete"
 
-    checkpoint_points = [
-        {
-            "episode": int(row.get("episodes_completed") or 0),
-            "win_rate": float(row.get("p1_win_rate") or 0.0),
-            "p1_wins": int(row.get("p1_wins") or 0),
-            "p2_wins": int(row.get("p2_wins") or 0),
-            "matchup": str(row.get("matchup") or ""),
-        }
-        for row in ckpt_history
-        if isinstance(row, dict) and row.get("episodes_completed") is not None
-    ]
+    checkpoint_points = []
+    for row in ckpt_history:
+        if not isinstance(row, dict) or row.get("episodes_completed") is None:
+            continue
+        vs_p1, vs_p2, vs_avg = _vs_logic_win_rates(row)
+        checkpoint_points.append(
+            {
+                "episode": int(row.get("episodes_completed") or 0),
+                "win_rate": float(row.get("p1_win_rate") or 0.0),
+                "p1_wins": int(row.get("p1_wins") or 0),
+                "p2_wins": int(row.get("p2_wins") or 0),
+                "matchup": str(row.get("matchup") or ""),
+                "vs_logic_agent_p1": vs_p1,
+                "vs_logic_agent_p2": vs_p2,
+                "vs_logic_win_rate": vs_avg,
+            }
+        )
+
+    latest_vs_logic_p1: Optional[float] = None
+    latest_vs_logic_p2: Optional[float] = None
+    latest_vs_logic_avg: Optional[float] = None
+    if checkpoint_points:
+        latest_vs_logic_p1 = checkpoint_points[-1].get("vs_logic_agent_p1")
+        latest_vs_logic_p2 = checkpoint_points[-1].get("vs_logic_agent_p2")
+        latest_vs_logic_avg = checkpoint_points[-1].get("vs_logic_win_rate")
 
     completed_rows = [
         _matchup_summary_row(matchup_dir, target_episodes)
@@ -242,6 +287,9 @@ def collect_unified_run_state(run_dir: Path) -> dict[str, Any]:
         "latest_checkpoint_win_rate": (
             checkpoint_points[-1]["win_rate"] if checkpoint_points else None
         ),
+        "latest_vs_logic_win_rate": latest_vs_logic_avg,
+        "latest_vs_logic_p1_seat": latest_vs_logic_p1,
+        "latest_vs_logic_p2_seat": latest_vs_logic_p2,
         "completed_matchups": completed_rows,
         "overall_pct": overall_pct,
         "complete": status == "complete",
@@ -334,13 +382,14 @@ def render_unified_random_matchups_html(
             f"<td>{html.escape(str(row.get('name', '')))}</td>"
             f"<td>{_pct(row.get('train_p1_win_rate'))}</td>"
             f"<td>{_pct(row.get('checkpoint_win_rate'))}</td>"
+            f"<td>{_pct(row.get('checkpoint_vs_logic_win_rate'))}</td>"
             f"<td>{'cached' if row.get('cached') else 'trained'}</td>"
             f"</tr>"
             for row in completed_rows
         )
         history_table = f"""
 <table class="history">
-  <thead><tr><th>Matchup</th><th>Train P1 win%</th><th>Last ckpt eval</th><th>Status</th></tr></thead>
+  <thead><tr><th>Matchup</th><th>Train P1 win%</th><th>Last self-play ckpt</th><th>Last vs logic</th><th>Status</th></tr></thead>
   <tbody>{history_rows}</tbody>
 </table>"""
     else:
@@ -348,16 +397,28 @@ def render_unified_random_matchups_html(
 
     ckpt_rows = ""
     for row in reversed(state.get("checkpoint_points") or []):
+        vs_p1 = row.get("vs_logic_agent_p1")
+        vs_p2 = row.get("vs_logic_agent_p2")
+        vs_detail = ""
+        if vs_p1 is not None or vs_p2 is not None:
+            vs_detail = (
+                f' title="P1 seat: {_pct(vs_p1)}, P2 seat: {_pct(vs_p2)}"'
+            )
         ckpt_rows += (
             f"<tr><td>{int(row.get('episode', 0))}</td>"
             f"<td>{_pct(row.get('win_rate'))}</td>"
+            f"<td{vs_detail}>{_pct(row.get('vs_logic_win_rate'))}</td>"
+            f"<td>{_pct(vs_p1)}</td>"
+            f"<td>{_pct(vs_p2)}</td>"
             f"<td>{int(row.get('p1_wins', 0))}</td>"
             f"<td>{int(row.get('p2_wins', 0))}</td></tr>"
         )
     ckpt_table = (
         f'<table class="history"><thead><tr>'
-        f"<th>Episode</th><th>P1 win%</th><th>P1 wins</th><th>P2 wins</th>"
-        f"</tr></thead><tbody>{ckpt_rows or '<tr><td colspan=\"4\" class=\"muted\">No checkpoint eval yet</td></tr>'}</tbody></table>"
+        f"<th>Episode</th><th>Self-play P1%</th>"
+        f"<th>Vs logic avg%</th><th>Vs logic P1 seat</th><th>Vs logic P2 seat</th>"
+        f"<th>Self-play P1 wins</th><th>Self-play P2 wins</th>"
+        f"</tr></thead><tbody>{ckpt_rows or '<tr><td colspan=\"7\" class=\"muted\">No checkpoint eval yet</td></tr>'}</tbody></table>"
     )
 
     return f"""<!DOCTYPE html>
@@ -416,7 +477,8 @@ def render_unified_random_matchups_html(
       <div class="stat"><span class="stat-label">Matchups done</span><span class="stat-value">{matchups_completed}/{matchups_total}</span></div>
       <div class="stat"><span class="stat-label">Overall progress</span><span class="stat-value">{overall_pct:.1f}%</span></div>
       <div class="stat"><span class="stat-label">Current train win%</span><span class="stat-value">{_pct(state.get('train_p1_win_rate'))}</span></div>
-      <div class="stat"><span class="stat-label">Latest ckpt eval</span><span class="stat-value">{_pct(state.get('latest_checkpoint_win_rate'))}</span></div>
+      <div class="stat"><span class="stat-label">Latest self-play ckpt</span><span class="stat-value">{_pct(state.get('latest_checkpoint_win_rate'))}</span></div>
+      <div class="stat"><span class="stat-label">Latest vs logic</span><span class="stat-value">{_pct(state.get('latest_vs_logic_win_rate'))}</span></div>
     </div>
 
     <div class="card">
@@ -426,7 +488,9 @@ def render_unified_random_matchups_html(
       <div class="metrics">
         <div><span class="metric-label">P1 seat win%</span><span class="metric-value">{_pct(state.get('train_p1_win_rate'))}</span></div>
         <div><span class="metric-label">P2 seat win%</span><span class="metric-value">{_pct(state.get('train_p2_win_rate'))}</span></div>
-        <div><span class="metric-label">Latest checkpoint</span><span class="metric-value">{_pct(state.get('latest_checkpoint_win_rate'))}</span></div>
+        <div><span class="metric-label">Latest self-play ckpt</span><span class="metric-value">{_pct(state.get('latest_checkpoint_win_rate'))}</span></div>
+        <div><span class="metric-label">Vs logic (avg)</span><span class="metric-value">{_pct(state.get('latest_vs_logic_win_rate'))}</span></div>
+        <div><span class="metric-label">Vs logic P1 / P2 seat</span><span class="metric-value">{_pct(state.get('latest_vs_logic_p1_seat'))} / {_pct(state.get('latest_vs_logic_p2_seat'))}</span></div>
       </div>
     </div>
 

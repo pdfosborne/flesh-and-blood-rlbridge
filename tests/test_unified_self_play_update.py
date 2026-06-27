@@ -83,6 +83,60 @@ def test_unified_policy_bundle_shared_tiers() -> None:
     assert _uses_unified_policy(tiers_a, tiers_b)
 
 
+def test_batched_fast_slot_transitions_include_step_order() -> None:
+    from train_dual_agent_common import (  # noqa: PLC0415
+        _FastRolloutSlot,
+        _apply_fast_rollout_action,
+    )
+
+    class _FakeEnv:
+        def fast_step_index(self, action: int) -> dict[str, object]:
+            del action
+            return {
+                "obs_vec": np.zeros(PLAYER_OBS_DIM, dtype=np.float64),
+                "reward": 0.0,
+                "terminated": False,
+                "truncated": False,
+                "acting_player_id": 2,
+                "legal_count": 2,
+                "p1_health": 20,
+                "p2_health": 20,
+                "p1_deck": 40,
+                "p2_deck": 40,
+                "turn_no": 1,
+            }
+
+    slot = _FastRolloutSlot(
+        env=_FakeEnv(),  # type: ignore[arg-type]
+        state={
+            "obs_vec": np.zeros(PLAYER_OBS_DIM, dtype=np.float64),
+            "acting_player_id": 1,
+            "legal_count": 2,
+        },
+        p1_rng=np.random.default_rng(0),
+        p2_rng=np.random.default_rng(1),
+    )
+    slot.step_order = 0
+    _apply_fast_rollout_action(
+        slot,
+        action=0,
+        value=0.0,
+        log_prob=0.0,
+        acting=1,
+        max_steps=50,
+    )
+    _apply_fast_rollout_action(
+        slot,
+        action=0,
+        value=0.0,
+        log_prob=0.0,
+        acting=2,
+        max_steps=50,
+    )
+    merged = _merge_episode_transitions(slot.p1_trans, slot.p2_trans)
+    assert [t["step_order"] for t in merged] == [0, 1]
+
+
 def test_swapped_matchup_reverses_decks() -> None:
     matchup = Matchup(
         name="a-vs-b",

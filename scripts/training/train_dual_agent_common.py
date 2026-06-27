@@ -887,7 +887,9 @@ def _finalize_fast_episode_transitions(
             "done": 1.0,
             "n_legal": last["n_legal"],
             "next_obs_vec": np.zeros_like(last["next_obs_vec"]),
+            "step_order": slot.step_order,
         })
+        slot.step_order += 1
         slot.cur_p2_r -= 1.0
     elif slot.final_p2_hp > slot.final_p1_hp and slot.p1_trans:
         last = slot.p1_trans[-1]
@@ -900,7 +902,9 @@ def _finalize_fast_episode_transitions(
             "done": 1.0,
             "n_legal": last["n_legal"],
             "next_obs_vec": np.zeros_like(last["next_obs_vec"]),
+            "step_order": slot.step_order,
         })
+        slot.step_order += 1
         slot.cur_p1_r -= 1.0
 
 
@@ -939,6 +943,7 @@ class _FastRolloutSlot:
     cur_p1_r: float = 0.0
     cur_p2_r: float = 0.0
     steps: int = 0
+    step_order: int = 0
     active: bool = True
     terminated: bool = False
     truncated: bool = False
@@ -961,6 +966,7 @@ def _reset_fast_rollout_slot(
     slot.cur_p1_r = 0.0
     slot.cur_p2_r = 0.0
     slot.steps = 0
+    slot.step_order = 0
     slot.active = True
     slot.terminated = False
     slot.truncated = False
@@ -1110,7 +1116,9 @@ def _apply_fast_rollout_action(
         "done": float(done),
         "n_legal": n_legal,
         "next_obs_vec": next_obs_vec,
+        "step_order": slot.step_order,
     }
+    slot.step_order += 1
     if acting == 1:
         slot.p1_trans.append(trans)
         slot.cur_p1_r += env_reward
@@ -1285,9 +1293,16 @@ def _flush_unified_ppo_buffers(
     p2_trans: list[dict[str, Any]],
 ) -> None:
     merged = _merge_episode_transitions(p1_trans, p2_trans)
-    if merged:
-        buf = _transitions_to_buf(merged)
-        _ppo_update(policy, buf, merged[-1]["next_obs_vec"])
+    _flush_unified_merged_transitions(policy, merged)
+
+
+def _flush_unified_merged_transitions(
+    policy: PPOAgent,
+    merged_trans: list[dict[str, Any]],
+) -> None:
+    if merged_trans:
+        buf = _transitions_to_buf(merged_trans)
+        _ppo_update(policy, buf, merged_trans[-1]["next_obs_vec"])
 
 
 def _flush_unified_warmup_buffers(
@@ -1296,9 +1311,16 @@ def _flush_unified_warmup_buffers(
     p2_trans: list[dict[str, Any]],
 ) -> None:
     merged = _merge_episode_transitions(p1_trans, p2_trans)
-    if merged:
-        buf = _transitions_to_buf(merged)
-        _bc_update(policy, buf, merged[-1]["next_obs_vec"])
+    _flush_unified_merged_warmup_transitions(policy, merged)
+
+
+def _flush_unified_merged_warmup_transitions(
+    policy: PPOAgent,
+    merged_trans: list[dict[str, Any]],
+) -> None:
+    if merged_trans:
+        buf = _transitions_to_buf(merged_trans)
+        _bc_update(policy, buf, merged_trans[-1]["next_obs_vec"])
 
 
 def _uses_unified_policy(p1_tiers: list[PPOAgent], p2_tiers: list[PPOAgent]) -> bool:
@@ -1517,7 +1539,9 @@ def _run_one_fast_episode(
                 "done": 1.0,
                 "n_legal": last["n_legal"],
                 "next_obs_vec": np.zeros_like(last["next_obs_vec"]),
+                "step_order": step_order,
             })
+            step_order += 1
             cur_p2_r -= 1.0
         elif final_p2_hp > final_p1_hp and p1_trans:
             last = p1_trans[-1]
@@ -1530,7 +1554,9 @@ def _run_one_fast_episode(
                 "done": 1.0,
                 "n_legal": last["n_legal"],
                 "next_obs_vec": np.zeros_like(last["next_obs_vec"]),
+                "step_order": step_order,
             })
+            step_order += 1
             cur_p1_r -= 1.0
 
     return {
@@ -2015,9 +2041,12 @@ def train_agents_from_both_perspectives_parallel(
     shutdown_flag = False
     warmup_p1_accum: list[dict[str, Any]] = []
     warmup_p2_accum: list[dict[str, Any]] = []
+    warmup_unified_accum: list[dict[str, Any]] = []
     ppo_p1_accum: list[dict[str, Any]] = []
     ppo_p2_accum: list[dict[str, Any]] = []
+    ppo_unified_accum: list[dict[str, Any]] = []
     warmup_bc_applied = warmup_episodes <= 0
+    use_unified_policy = _uses_unified_policy(p1_tiers, p2_tiers)
 
     try:
         with ThreadPoolExecutor(max_workers=batch_parallelism) as pool:
@@ -2072,6 +2101,7 @@ def train_agents_from_both_perspectives_parallel(
                 # Collect results and merge buffers.
                 batch_p1_trans: list[dict] = []
                 batch_p2_trans: list[dict] = []
+                batch_unified_trans: list[dict[str, Any]] = []
                 from concurrent.futures import TimeoutError as FutureTimeoutError
                 result_iter: list[dict[str, Any]]
                 if use_batched_fast_rollout:
@@ -2130,8 +2160,16 @@ def train_agents_from_both_perspectives_parallel(
                         break
 
                 for result in result_iter:
-                    batch_p1_trans.extend(result["p1_transitions"])
-                    batch_p2_trans.extend(result["p2_transitions"])
+                    if use_unified_policy:
+                        batch_unified_trans.extend(
+                            _merge_episode_transitions(
+                                result["p1_transitions"],
+                                result["p2_transitions"],
+                            )
+                        )
+                    else:
+                        batch_p1_trans.extend(result["p1_transitions"])
+                        batch_p2_trans.extend(result["p2_transitions"])
                     p1_ep_rewards.append(result["p1_reward"])
                     p2_ep_rewards.append(result["p2_reward"])
                     p1_outcomes.append(
@@ -2189,8 +2227,13 @@ def train_agents_from_both_perspectives_parallel(
                 if shutdown_flag:
                     break
 
-                if live_state_image_path is not None and batch_p1_trans:
-                    last_obs_vec = batch_p1_trans[-1]["obs_vec"]
+                preview_trans = (
+                    batch_unified_trans
+                    if use_unified_policy
+                    else batch_p1_trans
+                )
+                if live_state_image_path is not None and preview_trans:
+                    last_obs_vec = preview_trans[-1]["obs_vec"]
                     _write_state_image(
                         {"obs_vec_shape": str(last_obs_vec.shape)},
                         live_state_image_path,
@@ -2201,33 +2244,59 @@ def train_agents_from_both_perspectives_parallel(
                     )
 
                 if in_warmup:
-                    warmup_p1_accum.extend(batch_p1_trans)
-                    warmup_p2_accum.extend(batch_p2_trans)
+                    if use_unified_policy:
+                        warmup_unified_accum.extend(batch_unified_trans)
+                    else:
+                        warmup_p1_accum.extend(batch_p1_trans)
+                        warmup_p2_accum.extend(batch_p2_trans)
                     if completed >= warmup_episodes and not warmup_bc_applied:
+                        trans_count = (
+                            len(warmup_unified_accum)
+                            if use_unified_policy
+                            else len(warmup_p1_accum) + len(warmup_p2_accum)
+                        )
                         print(
                             f"  [warmup] behavioural-cloning update from "
-                            f"{len(warmup_p1_accum) + len(warmup_p2_accum)} transitions"
+                            f"{trans_count} transitions"
                         )
-                        _flush_warmup_buffers_auto(
-                            p1_tiers, p2_tiers, warmup_p1_accum, warmup_p2_accum,
-                        )
-                        warmup_p1_accum.clear()
-                        warmup_p2_accum.clear()
+                        if use_unified_policy:
+                            _flush_unified_merged_warmup_transitions(
+                                p1_tiers[0], warmup_unified_accum,
+                            )
+                            warmup_unified_accum.clear()
+                        else:
+                            _flush_warmup_buffers_auto(
+                                p1_tiers, p2_tiers, warmup_p1_accum, warmup_p2_accum,
+                            )
+                            warmup_p1_accum.clear()
+                            warmup_p2_accum.clear()
                         warmup_bc_applied = True
                 else:
-                    ppo_p1_accum.extend(batch_p1_trans)
-                    ppo_p2_accum.extend(batch_p2_trans)
-                    rollout_ready = (
-                        len(ppo_p1_accum) >= DEFAULT_PPO_ROLLOUT_BATCH
-                        or len(ppo_p2_accum) >= DEFAULT_PPO_ROLLOUT_BATCH
-                        or completed >= n_episodes
-                    )
-                    if rollout_ready:
-                        _flush_ppo_buffers_auto(
-                            p1_tiers, p2_tiers, ppo_p1_accum, ppo_p2_accum,
+                    if use_unified_policy:
+                        ppo_unified_accum.extend(batch_unified_trans)
+                        rollout_ready = (
+                            len(ppo_unified_accum) >= DEFAULT_PPO_ROLLOUT_BATCH
+                            or completed >= n_episodes
                         )
-                        ppo_p1_accum.clear()
-                        ppo_p2_accum.clear()
+                        if rollout_ready:
+                            _flush_unified_merged_transitions(
+                                p1_tiers[0], ppo_unified_accum,
+                            )
+                            ppo_unified_accum.clear()
+                    else:
+                        ppo_p1_accum.extend(batch_p1_trans)
+                        ppo_p2_accum.extend(batch_p2_trans)
+                        rollout_ready = (
+                            len(ppo_p1_accum) >= DEFAULT_PPO_ROLLOUT_BATCH
+                            or len(ppo_p2_accum) >= DEFAULT_PPO_ROLLOUT_BATCH
+                            or completed >= n_episodes
+                        )
+                        if rollout_ready:
+                            _flush_ppo_buffers_auto(
+                                p1_tiers, p2_tiers, ppo_p1_accum, ppo_p2_accum,
+                            )
+                            ppo_p1_accum.clear()
+                            ppo_p2_accum.clear()
 
                 # Progress logging.
                 if (
@@ -2257,9 +2326,18 @@ def train_agents_from_both_perspectives_parallel(
                         f"p1_avg={p1_avg:+.3f} p2_avg={p2_avg:+.3f}"
                     )
     finally:
-        if not warmup_bc_applied and (warmup_p1_accum or warmup_p2_accum):
-            _flush_warmup_buffers_auto(p1_tiers, p2_tiers, warmup_p1_accum, warmup_p2_accum)
-        if ppo_p1_accum or ppo_p2_accum:
+        if not warmup_bc_applied:
+            if use_unified_policy and warmup_unified_accum:
+                _flush_unified_merged_warmup_transitions(
+                    p1_tiers[0], warmup_unified_accum,
+                )
+            elif warmup_p1_accum or warmup_p2_accum:
+                _flush_warmup_buffers_auto(
+                    p1_tiers, p2_tiers, warmup_p1_accum, warmup_p2_accum,
+                )
+        if use_unified_policy and ppo_unified_accum:
+            _flush_unified_merged_transitions(p1_tiers[0], ppo_unified_accum)
+        elif ppo_p1_accum or ppo_p2_accum:
             _flush_ppo_buffers_auto(p1_tiers, p2_tiers, ppo_p1_accum, ppo_p2_accum)
         for env in envs + swap_envs:
             try:
@@ -2908,15 +2986,38 @@ class _CheckpointEvalTracker:
             episodes=self.checkpoint_eval_episodes,
             seed=(self.seed + completed) if self.seed is not None else None,
             backend="cpp" if self.matchup.cpp_engine_dir else "auto",
-            eval_label="Checkpoint eval",
+            eval_label="Checkpoint eval (self-play)",
         )
+        vs_logic: Optional[dict[str, Any]] = None
+        if self.matchup.cpp_engine_dir:
+            from train_play import (  # noqa: PLC0415
+                evaluate_agent_vs_logic_both_seats,
+            )
+
+            vs_logic = evaluate_agent_vs_logic_both_seats(
+                self.matchup,
+                eval_p1,
+                base_url=self.base_url,
+                game_format=self.game_format,
+                max_steps=self.max_steps,
+                episodes=self.checkpoint_eval_episodes,
+                seed=(self.seed + completed) if self.seed is not None else None,
+                backend="cpp",
+                eval_label_prefix="Checkpoint eval vs logic",
+            )
+        else:
+            print(
+                "  Checkpoint eval vs logic: skipped (no C++ engine for matchup)"
+            )
         record = {
             "matchup": self.matchup.name,
             "matchup_dir": _resolve_matchup_subdir(self.out_dir, self.matchup),
             "episodes_completed": completed,
             "target_episodes": self.n_episodes,
             "eval_episodes": self.checkpoint_eval_episodes,
+            "eval_mode": "self_play",
             **metrics,
+            "vs_logic": vs_logic,
         }
         self.log.append(record)
         wr = float(metrics["p1_win_rate"])
@@ -2950,10 +3051,22 @@ class _CheckpointEvalTracker:
         history_path.write_text(json.dumps(self.log, indent=2), encoding="utf-8")
         print(
             f"  Checkpoint eval @ ep {completed}: "
-            f"P1 win%={wr:.1%} "
+            f"self-play P1 win%={wr:.1%} "
             f"({metrics['p1_wins']}W/{metrics['p2_wins']}L/{metrics['draws']}D "
             f"over {self.checkpoint_eval_episodes} games)"
         )
+        if vs_logic is not None:
+            p1_logic_wr = float(
+                vs_logic["agent_p1_seat"].get("agent_win_rate", 0.0) or 0.0
+            )
+            p2_logic_wr = float(
+                vs_logic["agent_p2_seat"].get("agent_win_rate", 0.0) or 0.0
+            )
+            print(
+                f"  Checkpoint eval vs logic @ ep {completed}: "
+                f"agent@P1={p1_logic_wr:.1%}  agent@P2={p2_logic_wr:.1%} "
+                f"({self.checkpoint_eval_episodes} games per seat)"
+            )
         maybe_refresh_unified_dashboard(self.out_dir, min_interval_seconds=0.0)
 
 
@@ -3510,7 +3623,8 @@ def train_matchup(
         )
         print(
             f"  Checkpoint eval: every {effective_ckpt_interval} episode(s), "
-            f"{checkpoint_eval_episodes} eval game(s) per checkpoint"
+            f"{checkpoint_eval_episodes} eval game(s) per checkpoint "
+            f"(self-play + vs logic on P1/P2 seats)"
         )
         _write_unified_checkpoint_eval_scope(out_dir, matchup)
 

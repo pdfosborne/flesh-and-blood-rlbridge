@@ -2390,6 +2390,73 @@ def evaluate_fixed_matchup(
     )
 
 
+def evaluate_agent_vs_logic_both_seats(
+    matchup: "Matchup",
+    agent: Any,
+    *,
+    base_url: str,
+    game_format: str,
+    max_steps: int,
+    episodes: int,
+    seed: Optional[int] = None,
+    backend: str = "cpp",
+    eval_label_prefix: str = "Eval vs logic",
+) -> dict[str, Any]:
+    """Evaluate an agent against the C++ logic policy from both seats."""
+    empty: dict[str, Any] = {
+        "episodes": 0,
+        "agent_win_rate": 0.0,
+        "p1_wins": 0,
+        "p2_wins": 0,
+        "draws": 0,
+        "timeouts": 0,
+        "errors": 0,
+    }
+    if episodes <= 0:
+        return {"agent_p1_seat": dict(empty), "agent_p2_seat": dict(empty)}
+
+    agent_as_p1 = evaluate_policy_matchup(
+        matchup,
+        agent,
+        LOGIC_POLICY,
+        base_url=base_url,
+        game_format=game_format,
+        max_steps=max_steps,
+        episodes=episodes,
+        seed=seed,
+        backend=backend,
+        eval_label=f"{eval_label_prefix} (agent @ P1)",
+    )
+    agent_as_p2 = evaluate_policy_matchup(
+        matchup,
+        LOGIC_POLICY,
+        agent,
+        base_url=base_url,
+        game_format=game_format,
+        max_steps=max_steps,
+        episodes=episodes,
+        seed=(seed + 50_000) if seed is not None else None,
+        backend=backend,
+        eval_label=f"{eval_label_prefix} (agent @ P2)",
+    )
+    return {
+        "agent_p1_seat": {
+            **agent_as_p1,
+            "agent_win_rate": float(agent_as_p1.get("p1_win_rate", 0.0) or 0.0),
+            "seat": "p1",
+            "p1_policy": "agent",
+            "p2_policy": "logic",
+        },
+        "agent_p2_seat": {
+            **agent_as_p2,
+            "agent_win_rate": float(agent_as_p2.get("p2_win_rate", 0.0) or 0.0),
+            "seat": "p2",
+            "p1_policy": "logic",
+            "p2_policy": "agent",
+        },
+    }
+
+
 def _run_warmup_baseline(
     matchup: "Matchup",
     p1_agent: Any,
