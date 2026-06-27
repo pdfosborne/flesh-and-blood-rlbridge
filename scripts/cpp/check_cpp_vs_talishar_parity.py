@@ -31,6 +31,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from flesh_and_blood_rlbridge.talishar_engine_environment import TalisharEngineEnvironment
 from flesh_and_blood_rlbridge.cpp_engine_environment import get_engine_dir
+from flesh_and_blood_rlbridge.game_state_parity import (
+    build_initial_sync_payload,
+    compare_agent_contract,
+    compare_game_states,
+    extract_cpp_state,
+    extract_talishar_state,
+    is_syncable_card_id,
+)
 from flesh_and_blood_rlbridge.obs_alignment import (
     align_observation_for_cpp_training,
     observation_vectors_aligned,
@@ -101,6 +109,9 @@ class Discrepancy:
     talishar_value: Any
     cpp_value: Any
     tolerance_applied: bool = False
+    taxonomy: str = ""
+    card_id: str = ""
+    zone: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -111,6 +122,9 @@ class Discrepancy:
             "talishar_value": self.talishar_value,
             "cpp_value": self.cpp_value,
             "tolerance_applied": self.tolerance_applied,
+            "taxonomy": self.taxonomy,
+            "card_id": self.card_id,
+            "zone": self.zone,
         }
 
 
@@ -470,6 +484,9 @@ def _record_discrepancy(
     talishar_value: Any,
     cpp_value: Any,
     tolerance_applied: bool = False,
+    taxonomy: str = "",
+    card_id: str = "",
+    zone: str = "",
 ) -> bool:
     report.discrepancies_found += 1
     if report.first_failure_episode is None:
@@ -497,6 +514,9 @@ def _record_discrepancy(
             talishar_value=_summary_value(talishar_value),
             cpp_value=_summary_value(cpp_value),
             tolerance_applied=tolerance_applied,
+            taxonomy=taxonomy,
+            card_id=card_id,
+            zone=zone,
         ).to_dict()
     )
     print(f"    [FAIL] {category}: {description}")
@@ -545,7 +565,7 @@ def _card_ids_from_state_hand(state: dict[str, Any]) -> list[str]:
                 or card.get("cardId")
                 or card.get("card_id")
             )
-            if card_id:
+            if card_id and is_syncable_card_id(card_id):
                 card_ids.append(str(card_id))
     return card_ids
 
@@ -806,11 +826,36 @@ def _opening_hands_from_talishar(env_tal: Any) -> dict[int, list[str]]:
             if cards:
                 opening_hands[player_id] = cards
 
+    if len(opening_hands) >= 2:
+        return opening_hands
+
     last_state = getattr(env_tal, "_last_state", None)
     acting_player_id = _safe_int(getattr(env_tal, "_acting_player_id", 1)) or 1
     if acting_player_id not in opening_hands and isinstance(last_state, dict):
         opening_hands[acting_player_id] = _card_ids_from_state_hand(last_state)
     return opening_hands
+
+
+def _simulation_sync_payload_from_talishar(env_tal: Any) -> dict[str, Any]:
+    """Build full initial-sync payload using both player HTTP views."""
+    fetch_state = getattr(env_tal, "_fetch_state", None)
+    p1_state: dict[str, Any] = {}
+    p2_state: dict[str, Any] = {}
+    if callable(fetch_state):
+        for player_id in (1, 2):
+            try:
+                state = fetch_state(player_id=player_id, last_update=0)
+                if isinstance(state, dict):
+                    if player_id == 1:
+                        p1_state = state
+                    else:
+                        p2_state = state
+            except Exception:
+                continue
+    tal_raw: dict[str, Any] = dict(getattr(env_tal, "_last_state", None) or {})
+    if p1_state and p2_state:
+        tal_raw["_fetch_both"] = lambda: (p1_state, p2_state)
+    return build_initial_sync_payload(tal_raw)
 
 
 def _compare_step(
@@ -919,12 +964,32 @@ def _legal_actions_from_observation(observation: Any) -> list[dict[str, Any]]:
     return legal if isinstance(legal, list) else []
 
 
-def _choose_action(env_tal: Any, observation: Any, *, stress: bool) -> tuple[int, str]:
+def _is_pass_label(label: str) -> bool:
+    return str(label or "").strip().lower() in {"pass", "skip", "done"}
+
+
+def _choose_action(
+    env_tal: Any,
+    observation: Any,
+    *,
+    stress: bool,
+    step: int = 0,
+    rng_seed: Optional[int] = None,
+) -> tuple[int, str]:
     legal = _legal_actions_from_observation(observation)
     if not legal:
         return 0, "<no legal actions>"
     if stress:
         index = random.randrange(len(legal))
+    elif rng_seed is not None:
+        rng = random.Random(int(rng_seed) + int(step) * 1009)
+        non_pass = [
+            i
+            for i, action in enumerate(legal)
+            if not _is_pass_label(str(action.get("label", "") or ""))
+        ]
+        pool = non_pass if non_pass else list(range(len(legal)))
+        index = pool[rng.randrange(len(pool))]
     else:
         try:
             index = int(str(env_tal.sample_action()).strip())
@@ -932,6 +997,127 @@ def _choose_action(env_tal: Any, observation: Any, *, stress: bool) -> tuple[int
             index = 0
         index = max(0, min(index, len(legal) - 1))
     return index, str(legal[index].get("label", "") or "")
+
+
+def _configure_simulation_cpp_env(env_cpp: Any, *, parity_mode: str) -> None:
+    inner = _cpp_inner_env(env_cpp)
+    if parity_mode == "simulation" and inner is not None:
+        inner._strict_simulation = True
+
+
+def _apply_simulation_initial_sync(
+    env_tal: Any,
+    env_cpp: Any,
+    *,
+    sync_scope: str,
+    rng_seed: Optional[int],
+) -> None:
+    inner = _cpp_inner_env(env_cpp)
+    if inner is None:
+        return
+    payload = _simulation_sync_payload_from_talishar(env_tal)
+    if rng_seed is not None:
+        payload["rng_seed"] = rng_seed
+    if sync_scope == "hands":
+        payload.pop("deck_orders", None)
+        payload.pop("equipment", None)
+    apply_sync = getattr(inner, "apply_initial_sync_from_talishar", None)
+    if callable(apply_sync):
+        apply_sync(payload)
+
+
+def _record_state_discrepancies(
+    report: ParityReport,
+    *,
+    episode: int,
+    step: int,
+    tal_state: dict[str, Any],
+    cpp_state: dict[str, Any],
+    context: str,
+) -> bool:
+    result = compare_game_states(tal_state, cpp_state)
+    ok = True
+    for disc in result.discrepancies:
+        ok = False
+        _record_discrepancy(
+            report,
+            episode=episode,
+            step=step,
+            category="game_state",
+            description=f"{context}: {disc.description}",
+            talishar_value=disc.talishar_value,
+            cpp_value=disc.cpp_value,
+            taxonomy=disc.taxonomy,
+            card_id=disc.card_id,
+            zone=disc.zone,
+        )
+    return ok
+
+
+def _compare_simulation_step(
+    step_tal: Any,
+    step_cpp: Any,
+    env_tal: Any,
+    env_cpp: Any,
+    report: ParityReport,
+    *,
+    episode: int,
+    step: int,
+    action_index: int,
+    action_label: str,
+    align_obs: bool,
+) -> bool:
+    context = f"after action[{action_index}] {action_label!r}"
+    tal_state = extract_talishar_state(env_tal)
+    cpp_state = extract_cpp_state(_cpp_inner_env(env_cpp) or env_cpp)
+    ok = _record_state_discrepancies(
+        report,
+        episode=episode,
+        step=step,
+        tal_state=tal_state,
+        cpp_state=cpp_state,
+        context=context,
+    )
+    for disc in compare_agent_contract(step_tal, step_cpp, align_obs=align_obs):
+        ok = False
+        _record_discrepancy(
+            report,
+            episode=episode,
+            step=step,
+            category=disc.category,
+            description=f"{context}: {disc.description}",
+            talishar_value=disc.talishar_value,
+            cpp_value=disc.cpp_value,
+            taxonomy=disc.taxonomy,
+            card_id=disc.card_id,
+            zone=disc.zone,
+            tolerance_applied=disc.category == "reward",
+        )
+    return ok
+
+
+def _write_repro_trace(
+    out_dir: Path,
+    *,
+    episode: int,
+    step: int,
+    action_history: list[dict[str, Any]],
+    pre_tal_state: dict[str, Any],
+    pre_cpp_state: dict[str, Any],
+    action_descriptor: Any,
+    discrepancies: list[dict[str, Any]],
+) -> Path:
+    path = out_dir / "repro_trace.json"
+    payload = {
+        "episode": episode,
+        "step": step,
+        "action_history": action_history,
+        "pre_step": {"talishar": pre_tal_state, "cpp": pre_cpp_state},
+        "action": _json_safe_value(action_descriptor),
+        "discrepancies": discrepancies,
+    }
+    path.write_text(json.dumps(_json_safe_value(payload), indent=2), encoding="utf-8")
+    return path
 
 
 def run_parity_episode(
@@ -943,24 +1129,39 @@ def run_parity_episode(
     max_steps: int,
     stress: bool,
     stop_after_failure: bool = False,
+    parity_mode: str = "contract",
+    sync_scope: str = "full",
+    align_obs: bool = True,
+    rng_seed: Optional[int] = None,
+    repro_out_dir: Optional[Path] = None,
 ) -> bool:
     print(f"  [Episode {episode}] Resetting...")
     report.episodes_run += 1
     episode_failed = False
+    simulation = parity_mode == "simulation"
+    action_history: list[dict[str, Any]] = []
     try:
         _reset_talishar_for_parity(env_tal, env_cpp)
-        opening_hands = _opening_hands_from_talishar(env_tal)
         hand_playability = _hand_playability_from_talishar(env_tal)
         acting_player_id = int(getattr(env_tal, "_acting_player_id", 1) or 1)
-        reset_cpp = env_cpp.reset(
-            options={
-                "opening_hands": opening_hands,
-                "hand_playability": hand_playability,
-                "acting_player_id": acting_player_id,
-            }
-        )
+        reset_options: dict[str, Any] = {
+            "opening_hands": _opening_hands_from_talishar(env_tal),
+            "hand_playability": hand_playability,
+            "acting_player_id": acting_player_id,
+        }
+        if rng_seed is not None:
+            reset_options["rng_seed"] = rng_seed
+        reset_cpp = env_cpp.reset(options=reset_options)
         reset_tal = _build_talishar_reset_snapshot(env_tal)
-        reset_cpp = _align_cpp_reset_result(env_cpp, reset_tal, reset_cpp, env_tal=env_tal)
+        if simulation:
+            _apply_simulation_initial_sync(
+                env_tal,
+                env_cpp,
+                sync_scope=sync_scope,
+                rng_seed=rng_seed,
+            )
+        else:
+            reset_cpp = _align_cpp_reset_result(env_cpp, reset_tal, reset_cpp, env_tal=env_tal)
     except Exception as exc:
         report.episodes_failed += 1
         _record_discrepancy(
@@ -973,7 +1174,23 @@ def run_parity_episode(
             cpp_value="not comparable",
         )
         return False
-    if not _compare_reset(reset_tal, reset_cpp, report, episode):
+
+    if simulation:
+        tal_state = extract_talishar_state(env_tal)
+        cpp_state = extract_cpp_state(_cpp_inner_env(env_cpp) or env_cpp)
+        if not _record_state_discrepancies(
+            report,
+            episode=episode,
+            step=0,
+            tal_state=tal_state,
+            cpp_state=cpp_state,
+            context="reset",
+        ):
+            episode_failed = True
+            if stop_after_failure:
+                report.episodes_failed += 1
+                return False
+    elif not _compare_reset(reset_tal, reset_cpp, report, episode):
         episode_failed = True
         if stop_after_failure:
             report.episodes_failed += 1
@@ -981,19 +1198,30 @@ def run_parity_episode(
 
     observation = reset_tal.observation
     for step in range(1, max_steps + 1):
-        action_index, action_label = _choose_action(env_tal, observation, stress=stress)
+        action_index, action_label = _choose_action(
+            env_tal,
+            observation,
+            stress=stress,
+            step=step,
+            rng_seed=rng_seed,
+        )
         print(f"    Step {step}: action[{action_index}] {action_label}")
+        pre_tal_state = extract_talishar_state(env_tal) if simulation else {}
+        pre_cpp_state = (
+            extract_cpp_state(_cpp_inner_env(env_cpp) or env_cpp) if simulation else {}
+        )
         try:
             action_descriptor = _talishar_action_descriptor(env_tal, action_index)
             step_tal = env_tal.step(str(action_index))
-            set_mirror = getattr(_cpp_inner_env(env_cpp), "set_talishar_mirror_state", None)
-            if callable(set_mirror):
-                set_mirror(
-                    _talishar_parity_snapshot(
-                        step_tal,
-                        raw_state=getattr(env_tal, "_last_state", None),
+            if not simulation:
+                set_mirror = getattr(_cpp_inner_env(env_cpp), "set_talishar_mirror_state", None)
+                if callable(set_mirror):
+                    set_mirror(
+                        _talishar_parity_snapshot(
+                            step_tal,
+                            raw_state=getattr(env_tal, "_last_state", None),
+                        )
                     )
-                )
             step_cpp = env_cpp.step(action_descriptor)
         except Exception as exc:
             episode_failed = True
@@ -1011,16 +1239,51 @@ def run_parity_episode(
                 return False
             continue
         report.total_steps += 1
-        if not _compare_step(
-            step_tal,
-            step_cpp,
-            report,
-            episode=episode,
-            step=step,
-            action_index=action_index,
-            action_label=action_label,
-        ):
+        action_history.append(
+            {
+                "step": step,
+                "index": action_index,
+                "label": action_label,
+                "descriptor": _json_safe_value(action_descriptor),
+            }
+        )
+        if simulation:
+            step_ok = _compare_simulation_step(
+                step_tal,
+                step_cpp,
+                env_tal,
+                env_cpp,
+                report,
+                episode=episode,
+                step=step,
+                action_index=action_index,
+                action_label=action_label,
+                align_obs=align_obs,
+            )
+        else:
+            step_ok = _compare_step(
+                step_tal,
+                step_cpp,
+                report,
+                episode=episode,
+                step=step,
+                action_index=action_index,
+                action_label=action_label,
+            )
+        if not step_ok:
             episode_failed = True
+            if simulation and repro_out_dir is not None:
+                trace_path = _write_repro_trace(
+                    repro_out_dir,
+                    episode=episode,
+                    step=step,
+                    action_history=action_history,
+                    pre_tal_state=pre_tal_state,
+                    pre_cpp_state=pre_cpp_state,
+                    action_descriptor=action_descriptor,
+                    discrepancies=report.discrepancies[-5:],
+                )
+                print(f"    [repro] wrote {trace_path}")
             if stop_after_failure:
                 report.episodes_failed += 1
                 return False
@@ -1198,7 +1461,10 @@ def _create_parity_envs(
     cpp_engine_dir: Optional[str] = None,
     cpp_engine_deck1: Optional[str] = None,
     cpp_engine_deck2: Optional[str] = None,
+    parity_mode: str = "contract",
+    disable_obs_alignment: bool = False,
 ) -> tuple[TalisharEngineEnvironment, TalisharEngineEnvironment]:
+    align_obs = not disable_obs_alignment and parity_mode != "simulation"
     common = {
         "base_url": talishar_url,
         "local_deck_name": deck1,
@@ -1207,7 +1473,7 @@ def _create_parity_envs(
         "max_turns": max_turns,
         "self_play": True,
         "enable_combat_tracker": True,
-        "cpp_obs_alignment": True,
+        "cpp_obs_alignment": align_obs,
     }
     env_tal = TalisharEngineEnvironment(**common, use_cpp_engine=False)
     env_cpp = TalisharEngineEnvironment(
@@ -1232,6 +1498,7 @@ def _create_parity_envs(
             "or pass --cpp-engine-dir / --cpp-engine-cache-dir. "
             f"Expected engine directory: {expected_dir}"
         )
+    _configure_simulation_cpp_env(env_cpp, parity_mode=parity_mode)
     return env_tal, env_cpp
 
 
@@ -1253,6 +1520,10 @@ def run_parity_check(
     stop_after_failure: bool = False,
     write_reports: bool = True,
     verbose: bool = True,
+    parity_mode: str = "contract",
+    sync_scope: str = "full",
+    disable_obs_alignment: bool = False,
+    rng_seed: Optional[int] = None,
 ) -> tuple[ParityReport, int]:
     """Run a parity check programmatically.
 
@@ -1277,6 +1548,8 @@ def run_parity_check(
         print(f"Matchup: {deck1} vs {deck2}")
         print(f"Format: {game_format}")
         print(f"Mode: {mode}")
+        print(f"Parity mode: {parity_mode}")
+        print(f"Sync scope: {sync_scope}")
         print(f"Episodes: {episodes}")
         print(f"Talishar URL: {talishar_url}")
         print(f"Output Dir: {resolved_out_dir}")
@@ -1294,6 +1567,8 @@ def run_parity_check(
             cpp_engine_dir=cpp_engine_dir,
             cpp_engine_deck1=cpp_engine_deck1,
             cpp_engine_deck2=cpp_engine_deck2,
+            parity_mode=parity_mode,
+            disable_obs_alignment=disable_obs_alignment,
         )
         if verbose:
             print("[OK] Talishar HTTP environment created")
@@ -1321,8 +1596,10 @@ def run_parity_check(
         env_tal=env_tal,
         env_cpp=env_cpp,
     )
+    align_obs = not disable_obs_alignment and parity_mode != "simulation"
     try:
         for episode in range(1, episodes + 1):
+            episode_seed = (rng_seed + episode - 1) if rng_seed is not None else None
             run_parity_episode(
                 env_tal,
                 env_cpp,
@@ -1331,6 +1608,11 @@ def run_parity_check(
                 max_steps=max_steps,
                 stress=stress,
                 stop_after_failure=stop_after_failure,
+                parity_mode=parity_mode,
+                sync_scope=sync_scope,
+                align_obs=align_obs,
+                rng_seed=episode_seed,
+                repro_out_dir=resolved_out_dir if parity_mode == "simulation" else None,
             )
     except KeyboardInterrupt:
         if verbose:
@@ -1418,11 +1700,29 @@ def main() -> None:
     parser.add_argument("--episodes", type=int, default=10)
     parser.add_argument("--steps-per-episode", type=int, default=None)
     parser.add_argument("--max-turns", type=int, default=2000)
-    parser.add_argument("--talishar-url", default="http://localhost")
+    parser.add_argument("--talishar-url", default="http://localhost:8080/game")
     parser.add_argument("--cpp-engine-cache-dir", default=None)
     parser.add_argument("--cpp-engine-dir", default=None)
     parser.add_argument("--cpp-engine-deck1", default=None)
     parser.add_argument("--cpp-engine-deck2", default=None)
+    parser.add_argument(
+        "--parity-mode",
+        default="contract",
+        choices=["contract", "simulation"],
+        help="contract=mirror Talishar on each step; simulation=independent C++ stepping",
+    )
+    parser.add_argument(
+        "--sync-scope",
+        default="full",
+        choices=["hands", "full"],
+        help="Initial state copied from Talishar at reset (simulation mode)",
+    )
+    parser.add_argument(
+        "--disable-obs-alignment",
+        action="store_true",
+        help="Disable combat-slice neutralization during obs comparison",
+    )
+    parser.add_argument("--seed", type=int, default=None, help="RNG seed for C++ reset")
     parser.add_argument("--out-dir", default="results/parity_checks")
     parser.add_argument(
         "--stop-after-failure",
@@ -1455,6 +1755,10 @@ def main() -> None:
         stop_after_failure=args.stop_after_failure,
         write_reports=True,
         verbose=True,
+        parity_mode=args.parity_mode,
+        sync_scope=args.sync_scope,
+        disable_obs_alignment=args.disable_obs_alignment,
+        rng_seed=args.seed,
     )
     sys.exit(exit_code)
 

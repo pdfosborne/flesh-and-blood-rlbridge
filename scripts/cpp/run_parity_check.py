@@ -14,6 +14,7 @@ import argparse
 import os
 import sys
 from pathlib import Path
+from typing import Optional
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 _SCRIPTS_ROOT = REPO_ROOT / "scripts"
@@ -111,6 +112,18 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Deprecated alias; continuing after failures is already the default",
     )
+    parser.add_argument(
+        "--parity-mode",
+        default="contract",
+        choices=["contract", "simulation"],
+    )
+    parser.add_argument(
+        "--sync-scope",
+        default="full",
+        choices=["hands", "full"],
+    )
+    parser.add_argument("--disable-obs-alignment", action="store_true")
+    parser.add_argument("--seed", type=int, default=None)
     return parser
 
 
@@ -129,6 +142,10 @@ def execute_parity_check(
     cpp_engine_deck2: str = "",
     stop_after_failure: bool = False,
     verbose_header: bool = True,
+    parity_mode: str = "contract",
+    sync_scope: str = "full",
+    disable_obs_alignment: bool = False,
+    rng_seed: Optional[int] = None,
 ) -> int:
     if mode not in VALID_MODES:
         print(f"ERROR: Invalid mode '{mode}'. Must be one of: {', '.join(VALID_MODES)}")
@@ -176,6 +193,10 @@ def execute_parity_check(
         stop_after_failure=stop_after_failure,
         write_reports=True,
         verbose=verbose_header,
+        parity_mode=parity_mode,
+        sync_scope=sync_scope,
+        disable_obs_alignment=disable_obs_alignment,
+        rng_seed=rng_seed,
     )
 
     if verbose_header:
@@ -230,6 +251,10 @@ def main(argv: list[str] | None = None) -> int:
         cpp_engine_deck2=args.cpp_engine_deck2,
         stop_after_failure=args.stop_after_failure,
         verbose_header=True,
+        parity_mode=args.parity_mode,
+        sync_scope=args.sync_scope,
+        disable_obs_alignment=args.disable_obs_alignment,
+        rng_seed=args.seed,
     )
 
 

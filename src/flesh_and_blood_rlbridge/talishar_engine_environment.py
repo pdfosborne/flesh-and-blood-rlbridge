@@ -1335,7 +1335,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
     def _reset_repeat_tracking(self, *, turn_no: int, acting_player_id: int) -> None:
         self._repeat_tracker.reset(turn_no=turn_no, acting_player_id=acting_player_id)
 
-    def _repeat_action_penalty(
+    def _compute_repeat_action_penalty(
         self,
         action_key: tuple[int, str],
         *,
@@ -2204,7 +2204,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             )
             repeat_penalty = 0.0
         else:
-            repeat_penalty = self._repeat_action_penalty(
+            repeat_penalty = self._compute_repeat_action_penalty(
                 action_key,
                 turn_no=turn_no,
                 acting_player_id=self._acting_player_id,

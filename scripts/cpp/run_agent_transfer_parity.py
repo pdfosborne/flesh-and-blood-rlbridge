@@ -45,6 +45,46 @@ from scripts.cpp.check_cpp_vs_talishar_parity import (  # noqa: E402
 from train_dual_agent_common import Matchup, train_matchup  # noqa: E402
 
 
+def _resolve_training_weights(
+    summary: dict[str, Any],
+    *,
+    train_dir: Path,
+    game_format: str,
+) -> Path:
+    """Locate PPO weights after train_matchup (handles cache-hit package_dir quirk)."""
+    from agent_cache import AgentCacheStore  # noqa: PLC0415
+    from flesh_and_blood_rlbridge.player_observation import (  # noqa: PLC0415
+        PLAYER_OBS_SCHEMA_VERSION,
+    )
+
+    if summary.get("skipped_training"):
+        cache = AgentCacheStore(
+            REPO_ROOT / "results" / "agent_cache",
+            game_format,
+            obs_schema_version=PLAYER_OBS_SCHEMA_VERSION,
+        )
+        cached = cache._weights_path()
+        if cached.is_file():
+            return cached
+
+    package_dir = Path(summary["p1"]["package_dir"])
+    weights = package_dir / "weights" / "agent_weights.json"
+    if weights.is_file():
+        return weights
+
+    candidates = sorted(
+        train_dir.glob("**/ppo_*/weights/agent_weights.json"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if candidates:
+        return candidates[0]
+
+    raise FileNotFoundError(
+        f"No agent weights found under {train_dir} (package_dir={package_dir})"
+    )
+
+
 def _obs_vec(env: Any) -> np.ndarray:
     vec = getattr(env, "_last_observation_vec", None)
     if vec is not None:
@@ -280,7 +320,11 @@ def main() -> int:
             require_cpp_engine=True,
             n_workers=1,
         )
-        weights_path = Path(summary["p1"]["package_dir"]) / "weights" / "agent_weights.json"
+        weights_path = _resolve_training_weights(
+            summary,
+            train_dir=train_dir,
+            game_format=args.format,
+        )
     print(f"Using weights: {weights_path}")
 
     agent = PPOAgent()

@@ -82,6 +82,34 @@ from flesh_and_blood_rlbridge.card_vocab import (  # noqa: E402
     vocab_size,
 )
 
+_PLAY_ABILITY_CASE_RE = re.compile(r'case\s+"([^"]+)"\s*:')
+
+
+def _scan_play_ability_card_ids(talishar_src: Path) -> set[str]:
+    """Card IDs with explicit play/activation handlers in Talishar PHP."""
+    ids: set[str] = set()
+    for rel in (
+        "CardDictionaries/PlayAbilities.php",
+        "CharacterAbilities.php",
+    ):
+        path = talishar_src / rel
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        ids.update(_PLAY_ABILITY_CASE_RE.findall(text))
+    return ids
+
+
+def _cpp_instant_equipment_set(card_ids: list[str]) -> str:
+    if not card_ids:
+        return "static const std::unordered_set<std::string> kInstantEquipment = {};"
+    lines = ["static const std::unordered_set<std::string> kInstantEquipment = {"]
+    for cid in sorted(card_ids):
+        lines.append(f'    "{cid}",')
+    lines.append("};")
+    return "\n".join(lines)
+
+
 # ── Card metadata ──────────────────────────────────────────────────────────────
 
 @dataclass
@@ -95,6 +123,7 @@ class CardMeta:
     card_type: str = ""               # "attack", "reaction", "equipment", ...
     php_source_file: str = ""         # relative path of PHP file
     php_snippet: str = ""             # extracted PHP logic block
+    has_play_ability: bool = False    # Talishar PlayAbilities / CharacterAbilities case
 
 
 @dataclass
@@ -767,6 +796,41 @@ struct FastStepResult {{
     int turn_no = 0;
 }};
 
+// ── Combat chain link (parity snapshot) ─────────────────────────────────────
+
+struct CombatChainLink {{
+    std::string card_id;
+    int power = 0;
+    int defense = 0;
+}};
+
+struct GameSnapshot {{
+    int acting_player_id = 1;
+    int p1_health = 0;
+    int p2_health = 0;
+    int turn_no = 0;
+    int phase = 0;
+    int p1_resources = 0;
+    int p2_resources = 0;
+    int pending_attack_power = 0;
+    int pending_block_value = 0;
+    bool game_over = false;
+    int winner = -1;
+    std::vector<std::string> p1_hand;
+    std::vector<std::string> p2_hand;
+    std::vector<std::string> p1_deck;
+    std::vector<std::string> p2_deck;
+    std::vector<std::string> p1_discard;
+    std::vector<std::string> p2_discard;
+    std::vector<std::string> p1_equipment;
+    std::vector<std::string> p2_equipment;
+    std::vector<std::string> p1_arsenal;
+    std::vector<std::string> p2_arsenal;
+    std::vector<std::string> p1_pitch;
+    std::vector<std::string> p2_pitch;
+    std::vector<CombatChainLink> combat_chain;
+}};
+
 // ── Game state ────────────────────────────────────────────────────────────────
 
 struct GameState {{
@@ -785,6 +849,14 @@ struct GameState {{
     int         active_player = 0;   // player who owns the current turn
     int         pending_attack_power = 0;
     int         pending_block_value = 0;
+    int         pending_card_cost = 0;
+    Card        pending_play_card;
+    bool        pending_play_active = false;
+    bool        pending_play_is_attack = false;
+    bool        pending_from_equipment = false;
+    bool        instant_window = false;
+    bool        attack_pitch_satisfied = false;
+    std::vector<CombatChainLink> combat_chain;
     std::array<double, 80> deck_indices_p1{{}};
     std::array<double, 80> deck_indices_p2{{}};
     std::mt19937 rng = std::mt19937(0xFAB123u);
@@ -804,14 +876,33 @@ struct GameState {{
     void register_all_cards();
     void init_standard_decks();   // deal opening hands from pre-built deck lists
     void sync_opening_hand(int player_idx, const std::vector<std::string>& card_ids);
+    void sync_deck_order(int player_idx, const std::vector<std::string>& card_ids);
+    void sync_equipment(int player_idx, const std::vector<std::string>& card_ids);
+    GameSnapshot snapshot_state() const;
+    int observation_acting_player() const;
     void set_priority(int player_idx);
+    void draw_cards(int player_idx, int n);
 
 private:
+    int _available_resources(int player_idx) const;
+    int _equipment_activation_cost(const Card& card) const;
+    bool _is_hero_equipment(const Card& card, int player_idx) const;
+    bool _is_weapon(const Card& card) const;
+    void _append_equipment_legal_actions(
+        std::vector<LegalAction>& actions, int player_idx, bool instant_only) const;
     bool _is_attack_card(const Card& card) const;
     bool _is_block_card(const Card& card) const;
+    void _open_instant_window();
+    void _close_instant_window();
     void _apply_hand_play_main(size_t idx);
+    void _apply_equipment_index(size_t idx);
+    void _apply_arsenal_index(size_t idx);
     void _apply_block_index(size_t idx);
     void _resolve_combat();
+    void _apply_pitch_index(size_t idx);
+    void _try_complete_pitch();
+    void _begin_block_phase();
+    void _complete_pending_play();
     void _apply_hand_index(size_t idx);
     void _apply_pass();
     void _check_game_over();
@@ -826,6 +917,7 @@ _GAMESTATE_CPP = """\
 #include "cards.h"
 #include <algorithm>
 #include <cctype>
+#include <unordered_set>
 
 __PLAYER_OBS_IMPL__
 
@@ -833,9 +925,114 @@ namespace {{
 constexpr int kMinBlockDefense = 3;
 }}
 
+{instant_equipment_set}
+
 bool GameState::_is_attack_card(const Card& card) const {{
     const std::string lowered = _lower_copy(card.card_type);
-    return lowered.find("attack") != std::string::npos;
+    if (lowered.find("attack") != std::string::npos) {{
+        return true;
+    }}
+    if (lowered.find("weapon") != std::string::npos) {{
+        return true;
+    }}
+    return card.power > 0;
+}}
+
+bool GameState::_is_weapon(const Card& card) const {{
+    const std::string lowered = _lower_copy(card.card_type);
+    if (lowered.find("weapon") != std::string::npos) {{
+        return true;
+    }}
+    return card.power > 0 && card.cost <= 0;
+}}
+
+bool GameState::_is_hero_equipment(const Card& card, int player_idx) const {{
+    if (player_idx < 0 || player_idx >= 2) {{
+        return false;
+    }}
+    if (!players[player_idx].hero_card_id.empty()
+        && card.card_id == players[player_idx].hero_card_id) {{
+        return true;
+    }}
+    const std::string lowered = _lower_copy(card.card_type);
+    if (lowered.find("hero") != std::string::npos) {{
+        return true;
+    }}
+    return false;
+}}
+
+int GameState::_available_resources(int player_idx) const {{
+    if (player_idx < 0 || player_idx >= 2) {{
+        return 0;
+    }}
+    const auto& p = players[player_idx];
+    int avail = p.resources;
+    for (const auto& card : p.hand) {{
+        avail += card.pitch;
+    }}
+    return avail;
+}}
+
+int GameState::_equipment_activation_cost(const Card& card) const {{
+    if (_is_weapon(card)) {{
+        return 0;
+    }}
+    if (card.cost >= 0) {{
+        return card.cost;
+    }}
+    return 0;
+}}
+
+void GameState::_append_equipment_legal_actions(
+    std::vector<LegalAction>& actions, int player_idx, bool instant_only) const {{
+    if (player_idx < 0 || player_idx >= 2) {{
+        return;
+    }}
+    const auto& eq = players[player_idx].equipment;
+    for (size_t i = 0; i < eq.size(); ++i) {{
+        const Card& item = eq[static_cast<size_t>(i)];
+        if (_is_hero_equipment(item, player_idx)) {{
+            continue;
+        }}
+        const int act_cost = _equipment_activation_cost(item);
+        if (instant_only) {{
+            if (act_cost > 0 || _is_weapon(item)) {{
+                continue;
+            }}
+            if (kInstantEquipment.find(item.card_id) == kInstantEquipment.end()) {{
+                continue;
+            }}
+        }} else if (act_cost > _available_resources(player_idx)) {{
+            continue;
+        }}
+        actions.push_back(LegalAction{{
+            3,
+            std::to_string(i),
+            item.card_id,
+            "equipment",
+            item.name,
+        }});
+    }}
+}}
+
+void GameState::_open_instant_window() {{
+    instant_window = true;
+    phase = TurnPhase::MAIN;
+    priority = active_player;
+}}
+
+void GameState::_close_instant_window() {{
+    instant_window = false;
+}}
+
+int GameState::observation_acting_player() const {{
+    if (phase == TurnPhase::BLOCK) {{
+        return priority + 1;
+    }}
+    if (phase == TurnPhase::PITCH || instant_window) {{
+        return active_player + 1;
+    }}
+    return priority + 1;
 }}
 
 bool GameState::_is_block_card(const Card& card) const {{
@@ -848,12 +1045,14 @@ std::vector<LegalAction> GameState::get_legal_actions() const {{
     const auto& p = players[priority];
 
     if (phase == TurnPhase::MAIN) {{
+        if (instant_window) {{
+            _append_equipment_legal_actions(actions, priority, true);
+            actions.push_back(LegalAction{{99, "", "", "button", "Pass"}});
+            return actions;
+        }}
         for (size_t i = 0; i < p.hand.size(); ++i) {{
-            int avail = 0;
-            for (size_t j = 0; j < p.hand.size(); ++j) {{
-                if (j != i) avail += p.hand[j].pitch;
-            }}
-            if (p.hand[i].cost <= avail) {{
+            const int play_cost = std::max(0, p.hand[i].cost);
+            if (play_cost <= _available_resources(priority)) {{
                 actions.push_back(LegalAction{{
                     27,
                     std::to_string(i),
@@ -863,7 +1062,37 @@ std::vector<LegalAction> GameState::get_legal_actions() const {{
                 }});
             }}
         }}
+        _append_equipment_legal_actions(actions, priority, false);
+        for (size_t i = 0; i < p.arsenal.size(); ++i) {{
+            const int play_cost = std::max(0, p.arsenal[i].cost);
+            if (play_cost <= _available_resources(priority)) {{
+                actions.push_back(LegalAction{{
+                    5,
+                    std::to_string(i),
+                    p.arsenal[i].card_id,
+                    "arsenal",
+                    p.arsenal[i].name,
+                }});
+            }}
+        }}
         actions.push_back(LegalAction{{99, "", "", "button", "Pass"}});
+        return actions;
+    }}
+
+    if (phase == TurnPhase::PITCH) {{
+        _append_equipment_legal_actions(actions, priority, true);
+        for (size_t i = 0; i < p.hand.size(); ++i) {{
+            actions.push_back(LegalAction{{
+                27,
+                std::to_string(i),
+                p.hand[i].card_id,
+                "hand",
+                p.hand[i].name,
+            }});
+        }}
+        if (pending_card_cost > 0 && p.resources >= pending_card_cost) {{
+            actions.push_back(LegalAction{{99, "", "", "button", "Pass"}});
+        }}
         return actions;
     }}
 
@@ -894,13 +1123,50 @@ int GameState::fast_legal_count() const {{
     int count = 1;  // pass
 
     if (phase == TurnPhase::MAIN) {{
-        for (size_t i = 0; i < p.hand.size(); ++i) {{
-            int avail = 0;
-            for (size_t j = 0; j < p.hand.size(); ++j) {{
-                if (j != i) avail += p.hand[j].pitch;
+        if (instant_window) {{
+            int eq_count = 0;
+            for (size_t i = 0; i < p.equipment.size(); ++i) {{
+                if (_is_hero_equipment(p.equipment[i], priority)) {{
+                    continue;
+                }}
+                if (_equipment_activation_cost(p.equipment[i]) == 0
+                    && !_is_weapon(p.equipment[i])
+                    && kInstantEquipment.find(p.equipment[i].card_id) != kInstantEquipment.end()) {{
+                    ++eq_count;
+                }}
             }}
-            if (p.hand[i].cost <= avail) ++count;
+            return eq_count + 1;
         }}
+        for (size_t i = 0; i < p.hand.size(); ++i) {{
+            if (std::max(0, p.hand[i].cost) <= _available_resources(priority)) ++count;
+        }}
+        for (size_t i = 0; i < p.equipment.size(); ++i) {{
+            if (_is_hero_equipment(p.equipment[i], priority)) {{
+                continue;
+            }}
+            if (_equipment_activation_cost(p.equipment[i]) <= _available_resources(priority)) {{
+                ++count;
+            }}
+        }}
+        for (size_t i = 0; i < p.arsenal.size(); ++i) {{
+            if (std::max(0, p.arsenal[i].cost) <= _available_resources(priority)) ++count;
+        }}
+        return count;
+    }}
+
+    if (phase == TurnPhase::PITCH) {{
+        count = static_cast<int>(p.hand.size());
+        for (size_t i = 0; i < p.equipment.size(); ++i) {{
+            if (_is_hero_equipment(p.equipment[i], priority)) {{
+                continue;
+            }}
+            if (_equipment_activation_cost(p.equipment[i]) == 0
+                && !_is_weapon(p.equipment[i])
+                && kInstantEquipment.find(p.equipment[i].card_id) != kInstantEquipment.end()) {{
+                ++count;
+            }}
+        }}
+        if (pending_card_cost > 0 && p.resources >= pending_card_cost) ++count;
         return count;
     }}
 
@@ -925,18 +1191,206 @@ void GameState::seed_rng(uint32_t seed) {{
 }}
 
 void GameState::_resolve_combat() {{
-    const int defender = priority;
+    const int defender = 1 - active_player;
     const int dmg = std::max(0, pending_attack_power - pending_block_value);
     players[static_cast<size_t>(defender)].health -= dmg;
     pending_attack_power = 0;
     pending_block_value = 0;
+    pending_card_cost = 0;
+    pending_play_active = false;
+    pending_play_is_attack = false;
+    combat_chain.clear();
     phase = TurnPhase::MAIN;
     priority = active_player;
     _check_game_over();
 }}
 
+void GameState::_begin_block_phase() {{
+    if (!pending_play_active || !pending_play_is_attack) {{
+        return;
+    }}
+    if (pending_card_cost > 0) {{
+        const int from_pool = std::min(
+            pending_card_cost, players[active_player].resources);
+        players[active_player].resources -= from_pool;
+        pending_card_cost -= from_pool;
+    }}
+    pending_card_cost = 0;
+    players[active_player].resources = 0;
+    pending_attack_power = pending_play_card.power;
+    combat_chain.clear();
+    combat_chain.push_back(CombatChainLink{{
+        pending_play_card.card_id,
+        pending_play_card.power,
+        pending_play_card.defense,
+    }});
+    pending_play_active = false;
+    pending_play_is_attack = false;
+    attack_pitch_satisfied = false;
+    phase = TurnPhase::BLOCK;
+    priority = 1 - active_player;
+}}
+
+void GameState::_complete_pending_play() {{
+    if (!pending_play_active) {{
+        return;
+    }}
+    if (pending_card_cost > 0) {{
+        const int from_pool = std::min(
+            pending_card_cost, players[active_player].resources);
+        players[active_player].resources -= from_pool;
+        pending_card_cost -= from_pool;
+    }}
+    pending_card_cost = 0;
+    players[active_player].resources = 0;
+    if (pending_play_is_attack) {{
+        _begin_block_phase();
+        return;
+    }}
+    auto it = effects.find(pending_play_card.card_id);
+    if (it != effects.end()) {{
+        it->second(*this, active_player);
+    }}
+    players[active_player].discard.push_back(pending_play_card);
+    pending_play_active = false;
+    pending_play_is_attack = false;
+    pending_from_equipment = false;
+    phase = TurnPhase::MAIN;
+    priority = active_player;
+    _check_game_over();
+}}
+
+void GameState::_apply_equipment_index(size_t idx) {{
+    consecutive_passes = 0;
+    auto& eq = players[priority].equipment;
+    if (idx >= eq.size()) return;
+    const Card card = eq[static_cast<size_t>(idx)];
+    if (_is_hero_equipment(card, priority)) {{
+        return;
+    }}
+
+    const bool weapon = _is_weapon(card);
+    const int act_cost = _equipment_activation_cost(card);
+    const int from_pool = std::min(act_cost, players[priority].resources);
+    players[priority].resources -= from_pool;
+    const int owed = act_cost - from_pool;
+
+    if (weapon) {{
+        pending_play_card = card;
+        pending_from_equipment = true;
+        pending_play_is_attack = true;
+        pending_play_active = true;
+        pending_card_cost = owed;
+        pending_attack_power = 0;
+        pending_block_value = 0;
+        combat_chain.clear();
+        phase = TurnPhase::PITCH;
+        active_player = priority;
+        if (instant_window) {{
+            _close_instant_window();
+        }}
+        return;
+    }}
+
+    if (owed > 0) {{
+        pending_play_card = card;
+        pending_play_active = true;
+        pending_play_is_attack = false;
+        pending_from_equipment = true;
+        pending_card_cost = owed;
+        phase = TurnPhase::PITCH;
+        active_player = priority;
+        return;
+    }}
+
+    auto it = effects.find(card.card_id);
+    if (it != effects.end()) {{
+        it->second(*this, priority);
+    }}
+    if (!weapon && act_cost <= 0) {{
+        eq.erase(eq.begin() + static_cast<std::ptrdiff_t>(idx));
+        players[priority].discard.push_back(card);
+    }}
+    _check_game_over();
+}}
+
+void GameState::_apply_arsenal_index(size_t idx) {{
+    consecutive_passes = 0;
+    auto& ars = players[priority].arsenal;
+    if (idx >= ars.size()) return;
+
+    Card card = ars[static_cast<size_t>(idx)];
+    ars.erase(ars.begin() + static_cast<std::ptrdiff_t>(idx));
+
+    pending_play_card = card;
+    pending_play_active = true;
+    pending_play_is_attack = _is_attack_card(card);
+    pending_from_equipment = false;
+    const int owed = std::max(0, card.cost);
+    const int from_pool = std::min(owed, players[priority].resources);
+    players[priority].resources -= from_pool;
+    pending_card_cost = owed - from_pool;
+    active_player = priority;
+    if (pending_card_cost > 0) {{
+        phase = TurnPhase::PITCH;
+        return;
+    }}
+    _complete_pending_play();
+}}
+
+void GameState::_try_complete_pitch() {{
+    if (!pending_play_active) {{
+        return;
+    }}
+    if (players[active_player].resources < pending_card_cost) {{
+        return;
+    }}
+    if (pending_play_is_attack) {{
+        attack_pitch_satisfied = true;
+        phase = TurnPhase::MAIN;
+        _open_instant_window();
+        return;
+    }}
+    _complete_pending_play();
+}}
+
+void GameState::_apply_pitch_index(size_t idx) {{
+    consecutive_passes = 0;
+    auto& hand = players[active_player].hand;
+    if (idx >= hand.size()) return;
+
+    Card card = hand[static_cast<size_t>(idx)];
+    hand.erase(hand.begin() + static_cast<std::ptrdiff_t>(idx));
+    players[active_player].pitch_zone.push_back(card);
+    players[active_player].resources += card.pitch;
+    _try_complete_pitch();
+}}
+
 void GameState::_apply_pass() {{
     consecutive_passes += 1;
+    if (instant_window) {{
+        _close_instant_window();
+        if (pending_play_active && pending_play_is_attack) {{
+            if (attack_pitch_satisfied) {{
+                _begin_block_phase();
+            }} else {{
+                phase = TurnPhase::PITCH;
+            }}
+        }} else if (pending_play_active) {{
+            phase = TurnPhase::PITCH;
+        }}
+        consecutive_passes = 0;
+        return;
+    }}
+    if (phase == TurnPhase::PITCH) {{
+        if (pending_play_active
+            && (pending_card_cost == 0
+                || players[active_player].resources >= pending_card_cost)) {{
+            _complete_pending_play();
+            consecutive_passes = 0;
+        }}
+        return;
+    }}
     if (phase == TurnPhase::BLOCK) {{
         _resolve_combat();
         consecutive_passes = 0;
@@ -954,20 +1408,42 @@ void GameState::_apply_hand_play_main(size_t idx) {{
     hand.erase(hand.begin() + static_cast<std::ptrdiff_t>(idx));
 
     if (_is_attack_card(card)) {{
-        players[active_player].discard.push_back(card);
-        pending_attack_power = card.power;
+        pending_play_card = card;
+        pending_play_active = true;
+        pending_play_is_attack = true;
+        pending_from_equipment = false;
+        const int owed = std::max(0, card.cost);
+        const int from_pool = std::min(owed, players[priority].resources);
+        players[priority].resources -= from_pool;
+        pending_card_cost = owed - from_pool;
+        pending_attack_power = 0;
         pending_block_value = 0;
-        phase = TurnPhase::BLOCK;
-        priority = 1 - active_player;
+        combat_chain.clear();
+        active_player = priority;
+        attack_pitch_satisfied = false;
+        if (pending_card_cost == 0) {{
+            phase = TurnPhase::MAIN;
+            _open_instant_window();
+        }} else {{
+            phase = TurnPhase::PITCH;
+        }}
         return;
     }}
 
-    auto it = effects.find(card.card_id);
-    if (it != effects.end()) {{
-        it->second(*this, active_player);
+    pending_play_card = card;
+    pending_play_active = true;
+    pending_play_is_attack = false;
+    pending_from_equipment = false;
+    const int owed = std::max(0, card.cost);
+    const int from_pool = std::min(owed, players[priority].resources);
+    players[priority].resources -= from_pool;
+    pending_card_cost = owed - from_pool;
+    active_player = priority;
+    if (pending_card_cost > 0) {{
+        phase = TurnPhase::PITCH;
+        return;
     }}
-    players[active_player].discard.push_back(card);
-    _check_game_over();
+    _complete_pending_play();
 }}
 
 void GameState::_apply_block_index(size_t idx) {{
@@ -980,10 +1456,15 @@ void GameState::_apply_block_index(size_t idx) {{
     hand.erase(hand.begin() + static_cast<std::ptrdiff_t>(idx));
     players[priority].discard.push_back(card);
     pending_block_value += card.defense;
+    combat_chain.push_back(CombatChainLink{{card.card_id, card.power, card.defense}});
     _check_game_over();
 }}
 
 void GameState::_apply_hand_index(size_t idx) {{
+    if (phase == TurnPhase::PITCH) {{
+        _apply_pitch_index(idx);
+        return;
+    }}
     if (phase == TurnPhase::BLOCK) {{
         _apply_block_index(idx);
         return;
@@ -1013,6 +1494,18 @@ void GameState::_check_game_over() {{
 void GameState::apply_action(const LegalAction& action) {{
     if (action.action_code == 99) {{
         _apply_pass();
+        return;
+    }}
+    if (action.action_code == 3) {{
+        if (phase == TurnPhase::PITCH) {{
+            _apply_equipment_index(static_cast<size_t>(std::stoi(action.button_input)));
+            return;
+        }}
+        _apply_equipment_index(static_cast<size_t>(std::stoi(action.button_input)));
+        return;
+    }}
+    if (action.action_code == 5) {{
+        _apply_arsenal_index(static_cast<size_t>(std::stoi(action.button_input)));
         return;
     }}
     if (action.action_code == 27) {{
@@ -1049,7 +1542,7 @@ FastStepResult GameState::fast_step_index(int action_index) {{
     FastStepResult result;
     result.legal_count = fast_legal_count();
     result.obs_vec = player_observation_vector(result.legal_count);
-    result.acting_player_id = priority + 1;
+    result.acting_player_id = observation_acting_player();
     result.reward = reward;
     result.terminated = terminated;
     result.winner = winner;
@@ -1082,18 +1575,119 @@ void GameState::sync_opening_hand(int player_idx, const std::vector<std::string>
     std::vector<Card> synced_hand;
     synced_hand.reserve(card_ids.size());
     for (const auto& card_id : card_ids) {{
+        if (card_id.empty() || card_id == "CardBack" || card_id == "cardback") {{
+            continue;
+        }}
         auto it = std::find_if(available.begin(), available.end(), [&](const Card& c) {{
             return c.card_id == card_id;
         }});
         if (it == available.end()) {{
-            throw std::runtime_error("Cannot sync opening hand; card not found: " + card_id);
+            continue;
         }}
         synced_hand.push_back(*it);
         available.erase(it);
     }}
 
+    if (synced_hand.empty()) {{
+        return;
+    }}
+
     p.hand = synced_hand;
     p.deck = available;
+}}
+
+static std::vector<std::string> _card_ids_from_zone(const std::vector<Card>& zone) {{
+    std::vector<std::string> ids;
+    ids.reserve(zone.size());
+    for (const auto& card : zone) {{
+        ids.push_back(card.card_id);
+    }}
+    return ids;
+}}
+
+void GameState::sync_deck_order(int player_idx, const std::vector<std::string>& card_ids) {{
+    if (player_idx < 0 || player_idx >= 2) {{
+        throw std::runtime_error("player_idx must be 0 or 1");
+    }}
+    auto& p = players[player_idx];
+    std::vector<Card> available;
+    available.reserve(p.hand.size() + p.deck.size());
+    available.insert(available.end(), p.hand.begin(), p.hand.end());
+    available.insert(available.end(), p.deck.begin(), p.deck.end());
+
+    std::vector<Card> ordered_deck;
+    ordered_deck.reserve(card_ids.size());
+    for (const auto& card_id : card_ids) {{
+        auto it = std::find_if(available.begin(), available.end(), [&](const Card& c) {{
+            return c.card_id == card_id;
+        }});
+        if (it == available.end()) continue;
+        ordered_deck.push_back(*it);
+        available.erase(it);
+    }}
+    available.insert(available.end(), ordered_deck.begin(), ordered_deck.end());
+    p.deck = available;
+}}
+
+void GameState::sync_equipment(int player_idx, const std::vector<std::string>& card_ids) {{
+    if (player_idx < 0 || player_idx >= 2) {{
+        throw std::runtime_error("player_idx must be 0 or 1");
+    }}
+    auto& p = players[player_idx];
+    std::vector<Card> pool;
+    pool.reserve(
+        p.deck.size() + p.hand.size() + p.equipment.size() + p.discard.size());
+    pool.insert(pool.end(), p.deck.begin(), p.deck.end());
+    pool.insert(pool.end(), p.hand.begin(), p.hand.end());
+    pool.insert(pool.end(), p.equipment.begin(), p.equipment.end());
+    pool.insert(pool.end(), p.discard.begin(), p.discard.end());
+    p.equipment.clear();
+    for (const auto& card_id : card_ids) {{
+        auto it = std::find_if(pool.begin(), pool.end(), [&](const Card& c) {{
+            return c.card_id == card_id;
+        }});
+        if (it != pool.end()) {{
+            p.equipment.push_back(*it);
+        }} else {{
+            Card stub;
+            stub.card_id = card_id;
+            stub.name = card_id;
+            p.equipment.push_back(stub);
+        }}
+    }}
+}}
+
+GameSnapshot GameState::snapshot_state() const {{
+    GameSnapshot snap;
+    snap.acting_player_id = observation_acting_player();
+    snap.p1_health = players[0].health;
+    snap.p2_health = players[1].health;
+    snap.turn_no = turn_no;
+    snap.phase = static_cast<int>(phase);
+    snap.p1_resources = players[0].resources;
+    snap.p2_resources = players[1].resources;
+    snap.pending_attack_power = pending_attack_power;
+    snap.pending_block_value = pending_block_value;
+    snap.game_over = game_over;
+    snap.winner = winner;
+    snap.p1_hand = _card_ids_from_zone(players[0].hand);
+    snap.p2_hand = _card_ids_from_zone(players[1].hand);
+    snap.p1_deck = _card_ids_from_zone(players[0].deck);
+    snap.p2_deck = _card_ids_from_zone(players[1].deck);
+    snap.p1_discard = _card_ids_from_zone(players[0].discard);
+    snap.p2_discard = _card_ids_from_zone(players[1].discard);
+    snap.p1_equipment = _card_ids_from_zone(players[0].equipment);
+    snap.p2_equipment = _card_ids_from_zone(players[1].equipment);
+    snap.p1_arsenal = _card_ids_from_zone(players[0].arsenal);
+    snap.p2_arsenal = _card_ids_from_zone(players[1].arsenal);
+    snap.p1_pitch = _card_ids_from_zone(players[0].pitch_zone);
+    snap.p2_pitch = _card_ids_from_zone(players[1].pitch_zone);
+    snap.combat_chain = combat_chain;
+    return snap;
+}}
+
+void GameState::draw_cards(int player_idx, int n) {{
+    _draw_cards(player_idx, n);
 }}
 
 void GameState::set_priority(int player_idx) {{
@@ -1148,19 +1742,99 @@ _CARDS_H_HEADER = """\
 
 """
 
+
+def _infer_card_type(meta: CardMeta) -> str:
+    """Infer Talishar card type when PHP metadata is missing."""
+    card_type = str(meta.card_type or "").strip().lower()
+    if card_type and card_type not in {"unknown", "card"}:
+        return card_type
+    if int(meta.power or 0) > 0 and int(meta.cost or 0) <= 0:
+        return "weapon"
+    if int(meta.power or 0) > 0:
+        return "attack"
+    if int(meta.defense or 0) >= 3:
+        return "action"
+    if int(meta.cost or 0) < 0:
+        return "equipment"
+    return "action"
+
+
+def _render_card_effect_body(meta: CardMeta) -> tuple[str, str]:
+    """Return (C++ effect body, parity_status) from mined PHP snippet."""
+    meta.card_type = _infer_card_type(meta)
+    snippet = (meta.php_snippet or "").lower()
+    compact = re.sub(r"\s+", "", snippet)
+    power = int(meta.power or 0)
+
+    if "attack" in meta.card_type:
+        return (
+            "    // attack — damage resolved via combat chain",
+            "auto",
+        )
+
+    if "drawcard" in compact or "draw(" in snippet:
+        draw_n = 1
+        match = re.search(r"drawcard\s*\([^,]+,\s*(\d+)", snippet)
+        if match:
+            draw_n = int(match.group(1))
+        return (
+            f"    gs.draw_cards(player_idx, {draw_n});",
+            "auto",
+        )
+
+    if "addresource" in compact or "gainresource" in compact or (
+        "resource" in snippet and "gain" in snippet
+    ):
+        amount = 1
+        match = re.search(r"(\d+)\s*resource", snippet)
+        if match:
+            amount = int(match.group(1))
+        return (
+            f"    gs.players[player_idx].resources += {amount};",
+            "auto",
+        )
+
+    if "goagain" in compact or "go again" in snippet:
+        return (
+            "    // go again — parity stub (no extra action granted yet)",
+            "auto",
+        )
+
+    if "dealdamage" in compact or "playerhealth" in snippet and "-=" in snippet:
+        dmg = power or 1
+        match = re.search(r"health\s*-=\s*(\d+)", snippet)
+        if match:
+            dmg = int(match.group(1))
+        return (
+            f"    gs.players[1 - player_idx].health -= {dmg};",
+            "auto",
+        )
+
+    if power <= 0 and meta.card_type and "equipment" in meta.card_type.lower():
+        return (
+            "    // equipment — no on-play effect",
+            "stub",
+        )
+
+    return (
+        f"    // PARITY_TODO: translate PHP effect\n"
+        f"    int opp_idx = 1 - player_idx;\n"
+        f"    gs.players[opp_idx].health -= {power};",
+        "stub",
+    )
+
+
 _CARD_STUB = """\
 // ┌─ {card_id} : {name} ─────────────────────────────────────────────────────
 // │ cost={cost}  pitch={pitch}  power={power}  defense={defense}  type={card_type}
 // │ PHP source: {php_source_file}
+// │ parity_status: {parity_status}
 // │
 // │ Extracted PHP logic:
 {php_comment}
 // └──────────────────────────────────────────────────────────────────────────
 inline void effect_{card_id}(GameState& gs, int player_idx) {{
-    // Default effect: deal 'power' damage to the opponent.
-    // For equipment/reactions this is a safe no-op when power == 0.
-    int opp_idx = 1 - player_idx;
-    gs.players[opp_idx].health -= {power};
+{effect_body}
 }}
 
 """
@@ -1194,6 +1868,13 @@ void GameState::init_standard_decks() {{
     active_player = 0;
     pending_attack_power = 0;
     pending_block_value = 0;
+    pending_card_cost = 0;
+    pending_play_active = false;
+    pending_play_is_attack = false;
+    pending_from_equipment = false;
+    attack_pitch_satisfied = false;
+    instant_window = false;
+    combat_chain.clear();
     game_over = false;
     winner = -1;
     consecutive_passes = 0;
@@ -1240,6 +1921,9 @@ void GameState::init_standard_decks() {{
     _draw_cards(0, players[0].intellect);
     _draw_cards(1, players[1].intellect);
 
+    // Talishar grants 1 resource to the player with priority at turn start.
+    players[priority].resources = 1;
+
     format_idx = {format_idx};
     first_player = 1;
 {p1_deck_indices}
@@ -1281,6 +1965,37 @@ PYBIND11_MODULE(fab_engine, m) {{
                    std::to_string(a.action_code) + ">";
         }});
 
+    py::class_<CombatChainLink>(m, "CombatChainLink")
+        .def_readonly("card_id", &CombatChainLink::card_id)
+        .def_readonly("power", &CombatChainLink::power)
+        .def_readonly("defense", &CombatChainLink::defense);
+
+    py::class_<GameSnapshot>(m, "GameSnapshot")
+        .def_readonly("acting_player_id", &GameSnapshot::acting_player_id)
+        .def_readonly("p1_health", &GameSnapshot::p1_health)
+        .def_readonly("p2_health", &GameSnapshot::p2_health)
+        .def_readonly("turn_no", &GameSnapshot::turn_no)
+        .def_readonly("phase", &GameSnapshot::phase)
+        .def_readonly("p1_resources", &GameSnapshot::p1_resources)
+        .def_readonly("p2_resources", &GameSnapshot::p2_resources)
+        .def_readonly("pending_attack_power", &GameSnapshot::pending_attack_power)
+        .def_readonly("pending_block_value", &GameSnapshot::pending_block_value)
+        .def_readonly("game_over", &GameSnapshot::game_over)
+        .def_readonly("winner", &GameSnapshot::winner)
+        .def_readonly("p1_hand", &GameSnapshot::p1_hand)
+        .def_readonly("p2_hand", &GameSnapshot::p2_hand)
+        .def_readonly("p1_deck", &GameSnapshot::p1_deck)
+        .def_readonly("p2_deck", &GameSnapshot::p2_deck)
+        .def_readonly("p1_discard", &GameSnapshot::p1_discard)
+        .def_readonly("p2_discard", &GameSnapshot::p2_discard)
+        .def_readonly("p1_equipment", &GameSnapshot::p1_equipment)
+        .def_readonly("p2_equipment", &GameSnapshot::p2_equipment)
+        .def_readonly("p1_arsenal", &GameSnapshot::p1_arsenal)
+        .def_readonly("p2_arsenal", &GameSnapshot::p2_arsenal)
+        .def_readonly("p1_pitch", &GameSnapshot::p1_pitch)
+        .def_readonly("p2_pitch", &GameSnapshot::p2_pitch)
+        .def_readonly("combat_chain", &GameSnapshot::combat_chain);
+
     py::class_<FastStepResult>(m, "FastStepResult")
         .def_readonly("obs_vec", &FastStepResult::obs_vec)
         .def_readonly("legal_count", &FastStepResult::legal_count)
@@ -1305,6 +2020,11 @@ PYBIND11_MODULE(fab_engine, m) {{
         .def("register_all_cards", &GameState::register_all_cards)
         .def("init_standard_decks", &GameState::init_standard_decks)
         .def("sync_opening_hand", &GameState::sync_opening_hand)
+        .def("sync_deck_order", &GameState::sync_deck_order)
+        .def("sync_equipment", &GameState::sync_equipment)
+        .def("snapshot_state", &GameState::snapshot_state)
+        .def("observation_acting_player", &GameState::observation_acting_player)
+        .def("draw_cards", &GameState::draw_cards)
         .def("set_priority", &GameState::set_priority)
         .def("seed_rng", &GameState::seed_rng)
         .def("get_legal_actions",  &GameState::get_legal_actions,
@@ -1333,6 +2053,8 @@ PYBIND11_MODULE(fab_engine, m) {{
             [](const GameState& g) {{ return g.priority; }})
         .def_property_readonly("phase",
             [](const GameState& g) {{ return static_cast<int>(g.phase); }})
+        .def_property_readonly("instant_window",
+            [](const GameState& g) {{ return g.instant_window; }})
         .def_property_readonly("active_player",
             [](const GameState& g) {{ return g.active_player; }})
         .def_property_readonly("pending_attack_power",
@@ -1375,6 +2097,12 @@ PYBIND11_MODULE(fab_engine, m) {{
             [](const GameState& g) {{ return g.players[0].discard; }})
         .def_property_readonly("p2_discard",
             [](const GameState& g) {{ return g.players[1].discard; }})
+        .def_property_readonly("p1_resources",
+            [](const GameState& g) {{ return g.players[0].resources; }})
+        .def_property_readonly("p2_resources",
+            [](const GameState& g) {{ return g.players[1].resources; }})
+        .def_property_readonly("combat_chain",
+            [](const GameState& g) {{ return g.combat_chain; }})
         .def_property_readonly("p1_hero_id",
             [](const GameState& g) {{ return g.players[0].hero_card_id; }})
         .def_property_readonly("p2_hero_id",
@@ -1513,6 +2241,7 @@ def generate(
     p2_asset_info: DeckAssetInfo | None = None,
     character_health: dict[str, int] | None = None,
     character_intellect: dict[str, int] | None = None,
+    play_ability_ids: set[str] | None = None,
 ) -> None:
     # Default: 2 copies of each unique card if counts not provided.
     # Empty dicts are treated as missing because callers initialise counts
@@ -1525,10 +2254,17 @@ def generate(
     p2_asset_info = p2_asset_info or DeckAssetInfo(deck_counts=p2_counts)
     character_health = character_health or {}
     character_intellect = character_intellect or {}
+    play_ability_ids = play_ability_ids or set()
 
     out_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     all_ids = sorted(metas.keys())
+    instant_equipment = sorted(
+        cid
+        for cid in all_ids
+        if cid in play_ability_ids
+        and "equipment" in _infer_card_type(metas[cid]).lower()
+    )
 
     # gamestate.h
     (out_dir / "gamestate.h").write_text(
@@ -1536,7 +2272,10 @@ def generate(
     )
 
     # gamestate.cpp  (template uses {{ / }} escapes — call .format() to render)
-    gamestate_cpp = _GAMESTATE_CPP.format(action_capacity=ACTION_CAPACITY)
+    gamestate_cpp = _GAMESTATE_CPP.format(
+        action_capacity=ACTION_CAPACITY,
+        instant_equipment_set=_cpp_instant_equipment_set(instant_equipment),
+    )
     gamestate_cpp = gamestate_cpp.replace("__PLAYER_OBS_IMPL__", _render_player_obs_cpp_impl())
     (out_dir / "gamestate.cpp").write_text(gamestate_cpp, encoding="utf-8")
 
@@ -1550,6 +2289,7 @@ def generate(
         php_comment = "\n".join(f"// │   {ln}" for ln in php_lines[:50])
         if len(php_lines) > 50:
             php_comment += f"\n// │   … ({len(php_lines) - 50} more lines)"
+        effect_body, parity_status = _render_card_effect_body(m)
         cards_h += _CARD_STUB.format(
             card_id=cid,
             name=m.name or cid,
@@ -1560,7 +2300,10 @@ def generate(
             card_type=m.card_type or "unknown",
             php_source_file=m.php_source_file or "not found",
             php_comment=php_comment,
+            effect_body=effect_body,
+            parity_status=parity_status,
         )
+        m.parity_status = parity_status  # type: ignore[attr-defined]
     (out_dir / "cards.h").write_text(cards_h, encoding="utf-8")
 
     # register_cards.cpp
@@ -1581,8 +2324,9 @@ def generate(
         action_code: int = 27,
     ) -> str:
         m = metas.get(cid, CardMeta(card_id=cid))
+        m.card_type = _infer_card_type(m)
         safe_name = (m.name or cid).replace('"', '\\"')
-        safe_type = (m.card_type or "unknown").replace('"', '\\"')
+        safe_type = m.card_type.replace('"', '\\"')
         safe_zone = zone.replace('"', '\\"')
         return (
             f'    _push_card({player_vec}, '
@@ -1592,6 +2336,10 @@ def generate(
 
     def _setup_init_lines(info: DeckAssetInfo, player_vec: str) -> str:
         lines = []
+        if info.hero_id:
+            lines.append(
+                _card_init_line(info.hero_id, 1, player_vec, zone="equipment", action_code=0)
+            )
         for cid in info.equipment_ids:
             lines.append(_card_init_line(cid, 1, player_vec, zone="equipment", action_code=0))
         return "\n".join(lines)
@@ -1665,6 +2413,7 @@ def generate(
                 "type": m.card_type,
                 "php_file": m.php_source_file,
                 "php_found": bool(m.php_snippet),
+                "parity_status": getattr(m, "parity_status", "stub"),
             }
             for cid, m in metas.items()
         },
@@ -1858,11 +2607,15 @@ def main() -> None:
             p1_ids = all_ids
             print(f"  Found {len(all_ids)} total card IDs in PHP source")
         metas = scan_php_sources(talishar_src, all_ids)
+        play_ability_ids = _scan_play_ability_card_ids(talishar_src)
+        for meta in metas.values():
+            meta.has_play_ability = meta.card_id in play_ability_ids
     else:
         all_ids = p1_ids | p2_ids
         print(f"\nStep 2: WARNING — Talishar source not found at {talishar_src}")
         print("  Generating stub-only output (no PHP logic to extract)")
         metas = {cid: CardMeta(card_id=cid) for cid in all_ids}
+        play_ability_ids = set()
 
     if not metas:
         print("\nERROR: No cards found. Check --talishar-src and/or run Talishar.")
@@ -1884,6 +2637,7 @@ def main() -> None:
         p2_asset_info,
         character_health,
         character_intellect,
+        play_ability_ids,
     )
 
 

@@ -157,21 +157,44 @@ def run_matchup_parity(
     talishar_url: str,
     cpp_engine_cache_dir: str,
     stop_after_failure: bool,
+    parity_mode: str = "contract",
+    sync_scope: str = "full",
+    disable_obs_alignment: bool = False,
+    rng_seed: int | None = None,
 ) -> int:
-    from run_parity_check import execute_parity_check
-
-    return execute_parity_check(
-        deck1=deck1,
-        deck2=deck2,
-        game_format=game_format,
-        episodes=episodes,
-        mode=mode,
-        steps_per_episode=steps_per_episode,
-        talishar_url=talishar_url,
-        cpp_engine_cache_dir=cpp_engine_cache_dir,
-        stop_after_failure=stop_after_failure,
-        verbose_header=True,
-    )
+    """Run one matchup parity check in a fresh process (fab_engine is not reloadable)."""
+    cmd = [
+        sys.executable,
+        str(PARITY_RUNNER),
+        "--deck1",
+        deck1,
+        "--deck2",
+        deck2,
+        "--format",
+        game_format,
+        "--mode",
+        mode,
+        "--episodes",
+        str(episodes),
+        "--parity-mode",
+        parity_mode,
+        "--sync-scope",
+        sync_scope,
+        "--talishar-url",
+        talishar_url,
+    ]
+    if steps_per_episode > 0:
+        cmd.extend(["--steps-per-episode", str(steps_per_episode)])
+    if cpp_engine_cache_dir:
+        cmd.extend(["--cpp-engine-cache-dir", cpp_engine_cache_dir])
+    if stop_after_failure:
+        cmd.append("--stop-after-failure")
+    if disable_obs_alignment:
+        cmd.append("--disable-obs-alignment")
+    if rng_seed is not None:
+        cmd.extend(["--seed", str(rng_seed)])
+    completed = subprocess.run(cmd, cwd=str(REPO_ROOT), check=False)
+    return int(completed.returncode)
 
 
 def parse_report(report_path: Path) -> dict[str, Any]:

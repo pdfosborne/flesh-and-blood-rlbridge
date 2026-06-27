@@ -20,6 +20,18 @@ GENERATOR = REPO_ROOT / "scripts" / "cpp" / "generate_cpp_engine.py"
         "pending_attack_power",
         "pending_block_value",
         "active_player",
+        "GameSnapshot GameState::snapshot_state()",
+        "void GameState::sync_deck_order(",
+        "void GameState::sync_equipment(",
+        "std::vector<CombatChainLink> combat_chain",
+        "void GameState::_append_equipment_legal_actions(",
+        "instant_window",
+        "void GameState::_apply_equipment_index(",
+        "void GameState::_apply_arsenal_index(",
+        "action.action_code == 3",
+        "action.action_code == 5",
+        "def _render_card_effect_body(",
+        "parity_status",
     ],
 )
 def test_generator_emits_combat_flow(snippet: str) -> None:

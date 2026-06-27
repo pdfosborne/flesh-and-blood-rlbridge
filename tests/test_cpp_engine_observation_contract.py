@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from flesh_and_blood_rlbridge.cpp_engine_environment import CppEngineEnvironment
 from flesh_and_blood_rlbridge.deck_context import EpisodeContext
 from flesh_and_blood_rlbridge.player_observation import (
+    CONTEXT_DIM,
     PLAYER_OBS_DIM,
     PLAYER_OBS_SCHEMA_VERSION,
 )
@@ -93,6 +94,9 @@ def _build_env_for_encode(phase: int = 1) -> CppEngineEnvironment:
     env._acting_player = 1
     env._talishar_overlay = None
     env._talishar_raw_state = None
+    env._talishar_parity_extra = None
+    env._strict_simulation = False
+    env._steps = 0
     env._flow_phase = ""
     env._hand_playability = {}
     env._turn_no_override = None
@@ -244,3 +248,40 @@ def test_raw_state_from_gs_uses_bindings_not_players_attr() -> None:
     encoded = env._encode_observation(legal)
     obs = json.loads(encoded)
     assert len(obs["observationVec"]) == PLAYER_OBS_DIM
+
+
+def test_overlay_obs_vec_uses_talishar_health_not_cpp_gs() -> None:
+    """Contract mode must encode Talishar HP in scalars, not diverged C++ gs."""
+    env = _build_env_for_encode(phase=1)
+    env._gs.p1_health = 20
+    env._gs.p2_health = 20
+    env._talishar_overlay = {
+        "acting_player_id": 1,
+        "turn_phase": "M",
+        "turn_no": 5,
+        "player_health": 14,
+        "opponent_health": 20,
+        "player_hand_size": 2,
+        "opponent_hand_size": 3,
+        "player_deck_count": 30,
+        "opponent_deck_count": 29,
+        "player_pitch_count": 1,
+        "have_priority": True,
+        "player_hand": [],
+        "legal_actions": [{"index": 0, "label": "Pass", "zone": "button"}],
+    }
+    legal = [
+        _FakeAction(
+            action_code=99,
+            button_input="",
+            card_id="",
+            zone="button",
+            label="Pass",
+        )
+    ]
+    obs = json.loads(env._encode_observation(legal))
+    vec = obs["observationVec"]
+    p1_scalar = vec[CONTEXT_DIM + 3]
+    p2_scalar = vec[CONTEXT_DIM + 4]
+    assert abs(p1_scalar - 14 / 40.0) < 1e-6
+    assert abs(p2_scalar - 20 / 40.0) < 1e-6
