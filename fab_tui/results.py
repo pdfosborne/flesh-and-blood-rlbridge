@@ -12,7 +12,6 @@ from fab_bridge.unified_results import (
     has_unified_selfplay_checkpoints,
     is_unified_random_matchup_run,
     iter_unified_checkpoint_metadata,
-    resolve_latest_unified_matchup_dir,
     unified_run_label,
 )
 from fab_tui.config import REPO_ROOT, RESULTS_ROOT
@@ -71,7 +70,11 @@ class CompletedTrainingEntry(EvaluableResultsEntry):
 
 
 def _parse_run_stamp_from_path(path: Path) -> datetime | None:
-    """Parse trailing ``_YYYYMMDD_HHMMSS`` from a results folder name."""
+    """Parse trailing ``_YYYYMMDD_HHMMSS`` or bare ``YYYYMMDD_HHMMSS`` folder names."""
+    try:
+        return datetime.strptime(path.name, "%Y%m%d_%H%M%S")
+    except ValueError:
+        pass
     match = _RUN_STAMP_SUFFIX.search(path.name)
     if not match:
         return None

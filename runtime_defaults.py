@@ -20,6 +20,28 @@ class MetaGameControls:
 
 
 @dataclass
+class MetaUnifiedRandomMatchups:
+    """Unified random fabrary matchup training (``train_unified_random_matchups.py``)."""
+
+    matchups: int = 10
+    episodes: int = 1000
+    max_steps: int = 1_000
+    warmup_episodes: int = 50
+    checkpoint_interval_pct: float = 10.0
+    checkpoint_eval_episodes: int = 0  # 0 = min(100, episodes // 100)
+    workers: int = 0  # 0 = inherit META.workers
+    skip_converged: bool = False
+    build_cpp_engine: bool = True
+    require_cpp_engine: bool = True
+    seed: int | None = None
+    cache_dir: str | None = None
+    out_dir: str | None = None
+    # FaBrary slugs or full URLs; run scripts/deck/add_custom_decks_to_pool.py after editing.
+    #  -- Or add using TUI option 
+    custom_deck_links: tuple[str, ...] = ()
+
+
+@dataclass
 class MetaRuntime:
     """Shared runtime knobs — edit this block for your machine and training budget."""
 
@@ -59,6 +81,11 @@ class MetaRuntime:
     eval_poll_seconds: int = 30
     gif_fps: float = 3.0
     gif_fps_matchup_sim: float = 2.0
+
+    # ── Unified random fabrary matchups ───────────────────────────────────────
+    unified_random_matchups: MetaUnifiedRandomMatchups = field(
+        default_factory=MetaUnifiedRandomMatchups
+    )
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -194,6 +221,27 @@ class TuiDefaults:
     eval_poll_seconds: int = 30
 
 
+@dataclass(frozen=True)
+class UnifiedRandomMatchupsDefaults:
+    """``train_unified_random_matchups.py`` / fab_tui unified matchup wizard."""
+
+    matchups: int
+    episodes: int
+    max_steps: int
+    warmup_episodes: int
+    warmup_baseline_eval_episodes: int
+    checkpoint_interval_pct: float
+    checkpoint_eval_episodes: int
+    workers: int
+    skip_converged: bool
+    build_cpp_engine: bool
+    require_cpp_engine: bool
+    seed: int | None
+    cache_dir: str | None
+    out_dir: str | None
+    custom_deck_links: tuple[str, ...]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 META = MetaRuntime()
 
@@ -209,6 +257,7 @@ class RuntimeDefaults:
     dual_matchup: DualMatchupDefaults
     ppo: PpoDefaults
     tui: TuiDefaults
+    unified_random_matchups: UnifiedRandomMatchupsDefaults
 
 def _game_controls(meta: MetaRuntime) -> GameControlsDefaults:
     g = meta.game
@@ -224,6 +273,11 @@ def build_runtime(meta: MetaRuntime) -> RuntimeDefaults:
     """Derive per-script defaults from shared ``MetaRuntime`` settings."""
     dual_workers = 1 if meta.workers is None else meta.workers
     game = _game_controls(meta)
+    urm = meta.unified_random_matchups
+    urm_checkpoint_eval = urm.checkpoint_eval_episodes
+    if urm_checkpoint_eval <= 0:
+        urm_checkpoint_eval = min(100, max(1, urm.episodes // 100))
+    urm_workers = urm.workers if urm.workers > 0 else dual_workers
 
     play = PlayDefaults(
         workers=meta.workers,
@@ -286,6 +340,23 @@ def build_runtime(meta: MetaRuntime) -> RuntimeDefaults:
             eval_max_steps=meta.eval_max_steps,
             eval_poll_seconds=meta.eval_poll_seconds,
         ),
+        unified_random_matchups=UnifiedRandomMatchupsDefaults(
+            matchups=urm.matchups,
+            episodes=urm.episodes,
+            max_steps=urm.max_steps,
+            warmup_episodes=urm.warmup_episodes,
+            warmup_baseline_eval_episodes=meta.warmup_baseline_eval_episodes,
+            checkpoint_interval_pct=urm.checkpoint_interval_pct,
+            checkpoint_eval_episodes=urm_checkpoint_eval,
+            workers=urm_workers,
+            skip_converged=urm.skip_converged,
+            build_cpp_engine=urm.build_cpp_engine,
+            require_cpp_engine=urm.require_cpp_engine,
+            seed=urm.seed,
+            cache_dir=urm.cache_dir,
+            out_dir=urm.out_dir,
+            custom_deck_links=urm.custom_deck_links,
+        ),
     )
 
 
@@ -316,6 +387,15 @@ DEFAULT_PPO_EPOCHS = RUNTIME.ppo.ppo_epochs
 DEFAULT_MINI_BATCH = RUNTIME.ppo.mini_batch
 DEFAULT_PPO_ROLLOUT_BATCH = RUNTIME.ppo.rollout_batch
 
+_UR = RUNTIME.unified_random_matchups
+DEFAULT_UNIFIED_MATCHUPS = _UR.matchups
+DEFAULT_UNIFIED_EPISODES = _UR.episodes
+DEFAULT_UNIFIED_MAX_STEPS = _UR.max_steps
+DEFAULT_UNIFIED_WARMUP_EPISODES = _UR.warmup_episodes
+DEFAULT_UNIFIED_CHECKPOINT_INTERVAL_PCT = _UR.checkpoint_interval_pct
+DEFAULT_UNIFIED_CHECKPOINT_EVAL_EPISODES = _UR.checkpoint_eval_episodes
+DEFAULT_UNIFIED_WORKERS = _UR.workers
+
 
 def apply_meta(**overrides: object) -> RuntimeDefaults:
     """Rebuild ``RUNTIME`` after in-place ``META`` edits (mainly for tests)."""
@@ -328,6 +408,10 @@ def apply_meta(**overrides: object) -> RuntimeDefaults:
     global DEFAULT_HIDDEN_SIZE, DEFAULT_N_LAYERS, DEFAULT_N_HEADS, DEFAULT_LR, DEFAULT_GAMMA, DEFAULT_LAM  # noqa: PLW0603
     global DEFAULT_CLIP_EPS, DEFAULT_N_STEPS, DEFAULT_PPO_EPOCHS  # noqa: PLW0603
     global DEFAULT_MINI_BATCH, DEFAULT_PPO_ROLLOUT_BATCH  # noqa: PLW0603
+    global DEFAULT_UNIFIED_MATCHUPS, DEFAULT_UNIFIED_EPISODES  # noqa: PLW0603
+    global DEFAULT_UNIFIED_MAX_STEPS, DEFAULT_UNIFIED_WARMUP_EPISODES  # noqa: PLW0603
+    global DEFAULT_UNIFIED_CHECKPOINT_INTERVAL_PCT  # noqa: PLW0603
+    global DEFAULT_UNIFIED_CHECKPOINT_EVAL_EPISODES, DEFAULT_UNIFIED_WORKERS  # noqa: PLW0603
 
     META = replace(META, **overrides)
     RUNTIME = build_runtime(META)
@@ -353,4 +437,12 @@ def apply_meta(**overrides: object) -> RuntimeDefaults:
     DEFAULT_PPO_EPOCHS = RUNTIME.ppo.ppo_epochs
     DEFAULT_MINI_BATCH = RUNTIME.ppo.mini_batch
     DEFAULT_PPO_ROLLOUT_BATCH = RUNTIME.ppo.rollout_batch
+    _ur = RUNTIME.unified_random_matchups
+    DEFAULT_UNIFIED_MATCHUPS = _ur.matchups
+    DEFAULT_UNIFIED_EPISODES = _ur.episodes
+    DEFAULT_UNIFIED_MAX_STEPS = _ur.max_steps
+    DEFAULT_UNIFIED_WARMUP_EPISODES = _ur.warmup_episodes
+    DEFAULT_UNIFIED_CHECKPOINT_INTERVAL_PCT = _ur.checkpoint_interval_pct
+    DEFAULT_UNIFIED_CHECKPOINT_EVAL_EPISODES = _ur.checkpoint_eval_episodes
+    DEFAULT_UNIFIED_WORKERS = _ur.workers
     return RUNTIME

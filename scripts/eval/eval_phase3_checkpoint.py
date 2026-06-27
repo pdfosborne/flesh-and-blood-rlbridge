@@ -61,9 +61,12 @@ from runtime_defaults import (  # noqa: E402
     DEFAULT_STALL_NO_DAMAGE_TURNS,
 )
 from fab_bridge.unified_results import (  # noqa: E402
+    find_latest_unified_checkpoint_metadata,
     is_unified_random_matchup_run,
     iter_unified_checkpoint_metadata,
+    matchup_dir_from_unified_checkpoint,
     resolve_latest_unified_matchup_dir,
+    resolve_unified_run_root,
 )
 from scripts.training.train_pipeline_common import _write_deck_file  # noqa: E402
 
@@ -246,9 +249,12 @@ def _resolve_eval_dashboard_dir(
             if idx + 1 < len(parts):
                 return root / _SIDEBOARD_CANDIDATES_DIR / parts[idx + 1] / "eval_dashboard"
     if is_unified_random_matchup_run(root):
-        matchup_dir = resolve_latest_unified_matchup_dir(root)
-        if matchup_dir is not None:
+        matchup_dir = matchup_dir_from_unified_checkpoint(p1_bundle.checkpoint_dir)
+        if matchup_dir is not None and matchup_dir.is_dir():
             return matchup_dir / "eval_dashboard"
+        fallback = resolve_latest_unified_matchup_dir(root)
+        if fallback is not None:
+            return fallback / "eval_dashboard"
     return root / "eval_dashboard"
 
 
@@ -257,10 +263,15 @@ def _iter_checkpoint_metadata_paths(
     role: str,
     *,
     candidate_id: Optional[str] = None,
+    unified_matchup_dir: Optional[Path] = None,
 ) -> list[Path]:
     """Collect ``metadata.json`` paths for phase-3 checkpoints under *results_dir*."""
     if is_unified_random_matchup_run(results_dir):
-        return iter_unified_checkpoint_metadata(results_dir, role)
+        return iter_unified_checkpoint_metadata(
+            results_dir,
+            role,
+            matchup_dir=unified_matchup_dir,
+        )
 
     paths: list[Path] = []
 
@@ -312,12 +323,14 @@ def _latest_checkpoint(
     role: str,
     *,
     candidate_id: Optional[str] = None,
+    unified_matchup_dir: Optional[Path] = None,
 ) -> Optional[CheckpointBundle]:
     best: Optional[tuple[float, int, CheckpointBundle]] = None
     for meta_path in _iter_checkpoint_metadata_paths(
         results_dir,
         role,
         candidate_id=candidate_id,
+        unified_matchup_dir=unified_matchup_dir,
     ):
         bundle = _load_checkpoint(meta_path.parent, role)
         if bundle is None:
@@ -1534,7 +1547,7 @@ def main() -> None:
     parser.add_argument("--assets-path", default=os.environ.get("TALISHAR_ASSETS_PATH", ""))
     args = parser.parse_args()
 
-    results_dir = Path(args.results_dir).expanduser().resolve()
+    results_dir = resolve_unified_run_root(Path(args.results_dir).expanduser())
     if not results_dir.exists():
         raise SystemExit(f"results directory not found: {results_dir}")
     if not args.assets_path:
@@ -1563,11 +1576,23 @@ def main() -> None:
                 print("  Candidate     : (all under candidates/)")
     elif is_unified_random_matchup_run(results_dir):
         print("  Run type      : unified random matchups")
-        latest = resolve_latest_unified_matchup_dir(results_dir)
-        if latest is not None:
-            print(f"  Latest matchup: {latest.name}")
+        latest_meta = find_latest_unified_checkpoint_metadata(results_dir, "p1")
+        if latest_meta is not None:
+            latest_matchup = matchup_dir_from_unified_checkpoint(latest_meta.parent)
+            episode = latest_meta.parent.name
+            if latest_matchup is not None:
+                print(
+                    f"  Latest checkpoint: {episode} "
+                    f"({latest_matchup.name})"
+                )
+            else:
+                print(f"  Latest checkpoint: {episode}")
         else:
-            print("  Latest matchup: (waiting for first matchup output)")
+            active = resolve_latest_unified_matchup_dir(results_dir)
+            if active is not None:
+                print(f"  Latest matchup: {active.name} (waiting for checkpoints)")
+            else:
+                print("  Latest matchup: (waiting for first matchup output)")
     print(f"  Talishar URL  : {args.talishar_url}")
     print(f"  Assets path   : {args.assets_path}")
     if args.render_only:
@@ -1603,12 +1628,17 @@ def main() -> None:
     last_matchup_dir: Optional[Path] = None
     poll_count = 0
     while True:
+        unified_matchup_scope: Optional[Path] = None
         if is_unified_random_matchup_run(results_dir):
-            active_matchup = resolve_latest_unified_matchup_dir(results_dir)
+            if args.watch:
+                unified_matchup_scope = resolve_latest_unified_matchup_dir(results_dir)
+            active_matchup = unified_matchup_scope or resolve_latest_unified_matchup_dir(
+                results_dir
+            )
             if active_matchup != last_matchup_dir:
                 last_seen = None
                 last_matchup_dir = active_matchup
-                if active_matchup is not None:
+                if active_matchup is not None and args.watch:
                     print(
                         f"  [watch] Eval scope → latest matchup {active_matchup.name}",
                         flush=True,
@@ -1621,6 +1651,7 @@ def main() -> None:
                 results_dir,
                 "p1",
                 candidate_id=args.candidate_id,
+                unified_matchup_dir=unified_matchup_scope,
             )
 
         if p1_bundle is None:

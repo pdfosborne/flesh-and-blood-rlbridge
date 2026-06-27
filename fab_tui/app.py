@@ -28,6 +28,7 @@ from fab_bridge.agents import (
 )
 from fab_tui.config import (
     AGENT_CACHE_DIR,
+    FABRARY_DECKS_PATH,
     RESULTS_ROOT,
     EnvironmentSettings,
     EvalSpec,
@@ -72,6 +73,7 @@ from fab_tui.runner import (
     run_live_talishar_play,
     run_matchup_simulation,
     run_sideboard_compare,
+    run_add_custom_decks_to_pool,
     run_unified_random_matchups,
 )
 from fab_tui.card_search import CARDS_DB_PATH, clear_card_db_caches
@@ -106,6 +108,11 @@ UNIFIED_FORMAT_CHOICES = {
     "2": ("classic_constructed", "Classic Constructed (CC)"),
     "3": ("blitz", "Blitz"),
     "4": ("upf", "Ultimate Pit Fight"),
+}
+
+UNIFIED_MATCHUP_ACTIONS = {
+    "1": ("train", "Start training run"),
+    "2": ("add_decks", "Add custom decks to fabrary pool"),
 }
 
 
@@ -574,6 +581,82 @@ def wizard_simulate_decks(env: EnvironmentSettings) -> None:
 
 
 def wizard_unified_random_matchups(env: EnvironmentSettings) -> None:
+    action = _choose_mapping(
+        UNIFIED_MATCHUP_ACTIONS,
+        "Unified random matchups — choose action",
+    )
+    if action == "add_decks":
+        wizard_add_custom_decks_to_pool(env)
+        return
+    wizard_unified_random_matchups_train(env)
+
+
+def wizard_add_custom_decks_to_pool(_env: EnvironmentSettings) -> None:
+    from runtime_defaults import META
+
+    _header(
+        "Add custom decks to pool",
+        "Fetch FaBrary decks into fabrary_decks.json for unified random matchups",
+    )
+
+    runtime_links = list(META.unified_random_matchups.custom_deck_links)
+    console.print(f"\n[dim]Target pool:[/dim] {FABRARY_DECKS_PATH}")
+    if runtime_links:
+        table = Table(title="Links from runtime_defaults.py", box=box.SIMPLE)
+        table.add_column("#", style="cyan", justify="right")
+        table.add_column("FaBrary slug / URL")
+        for index, link in enumerate(runtime_links, start=1):
+            table.add_row(str(index), link)
+        console.print(table)
+    else:
+        console.print(
+            "[yellow]No links in META.unified_random_matchups.custom_deck_links.[/yellow]\n"
+            "[dim]Add slugs in runtime_defaults.py or enter URLs below.[/dim]"
+        )
+
+    extra_raw = Prompt.ask(
+        "Extra FaBrary URLs or slugs (comma-separated, blank for none)",
+        default="",
+    ).strip()
+    extra_links = [part.strip() for part in extra_raw.split(",") if part.strip()]
+    all_links = runtime_links + [link for link in extra_links if link not in runtime_links]
+
+    if not all_links:
+        console.print("[red]No deck links to fetch.[/red]")
+        _pause()
+        return
+
+    dry_run = Confirm.ask("Dry run only (no API fetch)?", default=False)
+    deck_id: str | None = None
+    if len(all_links) == 1 and Confirm.ask("Set a custom fabrary_decks.json deck id?", default=False):
+        deck_id = Prompt.ask("Deck id", default="").strip() or None
+
+    review = Table(title="Review", box=box.ROUNDED)
+    review.add_column("Setting", style="cyan")
+    review.add_column("Value")
+    review.add_row("Links to fetch", str(len(all_links)))
+    review.add_row("Dry run", str(dry_run))
+    review.add_row("Output", str(FABRARY_DECKS_PATH))
+    console.print(review)
+
+    if not Confirm.ask("\nFetch and append decks to the pool?", default=True):
+        return
+
+    console.print("\n[bold]Running add_custom_decks_to_pool…[/bold]\n")
+    rc = run_add_custom_decks_to_pool(
+        links=extra_links,
+        dry_run=dry_run,
+        deck_id=deck_id,
+    )
+    _header("Add custom decks finished", f"Exit code {rc}")
+    if rc == 0 and not dry_run:
+        console.print(
+            f"[green]Updated[/green] [dim]{FABRARY_DECKS_PATH}[/dim]"
+        )
+    _pause()
+
+
+def wizard_unified_random_matchups_train(env: EnvironmentSettings) -> None:
     _header(
         "Unified random matchups",
         "Train the shared unified agent on random fabrary deck pairs",
@@ -605,6 +688,10 @@ def wizard_unified_random_matchups(env: EnvironmentSettings) -> None:
     console.print(
         "[dim]When checkpoint eval is enabled, a Talishar eval watcher runs in the "
         "background on the latest matchup in this experiment.[/dim]"
+    )
+    console.print(
+        "[dim]A live HTML training dashboard is written to "
+        "unified_random_matchups_dashboard.html in the run folder.[/dim]"
     )
     spec.workers = IntPrompt.ask("Parallel workers", default=spec.workers)
     spec.skip_converged = Confirm.ask(
@@ -786,17 +873,46 @@ def wizard_evaluate(env: EnvironmentSettings) -> None:
     mode = _choose_mapping(EVAL_MODE_CHOICES, "What would you like to do?")
     render_only = mode == "render"
 
-    results_dir = _choose_results_dir(
-        title="Results with phase-3 checkpoints",
-        manual_hint="Results directory",
+    from fab_bridge.unified_results import (
+        is_unified_random_matchup_run,
+        resolve_unified_run_root,
+    )
+
+    results_dir = str(
+        resolve_unified_run_root(Path(_choose_results_dir(
+            title="Results with phase-3 checkpoints",
+            manual_hint="Results directory",
+        )))
     )
     candidate_id = _pick_sideboard_candidate_id(results_dir)
+    unified_run = is_unified_random_matchup_run(Path(results_dir))
+    if unified_run:
+        console.print(
+            "[dim]Unified random matchup run — evaluating the most recent "
+            "checkpoint across all matchups in this experiment.[/dim]"
+        )
+
+    default_episodes = (
+        RUNTIME.unified_random_matchups.checkpoint_eval_episodes
+        if unified_run
+        else RUNTIME.play.checkpoint_eval_episodes or 20
+    )
+    default_workers = (
+        RUNTIME.unified_random_matchups.workers
+        if unified_run
+        else RUNTIME.meta.eval_parallel_workers or RUNTIME.play.workers or 4
+    )
+    default_max_steps = (
+        RUNTIME.unified_random_matchups.max_steps
+        if unified_run
+        else RUNTIME.meta.eval_max_steps or RUNTIME.meta.max_play_steps or 1000
+    )
 
     if render_only:
         spec = EvalSpec(
             results_dir=results_dir,
             candidate_id=candidate_id,
-            max_steps=IntPrompt.ask("Max steps for render replay", default=1000),
+            max_steps=IntPrompt.ask("Max steps for render replay", default=default_max_steps),
             watch=Confirm.ask("Watch for new checkpoints?", default=False),
             render_only=True,
         )
@@ -807,10 +923,13 @@ def wizard_evaluate(env: EnvironmentSettings) -> None:
         spec = EvalSpec(
             results_dir=results_dir,
             candidate_id=candidate_id,
-            episodes=IntPrompt.ask("Evaluation episodes", default=20),
-            parallel_workers=IntPrompt.ask("Parallel workers", default=4),
-            max_steps=IntPrompt.ask("Max steps per game", default=1000),
-            watch=Confirm.ask("Watch for new checkpoints?", default=True),
+            episodes=IntPrompt.ask("Evaluation episodes", default=default_episodes),
+            parallel_workers=IntPrompt.ask("Parallel workers", default=default_workers),
+            max_steps=IntPrompt.ask("Max steps per game", default=default_max_steps),
+            watch=Confirm.ask(
+                "Watch for new checkpoints?",
+                default=unified_run,
+            ),
         )
         if spec.watch:
             spec.poll_seconds = IntPrompt.ask("Poll interval (seconds)", default=30)

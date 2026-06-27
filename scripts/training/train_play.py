@@ -107,7 +107,9 @@ try:
         _env_supports_fast_training,
         _announce_training_backend,
         _mask_logits_to_legal,
+        _sample_policy_action_index,
         _save_warmup_handoff_checkpoint,
+        swapped_matchup,
         DEFAULT_N_EPISODES,
         DEFAULT_WARMUP_EPISODES,
         DEFAULT_WARMUP_BASELINE_EVAL_EPISODES,
@@ -1681,15 +1683,9 @@ def _fast_sample_action_index(
     n_legal: int,
     rng: np.random.Generator,
 ) -> int:
-    if getattr(agent, "_actor", None) is None:
-        return 0
-    logits = agent._actor.predict(obs_vec[None, :])
-    logits = _mask_logits_to_legal(logits, max(1, int(n_legal)))
-    probs = _softmax_logits(np.asarray(logits[0], dtype=np.float64))
-    action = int(rng.choice(len(probs), p=probs))
-    if action >= n_legal:
-        action = max(0, n_legal - 1)
-    return action
+    if getattr(agent, "_shared", None) is None:
+        raise RuntimeError("Eval policy has no initialized networks (would default to pass)")
+    return _sample_policy_action_index(agent, obs_vec, n_legal, rng)
 
 
 def _maybe_refresh_sideboard_dashboard(
@@ -1821,6 +1817,7 @@ def _evaluate_fast_policy_matchup(
     progress_interval: int = 100,
     live_phase: str = "cpp_checkpoint",
     p1_deck_card_ids: Optional[set[str]] = None,
+    swap_env: Any = None,
 ) -> Optional[dict[str, Any]]:
     if not _env_supports_fast_training(env):
         return None
@@ -1830,28 +1827,41 @@ def _evaluate_fast_policy_matchup(
     end_state_keys: set[tuple[Any, ...]] = set()
     episode_damage_breakdowns: list[dict[str, Any]] = []
     deck_card_ids = set(p1_deck_card_ids or ())
-    cpp_env = getattr(env, "_cpp_env", None) if hasattr(env, "_cpp_env") else env
-    trace_env = cpp_env if hasattr(cpp_env, "get_combat_trace") else env
+    p1_actions = p2_actions = 0
+    p1_pass_actions = p2_pass_actions = 0
     for ep in range(episodes):
         ep_seed = (seed + ep) if seed is not None else ep
-        episode_rng = np.random.default_rng(ep_seed)
-        state = env.fast_reset(seed=ep_seed, starting_player_id=1 + (ep % 2))
+        p1_rng = np.random.default_rng((ep_seed * 31 + 7) if seed is not None else None)
+        p2_rng = np.random.default_rng((ep_seed * 31 + 13) if seed is not None else None)
+        use_swap = swap_env is not None and (ep % 2 == 1)
+        active_env = swap_env if use_swap else env
+        state = active_env.fast_reset(seed=ep_seed, starting_player_id=1 + (ep % 2))
         terminated = truncated = False
         steps = 0
 
         while steps < max_steps:
             acting = int(state.get("acting_player_id", 1) or 1)
             seat_policy = p1_policy if acting == 1 else p2_policy
+            seat_rng = p1_rng if acting == 1 else p2_rng
             obs_vec = np.asarray(state["obs_vec"], dtype=np.float64)
             n_legal = max(1, int(state.get("legal_count", 1) or 1))
             action = _fast_action_for_policy(
                 seat_policy,
-                env,
+                active_env,
                 obs_vec=obs_vec,
                 n_legal=n_legal,
-                rng=episode_rng,
+                rng=seat_rng,
             )
-            state = env.fast_step_index(action)
+            is_pass = n_legal <= 1 or action >= n_legal - 1
+            if acting == 1:
+                p1_actions += 1
+                if is_pass:
+                    p1_pass_actions += 1
+            else:
+                p2_actions += 1
+                if is_pass:
+                    p2_pass_actions += 1
+            state = active_env.fast_step_index(action)
             terminated = bool(state.get("terminated", False))
             truncated = bool(state.get("truncated", False))
             steps += 1
@@ -1886,9 +1896,11 @@ def _evaluate_fast_policy_matchup(
             errors=errors,
         )
         if hasattr(trace_env, "get_combat_trace"):
-            damage_acc = EvalDamageAccumulator(deck_card_ids=deck_card_ids)
-            damage_acc.ingest_trace(trace_env.get_combat_trace())
-            episode_damage_breakdowns.append(damage_acc.to_dict())
+            ep_trace_env = getattr(active_env, "_cpp_env", active_env)
+            if hasattr(ep_trace_env, "get_combat_trace"):
+                damage_acc = EvalDamageAccumulator(deck_card_ids=deck_card_ids)
+                damage_acc.ingest_trace(ep_trace_env.get_combat_trace())
+                episode_damage_breakdowns.append(damage_acc.to_dict())
 
         completed = ep + 1
         if progress_interval > 0 and (
@@ -1932,6 +1944,16 @@ def _evaluate_fast_policy_matchup(
             f"  WARNING: {eval_label}: only {len(end_state_keys)} unique end state(s) "
             f"across {episodes} episodes — results may be degenerate (check eval seed)"
         )
+    if p2_actions == 0 and episodes > 0:
+        print(
+            f"  WARNING: {eval_label}: P2 never acted across {episodes} episode(s) "
+            "— checkpoint eval may be one-sided"
+        )
+    elif p2_actions > 0 and p2_pass_actions == p2_actions:
+        print(
+            f"  WARNING: {eval_label}: P2 only selected pass actions "
+            f"({p2_pass_actions}/{p2_actions} steps)"
+        )
     if errors:
         print(f"  WARNING: {eval_label}: {errors} episode(s) ended with classification errors")
     if anomalies and len(anomalies) > 5:
@@ -1961,6 +1983,11 @@ def _evaluate_fast_policy_matchup(
         "eval_anomalies": anomalies[:20],
         "p1_policy": _policy_label(p1_policy),
         "p2_policy": _policy_label(p2_policy),
+        "p1_actions": p1_actions,
+        "p2_actions": p2_actions,
+        "p1_pass_actions": p1_pass_actions,
+        "p2_pass_actions": p2_pass_actions,
+        "deck_swap_eval": swap_env is not None,
     }
     if damage_breakdown is not None:
         metrics["damage_breakdown"] = damage_breakdown
@@ -2047,6 +2074,17 @@ def _evaluate_p1_vs_fixed_opponent(
         require_fast_training=(backend == "cpp"),
         enable_combat_tracker=True,
     )
+    swap_env = None
+    if p2_agent is not None and use_cpp:
+        swap_env = make_env(
+            swapped_matchup(matchup),
+            base_url=base_url,
+            game_format=game_format,
+            max_turns=max_steps,
+            use_cpp_engine=use_cpp,
+            require_fast_training=(backend == "cpp"),
+            enable_combat_tracker=True,
+        )
     if backend in {"auto", "cpp"}:
         fast_metrics = _evaluate_fast_policy_matchup(
             env,
@@ -2058,13 +2096,22 @@ def _evaluate_p1_vs_fixed_opponent(
             eval_label=eval_label,
             live_progress_path=live_progress_path,
             p1_deck_card_ids=p1_deck_card_ids,
+            swap_env=swap_env,
         )
         if fast_metrics is not None:
-            env.close()
+            try:
+                env.close()
+            finally:
+                if swap_env is not None:
+                    swap_env.close()
             print(f"  {eval_label} backend: C++ engine fast sampled eval")
             return fast_metrics
         if backend == "cpp":
-            env.close()
+            try:
+                env.close()
+            finally:
+                if swap_env is not None:
+                    swap_env.close()
             raise RuntimeError(
                 f"C++ fast eval required for {matchup.name} but unavailable"
             )

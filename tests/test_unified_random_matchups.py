@@ -16,6 +16,7 @@ from rl_agents.ppo import PPOAgent  # noqa: E402
 from train_dual_agent_common import (  # noqa: E402
     _MAX_WIN_PATH_LEN,
     resolve_checkpoint_interval,
+    resolve_fabrary_deck_cards,
     sample_random_fabrary_matchups,
     shorten_matchup_dir_name,
 )
@@ -115,3 +116,41 @@ def test_build_assets_hero_map_skips_empty_txt_files(tmp_path: Path) -> None:
     hero_map = _build_assets_hero_map(assets)
     assert "aurora" in hero_map
     assert hero_map["aurora"] == "aurora AuroraText"
+
+
+def test_clone_agent_weights_requires_initialized_source() -> None:
+    from agent_cache import clone_agent_weights  # noqa: E402
+
+    src = PPOAgent()
+    dst = PPOAgent()
+    try:
+        clone_agent_weights(src, dst)
+        assert False, "expected RuntimeError"
+    except RuntimeError as exc:
+        assert "no initialized networks" in str(exc).lower()
+
+
+def test_sample_policy_action_index_respects_legal_mask() -> None:
+    import numpy as np
+
+    from train_dual_agent_common import _sample_policy_action_index  # noqa: E402
+
+    policy = PPOAgent(n_actions=8, obs_dim=PLAYER_OBS_DIM)
+    policy._init_nets(PLAYER_OBS_DIM)
+    rng = np.random.default_rng(0)
+    obs = np.zeros(PLAYER_OBS_DIM, dtype=np.float64)
+    action = _sample_policy_action_index(policy, obs, n_legal=3, rng=rng)
+    assert 0 <= action < 3
+
+
+def test_resolve_fabrary_deck_cards_uses_card_ids_field() -> None:
+    deck_entry = {
+        "id": "fab_test_import",
+        "card_ids": [
+            {"id": "wtr001", "count": 2},
+            {"id": "wtr002", "count": 1},
+        ],
+        "cards": [],
+    }
+    result = resolve_fabrary_deck_cards(deck_entry, "silver_age")
+    assert result == ["wtr001", "wtr001", "wtr002"]

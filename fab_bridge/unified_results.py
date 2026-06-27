@@ -26,6 +26,24 @@ def is_unified_random_matchup_run(path: Path) -> bool:
     return (path / RUN_MANIFEST).is_file()
 
 
+def resolve_unified_run_root(path: Path) -> Path:
+    """Normalize *path* to a unified run root (accepts matchup subfolders).
+
+    Walks upward until ``run_manifest.json`` is found. Returns *path* unchanged
+    when it is not inside a unified run.
+    """
+    resolved = path.expanduser().resolve()
+    current = resolved
+    for _ in range(6):
+        if is_unified_random_matchup_run(current):
+            return current
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    return resolved
+
+
 def read_checkpoint_eval_scope(run_dir: Path) -> dict:
     path = run_dir / CHECKPOINT_EVAL_SCOPE
     if not path.is_file():
@@ -35,6 +53,30 @@ def read_checkpoint_eval_scope(run_dir: Path) -> dict:
     except (json.JSONDecodeError, OSError, TypeError):
         return {}
     return raw if isinstance(raw, dict) else {}
+
+
+def _episode_dir_sort_key(meta_path: Path) -> tuple[int, float]:
+    episode_name = meta_path.parent.name.removeprefix("episode_")
+    try:
+        episode = int(episode_name)
+    except ValueError:
+        episode = 0
+    try:
+        mtime = meta_path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    return episode, mtime
+
+
+def matchup_dir_from_unified_checkpoint(checkpoint_dir: Path) -> Path | None:
+    """Return the matchup output folder containing a unified self-play checkpoint."""
+    parts = checkpoint_dir.resolve().parts
+    if UNIFIED_SELFPLAY not in parts:
+        return None
+    idx = parts.index(UNIFIED_SELFPLAY)
+    if idx < 1:
+        return None
+    return Path(*parts[:idx])
 
 
 def _looks_like_matchup_dir(path: Path) -> bool:
@@ -58,7 +100,7 @@ def iter_unified_matchup_dirs(run_dir: Path) -> list[Path]:
 
 
 def resolve_latest_unified_matchup_dir(run_dir: Path) -> Path | None:
-    """Resolve the active/latest matchup folder for checkpoint evaluation."""
+    """Resolve the active/latest matchup folder for in-run checkpoint watching."""
     scope = read_checkpoint_eval_scope(run_dir)
     subdir = str(scope.get("matchup_dir") or "").strip()
     if subdir:
@@ -69,21 +111,54 @@ def resolve_latest_unified_matchup_dir(run_dir: Path) -> Path | None:
     return dirs[0] if dirs else None
 
 
+def _glob_unified_checkpoint_metadata(
+    run_dir: Path,
+    role: str,
+    *,
+    matchup_dir: Path | None = None,
+) -> list[Path]:
+    if matchup_dir is not None:
+        search_roots = [matchup_dir]
+    else:
+        search_roots = iter_unified_matchup_dirs(run_dir)
+    paths: list[Path] = []
+    for root in search_roots:
+        paths.extend(root.glob(f"{UNIFIED_SELFPLAY}/{role}/episode_*/metadata.json"))
+    return sorted(paths, key=_episode_dir_sort_key)
+
+
 def has_unified_selfplay_checkpoints(run_dir: Path) -> bool:
-    matchup_dir = resolve_latest_unified_matchup_dir(run_dir)
-    if matchup_dir is None:
-        return False
-    return any(matchup_dir.glob(f"{UNIFIED_SELFPLAY}/p1/episode_*/metadata.json"))
+    return bool(_glob_unified_checkpoint_metadata(run_dir, "p1"))
 
 
-def iter_unified_checkpoint_metadata(run_dir: Path, role: str) -> list[Path]:
-    matchup_dir = resolve_latest_unified_matchup_dir(run_dir)
-    if matchup_dir is None:
-        return []
-    return sorted(
-        matchup_dir.glob(f"{UNIFIED_SELFPLAY}/{role}/episode_*/metadata.json"),
-        key=lambda path: path.parent.name,
+def iter_unified_checkpoint_metadata(
+    run_dir: Path,
+    role: str,
+    *,
+    matchup_dir: Path | None = None,
+) -> list[Path]:
+    """Collect unified self-play checkpoint metadata paths under a run.
+
+    When *matchup_dir* is set, only that matchup folder is searched (watch mode
+    during training). Otherwise every matchup under the run is scanned so the
+    globally latest checkpoint can be resolved from the run root.
+    """
+    return _glob_unified_checkpoint_metadata(run_dir, role, matchup_dir=matchup_dir)
+
+
+def find_latest_unified_checkpoint_metadata(
+    run_dir: Path,
+    role: str = "p1",
+    *,
+    matchup_dir: Path | None = None,
+) -> Path | None:
+    """Return metadata path for the newest unified checkpoint in *run_dir*."""
+    paths = iter_unified_checkpoint_metadata(
+        run_dir,
+        role,
+        matchup_dir=matchup_dir,
     )
+    return paths[-1] if paths else None
 
 
 def unified_run_label(run_dir: Path) -> str:
@@ -97,23 +172,25 @@ def unified_run_label(run_dir: Path) -> str:
     fmt = str(data.get("format") or "").strip()
     matchups = data.get("matchups_sampled") or []
     count = len(matchups) if isinstance(matchups, list) else 0
-    latest = resolve_latest_unified_matchup_dir(run_dir)
+    latest_meta = find_latest_unified_checkpoint_metadata(run_dir, "p1")
     latest_name = ""
-    if latest is not None:
-        label_path = latest / MATCHUP_LABEL
-        if label_path.is_file():
-            try:
-                label = json.loads(label_path.read_text(encoding="utf-8"))
-                latest_name = str(label.get("name") or "").strip()
-            except (json.JSONDecodeError, OSError, TypeError):
-                latest_name = latest.name
-        else:
-            latest_name = latest.name
+    if latest_meta is not None:
+        latest_matchup = matchup_dir_from_unified_checkpoint(latest_meta.parent)
+        if latest_matchup is not None:
+            label_path = latest_matchup / MATCHUP_LABEL
+            if label_path.is_file():
+                try:
+                    label = json.loads(label_path.read_text(encoding="utf-8"))
+                    latest_name = str(label.get("name") or "").strip()
+                except (json.JSONDecodeError, OSError, TypeError):
+                    latest_name = latest_matchup.name
+            else:
+                latest_name = latest_matchup.name
     parts = []
     if fmt:
         parts.append(fmt.replace("_", " "))
     if count:
         parts.append(f"{count} matchup(s)")
     if latest_name:
-        parts.append(f"latest: {latest_name}")
+        parts.append(f"latest ckpt: {latest_name}")
     return " · ".join(parts) if parts else run_dir.name

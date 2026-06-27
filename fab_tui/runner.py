@@ -266,11 +266,14 @@ def normalize_card_db_for_talishar(*, dry_run: bool = False) -> tuple[int, dict[
 
 def run_eval_dashboard(spec: EvalSpec, env: EnvironmentSettings) -> int:
     env.apply_to_environ()
+    from fab_bridge.unified_results import resolve_unified_run_root
+
+    results_dir = str(resolve_unified_run_root(Path(spec.results_dir)))
     cmd = [
         _python(),
         str(SCRIPTS_EVAL / "eval_phase3_checkpoint.py"),
         "--results-dir",
-        spec.results_dir,
+        results_dir,
         "--assets-path",
         env.assets_path,
         "--talishar-url",
@@ -644,6 +647,26 @@ def run_eval_sideboard_compare(
     return run_streaming(cmd)
 
 
+def run_add_custom_decks_to_pool(
+    *,
+    links: list[str] | None = None,
+    dry_run: bool = False,
+    deck_id: str | None = None,
+) -> int:
+    """Fetch FaBrary decks and append them to fabrary_decks.json."""
+    cmd = [
+        _python(),
+        str(SCRIPTS_DECK / "add_custom_decks_to_pool.py"),
+    ]
+    if dry_run:
+        cmd.append("--dry-run")
+    if deck_id:
+        cmd.extend(["--deck-id", deck_id])
+    if links:
+        cmd.extend(links)
+    return run_streaming(cmd)
+
+
 def run_unified_random_matchups(
     spec: UnifiedRandomMatchupSpec,
     env: EnvironmentSettings,
@@ -667,6 +690,8 @@ def run_unified_random_matchups(
         str(spec.max_steps),
         "--warmup-episodes",
         str(spec.warmup_episodes),
+        "--warmup-baseline-eval-episodes",
+        str(spec.warmup_baseline_eval_episodes),
         "--checkpoint-interval-pct",
         str(spec.checkpoint_interval_pct),
         "--checkpoint-eval-episodes",
@@ -686,7 +711,12 @@ def run_unified_random_matchups(
         cmd.append("--skip-converged")
     else:
         cmd.append("--no-skip-converged")
-    cmd.append("--require-cpp-engine")
+    if not spec.build_cpp_engine:
+        cmd.append("--no-build-cpp-engine")
+    if spec.require_cpp_engine:
+        cmd.append("--require-cpp-engine")
+    else:
+        cmd.append("--no-require-cpp-engine")
     dashboard_proc = None
     try:
         if spec.checkpoint_eval_episodes > 0:

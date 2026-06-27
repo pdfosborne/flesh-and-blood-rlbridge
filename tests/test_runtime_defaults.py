@@ -16,6 +16,7 @@ from runtime_defaults import (  # noqa: E402
     DEFAULT_PARALLEL_SEEDS,
     META,
     MetaGameControls,
+    MetaUnifiedRandomMatchups,
     RUNTIME,
     apply_meta,
     build_runtime,
@@ -89,3 +90,31 @@ def test_apply_meta_updates_module_aliases() -> None:
         assert rd.RUNTIME.play.parallel_seeds == 7
     finally:
         apply_meta(parallel_seeds=original)
+
+
+def test_unified_random_matchups_defaults_from_meta() -> None:
+    urm = RUNTIME.unified_random_matchups
+    meta_urm = META.unified_random_matchups
+    assert urm.matchups == meta_urm.matchups
+    assert urm.episodes == meta_urm.episodes
+    assert urm.max_steps == meta_urm.max_steps
+    expected_workers = meta_urm.workers
+    if expected_workers <= 0:
+        expected_workers = 1 if META.workers is None else META.workers
+    assert urm.workers == expected_workers
+    assert urm.checkpoint_eval_episodes == min(
+        100, max(1, meta_urm.episodes // 100)
+    )
+    assert urm.custom_deck_links == meta_urm.custom_deck_links
+
+
+def test_unified_episodes_independent_of_play_episodes() -> None:
+    runtime = build_runtime(
+        replace(META, play_episodes=999, unified_random_matchups=replace(
+            META.unified_random_matchups,
+            episodes=42,
+        ))
+    )
+    assert runtime.unified_random_matchups.episodes == 42
+    assert runtime.matchup_sim.play_episodes == 999
+    assert runtime.dual_matchup.episodes == 999

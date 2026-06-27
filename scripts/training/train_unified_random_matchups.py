@@ -28,9 +28,6 @@ import _bootstrap  # noqa: E402
 _bootstrap.configure_paths()
 
 from train_dual_agent_common import (  # noqa: E402
-    DEFAULT_N_EPISODES,
-    DEFAULT_WARMUP_BASELINE_EVAL_EPISODES,
-    DEFAULT_WARMUP_EPISODES,
     FABRARY_ENV_SUFFIX,
     REPO_ROOT,
     build_fabrary_eval_env_ids,
@@ -40,12 +37,19 @@ from train_dual_agent_common import (  # noqa: E402
     sample_random_fabrary_matchups,
 )
 from runtime_defaults import (  # noqa: E402
-    DEFAULT_CHECKPOINT_EVAL_EPISODES,
-    DEFAULT_CHECKPOINT_INTERVAL_PCT,
+    DEFAULT_UNIFIED_CHECKPOINT_EVAL_EPISODES,
+    DEFAULT_UNIFIED_CHECKPOINT_INTERVAL_PCT,
+    DEFAULT_UNIFIED_EPISODES,
+    DEFAULT_UNIFIED_MATCHUPS,
+    DEFAULT_UNIFIED_MAX_STEPS,
+    DEFAULT_UNIFIED_WARMUP_EPISODES,
+    DEFAULT_UNIFIED_WORKERS,
+    DEFAULT_WARMUP_BASELINE_EVAL_EPISODES,
     RUNTIME,
 )
 
-DEFAULT_MAX_STEPS = RUNTIME.dual_matchup.max_steps
+DEFAULT_MAX_STEPS = DEFAULT_UNIFIED_MAX_STEPS
+_UR = RUNTIME.unified_random_matchups
 
 
 def _parse_args() -> argparse.Namespace:
@@ -64,15 +68,15 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--matchups",
         type=int,
-        default=3,
+        default=DEFAULT_UNIFIED_MATCHUPS,
         help="Number of random deck pairs to train this run",
     )
-    parser.add_argument("--episodes", type=int, default=DEFAULT_N_EPISODES)
+    parser.add_argument("--episodes", type=int, default=DEFAULT_UNIFIED_EPISODES)
     parser.add_argument("--max-steps", type=int, default=DEFAULT_MAX_STEPS)
     parser.add_argument(
         "--warmup-episodes",
         type=int,
-        default=DEFAULT_WARMUP_EPISODES,
+        default=DEFAULT_UNIFIED_WARMUP_EPISODES,
     )
     parser.add_argument(
         "--warmup-baseline-eval-episodes",
@@ -82,28 +86,28 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--checkpoint-interval-pct",
         type=float,
-        default=DEFAULT_CHECKPOINT_INTERVAL_PCT,
+        default=DEFAULT_UNIFIED_CHECKPOINT_INTERVAL_PCT,
     )
     parser.add_argument("--checkpoint-interval", type=int, default=None)
     parser.add_argument(
         "--checkpoint-eval-episodes",
         type=int,
-        default=DEFAULT_CHECKPOINT_EVAL_EPISODES,
+        default=DEFAULT_UNIFIED_CHECKPOINT_EVAL_EPISODES,
     )
-    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--seed", type=int, default=_UR.seed)
     parser.add_argument(
         "--workers",
         type=int,
-        default=RUNTIME.dual_matchup.workers,
+        default=DEFAULT_UNIFIED_WORKERS,
         help="Parallel Talishar/C++ worker sessions per matchup",
     )
     parser.add_argument(
         "--cache-dir",
-        default=str(REPO_ROOT / "results" / "agent_cache"),
+        default=_UR.cache_dir or str(REPO_ROOT / "results" / "agent_cache"),
     )
     parser.add_argument(
         "--out-dir",
-        default=str(REPO_ROOT / "results" / "unified_random_matchups"),
+        default=_UR.out_dir or str(REPO_ROOT / "results" / "unified_random_matchups"),
         help="Base directory when --run-dir is not set",
     )
     parser.add_argument(
@@ -114,7 +118,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--skip-converged",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=_UR.skip_converged,
         help="Skip deck pairs already converged in unified agent cache",
     )
     parser.add_argument(
@@ -204,28 +208,60 @@ def main() -> None:
     print(f"Output dir   : {out_dir}")
     print(f"Cache dir    : {args.cache_dir}")
 
-    summary, failed = run_matchup_training(
-        selected,
-        eval_env_ids,
-        base_url=base_url,
-        n_episodes=int(args.episodes),
-        max_steps=int(args.max_steps),
-        out_dir=out_dir,
-        seed=args.seed,
-        game_format=format_name,
-        cache_dir=Path(args.cache_dir),
-        warmup_episodes=int(args.warmup_episodes),
-        warmup_baseline_eval_episodes=int(args.warmup_baseline_eval_episodes),
-        show_frontend=bool(args.show_frontend),
-        frontend_url=args.frontend_url,
-        n_workers=max(1, int(args.workers)),
-        checkpoint_interval_pct=float(args.checkpoint_interval_pct),
-        checkpoint_interval=args.checkpoint_interval,
-        checkpoint_eval_episodes=int(args.checkpoint_eval_episodes),
-        skip_converged=bool(args.skip_converged),
-        build_cpp_engine=not args.no_build_cpp_engine,
-        require_cpp_engine=not args.no_require_cpp_engine,
+    from fab_bridge.unified_dashboard import (  # noqa: PLC0415
+        UNIFIED_DASHBOARD_NAME,
+        write_unified_random_matchups_dashboard,
     )
+
+    write_unified_random_matchups_dashboard(out_dir, auto_refresh_seconds=5.0)
+    print(f"Dashboard    : {out_dir / UNIFIED_DASHBOARD_NAME}")
+
+    build_cpp_engine = _UR.build_cpp_engine
+    if args.no_build_cpp_engine:
+        build_cpp_engine = False
+    require_cpp_engine = _UR.require_cpp_engine
+    if args.require_cpp_engine:
+        require_cpp_engine = True
+    if args.no_require_cpp_engine:
+        require_cpp_engine = False
+
+    dashboard_proc = None
+    summary: list = []
+    failed: list = []
+    try:
+        from runscripts._common import (  # noqa: PLC0415
+            start_unified_random_matchups_train_dashboard,
+            stop_background_process,
+        )
+
+        dashboard_proc = start_unified_random_matchups_train_dashboard(out_dir)
+        summary, failed = run_matchup_training(
+            selected,
+            eval_env_ids,
+            base_url=base_url,
+            n_episodes=int(args.episodes),
+            max_steps=int(args.max_steps),
+            out_dir=out_dir,
+            seed=args.seed,
+            game_format=format_name,
+            cache_dir=Path(args.cache_dir),
+            warmup_episodes=int(args.warmup_episodes),
+            warmup_baseline_eval_episodes=int(args.warmup_baseline_eval_episodes),
+            show_frontend=bool(args.show_frontend),
+            frontend_url=args.frontend_url,
+            n_workers=max(1, int(args.workers)),
+            checkpoint_interval_pct=float(args.checkpoint_interval_pct),
+            checkpoint_interval=args.checkpoint_interval,
+            checkpoint_eval_episodes=int(args.checkpoint_eval_episodes),
+            skip_converged=bool(args.skip_converged),
+            build_cpp_engine=build_cpp_engine,
+            require_cpp_engine=require_cpp_engine,
+        )
+    finally:
+        if dashboard_proc is not None:
+            from runscripts._common import stop_background_process  # noqa: PLC0415
+
+            stop_background_process(dashboard_proc)
     print_training_summary(summary, failed, out_dir)
     if failed:
         sys.exit(1)

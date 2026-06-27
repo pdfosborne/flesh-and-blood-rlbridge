@@ -124,6 +124,23 @@ def start_unified_random_matchups_eval_dashboard(
     )
 
 
+def start_unified_random_matchups_train_dashboard(
+    out_dir: Path,
+    *,
+    poll_seconds: float = 5.0,
+) -> subprocess.Popen[Any]:
+    """Launch the live HTML training dashboard watcher for a unified run."""
+    return run_python_background(
+        SCRIPTS_EVAL / "unified_random_matchups_dashboard.py",
+        "--out-dir",
+        str(out_dir),
+        "--watch",
+        "--poll-seconds",
+        str(poll_seconds),
+        cwd=REPO_ROOT,
+    )
+
+
 def title_case_token(token: str) -> str:
     token = token.strip()
     if not token:

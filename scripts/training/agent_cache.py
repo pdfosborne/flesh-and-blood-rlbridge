@@ -139,7 +139,10 @@ class UnifiedPolicyBundle:
 
 def clone_agent_weights(src: PPOAgent, dst: PPOAgent) -> None:
     if src._shared is None or src.obs_dim <= 0:
-        return
+        raise RuntimeError(
+            "Cannot clone agent weights: source policy has no initialized networks "
+            f"(obs_dim={getattr(src, 'obs_dim', 0)!r})"
+        )
     dst.n_actions = src.n_actions
     dst._mask_actions = src._mask_actions
     dst.obs_dim = src.obs_dim

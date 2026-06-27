@@ -31,6 +31,12 @@ CARDS_DB_PATH = FAB_DB_DIR / "cards.json"
 TALISHAR_ID_RE = re.compile(r"^[a-z][a-z0-9_]+$")
 
 from fab_tui.deck_cards import assign_pitch_variants  # noqa: E402
+from fab_bridge.unified_dashboard import (  # noqa: E402
+    maybe_refresh_unified_dashboard,
+    update_unified_training_live,
+    write_unified_random_matchups_dashboard,
+)
+from fab_bridge.unified_results import is_unified_random_matchup_run  # noqa: E402
 from play_outcome_stats import (  # noqa: E402
     absolute_p1_p2_deck_from_env,
     absolute_p1_p2_hp_from_env,
@@ -830,6 +836,26 @@ def _sample_actions_from_logits_batch(
         actions[row] = action
         log_probs[row] = float(lp_all[row, action])
     return actions, log_probs
+
+
+def _sample_policy_action_index(
+    policy: PPOAgent,
+    obs_vec: np.ndarray,
+    n_legal: int,
+    rng: np.random.Generator,
+) -> int:
+    """Sample one legal action index using the same path as fast training rollouts."""
+    if getattr(policy, "_shared", None) is None:
+        raise RuntimeError("Policy has no initialized networks for eval sampling")
+    nl = max(1, int(n_legal))
+    logits, _values = policy.predict_batch(np.asarray(obs_vec, dtype=np.float64)[None, :])
+    actions, _log_probs = _sample_actions_from_logits_batch(
+        np.asarray(logits, dtype=np.float64),
+        np.array([nl], dtype=np.int64),
+        [rng],
+        policy.n_actions,
+    )
+    return int(actions[0])
 
 
 def _int_fast_state(state_dict: dict[str, Any], key: str, default: int) -> int:
@@ -2739,6 +2765,64 @@ def _write_unified_checkpoint_eval_scope(
     )
 
 
+def _unified_run_progress_callback(
+    out_dir: Path,
+    matchup: Matchup,
+    *,
+    target_episodes: int,
+    matchups_completed: int,
+    matchups_total: int,
+) -> Optional[Callable[..., None]]:
+    if not is_unified_random_matchup_run(out_dir):
+        return None
+
+    def _callback(
+        completed: int,
+        p1_rewards: Any = None,
+        p2_rewards: Any = None,
+        p1_outcomes: Any = None,
+    ) -> None:
+        p1_wr: Optional[float] = None
+        p2_wr: Optional[float] = None
+        if p1_outcomes:
+            summary = summarize_p1_outcomes(p1_outcomes, episodes=completed)
+            p1_wr, p2_wr = _training_win_rates_from_outcomes(summary)
+        update_unified_training_live(
+            out_dir,
+            current_matchup=matchup.name,
+            current_matchup_dir=_resolve_matchup_subdir(out_dir, matchup),
+            target_episodes=target_episodes,
+            matchups_total=matchups_total,
+            matchups_completed=matchups_completed,
+            episodes_completed=completed,
+            p1_win_rate=p1_wr,
+            p2_win_rate=p2_wr,
+            status="training",
+        )
+        maybe_refresh_unified_dashboard(out_dir)
+
+    return _callback
+
+
+def _combined_unified_training_progress(
+    ckpt_tracker: Optional["_CheckpointEvalTracker"],
+    dash_cb: Optional[Callable[..., None]],
+) -> Optional[Callable[..., None]]:
+    if ckpt_tracker is None and dash_cb is None:
+        return None
+
+    def _callback(completed: int, *args: Any) -> None:
+        if ckpt_tracker is not None:
+            ckpt_tracker.on_parallel_progress(completed, *args)
+        if dash_cb is not None:
+            try:
+                dash_cb(completed, *args)
+            except TypeError:
+                dash_cb(completed)
+
+    return _callback
+
+
 class _CheckpointEvalTracker:
     """Periodic head-to-head eval snapshots during unified self-play training."""
 
@@ -2795,6 +2879,11 @@ class _CheckpointEvalTracker:
         eval_p2 = PPOAgent()
         clone_agent_weights(self.p1_policy, eval_p1)
         clone_agent_weights(self.p2_policy, eval_p2)
+        if eval_p1._shared is None or eval_p2._shared is None:
+            raise RuntimeError(
+                "Checkpoint eval could not clone unified policy weights "
+                "(both seats must use the trained agent, not pass-only fallback)"
+            )
         from train_play import _evaluate_p1_vs_fixed_opponent  # noqa: PLC0415
 
         metrics = _evaluate_p1_vs_fixed_opponent(
@@ -2853,6 +2942,7 @@ class _CheckpointEvalTracker:
             f"({metrics['p1_wins']}W/{metrics['p2_wins']}L/{metrics['draws']}D "
             f"over {self.checkpoint_eval_episodes} games)"
         )
+        maybe_refresh_unified_dashboard(self.out_dir, min_interval_seconds=0.0)
 
 
 def _evaluate_policy_pair(
@@ -3162,6 +3252,8 @@ def train_matchup(
     _seed_run_capture: Optional[dict[str, Any]] = None,
     _skip_cache_converge: bool = False,
     _force_train: bool = False,
+    _unified_matchups_completed: int = 0,
+    _unified_matchups_total: Optional[int] = None,
 ) -> dict:
     ensure_matchup_cpp_engine(
         matchup,
@@ -3204,6 +3296,21 @@ def train_matchup(
     print(f"{'=' * 60}")
 
     _write_matchup_dir_label(out_dir, matchup)
+
+    if _unified_matchups_total is not None:
+        update_unified_training_live(
+            out_dir,
+            current_matchup=matchup.name,
+            current_matchup_dir=_resolve_matchup_subdir(out_dir, matchup),
+            target_episodes=n_episodes,
+            matchups_total=_unified_matchups_total,
+            matchups_completed=_unified_matchups_completed,
+            episodes_completed=0,
+            p1_win_rate=None,
+            p2_win_rate=None,
+            status="training",
+        )
+        write_unified_random_matchups_dashboard(out_dir, auto_refresh_seconds=5.0)
 
     if matchup.cpp_engine_dir:
         print(f"  C++ engine : {matchup.cpp_engine_dir}")
@@ -3347,6 +3454,17 @@ def train_matchup(
         print(f"  Live state image path → {live_state_image_path}")
 
     ckpt_tracker: Optional[_CheckpointEvalTracker] = None
+    dash_cb = (
+        _unified_run_progress_callback(
+            out_dir,
+            matchup,
+            target_episodes=n_episodes,
+            matchups_completed=_unified_matchups_completed,
+            matchups_total=_unified_matchups_total,
+        )
+        if _unified_matchups_total is not None
+        else None
+    )
     effective_ckpt_interval = resolve_checkpoint_interval(
         n_episodes,
         checkpoint_interval=checkpoint_interval,
@@ -3389,8 +3507,9 @@ def train_matchup(
             n_workers=rollout_workers,
             live_state_image_path=live_state_image_path,
             episode_cache=episode_cache,
-            on_episodes_progress=(
-                ckpt_tracker.on_parallel_progress if ckpt_tracker is not None else None
+            on_episodes_progress=_combined_unified_training_progress(
+                ckpt_tracker,
+                dash_cb,
             ),
         )
         p1_rewards.extend(rem_p1)
@@ -3621,6 +3740,22 @@ def train_matchup(
         meta_p1["training_win_rate"] = p1_wr
     if p2_wr is not None:
         meta_p2["training_win_rate"] = p2_wr
+
+    if _unified_matchups_total is not None:
+        update_unified_training_live(
+            out_dir,
+            current_matchup=matchup.name,
+            current_matchup_dir=_resolve_matchup_subdir(out_dir, matchup),
+            target_episodes=n_episodes,
+            matchups_total=_unified_matchups_total,
+            matchups_completed=_unified_matchups_completed,
+            episodes_completed=n_episodes,
+            p1_win_rate=p1_wr,
+            p2_win_rate=p2_wr,
+            status="training",
+        )
+        write_unified_random_matchups_dashboard(out_dir, auto_refresh_seconds=5.0)
+
     return {"p1": meta_p1, "p2": meta_p2}
 
 
@@ -3702,11 +3837,30 @@ def run_matchup_training(
 
     summary: list[dict] = []
     failed: list[str] = []
-    for matchup in matchups:
+    unified_run = is_unified_random_matchup_run(out_dir)
+    matchups_total = len(matchups)
+    if unified_run:
+        manifest_path = out_dir / "run_manifest.json"
+        if manifest_path.is_file():
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                matchups_total = int(
+                    manifest.get("matchups_requested")
+                    or len(manifest.get("matchups_sampled") or [])
+                    or len(matchups)
+                )
+            except (json.JSONDecodeError, OSError, TypeError, ValueError):
+                pass
+        write_unified_random_matchups_dashboard(out_dir, auto_refresh_seconds=5.0)
+
+    for idx, matchup in enumerate(matchups):
         try:
             train_kwargs: dict[str, Any] = {}
             if not skip_converged:
                 train_kwargs["_force_train"] = True
+            if unified_run:
+                train_kwargs["_unified_matchups_completed"] = idx
+                train_kwargs["_unified_matchups_total"] = matchups_total
             meta = train_matchup(
                 matchup,
                 base_url=base_url,
@@ -3731,6 +3885,21 @@ def run_matchup_training(
                 **train_kwargs,
             )
             summary.append(meta)
+            if unified_run:
+                update_unified_training_live(
+                    out_dir,
+                    matchups_completed=idx + 1,
+                    matchups_total=matchups_total,
+                    status=(
+                        "complete"
+                        if idx + 1 >= matchups_total
+                        else "between_matchups"
+                    ),
+                )
+                write_unified_random_matchups_dashboard(
+                    out_dir,
+                    auto_refresh_seconds=5.0,
+                )
         except Exception as exc:
             print(f"\n  ERROR training {matchup.name}: {exc}")
             failed.append(matchup.name)
@@ -3821,6 +3990,19 @@ def resolve_fabrary_deck_cards(deck_entry: dict, format_name: str) -> list[str]:
     rules = FORMAT_DECK_RULES[format_name]
     max_copies = rules["max_copies"]
     deck_size = rules["deck_size"]
+
+    card_ids_field = deck_entry.get("card_ids")
+    if card_ids_field:
+        result: list[str] = []
+        for card_entry in card_ids_field:
+            card_id = str(card_entry.get("id", "")).strip()
+            if not card_id:
+                continue
+            count = min(int(card_entry.get("count", 1)), max_copies)
+            result.extend([card_id] * count)
+        if len(result) > deck_size:
+            result = result[:deck_size]
+        return result
 
     cards_data = json.loads(CARDS_DB_PATH.read_text(encoding="utf-8"))
     name_map: dict[str, list[dict]] = {}

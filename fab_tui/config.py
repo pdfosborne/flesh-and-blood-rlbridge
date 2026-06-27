@@ -341,19 +341,22 @@ class UnifiedRandomMatchupSpec:
     """Random fabrary deck matchups for unified agent training."""
 
     game_format: PipelineFormat = "silver_age"
-    matchups: int = 3
-    episodes: int = RUNTIME.dual_matchup.episodes
-    max_steps: int = RUNTIME.dual_matchup.max_steps
-    warmup_episodes: int = RUNTIME.play.warmup_episodes
-    checkpoint_interval_pct: float = DEFAULT_CHECKPOINT_INTERVAL_PCT
-    checkpoint_eval_episodes: int = DEFAULT_CHECKPOINT_EVAL_EPISODES
-    workers: int = RUNTIME.dual_matchup.workers
-    skip_converged: bool = True
-    build_cpp_engine: bool = True
-    require_cpp_engine: bool = True
-    seed: int | None = None
-    cache_dir: str | None = None
-    out_dir: str | None = None
+    matchups: int = RUNTIME.unified_random_matchups.matchups
+    episodes: int = RUNTIME.unified_random_matchups.episodes
+    max_steps: int = RUNTIME.unified_random_matchups.max_steps
+    warmup_episodes: int = RUNTIME.unified_random_matchups.warmup_episodes
+    warmup_baseline_eval_episodes: int = (
+        RUNTIME.unified_random_matchups.warmup_baseline_eval_episodes
+    )
+    checkpoint_interval_pct: float = RUNTIME.unified_random_matchups.checkpoint_interval_pct
+    checkpoint_eval_episodes: int = RUNTIME.unified_random_matchups.checkpoint_eval_episodes
+    workers: int = RUNTIME.unified_random_matchups.workers
+    skip_converged: bool = RUNTIME.unified_random_matchups.skip_converged
+    build_cpp_engine: bool = RUNTIME.unified_random_matchups.build_cpp_engine
+    require_cpp_engine: bool = RUNTIME.unified_random_matchups.require_cpp_engine
+    seed: int | None = RUNTIME.unified_random_matchups.seed
+    cache_dir: str | None = RUNTIME.unified_random_matchups.cache_dir
+    out_dir: str | None = RUNTIME.unified_random_matchups.out_dir
 
     def resolved_out_dir(self) -> Path:
         if self.out_dir:

@@ -20,6 +20,14 @@ def test_run_time_labels_from_folder_stamp(tmp_path: Path) -> None:
     assert stamp == "20260621_153346"
 
 
+def test_run_time_labels_from_bare_stamp_folder(tmp_path: Path) -> None:
+    run_dir = tmp_path / "20260626_215125"
+    run_dir.mkdir()
+    started, stamp = _run_time_labels(run_dir)
+    assert started == "2026-06-26 21:51"
+    assert stamp == "20260626_215125"
+
+
 def test_run_time_labels_from_manifest_when_no_stamp(tmp_path: Path) -> None:
     run_dir = tmp_path / "custom_sideboard_run"
     run_dir.mkdir()
