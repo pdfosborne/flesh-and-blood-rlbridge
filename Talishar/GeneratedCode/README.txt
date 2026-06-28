@@ -1,1 +1,0 @@
-This folder holds code generated from the FaB Cube open source data set
