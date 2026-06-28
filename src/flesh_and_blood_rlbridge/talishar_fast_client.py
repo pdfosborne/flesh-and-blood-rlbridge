@@ -31,7 +31,13 @@ def _parse_json_body(body_text: str, *, allow_empty: bool = False) -> dict[str, 
         text = text[min(starts):]
     elif allow_empty:
         return {}
-    data = json.loads(text)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        preview = body_text[:500].replace("\n", " ")
+        raise RuntimeError(
+            f"Talishar returned non-JSON response: {preview!r}"
+        ) from exc
     return data if isinstance(data, dict) else {"_raw": data}
 
 

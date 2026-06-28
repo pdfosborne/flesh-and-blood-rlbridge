@@ -914,6 +914,82 @@ def _finalize_fast_episode_transitions(
         slot.cur_p1_r -= 1.0
 
 
+def _skipped_fast_episode_result(*, warmup: bool) -> dict[str, Any]:
+    return {
+        "p1_transitions": [],
+        "p2_transitions": [],
+        "p1_reward": 0.0,
+        "p2_reward": 0.0,
+        "terminated": False,
+        "truncated": False,
+        "warmup": warmup,
+        "steps": 0,
+        "p1_hp": None,
+        "p2_hp": None,
+        "turn_no": None,
+        "p1_deck": None,
+        "p2_deck": None,
+    }
+
+
+def _safe_parallel_fast_episode_batch(
+    envs: list[TalisharEngineEnvironment],
+    p1_policy: PPOAgent,
+    p2_policy: PPOAgent,
+    *,
+    max_steps: int,
+    warmup: bool,
+    episode_indices: list[int],
+    seed_base: Optional[int],
+    swap_envs: Optional[list[TalisharEngineEnvironment]] = None,
+    rollout_mode: str = DEFAULT_ROLLOUT_MODE,
+    max_workers: int = 1,
+) -> list[dict[str, Any]]:
+    """Run a fast rollout batch; isolate failures to individual episodes."""
+    batch_size = len(envs)
+    try:
+        return _run_parallel_fast_episode_batch(
+            envs,
+            p1_policy,
+            p2_policy,
+            max_steps=max_steps,
+            warmup=warmup,
+            episode_indices=episode_indices,
+            seed_base=seed_base,
+            swap_envs=swap_envs,
+            rollout_mode=rollout_mode,
+            max_workers=max_workers,
+        )
+    except Exception as exc:
+        print(
+            f"  [parallel] fast batch failed ({exc!r}) — "
+            f"retrying {batch_size} episode(s) individually",
+            flush=True,
+        )
+
+    results: list[dict[str, Any]] = []
+    for worker in range(batch_size):
+        swap_slice = swap_envs[worker : worker + 1] if swap_envs is not None else None
+        try:
+            one = _run_parallel_fast_episode_batch(
+                envs[worker : worker + 1],
+                p1_policy,
+                p2_policy,
+                max_steps=max_steps,
+                warmup=warmup,
+                episode_indices=[episode_indices[worker]],
+                seed_base=(seed_base + worker) if seed_base is not None else None,
+                swap_envs=swap_slice,
+                rollout_mode=rollout_mode,
+                max_workers=1,
+            )
+            results.append(one[0])
+        except Exception as exc:
+            print(f"  [parallel] episode failed ({exc!r}) — skipping", flush=True)
+            results.append(_skipped_fast_episode_result(warmup=warmup))
+    return results
+
+
 def _fast_episode_result_from_slot(
     slot: "_FastRolloutSlot",
     *,
@@ -2189,6 +2265,7 @@ def train_agents_from_both_perspectives_parallel(
     suppress_train_progress: bool = False,
     rollout_mode: Optional[str] = None,
     rollout_processes: Optional[int] = None,
+    shared_buffer: Any = None,
 ) -> tuple[list[float], list[float], dict[str, Any]]:
     """Parallel rollout version of ``train_agents_from_both_perspectives``.
 
@@ -2388,7 +2465,7 @@ def train_agents_from_both_perspectives_parallel(
                         staging_dir=rollout_staging,
                     )
                 elif use_fast_rollout:
-                    batch_results = _run_parallel_fast_episode_batch(
+                    batch_results = _safe_parallel_fast_episode_batch(
                         envs[:batch_size],
                         p1_policy,
                         p2_policy,
@@ -2486,6 +2563,30 @@ def train_agents_from_both_perspectives_parallel(
                         break
 
                 for result in result_iter:
+                    if (
+                        not result.get("p1_transitions")
+                        and not result.get("p2_transitions")
+                        and not int(result.get("steps") or 0)
+                    ):
+                        skipped_episodes += 1
+                        p1_ep_rewards.append(0.0)
+                        p2_ep_rewards.append(0.0)
+                        p1_outcomes.append(classify_p1_episode_outcome(skipped=True))
+                        completed += 1
+                        if on_episodes_progress is not None:
+                            try:
+                                on_episodes_progress(
+                                    completed, p1_ep_rewards, p2_ep_rewards, p1_outcomes
+                                )
+                            except TypeError:
+                                on_episodes_progress(
+                                    completed, p1_ep_rewards, p2_ep_rewards
+                                )
+                            except Exception as exc:
+                                print(
+                                    f"  [parallel] progress callback failed ({exc!r})"
+                                )
+                        continue
                     if use_unified_policy:
                         batch_unified_trans.extend(
                             _merge_episode_transitions(
@@ -2586,9 +2687,15 @@ def train_agents_from_both_perspectives_parallel(
                             f"{trans_count} transitions"
                         )
                         if use_unified_policy:
-                            _flush_unified_merged_warmup_transitions(
-                                p1_tiers[0], warmup_unified_accum,
-                            )
+                            if shared_buffer is not None:
+                                with shared_buffer._lock:
+                                    _flush_unified_merged_warmup_transitions(
+                                        p1_tiers[0], warmup_unified_accum,
+                                    )
+                            else:
+                                _flush_unified_merged_warmup_transitions(
+                                    p1_tiers[0], warmup_unified_accum,
+                                )
                             warmup_unified_accum.clear()
                         else:
                             _flush_warmup_buffers_auto(
@@ -2599,16 +2706,20 @@ def train_agents_from_both_perspectives_parallel(
                         warmup_bc_applied = True
                 else:
                     if use_unified_policy:
-                        ppo_unified_accum.extend(batch_unified_trans)
-                        rollout_ready = (
-                            len(ppo_unified_accum) >= DEFAULT_PPO_ROLLOUT_BATCH
-                            or completed >= n_episodes
-                        )
-                        if rollout_ready:
-                            _flush_unified_merged_transitions(
-                                p1_tiers[0], ppo_unified_accum,
+                        if shared_buffer is not None:
+                            shared_buffer.extend_ppo(batch_unified_trans)
+                            shared_buffer.maybe_flush_ppo(p1_tiers[0])
+                        else:
+                            ppo_unified_accum.extend(batch_unified_trans)
+                            rollout_ready = (
+                                len(ppo_unified_accum) >= DEFAULT_PPO_ROLLOUT_BATCH
+                                or completed >= n_episodes
                             )
-                            ppo_unified_accum.clear()
+                            if rollout_ready:
+                                _flush_unified_merged_transitions(
+                                    p1_tiers[0], ppo_unified_accum,
+                                )
+                                ppo_unified_accum.clear()
                     else:
                         ppo_p1_accum.extend(batch_p1_trans)
                         ppo_p2_accum.extend(batch_p2_trans)
@@ -2654,14 +2765,20 @@ def train_agents_from_both_perspectives_parallel(
     finally:
         if not warmup_bc_applied:
             if use_unified_policy and warmup_unified_accum:
-                _flush_unified_merged_warmup_transitions(
-                    p1_tiers[0], warmup_unified_accum,
-                )
+                if shared_buffer is not None:
+                    with shared_buffer._lock:
+                        _flush_unified_merged_warmup_transitions(
+                            p1_tiers[0], warmup_unified_accum,
+                        )
+                else:
+                    _flush_unified_merged_warmup_transitions(
+                        p1_tiers[0], warmup_unified_accum,
+                    )
             elif warmup_p1_accum or warmup_p2_accum:
                 _flush_warmup_buffers_auto(
                     p1_tiers, p2_tiers, warmup_p1_accum, warmup_p2_accum,
                 )
-        if use_unified_policy and ppo_unified_accum:
+        if use_unified_policy and shared_buffer is None and ppo_unified_accum:
             _flush_unified_merged_transitions(p1_tiers[0], ppo_unified_accum)
         elif ppo_p1_accum or ppo_p2_accum:
             _flush_ppo_buffers_auto(p1_tiers, p2_tiers, ppo_p1_accum, ppo_p2_accum)
@@ -3176,6 +3293,7 @@ def _unified_run_progress_callback(
     target_episodes: int,
     matchups_completed: int,
     matchups_total: int,
+    matchup_live_key: Optional[str] = None,
 ) -> Optional[Callable[..., None]]:
     if not is_unified_random_matchup_run(out_dir):
         return None
@@ -3191,18 +3309,38 @@ def _unified_run_progress_callback(
         if p1_outcomes:
             summary = summarize_p1_outcomes(p1_outcomes, episodes=completed)
             p1_wr, p2_wr = _training_win_rates_from_outcomes(summary)
-        update_unified_training_live(
-            out_dir,
-            current_matchup=matchup.name,
-            current_matchup_dir=_resolve_matchup_subdir(out_dir, matchup),
-            target_episodes=target_episodes,
-            matchups_total=matchups_total,
-            matchups_completed=matchups_completed,
-            episodes_completed=completed,
-            p1_win_rate=p1_wr,
-            p2_win_rate=p2_wr,
-            status="training",
-        )
+        if matchup_live_key:
+            from fab_bridge.unified_dashboard import update_unified_matchup_live  # noqa: PLC0415
+
+            update_unified_matchup_live(
+                out_dir,
+                matchup_live_key,
+                name=matchup.name,
+                episodes_completed=completed,
+                p1_win_rate=p1_wr,
+                p2_win_rate=p2_wr,
+                status="training",
+            )
+            update_unified_training_live(
+                out_dir,
+                target_episodes=target_episodes,
+                matchups_total=matchups_total,
+                matchups_completed=matchups_completed,
+                status="training",
+            )
+        else:
+            update_unified_training_live(
+                out_dir,
+                current_matchup=matchup.name,
+                current_matchup_dir=_resolve_matchup_subdir(out_dir, matchup),
+                target_episodes=target_episodes,
+                matchups_total=matchups_total,
+                matchups_completed=matchups_completed,
+                episodes_completed=completed,
+                p1_win_rate=p1_wr,
+                p2_win_rate=p2_wr,
+                status="training",
+            )
         maybe_refresh_unified_dashboard(out_dir)
 
     return _callback
@@ -3244,6 +3382,7 @@ class _CheckpointEvalTracker:
         p2_policy: PPOAgent,
         seed: Optional[int],
         out_dir: Path,
+        policy_snapshot_fn: Optional[Callable[[], tuple[PPOAgent, PPOAgent]]] = None,
     ) -> None:
         self.matchup = matchup
         self.base_url = base_url
@@ -3261,6 +3400,7 @@ class _CheckpointEvalTracker:
         self.final_win_rate: Optional[float] = None
         self._episodes_done = 0
         self._logic_vs_logic_baseline = self._load_logic_vs_logic_baseline()
+        self._policy_snapshot_fn = policy_snapshot_fn
 
     def _logic_vs_logic_baseline_path(self) -> Path:
         return (
@@ -3304,8 +3444,11 @@ class _CheckpointEvalTracker:
 
         eval_p1 = PPOAgent()
         eval_p2 = PPOAgent()
-        clone_agent_weights(self.p1_policy, eval_p1)
-        clone_agent_weights(self.p2_policy, eval_p2)
+        if self._policy_snapshot_fn is not None:
+            eval_p1, eval_p2 = self._policy_snapshot_fn()
+        else:
+            clone_agent_weights(self.p1_policy, eval_p1)
+            clone_agent_weights(self.p2_policy, eval_p2)
         if eval_p1._shared is None or eval_p2._shared is None:
             raise RuntimeError(
                 "Checkpoint eval could not clone unified policy weights "
@@ -3743,6 +3886,10 @@ def train_matchup(
     _force_train: bool = False,
     _unified_matchups_completed: int = 0,
     _unified_matchups_total: Optional[int] = None,
+    _shared_policy: Optional[PPOAgent] = None,
+    _shared_buffer: Any = None,
+    _skip_persist: bool = False,
+    _matchup_live_key: Optional[str] = None,
 ) -> dict:
     if matchup.p1_fabrary_entry and matchup.p2_fabrary_entry:
         from runtime_defaults import RUNTIME  # noqa: PLC0415
@@ -3802,19 +3949,40 @@ def train_matchup(
     _write_matchup_dir_label(out_dir, matchup)
 
     if _unified_matchups_total is not None:
-        update_unified_training_live(
-            out_dir,
-            current_matchup=matchup.name,
-            current_matchup_dir=_resolve_matchup_subdir(out_dir, matchup),
-            target_episodes=n_episodes,
-            matchups_total=_unified_matchups_total,
-            matchups_completed=_unified_matchups_completed,
-            episodes_completed=0,
-            p1_win_rate=None,
-            p2_win_rate=None,
-            status="training",
-        )
-        write_unified_random_matchups_dashboard(out_dir, auto_refresh_seconds=5.0)
+        if _matchup_live_key:
+            from fab_bridge.unified_dashboard import update_unified_matchup_live  # noqa: PLC0415
+
+            update_unified_matchup_live(
+                out_dir,
+                _matchup_live_key,
+                name=matchup.name,
+                episodes_completed=0,
+                p1_win_rate=None,
+                p2_win_rate=None,
+                status="training",
+            )
+            update_unified_training_live(
+                out_dir,
+                target_episodes=n_episodes,
+                matchups_total=_unified_matchups_total,
+                matchups_completed=_unified_matchups_completed,
+                status="training",
+            )
+        else:
+            update_unified_training_live(
+                out_dir,
+                current_matchup=matchup.name,
+                current_matchup_dir=_resolve_matchup_subdir(out_dir, matchup),
+                target_episodes=n_episodes,
+                matchups_total=_unified_matchups_total,
+                matchups_completed=_unified_matchups_completed,
+                episodes_completed=0,
+                p1_win_rate=None,
+                p2_win_rate=None,
+                status="training",
+            )
+        if _matchup_live_key is None:
+            write_unified_random_matchups_dashboard(out_dir, auto_refresh_seconds=5.0)
 
     if build_cpp_engine and matchup.cpp_engine_dir:
         print(f"  C++ engine : {matchup.cpp_engine_dir}")
@@ -3915,10 +4083,18 @@ def train_matchup(
         require_fast_training=True,
     )
 
-    unified_bundle = _bootstrap_unified_policy(cache_store, probe_env, seed)
-    unified_policy = unified_bundle.policy
-    policy_tiers = unified_bundle.shared_tiers()
-    print("  Unified policy init:", ", ".join(unified_bundle.init_sources))
+    unified_bundle = (
+        None
+        if _shared_policy is not None
+        else _bootstrap_unified_policy(cache_store, probe_env, seed)
+    )
+    if _shared_policy is not None:
+        unified_policy = _shared_policy
+        print("  Unified policy init: shared (parallel batch)")
+    else:
+        unified_policy = unified_bundle.policy
+        print("  Unified policy init:", ", ".join(unified_bundle.init_sources))
+    policy_tiers = [unified_policy]
     print(
         f"  obs_schema={PLAYER_OBS_SCHEMA_VERSION} "
         f"obs_dim={unified_policy.obs_dim} "
@@ -3977,10 +4153,18 @@ def train_matchup(
             target_episodes=n_episodes,
             matchups_completed=_unified_matchups_completed,
             matchups_total=_unified_matchups_total,
+            matchup_live_key=_matchup_live_key,
         )
         if _unified_matchups_total is not None
         else None
     )
+    policy_snapshot_fn: Optional[Callable[[], tuple[PPOAgent, PPOAgent]]] = None
+    if _shared_buffer is not None:
+        def _clone_for_eval() -> tuple[PPOAgent, PPOAgent]:
+            snap = _shared_buffer.clone_policy_snapshot()
+            return snap, snap
+
+        policy_snapshot_fn = _clone_for_eval
     effective_ckpt_interval = resolve_checkpoint_interval(
         n_episodes,
         checkpoint_interval=checkpoint_interval,
@@ -3999,6 +4183,7 @@ def train_matchup(
             p2_policy=unified_policy,
             seed=seed,
             out_dir=out_dir,
+            policy_snapshot_fn=policy_snapshot_fn,
         )
         print(
             f"  Checkpoint eval: every {effective_ckpt_interval} episode(s), "
@@ -4030,6 +4215,7 @@ def train_matchup(
             ),
             rollout_mode=rollout_mode,
             rollout_processes=rollout_processes,
+            shared_buffer=_shared_buffer,
         )
         p1_rewards.extend(rem_p1)
         p2_rewards.extend(rem_p2)
@@ -4186,35 +4372,36 @@ def train_matchup(
     if ckpt_tracker is not None and ckpt_tracker.log:
         training_stats["checkpoint_eval_history"] = ckpt_tracker.log
 
-    cache_store.persist(
-        unified_policy,
-        episodes_delta=len(p1_rewards),
-        training_summary=(
-            {
-                "matchup_name": matchup.name,
-                "p1_fingerprint": p1_deck_fp,
-                "p2_fingerprint": p2_deck_fp,
-                "p1_hero": matchup.p1_hero,
-                "p2_hero": matchup.p2_hero,
-                "episodes_completed": len(p1_rewards),
-                "target_episodes": n_episodes,
-                "p1_win_rate": p1_wr,
-                "p2_win_rate": p2_wr,
-                "first_checkpoint_win_rate": ckpt_tracker.first_win_rate
-                if ckpt_tracker is not None
-                else None,
-                "final_checkpoint_win_rate": ckpt_tracker.final_win_rate
-                if ckpt_tracker is not None
-                else None,
-                "checkpoint_eval_win_rate": ckpt_tracker.final_win_rate
-                if ckpt_tracker is not None
-                else None,
-                "training_stats": training_stats,
-            }
-            if len(p1_rewards) >= n_episodes and not _skip_cache_converge
-            else None
-        ),
-    )
+    persist_summary: Optional[dict[str, Any]] = None
+    if len(p1_rewards) >= n_episodes and not _skip_cache_converge:
+        persist_summary = {
+            "matchup_name": matchup.name,
+            "p1_fingerprint": p1_deck_fp,
+            "p2_fingerprint": p2_deck_fp,
+            "p1_hero": matchup.p1_hero,
+            "p2_hero": matchup.p2_hero,
+            "episodes_completed": len(p1_rewards),
+            "target_episodes": n_episodes,
+            "p1_win_rate": p1_wr,
+            "p2_win_rate": p2_wr,
+            "first_checkpoint_win_rate": ckpt_tracker.first_win_rate
+            if ckpt_tracker is not None
+            else None,
+            "final_checkpoint_win_rate": ckpt_tracker.final_win_rate
+            if ckpt_tracker is not None
+            else None,
+            "checkpoint_eval_win_rate": ckpt_tracker.final_win_rate
+            if ckpt_tracker is not None
+            else None,
+            "training_stats": training_stats,
+        }
+
+    if not _skip_persist:
+        cache_store.persist(
+            unified_policy,
+            episodes_delta=len(p1_rewards),
+            training_summary=persist_summary,
+        )
 
     print(
         f"  Done in {elapsed:.1f}s — "
@@ -4261,21 +4448,38 @@ def train_matchup(
         meta_p2["training_win_rate"] = p2_wr
 
     if _unified_matchups_total is not None:
-        update_unified_training_live(
-            out_dir,
-            current_matchup=matchup.name,
-            current_matchup_dir=_resolve_matchup_subdir(out_dir, matchup),
-            target_episodes=n_episodes,
-            matchups_total=_unified_matchups_total,
-            matchups_completed=_unified_matchups_completed,
-            episodes_completed=n_episodes,
-            p1_win_rate=p1_wr,
-            p2_win_rate=p2_wr,
-            status="training",
-        )
-        write_unified_random_matchups_dashboard(out_dir, auto_refresh_seconds=5.0)
+        if _matchup_live_key:
+            from fab_bridge.unified_dashboard import update_unified_matchup_live  # noqa: PLC0415
 
-    return {"p1": meta_p1, "p2": meta_p2}
+            update_unified_matchup_live(
+                out_dir,
+                _matchup_live_key,
+                name=matchup.name,
+                episodes_completed=n_episodes,
+                p1_win_rate=p1_wr,
+                p2_win_rate=p2_wr,
+                status="complete",
+            )
+        else:
+            update_unified_training_live(
+                out_dir,
+                current_matchup=matchup.name,
+                current_matchup_dir=_resolve_matchup_subdir(out_dir, matchup),
+                target_episodes=n_episodes,
+                matchups_total=_unified_matchups_total,
+                matchups_completed=_unified_matchups_completed,
+                episodes_completed=n_episodes,
+                p1_win_rate=p1_wr,
+                p2_win_rate=p2_wr,
+                status="training",
+            )
+        if _matchup_live_key is None:
+            write_unified_random_matchups_dashboard(out_dir, auto_refresh_seconds=5.0)
+
+    result: dict[str, Any] = {"p1": meta_p1, "p2": meta_p2}
+    if persist_summary is not None:
+        result["_persist_summary"] = persist_summary
+    return result
 
 
 def print_training_summary(summary: list[dict], failed: list[str], out_dir: Path) -> None:
@@ -4338,6 +4542,7 @@ def run_matchup_training(
     frontend_url: Optional[str] = None,
     n_workers: int = 1,
     parallel_seeds: int = 1,
+    parallel_matchups: int = 1,
     checkpoint_interval_pct: float = DEFAULT_CHECKPOINT_INTERVAL_PCT,
     checkpoint_interval: Optional[int] = None,
     checkpoint_eval_episodes: int = DEFAULT_CHECKPOINT_EVAL_EPISODES,
@@ -4348,6 +4553,12 @@ def run_matchup_training(
     rollout_processes: Optional[int] = None,
 ) -> tuple[list[dict], list[str]]:
     from agent_cache import AgentCacheStore
+    from unified_parallel_training import (
+        UnifiedSharedExperienceBuffer,
+        persist_batch_to_cache,
+        run_parallel_matchup_batch,
+        workers_per_parallel_matchup,
+    )
 
     cache_root = cache_dir or (REPO_ROOT / "results" / "agent_cache")
     cache_store = AgentCacheStore(
@@ -4360,6 +4571,7 @@ def run_matchup_training(
     failed: list[str] = []
     unified_run = is_unified_random_matchup_run(out_dir)
     matchups_total = len(matchups)
+    parallel_matchups = max(1, int(parallel_matchups))
     if unified_run:
         manifest_path = out_dir / "run_manifest.json"
         if manifest_path.is_file():
@@ -4374,14 +4586,92 @@ def run_matchup_training(
                 pass
         write_unified_random_matchups_dashboard(out_dir, auto_refresh_seconds=5.0)
 
-    for idx, matchup in enumerate(matchups):
-        try:
+    shared_policy: Optional[PPOAgent] = None
+    matchups_completed_count = 0
+
+    for batch_start in range(0, len(matchups), parallel_matchups):
+        batch = matchups[batch_start : batch_start + parallel_matchups]
+        batch_index = batch_start // parallel_matchups + 1
+        workers_per_matchup = workers_per_parallel_matchup(n_workers, len(batch))
+        use_parallel_batch = parallel_matchups > 1
+        shared_buffer: Optional[UnifiedSharedExperienceBuffer] = None
+        batch_failed: list[str] = []
+
+        if unified_run and use_parallel_batch:
+            active_matchups = {
+                _resolve_matchup_subdir(out_dir, matchup): {
+                    "name": matchup.name,
+                    "episodes_completed": 0,
+                    "p1_win_rate": None,
+                    "p2_win_rate": None,
+                    "status": "training",
+                }
+                for matchup in batch
+            }
+            update_unified_training_live(
+                out_dir,
+                matchups_total=matchups_total,
+                matchups_completed=matchups_completed_count,
+                parallel_matchups=len(batch),
+                batch_index=batch_index,
+                target_episodes=n_episodes,
+                active_matchups=active_matchups,
+                status="training",
+            )
+            write_unified_random_matchups_dashboard(out_dir, auto_refresh_seconds=5.0)
+
+        if use_parallel_batch:
+            shared_buffer = UnifiedSharedExperienceBuffer()
+            if shared_policy is None and batch:
+                bootstrap_matchup = batch[0]
+                probe_env = make_env(
+                    bootstrap_matchup,
+                    base_url=base_url,
+                    game_format=game_format,
+                    max_turns=max_steps,
+                    show_frontend=False,
+                    frontend_url=frontend_url,
+                )
+                try:
+                    if _env_supports_fast_training(probe_env):
+                        probe_env.fast_reset(seed=seed)
+                    else:
+                        probe_env.reset(seed=seed)
+                    shared_policy = _bootstrap_unified_policy(
+                        cache_store, probe_env, seed,
+                    ).policy
+                finally:
+                    try:
+                        probe_env.close()
+                    except Exception:
+                        pass
+            if shared_policy is not None:
+                shared_buffer.bind_policy(shared_policy)
+            print(
+                f"\n  Parallel batch {batch_index}: "
+                f"{len(batch)} matchup(s), "
+                f"{workers_per_matchup} worker(s)/matchup",
+                flush=True,
+            )
+
+        persist_payloads: list[dict[str, Any]] = []
+        persist_lock = threading.Lock()
+
+        def _train_one(matchup: Matchup) -> dict[str, Any]:
+            nonlocal shared_policy
             train_kwargs: dict[str, Any] = {}
             if not skip_converged:
                 train_kwargs["_force_train"] = True
             if unified_run:
-                train_kwargs["_unified_matchups_completed"] = idx
+                train_kwargs["_unified_matchups_completed"] = matchups_completed_count
                 train_kwargs["_unified_matchups_total"] = matchups_total
+            if use_parallel_batch and shared_buffer is not None:
+                train_kwargs["_shared_policy"] = shared_policy
+                train_kwargs["_shared_buffer"] = shared_buffer
+                train_kwargs["_skip_persist"] = True
+                train_kwargs["_matchup_live_key"] = _resolve_matchup_subdir(
+                    out_dir, matchup
+                )
             meta = train_matchup(
                 matchup,
                 base_url=base_url,
@@ -4396,7 +4686,7 @@ def run_matchup_training(
                 warmup_baseline_eval_episodes=warmup_baseline_eval_episodes,
                 show_frontend=show_frontend,
                 frontend_url=frontend_url,
-                n_workers=n_workers,
+                n_workers=workers_per_matchup if use_parallel_batch else n_workers,
                 parallel_seeds=parallel_seeds,
                 checkpoint_interval_pct=checkpoint_interval_pct,
                 checkpoint_interval=checkpoint_interval,
@@ -4407,25 +4697,67 @@ def run_matchup_training(
                 rollout_processes=rollout_processes,
                 **train_kwargs,
             )
-            summary.append(meta)
-            if unified_run:
-                update_unified_training_live(
-                    out_dir,
-                    matchups_completed=idx + 1,
-                    matchups_total=matchups_total,
-                    status=(
-                        "complete"
-                        if idx + 1 >= matchups_total
-                        else "between_matchups"
-                    ),
+            payload = meta.get("_persist_summary")
+            if isinstance(payload, dict):
+                with persist_lock:
+                    persist_payloads.append(payload)
+            return meta
+
+        if use_parallel_batch:
+            batch_summary, batch_failed = run_parallel_matchup_batch(
+                batch,
+                train_fn=_train_one,
+                label=f"batch {batch_index}",
+            )
+            summary.extend(batch_summary)
+            failed.extend(batch_failed)
+            if shared_buffer is not None and shared_policy is not None:
+                shared_buffer.flush_remaining(shared_policy)
+            if shared_policy is not None and persist_payloads:
+                persist_batch_to_cache(
+                    cache_store,
+                    shared_policy,
+                    persist_payloads,
                 )
-                write_unified_random_matchups_dashboard(
-                    out_dir,
-                    auto_refresh_seconds=5.0,
-                )
-        except Exception as exc:
-            print(f"\n  ERROR training {matchup.name}: {exc}")
-            failed.append(matchup.name)
+        else:
+            for matchup in batch:
+                try:
+                    meta = _train_one(matchup)
+                    summary.append(meta)
+                    if not use_parallel_batch and shared_policy is None:
+                        loaded = cache_store.load_if_exists()
+                        if loaded is not None:
+                            shared_policy = loaded
+                except Exception as exc:
+                    print(f"\n  ERROR training {matchup.name}: {exc}")
+                    failed.append(matchup.name)
+
+        if use_parallel_batch:
+            matchups_completed_count += len(batch_summary)
+        else:
+            matchups_completed_count += sum(
+                1 for m in batch if m.name not in failed
+            )
+
+        if unified_run:
+            update_unified_training_live(
+                out_dir,
+                matchups_completed=matchups_completed_count,
+                matchups_total=matchups_total,
+                parallel_matchups=len(batch),
+                batch_index=batch_index,
+                active_matchups={},
+                status=(
+                    "complete"
+                    if matchups_completed_count >= matchups_total
+                    else "between_matchups"
+                ),
+            )
+            write_unified_random_matchups_dashboard(
+                out_dir,
+                auto_refresh_seconds=5.0,
+            )
+
     return summary, failed
 
 

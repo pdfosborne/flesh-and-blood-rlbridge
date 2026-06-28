@@ -62,6 +62,11 @@ include $fabRoot . "/Libraries/HTTPLibraries.php";
 require_once $fabRoot . "/Libraries/CoreLibraries.php";
 
 if ($trainingMode) {
+    if (file_exists($fabBridgeStubs . "/TrainingStatsStubs.php")) {
+        include_once $fabBridgeStubs . "/TrainingStatsStubs.php";
+    } elseif (file_exists($fabRoot . "/TrainingStatsStubs.php")) {
+        include_once $fabRoot . "/TrainingStatsStubs.php";
+    }
     if (file_exists($fabBridgeStubs . "/RLValidation.php")) {
         include_once $fabBridgeStubs . "/RLValidation.php";
     } else {

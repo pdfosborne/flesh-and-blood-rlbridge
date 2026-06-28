@@ -18,6 +18,14 @@ if (-not $Eval) {
     }
 }
 
+if (-not (Test-Path Talishar\GameLogic.php)) {
+    Write-Host "[setup] Ensuring Talishar checkout..."
+    python -c "from fab_bridge.talishar_setup import ensure_talishar; ensure_talishar()"
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+} else {
+    python -c "from fab_bridge.talishar_setup import sync_bundled_decks; sync_bundled_decks()"
+}
+
 New-Item -ItemType Directory -Force -Path results\agent_cache | Out-Null
 $env:HOST_UID = [string][Environment]::UserId
 

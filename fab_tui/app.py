@@ -694,6 +694,10 @@ def wizard_unified_random_matchups_train(env: EnvironmentSettings) -> None:
         "unified_random_matchups_dashboard.html in the run folder.[/dim]"
     )
     spec.workers = IntPrompt.ask("Parallel workers", default=spec.workers)
+    spec.parallel_matchups = IntPrompt.ask(
+        "Parallel matchups per batch",
+        default=spec.parallel_matchups,
+    )
     spec.skip_converged = Confirm.ask(
         "Skip already-converged deck pairs in cache?",
         default=spec.skip_converged,
@@ -718,6 +722,7 @@ def wizard_unified_random_matchups_train(env: EnvironmentSettings) -> None:
         ("Checkpoint interval", f"{spec.checkpoint_interval_pct:g}%"),
         ("Checkpoint eval games", str(spec.checkpoint_eval_episodes)),
         ("Workers", str(spec.workers)),
+        ("Parallel matchups", str(spec.parallel_matchups)),
         ("Backend", "Talishar fast"),
         ("Skip converged", str(spec.skip_converged)),
         ("Seed", str(spec.seed) if spec.seed is not None else "random"),

@@ -219,11 +219,16 @@ def run(
 
     if not fe_only:
         _header("Starting Talishar backend (Docker Compose)")
-        if not TALISHAR_DIR.is_dir():
-            print(f"ERROR: Talishar directory not found: {TALISHAR_DIR}", file=sys.stderr)
-            return 1
         if not COMPOSE_FILE.is_file():
             print(f"ERROR: compose file not found: {COMPOSE_FILE}", file=sys.stderr)
+            return 1
+
+        from fab_bridge.talishar_setup import ensure_talishar  # noqa: PLC0415
+
+        try:
+            ensure_talishar(clone=True, quiet=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"ERROR: Talishar setup failed: {exc}", file=sys.stderr)
             return 1
 
         _prepare_talishar_runtime_files(TALISHAR_DIR)

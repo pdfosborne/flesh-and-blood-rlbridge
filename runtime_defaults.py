@@ -73,7 +73,9 @@ class MetaUnifiedRandomMatchups:
     checkpoint_interval_pct: float = 10.0
     checkpoint_eval_episodes: int = 0  # 0 = min(100, episodes // 100)
     workers: int = 0  # 0 = inherit META.workers
+    parallel_matchups: int = 5
     skip_converged: bool = False
+    # cpp engine is not implemented fully to match talishar engine, so we disable it by default
     build_cpp_engine: bool = False
     require_cpp_engine: bool = False
     seed: int | None = None
@@ -308,6 +310,7 @@ class UnifiedRandomMatchupsDefaults:
     checkpoint_interval_pct: float
     checkpoint_eval_episodes: int
     workers: int
+    parallel_matchups: int
     skip_converged: bool
     build_cpp_engine: bool
     require_cpp_engine: bool
@@ -542,6 +545,7 @@ def build_runtime(meta: MetaRuntime) -> RuntimeDefaults:
             checkpoint_interval_pct=urm.checkpoint_interval_pct,
             checkpoint_eval_episodes=urm_checkpoint_eval,
             workers=urm_workers,
+            parallel_matchups=max(1, int(urm.parallel_matchups)),
             skip_converged=urm.skip_converged,
             build_cpp_engine=urm.build_cpp_engine,
             require_cpp_engine=urm.require_cpp_engine,
@@ -601,6 +605,7 @@ DEFAULT_UNIFIED_WARMUP_EPISODES = _UR.warmup_episodes
 DEFAULT_UNIFIED_CHECKPOINT_INTERVAL_PCT = _UR.checkpoint_interval_pct
 DEFAULT_UNIFIED_CHECKPOINT_EVAL_EPISODES = _UR.checkpoint_eval_episodes
 DEFAULT_UNIFIED_WORKERS = _UR.workers
+DEFAULT_UNIFIED_PARALLEL_MATCHUPS = _UR.parallel_matchups
 DEFAULT_ROLLOUT_MODE = RUNTIME.rollout.mode
 DEFAULT_ROLLOUT_PROCESSES = RUNTIME.rollout.processes
 DEFAULT_ROLLOUT_HTTP_POOL_SIZE = RUNTIME.rollout.http_pool_size
@@ -627,6 +632,7 @@ def apply_meta(**overrides: object) -> RuntimeDefaults:
     global DEFAULT_UNIFIED_MAX_STEPS, DEFAULT_UNIFIED_WARMUP_EPISODES  # noqa: PLW0603
     global DEFAULT_UNIFIED_CHECKPOINT_INTERVAL_PCT  # noqa: PLW0603
     global DEFAULT_UNIFIED_CHECKPOINT_EVAL_EPISODES, DEFAULT_UNIFIED_WORKERS  # noqa: PLW0603
+    global DEFAULT_UNIFIED_PARALLEL_MATCHUPS  # noqa: PLW0603
     global DEFAULT_ROLLOUT_MODE, DEFAULT_ROLLOUT_PROCESSES, DEFAULT_ROLLOUT_HTTP_POOL_SIZE  # noqa: PLW0603
 
     META = replace(META, **overrides)
@@ -672,6 +678,7 @@ def apply_meta(**overrides: object) -> RuntimeDefaults:
     DEFAULT_UNIFIED_CHECKPOINT_INTERVAL_PCT = _ur.checkpoint_interval_pct
     DEFAULT_UNIFIED_CHECKPOINT_EVAL_EPISODES = _ur.checkpoint_eval_episodes
     DEFAULT_UNIFIED_WORKERS = _ur.workers
+    DEFAULT_UNIFIED_PARALLEL_MATCHUPS = _ur.parallel_matchups
     DEFAULT_ROLLOUT_MODE = RUNTIME.rollout.mode
     DEFAULT_ROLLOUT_PROCESSES = RUNTIME.rollout.processes
     DEFAULT_ROLLOUT_HTTP_POOL_SIZE = RUNTIME.rollout.http_pool_size

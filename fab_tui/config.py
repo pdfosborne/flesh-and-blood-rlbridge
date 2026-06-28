@@ -351,6 +351,7 @@ class UnifiedRandomMatchupSpec:
     checkpoint_interval_pct: float = RUNTIME.unified_random_matchups.checkpoint_interval_pct
     checkpoint_eval_episodes: int = RUNTIME.unified_random_matchups.checkpoint_eval_episodes
     workers: int = RUNTIME.unified_random_matchups.workers
+    parallel_matchups: int = RUNTIME.unified_random_matchups.parallel_matchups
     skip_converged: bool = RUNTIME.unified_random_matchups.skip_converged
     build_cpp_engine: bool = RUNTIME.unified_random_matchups.build_cpp_engine
     require_cpp_engine: bool = RUNTIME.unified_random_matchups.require_cpp_engine

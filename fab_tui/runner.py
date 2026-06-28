@@ -698,6 +698,8 @@ def run_unified_random_matchups(
         str(spec.checkpoint_eval_episodes),
         "--workers",
         str(spec.workers),
+        "--parallel-matchups",
+        str(spec.parallel_matchups),
         "--run-dir",
         str(out_dir),
         "--cache-dir",

@@ -69,7 +69,7 @@ source scripts/docker-env.sh   # once per shell
 fab-tui                        # terminal UI (second terminal while compose is up)
 ```
 
-Training output and saved sideboard lists are written to **`results/`** in the repo (e.g. `results/sideboard_compare/`, `results/tui_decks/saved/`). Generated deck files for final evaluation are written to **`Talishar/Assets/`** (shared with the Talishar container). Replay GIFs on the Results tab use the bundled Talishar-FE container.
+Training output and saved sideboard lists are written to **`results/`** in the repo (e.g. `results/sideboard_compare/`, `results/tui_decks/saved/`). Generated deck files for final evaluation are written to **`Talishar/Assets/`** (shared with the Talishar container; `Talishar/` itself is gitignored and cloned from upstream on first setup). Bundled training decks ship in **`assets/talishar_decks/`** and are synced into `Talishar/Assets/` automatically. Replay GIFs on the Results tab use the bundled Talishar-FE container.
 
 If you also run Talishar separately (e.g. `cd Talishar && docker compose up`), stop that stack first so port **8080** and **`Talishar/Assets`** are not split across two instances. The compose stack auto-creates **`Talishar/HostFiles/Redirector.php`**, **`GameIDCounter.txt`**, and **`Talishar/APIKeys/APIKeys.php`** (stub with empty secrets — required by Talishar but not in git).
 

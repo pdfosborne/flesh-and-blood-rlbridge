@@ -44,6 +44,7 @@ from runtime_defaults import (  # noqa: E402
     DEFAULT_UNIFIED_MAX_STEPS,
     DEFAULT_UNIFIED_WARMUP_EPISODES,
     DEFAULT_UNIFIED_WORKERS,
+    DEFAULT_UNIFIED_PARALLEL_MATCHUPS,
     DEFAULT_WARMUP_BASELINE_EVAL_EPISODES,
     DEFAULT_ROLLOUT_MODE,
     DEFAULT_ROLLOUT_PROCESSES,
@@ -101,7 +102,13 @@ def _parse_args() -> argparse.Namespace:
         "--workers",
         type=int,
         default=DEFAULT_UNIFIED_WORKERS,
-        help="Parallel Talishar fast worker sessions per matchup",
+        help="Total parallel Talishar fast worker sessions (split across parallel matchups)",
+    )
+    parser.add_argument(
+        "--parallel-matchups",
+        type=int,
+        default=DEFAULT_UNIFIED_PARALLEL_MATCHUPS,
+        help="Number of matchups to train concurrently per batch",
     )
     parser.add_argument(
         "--cache-dir",
@@ -205,6 +212,7 @@ def main() -> None:
         "matchups_requested": int(args.matchups),
         "matchups_sampled": [m.name for m in selected],
         "episodes_per_matchup": int(args.episodes),
+        "parallel_matchups": max(1, int(args.parallel_matchups)),
         "seed": args.seed,
         "started_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -219,6 +227,7 @@ def main() -> None:
     print(f"Format       : {format_name}")
     print(f"Deck pool    : {len(decks)} fabrary decks")
     print(f"Matchups     : {len(selected)} random pairs")
+    print(f"Parallel     : {max(1, int(args.parallel_matchups))} matchup(s) per batch")
     for matchup in selected:
         print(f"  - {matchup.name}")
     print(f"Output dir   : {out_dir}")
@@ -266,6 +275,7 @@ def main() -> None:
             show_frontend=bool(args.show_frontend),
             frontend_url=args.frontend_url,
             n_workers=max(1, int(args.workers)),
+            parallel_matchups=max(1, int(args.parallel_matchups)),
             checkpoint_interval_pct=float(args.checkpoint_interval_pct),
             checkpoint_interval=args.checkpoint_interval,
             checkpoint_eval_episodes=int(args.checkpoint_eval_episodes),

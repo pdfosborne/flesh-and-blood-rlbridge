@@ -11,9 +11,11 @@ from fab_bridge.unified_dashboard import (
     LOGIC_VS_LOGIC_BASELINE_NAME,
     UNIFIED_DASHBOARD_NAME,
     UNIFIED_LIVE_STATE,
+    aggregate_checkpoint_points,
     collect_unified_run_state,
     count_completed_matchups,
     render_unified_random_matchups_html,
+    update_unified_matchup_live,
     write_unified_random_matchups_dashboard,
 )
 
@@ -63,11 +65,13 @@ def test_collect_and_render_dashboard(tmp_path: Path) -> None:
                 "p1_win_rate": 0.52,
                 "p2_win_rate": 0.48,
                 "status": "training",
+                "batch_index": 1,
+                "parallel_matchups": 1,
             }
         ),
         encoding="utf-8",
     )
-    (run_dir / "checkpoint_eval_history.json").write_text(
+    (run_dir / "match_a" / "checkpoint_eval_history.json").write_text(
         json.dumps(
             [
                 {
@@ -165,38 +169,26 @@ def test_collect_and_render_dashboard(tmp_path: Path) -> None:
     assert state["current_matchup"] == "a-vs-b"
     assert state["episodes_completed"] == 250
     assert state["train_p1_win_rate"] == 0.52
-    assert len(state["checkpoint_points"]) == 2
-    latest = state["checkpoint_points"][-1]
+    assert len(state["active_checkpoint_rows"]) == 1
+    latest = state["active_checkpoint_rows"][0]
     assert latest["vs_logic_agent_p1"] == 0.65
     assert latest["vs_logic_win_rate"] == pytest.approx(0.63)
     assert latest["logic_vs_agent_win_rate"] == pytest.approx(0.37)
     assert latest["agent_vs_agent_win_rate"] == 0.51
     assert latest["timeout_rate"] == 0.01
-    assert state["matchup_logic_vs_logic_win_rate"] == 0.48
 
     html = render_unified_random_matchups_html(state, auto_refresh_seconds=5.0)
     assert "Training AI agents with random matchups" in html
-    assert html.count("<th>Matchup</th>") == 1
+    assert "Training progress" in html
+    assert "Checkpoint eval (active batch)" in html
+    assert html.count("<th>Matchup</th>") == 2
     assert "Agent win% vs logic" in html
-    assert "Logic win% vs logic" not in html
     assert "Logic vs agent win%" in html
     assert "Agent win% vs agent" in html
     assert "Timeout %" in html
-    assert "Vs logic (avg)" not in html
-    assert "Logic vs logic" in html
-    assert "C++ checkpoint eval replay" not in html
-    assert "Talishar fast checkpoint eval replay" in html
-    assert "Self-play P1%" not in html
-    assert "First self-play ckpt" in html
-    assert "Train P1 win%" not in html
-    assert ">Status<" not in html
-    completed = state["completed_matchups"][0]
-    assert completed["first_checkpoint_win_rate"] == 0.40
-    assert completed["checkpoint_win_rate"] == 0.55
-    assert completed["checkpoint_vs_logic_win_rate"] == pytest.approx(0.415)
-    assert "c-vs-d" in html
-    assert "a-vs-b" in html
-    assert "1/3" in html
+    assert "class=\"summary\"" not in html
+    assert "class=\"metrics\"" not in html
+    assert "Matchups 1/3" in html
     assert "250/1000" in html
 
     from fab_bridge.cpp_eval_live_dashboard import (
@@ -243,3 +235,89 @@ def test_count_completed_matchups(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     assert count_completed_matchups(run_dir, 1000) == 1
+
+
+def test_parallel_active_matchups_and_aggregate(tmp_path: Path) -> None:
+    run_dir = _write_run(tmp_path)
+    match_a = run_dir / "match_a"
+    match_b = run_dir / "match_b"
+    match_a.mkdir()
+    match_b.mkdir()
+    for subdir, name in ((match_a, "a-vs-b"), (match_b, "c-vs-d")):
+        (subdir / "matchup_label.json").write_text(
+            json.dumps({"name": name}),
+            encoding="utf-8",
+        )
+        (subdir / "checkpoint_eval_history.json").write_text(
+            json.dumps(
+                [
+                    {
+                        "matchup": name,
+                        "episodes_completed": 100,
+                        "p1_win_rate": 0.40 if name == "a-vs-b" else 0.60,
+                        "vs_logic": {
+                            "agent_p1_seat": {"agent_win_rate": 0.30},
+                            "agent_p2_seat": {"agent_win_rate": 0.34},
+                        },
+                    },
+                    {
+                        "matchup": name,
+                        "episodes_completed": 200,
+                        "p1_win_rate": 0.50 if name == "a-vs-b" else 0.70,
+                        "vs_logic": {
+                            "agent_p1_seat": {"agent_win_rate": 0.40},
+                            "agent_p2_seat": {"agent_win_rate": 0.44},
+                        },
+                    },
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+    update_unified_matchup_live(
+        run_dir,
+        "match_a",
+        name="a-vs-b",
+        episodes_completed=200,
+        status="training",
+    )
+    update_unified_matchup_live(
+        run_dir,
+        "match_b",
+        name="c-vs-d",
+        episodes_completed=180,
+        status="training",
+    )
+    (run_dir / UNIFIED_LIVE_STATE).write_text(
+        json.dumps(
+            {
+                **json.loads((run_dir / UNIFIED_LIVE_STATE).read_text(encoding="utf-8")),
+                "matchups_total": 3,
+                "matchups_completed": 0,
+                "target_episodes": 1000,
+                "parallel_matchups": 2,
+                "batch_index": 1,
+                "status": "training",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    state = collect_unified_run_state(run_dir)
+    assert len(state["active_matchups"]) == 2
+    assert len(state["active_checkpoint_rows"]) == 2
+    aggregate = aggregate_checkpoint_points(
+        {
+            "match_a": json.loads((match_a / "checkpoint_eval_history.json").read_text()),
+            "match_b": json.loads((match_b / "checkpoint_eval_history.json").read_text()),
+        }
+    )
+    ep200 = next(row for row in aggregate if row["episode"] == 200)
+    assert ep200["win_rate_mean"] == pytest.approx(0.60)
+    assert ep200["vs_logic_mean"] == pytest.approx(0.42)
+    assert ep200["n_matchups"] == 2
+
+    html = render_unified_random_matchups_html(state)
+    assert "a-vs-b" in html
+    assert "c-vs-d" in html
+    assert "matchup-progress" in html

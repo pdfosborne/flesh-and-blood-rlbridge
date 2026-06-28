@@ -38,6 +38,15 @@ _ensure_talishar_fe() {
   fi
 }
 
+_ensure_talishar() {
+  if [[ ! -f Talishar/GameLogic.php ]]; then
+    echo "[setup] Ensuring Talishar checkout..."
+    python -c "from fab_bridge.talishar_setup import ensure_talishar; ensure_talishar()"
+  else
+    python -c "from fab_bridge.talishar_setup import sync_bundled_decks; sync_bundled_decks()"
+  fi
+}
+
 _prepare_results_dir() {
   mkdir -p results/agent_cache
   export HOST_UID="$(id -u)"
@@ -123,6 +132,7 @@ _print_ready_banner() {
   fi
 }
 
+_ensure_talishar
 _ensure_talishar_fe
 
 _prepare_results_dir

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import html
 import json
+import math
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,6 +29,25 @@ UNIFIED_LIVE_STATE = "unified_training_live.json"
 LOGIC_VS_LOGIC_BASELINE_NAME = "logic_vs_logic_baseline.json"
 
 _last_dashboard_write: dict[str, float] = {}
+_run_state_locks: dict[str, threading.Lock] = {}
+_run_state_locks_guard = threading.Lock()
+
+
+def _run_state_lock(run_dir: Path) -> threading.Lock:
+    key = str(run_dir.expanduser().resolve())
+    with _run_state_locks_guard:
+        lock = _run_state_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _run_state_locks[key] = lock
+        return lock
+
+
+def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    tmp.replace(path)
 
 
 def _read_json(path: Path) -> Any:
@@ -232,14 +253,139 @@ def update_unified_training_live(run_dir: Path, **fields: Any) -> None:
     """Merge fields into ``unified_training_live.json`` at the run root."""
     if not is_unified_random_matchup_run(run_dir):
         return
+    run_dir = run_dir.expanduser().resolve()
     path = run_dir / UNIFIED_LIVE_STATE
-    current: dict[str, Any] = {}
-    raw = _read_json(path)
-    if isinstance(raw, dict):
-        current.update(raw)
-    current.update({k: v for k, v in fields.items() if v is not None})
-    current["updated_at"] = datetime.now(timezone.utc).isoformat()
-    path.write_text(json.dumps(current, indent=2), encoding="utf-8")
+    with _run_state_lock(run_dir):
+        current: dict[str, Any] = {}
+        raw = _read_json(path)
+        if isinstance(raw, dict):
+            current.update(raw)
+        current.update({k: v for k, v in fields.items() if v is not None})
+        current["updated_at"] = datetime.now(timezone.utc).isoformat()
+        _atomic_write_json(path, current)
+
+
+def update_unified_matchup_live(
+    run_dir: Path,
+    matchup_key: str,
+    **fields: Any,
+) -> None:
+    """Merge per-matchup fields into ``active_matchups`` in live state."""
+    if not is_unified_random_matchup_run(run_dir):
+        return
+    run_dir = run_dir.expanduser().resolve()
+    path = run_dir / UNIFIED_LIVE_STATE
+    with _run_state_lock(run_dir):
+        current: dict[str, Any] = {}
+        raw = _read_json(path)
+        if isinstance(raw, dict):
+            current.update(raw)
+        active_raw = current.get("active_matchups")
+        active: dict[str, Any] = (
+            dict(active_raw) if isinstance(active_raw, dict) else {}
+        )
+        row: dict[str, Any] = {}
+        existing = active.get(matchup_key)
+        if isinstance(existing, dict):
+            row.update(existing)
+        row.update({k: v for k, v in fields.items() if v is not None})
+        active[str(matchup_key)] = row
+        current["active_matchups"] = active
+        current["updated_at"] = datetime.now(timezone.utc).isoformat()
+        _atomic_write_json(path, current)
+
+
+def _checkpoint_point_from_row(row: dict[str, Any]) -> dict[str, Any]:
+    vs_p1, vs_p2, vs_avg = _vs_logic_win_rates(row)
+    timeout_rate: Optional[float] = None
+    if row.get("timeout_rate") is not None:
+        timeout_rate = float(row["timeout_rate"])
+    return {
+        "episode": int(row.get("episodes_completed") or 0),
+        "win_rate": float(row.get("p1_win_rate") or 0.0),
+        "p1_wins": int(row.get("p1_wins") or 0),
+        "p2_wins": int(row.get("p2_wins") or 0),
+        "matchup": str(row.get("matchup") or ""),
+        "vs_logic_agent_p1": vs_p1,
+        "vs_logic_agent_p2": vs_p2,
+        "vs_logic_win_rate": vs_avg,
+        "logic_vs_agent_win_rate": _logic_vs_agent_win_rate(row),
+        "agent_vs_agent_win_rate": float(row.get("p1_win_rate") or 0.0),
+        "timeout_rate": timeout_rate,
+    }
+
+
+def _load_matchup_checkpoint_history(matchup_dir: Path) -> list[dict[str, Any]]:
+    raw = _read_json(matchup_dir / "checkpoint_eval_history.json")
+    if not isinstance(raw, list):
+        return []
+    return [row for row in raw if isinstance(row, dict)]
+
+
+def _mean_and_se(values: list[float]) -> tuple[Optional[float], Optional[float]]:
+    if not values:
+        return None, None
+    mean = sum(values) / len(values)
+    if len(values) < 2:
+        return mean, 0.0
+    variance = sum((value - mean) ** 2 for value in values) / (len(values) - 1)
+    return mean, math.sqrt(variance / len(values))
+
+
+def aggregate_checkpoint_points(
+    histories: dict[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Average checkpoint metrics across matchups at each episode bucket."""
+    by_episode: dict[int, list[dict[str, Any]]] = {}
+    for _key, hist in histories.items():
+        for row in hist:
+            if row.get("episodes_completed") is None:
+                continue
+            point = _checkpoint_point_from_row(row)
+            episode = int(point["episode"])
+            by_episode.setdefault(episode, []).append(point)
+
+    aggregate: list[dict[str, Any]] = []
+    for episode in sorted(by_episode.keys()):
+        points = by_episode[episode]
+        self_play = [float(p["win_rate"]) for p in points]
+        vs_logic = [
+            float(p["vs_logic_win_rate"])
+            for p in points
+            if p.get("vs_logic_win_rate") is not None
+        ]
+        sp_mean, sp_se = _mean_and_se(self_play)
+        vl_mean, vl_se = _mean_and_se(vs_logic)
+        aggregate.append(
+            {
+                "episode": episode,
+                "win_rate_mean": sp_mean,
+                "win_rate_se": sp_se,
+                "vs_logic_mean": vl_mean,
+                "vs_logic_se": vl_se,
+                "n_matchups": len(points),
+            }
+        )
+    return aggregate
+
+
+def _latest_checkpoint_rows_for_active(
+    run_dir: Path,
+    active_matchups: dict[str, Any],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for subdir, info in active_matchups.items():
+        if not isinstance(info, dict):
+            continue
+        hist = _load_matchup_checkpoint_history(run_dir / str(subdir))
+        if not hist:
+            continue
+        latest = hist[-1]
+        point = _checkpoint_point_from_row(latest)
+        point["matchup"] = str(info.get("name") or point.get("matchup") or subdir)
+        point["matchup_dir"] = str(subdir)
+        rows.append(point)
+    return rows
 
 
 def collect_unified_run_state(run_dir: Path) -> dict[str, Any]:
@@ -279,79 +425,82 @@ def collect_unified_run_state(run_dir: Path) -> dict[str, Any]:
         else count_completed_matchups(run_dir, target_episodes)
     )
 
-    current_name = str(
-        live.get("current_matchup")
-        or scope.get("matchup")
-        or ""
-    ).strip()
+    parallel_matchups = int(
+        live.get("parallel_matchups")
+        or manifest.get("parallel_matchups")
+        or 1
+    )
+    batch_index = int(live.get("batch_index") or 0)
+
+    active_raw = live.get("active_matchups")
+    active_matchups: dict[str, Any] = (
+        dict(active_raw) if isinstance(active_raw, dict) else {}
+    )
+
+    current_name = str(live.get("current_matchup") or scope.get("matchup") or "").strip()
     current_subdir = str(
-        live.get("current_matchup_dir")
-        or scope.get("matchup_dir")
-        or ""
+        live.get("current_matchup_dir") or scope.get("matchup_dir") or ""
     ).strip()
     if not current_name and current_subdir:
         current_name = _matchup_label(run_dir / current_subdir)
 
+    if not active_matchups and current_subdir:
+        active_matchups = {
+            current_subdir: {
+                "name": current_name or current_subdir,
+                "episodes_completed": int(live.get("episodes_completed") or 0),
+                "p1_win_rate": live.get("p1_win_rate"),
+                "p2_win_rate": live.get("p2_win_rate"),
+                "status": live.get("status") or "training",
+            }
+        }
+
     episodes_completed = int(live.get("episodes_completed") or 0)
-    if episodes_completed <= 0 and ckpt_history:
-        last_ckpt = ckpt_history[-1]
-        if isinstance(last_ckpt, dict):
-            episodes_completed = int(last_ckpt.get("episodes_completed") or 0)
-    if episodes_completed <= 0 and current_subdir:
-        row = _matchup_summary_row(run_dir / current_subdir, target_episodes)
-        episodes_completed = int(row.get("episodes_completed") or 0)
+    if episodes_completed <= 0 and active_matchups:
+        episodes_completed = max(
+            int(row.get("episodes_completed") or 0)
+            for row in active_matchups.values()
+            if isinstance(row, dict)
+        )
 
     train_p1_wr = live.get("p1_win_rate")
     train_p2_wr = live.get("p2_win_rate")
     status = str(live.get("status") or "training")
     if (run_dir / "training_summary.json").is_file() and matchups_completed >= matchups_total > 0:
         status = "complete"
-    elif not current_name and matchups_completed >= matchups_total > 0:
+    elif not active_matchups and matchups_completed >= matchups_total > 0:
         status = "complete"
+
+    active_histories: dict[str, list[dict[str, Any]]] = {
+        str(subdir): _load_matchup_checkpoint_history(run_dir / str(subdir))
+        for subdir in active_matchups
+        if (run_dir / str(subdir)).is_dir()
+    }
+    if not active_histories and current_subdir:
+        active_histories[current_subdir] = _load_matchup_checkpoint_history(
+            run_dir / current_subdir
+        )
+    if not active_histories and ckpt_history:
+        active_histories["__run_root__"] = [
+            row for row in ckpt_history if isinstance(row, dict)
+        ]
+
+    checkpoint_aggregate_points = aggregate_checkpoint_points(active_histories)
+    active_checkpoint_rows = _latest_checkpoint_rows_for_active(
+        run_dir, active_matchups
+    )
+    if not active_checkpoint_rows and ckpt_history:
+        latest = ckpt_history[-1]
+        if isinstance(latest, dict):
+            point = _checkpoint_point_from_row(latest)
+            point["matchup"] = str(point.get("matchup") or current_name or "—")
+            active_checkpoint_rows = [point]
 
     checkpoint_points = []
     for row in ckpt_history:
         if not isinstance(row, dict) or row.get("episodes_completed") is None:
             continue
-        vs_p1, vs_p2, vs_avg = _vs_logic_win_rates(row)
-        timeout_rate: Optional[float] = None
-        if row.get("timeout_rate") is not None:
-            timeout_rate = float(row["timeout_rate"])
-        checkpoint_points.append(
-            {
-                "episode": int(row.get("episodes_completed") or 0),
-                "win_rate": float(row.get("p1_win_rate") or 0.0),
-                "p1_wins": int(row.get("p1_wins") or 0),
-                "p2_wins": int(row.get("p2_wins") or 0),
-                "matchup": str(row.get("matchup") or ""),
-                "vs_logic_agent_p1": vs_p1,
-                "vs_logic_agent_p2": vs_p2,
-                "vs_logic_win_rate": vs_avg,
-                "logic_vs_agent_win_rate": _logic_vs_agent_win_rate(row),
-                "agent_vs_agent_win_rate": float(row.get("p1_win_rate") or 0.0),
-                "timeout_rate": timeout_rate,
-            }
-        )
-
-    latest_vs_logic_p1: Optional[float] = None
-    latest_vs_logic_p2: Optional[float] = None
-    latest_vs_logic_avg: Optional[float] = None
-    matchup_logic_vs_logic: Optional[float] = None
-    if checkpoint_points:
-        latest_vs_logic_p1 = checkpoint_points[-1].get("vs_logic_agent_p1")
-        latest_vs_logic_p2 = checkpoint_points[-1].get("vs_logic_agent_p2")
-        latest_vs_logic_avg = checkpoint_points[-1].get("vs_logic_win_rate")
-    if current_subdir:
-        matchup_logic_vs_logic = _read_matchup_logic_vs_logic_baseline(
-            run_dir / current_subdir
-        )
-    if matchup_logic_vs_logic is None and ckpt_history:
-        first_ckpt = next(
-            (row for row in ckpt_history if isinstance(row, dict)),
-            None,
-        )
-        if isinstance(first_ckpt, dict):
-            matchup_logic_vs_logic = _logic_vs_logic_win_rate(first_ckpt)
+        checkpoint_points.append(_checkpoint_point_from_row(row))
 
     completed_rows = [
         _matchup_summary_row(matchup_dir, target_episodes)
@@ -361,20 +510,30 @@ def collect_unified_run_state(run_dir: Path) -> dict[str, Any]:
 
     overall_pct = 0.0
     if matchups_total > 0:
-        intra = (
-            (episodes_completed / max(1, target_episodes))
-            if status == "training" and target_episodes > 0
-            else 0.0
-        )
+        if active_matchups and target_episodes > 0 and status == "training":
+            intra_values = [
+                int(row.get("episodes_completed") or 0) / max(1, target_episodes)
+                for row in active_matchups.values()
+                if isinstance(row, dict)
+            ]
+            intra = sum(intra_values) / max(1, len(intra_values)) if intra_values else 0.0
+        elif target_episodes > 0 and status == "training":
+            intra = episodes_completed / max(1, target_episodes)
+        else:
+            intra = 0.0
         overall_pct = ((matchups_completed + intra) / matchups_total) * 100.0
 
     cpp_eval_live_dashboard = run_dir / CPP_EVAL_LIVE_DASHBOARD
     cpp_eval_live_dashboard_path = (
         str(cpp_eval_live_dashboard) if cpp_eval_live_dashboard.is_file() else ""
     )
+    all_ckpt_for_label: list[Any] = ckpt_history
+    for hist in active_histories.values():
+        all_ckpt_for_label = list(hist)
+        break
     checkpoint_eval_replay_label = _resolve_checkpoint_eval_replay_label(
         run_dir,
-        ckpt_history=ckpt_history,
+        ckpt_history=all_ckpt_for_label,
         live=live,
     )
 
@@ -386,6 +545,9 @@ def collect_unified_run_state(run_dir: Path) -> dict[str, Any]:
         "matchups_completed": matchups_completed,
         "matchups_sampled": list(manifest.get("matchups_sampled") or []),
         "target_episodes": target_episodes,
+        "parallel_matchups": parallel_matchups,
+        "batch_index": batch_index,
+        "active_matchups": active_matchups,
         "current_matchup": current_name or "—",
         "current_matchup_dir": current_subdir,
         "episodes_completed": episodes_completed,
@@ -393,19 +555,84 @@ def collect_unified_run_state(run_dir: Path) -> dict[str, Any]:
         "train_p2_win_rate": train_p2_wr,
         "status": status,
         "checkpoint_points": checkpoint_points,
-        "latest_checkpoint_win_rate": (
-            checkpoint_points[-1]["win_rate"] if checkpoint_points else None
-        ),
-        "latest_vs_logic_win_rate": latest_vs_logic_avg,
-        "latest_vs_logic_p1_seat": latest_vs_logic_p1,
-        "latest_vs_logic_p2_seat": latest_vs_logic_p2,
-        "matchup_logic_vs_logic_win_rate": matchup_logic_vs_logic,
+        "checkpoint_aggregate_points": checkpoint_aggregate_points,
+        "active_checkpoint_rows": active_checkpoint_rows,
         "completed_matchups": completed_rows,
         "overall_pct": overall_pct,
         "complete": status == "complete",
         "cpp_eval_live_dashboard_path": cpp_eval_live_dashboard_path,
         "checkpoint_eval_replay_label": checkpoint_eval_replay_label,
     }
+
+
+def _svg_winrate_chart_with_error_bands(
+    points: list[dict[str, Any]],
+    *,
+    width: int = 520,
+    height: int = 200,
+    target_episodes: int = 0,
+    empty_message: str = "Waiting for checkpoint eval…",
+) -> str:
+    if not points:
+        return (
+            f'<svg viewBox="0 0 {width} {height}" class="chart empty">'
+            f'<text x="{width // 2}" y="{height // 2}" text-anchor="middle" '
+            f'class="chart-empty">{html.escape(empty_message)}</text></svg>'
+        )
+    pad_l, pad_r, pad_t, pad_b = 36, 12, 12, 28
+    plot_w = width - pad_l - pad_r
+    plot_h = height - pad_t - pad_b
+    max_x = max(
+        int(target_episodes or 0),
+        max(int(p.get("episode", 0) or 0) for p in points),
+        1,
+    )
+
+    def px(ep: float) -> float:
+        return pad_l + (ep / max_x) * plot_w
+
+    def py(rate: float) -> float:
+        return pad_t + (1.0 - max(0.0, min(1.0, float(rate)))) * plot_h
+
+    def band(mean_key: str, se_key: str, class_prefix: str) -> str:
+        upper = []
+        lower = []
+        for point in points:
+            mean = point.get(mean_key)
+            se = point.get(se_key)
+            if mean is None:
+                continue
+            spread = float(se or 0.0)
+            upper.append(f"{px(point['episode']):.1f},{py(float(mean) + spread):.1f}")
+            lower.append(f"{px(point['episode']):.1f},{py(float(mean) - spread):.1f}")
+        if not upper:
+            return ""
+        polygon = " ".join(upper + list(reversed(lower)))
+        line = " ".join(
+            f"{px(point['episode']):.1f},{py(float(point[mean_key])):.1f}"
+            for point in points
+            if point.get(mean_key) is not None
+        )
+        return (
+            f'<polygon points="{polygon}" class="{class_prefix}-band"/>'
+            f'<polyline points="{line}" class="{class_prefix}-line" fill="none"/>'
+        )
+
+    grid = "\n".join(
+        f'<line x1="{pad_l}" y1="{py(v):.1f}" x2="{width - pad_r}" y2="{py(v):.1f}" class="chart-grid"/>'
+        f'<text x="{pad_l - 6}" y="{py(v) + 4:.1f}" text-anchor="end" class="chart-axis">{int(v * 100)}%</text>'
+        for v in (0.0, 0.5, 1.0)
+    )
+    legend = (
+        '<text x="' + str(pad_l) + f'" y="{height - 8}" class="chart-axis">'
+        "— self-play mean ± SE  ·  — vs logic mean ± SE</text>"
+    )
+    return f"""<svg viewBox="0 0 {width} {height}" class="chart">
+  {grid}
+  {band("win_rate_mean", "win_rate_se", "chart-selfplay")}
+  {band("vs_logic_mean", "vs_logic_se", "chart-vslogic")}
+  {legend}
+</svg>"""
 
 
 def _svg_winrate_chart(
@@ -472,15 +699,45 @@ def render_unified_random_matchups_html(
     matchups_total = int(state.get("matchups_total") or 0)
     matchups_completed = int(state.get("matchups_completed") or 0)
     target_eps = int(state.get("target_episodes") or 0)
-    current_eps = int(state.get("episodes_completed") or 0)
-    train_pct = (current_eps / max(1, target_eps)) * 100.0 if target_eps else 0.0
     overall_pct = float(state.get("overall_pct") or 0.0)
+    batch_index = int(state.get("batch_index") or 0)
     status = str(state.get("status") or "training")
     status_label = {
         "training": "Training",
         "between_matchups": "Between matchups",
         "complete": "Complete",
     }.get(status, status.title())
+
+    progress_headline = (
+        f"Matchups {matchups_completed}/{matchups_total} · "
+        f"{overall_pct:.1f}%"
+    )
+    if batch_index > 0:
+        progress_headline += f" · Batch {batch_index}"
+
+    active_matchups = state.get("active_matchups") or {}
+    progress_blocks = ""
+    if isinstance(active_matchups, dict) and active_matchups:
+        for subdir, row in active_matchups.items():
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("name") or subdir)
+            eps = int(row.get("episodes_completed") or 0)
+            pct = (eps / max(1, target_eps)) * 100.0 if target_eps else 0.0
+            progress_blocks += f"""
+      <div class="matchup-progress">
+        <div class="progress-label"><span>{html.escape(name)}</span><span>{eps}/{target_eps}</span></div>
+        <div class="progress-bar"><div class="progress-fill" style="width:{pct:.1f}%"></div></div>
+      </div>"""
+    else:
+        current_eps = int(state.get("episodes_completed") or 0)
+        name = str(state.get("current_matchup") or "—")
+        pct = (current_eps / max(1, target_eps)) * 100.0 if target_eps else 0.0
+        progress_blocks = f"""
+      <div class="matchup-progress">
+        <div class="progress-label"><span>{html.escape(name)}</span><span>{current_eps}/{target_eps}</span></div>
+        <div class="progress-bar"><div class="progress-fill" style="width:{pct:.1f}%"></div></div>
+      </div>"""
 
     cpp_live_path = str(state.get("cpp_eval_live_dashboard_path") or "").strip()
     replay_heading = format_checkpoint_eval_replay_heading(
@@ -498,8 +755,8 @@ def render_unified_random_matchups_html(
             f"({html.escape(CPP_EVAL_LIVE_DASHBOARD)}).</p>"
         )
 
-    ckpt_chart = _svg_winrate_chart(
-        state.get("checkpoint_points") or [],
+    ckpt_chart = _svg_winrate_chart_with_error_bands(
+        state.get("checkpoint_aggregate_points") or [],
         target_episodes=target_eps,
     )
 
@@ -523,9 +780,11 @@ def render_unified_random_matchups_html(
         history_table = '<p class="muted">No completed matchups yet.</p>'
 
     ckpt_rows = ""
-    for row in reversed(state.get("checkpoint_points") or []):
+    for row in state.get("active_checkpoint_rows") or []:
         ckpt_rows += (
-            f"<tr><td>{int(row.get('episode', 0))}</td>"
+            f"<tr>"
+            f"<td>{html.escape(str(row.get('matchup') or '—'))}</td>"
+            f"<td>{int(row.get('episode', 0))}</td>"
             f"<td>{_pct(row.get('vs_logic_win_rate'))}</td>"
             f"<td>{_pct(row.get('logic_vs_agent_win_rate'))}</td>"
             f"<td>{_pct(row.get('agent_vs_agent_win_rate'))}</td>"
@@ -533,12 +792,13 @@ def render_unified_random_matchups_html(
         )
     ckpt_table = (
         f'<table class="history"><thead><tr>'
+        f"<th>Matchup</th>"
         f"<th>Episode</th>"
         f"<th>Agent win% vs logic</th>"
         f"<th>Logic vs agent win%</th>"
         f"<th>Agent win% vs agent</th>"
         f"<th>Timeout %</th>"
-        f"</tr></thead><tbody>{ckpt_rows or '<tr><td colspan=\"5\" class=\"muted\">No checkpoint eval yet</td></tr>'}</tbody></table>"
+        f"</tr></thead><tbody>{ckpt_rows or '<tr><td colspan=\"6\" class=\"muted\">No checkpoint eval yet</td></tr>'}</tbody></table>"
     )
 
     return f"""<!DOCTYPE html>
@@ -559,18 +819,14 @@ def render_unified_random_matchups_html(
     .wrap {{ max-width: 960px; margin: 0 auto; padding: 28px 20px 40px; }}
     h1 {{ margin: 0 0 6px; font-size: 1.6rem; }}
     .sub {{ color: var(--muted); margin: 0 0 24px; line-height: 1.5; }}
-    .summary {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 24px; }}
-    .stat {{ background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }}
-    .stat-label {{ display: block; color: var(--muted); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; }}
-    .stat-value {{ display: block; font-size: 1.35rem; font-weight: 600; margin-top: 6px; }}
+    .progress-headline {{ font-size: 1.15rem; font-weight: 600; margin: 0 0 16px; }}
+    .matchup-progress {{ margin-bottom: 14px; }}
+    .matchup-progress:last-child {{ margin-bottom: 0; }}
     .card {{ background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; margin-bottom: 18px; }}
     .card h2 {{ margin: 0 0 12px; font-size: 1.05rem; }}
     .progress-bar {{ height: 10px; background: #243044; border-radius: 999px; overflow: hidden; }}
     .progress-fill {{ height: 100%; background: linear-gradient(90deg, var(--primary), var(--good)); }}
     .progress-label {{ display: flex; justify-content: space-between; font-size: 0.85rem; color: var(--muted); margin-bottom: 8px; }}
-    .metrics {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-top: 14px; }}
-    .metric-label {{ display: block; color: var(--muted); font-size: 0.75rem; }}
-    .metric-value {{ font-size: 1.2rem; font-weight: 600; }}
     .status-pill {{ display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 0.75rem; background: #243044; color: var(--primary); }}
     .status-pill.complete {{ color: var(--good); }}
     .history {{ width: 100%; border-collapse: collapse; font-size: 0.85rem; }}
@@ -580,8 +836,10 @@ def render_unified_random_matchups_html(
     a {{ color: var(--primary); text-decoration: none; }}
     a:hover {{ text-decoration: underline; }}
     .chart {{ width: 100%; max-width: 520px; }}
-    .chart-line {{ stroke: var(--primary); stroke-width: 2; }}
-    .chart-dot {{ fill: var(--primary); }}
+    .chart-selfplay-line {{ stroke: var(--primary); stroke-width: 2; }}
+    .chart-selfplay-band {{ fill: rgba(91, 156, 255, 0.18); stroke: none; }}
+    .chart-vslogic-line {{ stroke: var(--good); stroke-width: 2; }}
+    .chart-vslogic-band {{ fill: rgba(62, 207, 142, 0.15); stroke: none; }}
     .chart-grid {{ stroke: #243044; stroke-width: 1; }}
     .chart-axis {{ fill: var(--muted); font-size: 10px; }}
     .chart-empty {{ fill: var(--muted); font-size: 12px; }}
@@ -595,29 +853,15 @@ def render_unified_random_matchups_html(
       <span class="status-pill{' complete' if status == 'complete' else ''}">{html.escape(status_label)}</span>
     </p>
 
-    <div class="summary">
-      <div class="stat"><span class="stat-label">Matchups done</span><span class="stat-value">{matchups_completed}/{matchups_total}</span></div>
-      <div class="stat"><span class="stat-label">Overall progress</span><span class="stat-value">{overall_pct:.1f}%</span></div>
-      <div class="stat"><span class="stat-label">Current train win%</span><span class="stat-value">{_pct(state.get('train_p1_win_rate'))}</span></div>
-      <div class="stat"><span class="stat-label">Latest self-play ckpt</span><span class="stat-value">{_pct(state.get('latest_checkpoint_win_rate'))}</span></div>
-      <div class="stat"><span class="stat-label">Latest vs logic</span><span class="stat-value">{_pct(state.get('latest_vs_logic_win_rate'))}</span></div>
+    <p class="progress-headline">{html.escape(progress_headline)}</p>
+
+    <div class="card">
+      <h2>Training progress</h2>
+      {progress_blocks}
     </div>
 
     <div class="card">
-      <h2>Current matchup · {html.escape(str(state.get('current_matchup') or '—'))}</h2>
-      <div class="progress-label"><span>Training episodes</span><span>{current_eps}/{target_eps}</span></div>
-      <div class="progress-bar"><div class="progress-fill" style="width:{train_pct:.1f}%"></div></div>
-      <div class="metrics">
-        <div><span class="metric-label">P1 seat win%</span><span class="metric-value">{_pct(state.get('train_p1_win_rate'))}</span></div>
-        <div><span class="metric-label">P2 seat win%</span><span class="metric-value">{_pct(state.get('train_p2_win_rate'))}</span></div>
-        <div><span class="metric-label">Latest self-play ckpt</span><span class="metric-value">{_pct(state.get('latest_checkpoint_win_rate'))}</span></div>
-        <div><span class="metric-label">Logic vs logic</span><span class="metric-value">{_pct(state.get('matchup_logic_vs_logic_win_rate'))}</span></div>
-        <div><span class="metric-label">Vs logic P1 / P2 seat</span><span class="metric-value">{_pct(state.get('latest_vs_logic_p1_seat'))} / {_pct(state.get('latest_vs_logic_p2_seat'))}</span></div>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>Checkpoint eval (current matchup)</h2>
+      <h2>Checkpoint eval (active batch)</h2>
       {cpp_live_link}
       {ckpt_chart}
       {ckpt_table}
@@ -643,14 +887,15 @@ def write_unified_random_matchups_dashboard(
     run_dir = run_dir.expanduser().resolve()
     if not is_unified_random_matchup_run(run_dir):
         return None
-    state = collect_unified_run_state(run_dir)
-    page = render_unified_random_matchups_html(
-        state,
-        auto_refresh_seconds=auto_refresh_seconds,
-    )
-    html_path = run_dir / UNIFIED_DASHBOARD_NAME
-    html_path.write_text(page, encoding="utf-8")
-    return html_path
+    with _run_state_lock(run_dir):
+        state = collect_unified_run_state(run_dir)
+        page = render_unified_random_matchups_html(
+            state,
+            auto_refresh_seconds=auto_refresh_seconds,
+        )
+        html_path = run_dir / UNIFIED_DASHBOARD_NAME
+        html_path.write_text(page, encoding="utf-8")
+        return html_path
 
 
 def maybe_refresh_unified_dashboard(

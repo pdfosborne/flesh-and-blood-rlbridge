@@ -7,6 +7,7 @@ from pathlib import Path
 
 from fab_bridge.doctor import print_report, run_doctor
 from fab_bridge.paths import configure_import_paths, repo_root, talishar_assets_dir, talishar_dir
+from fab_bridge.talishar_setup import ensure_talishar
 
 configure_import_paths()
 
@@ -50,12 +51,17 @@ def run_init(*, start_talishar: bool = True, backend_only: bool = True, sync_age
     assets = talishar_assets_dir()
     if not assets.is_dir() or not any(assets.glob("*.txt")):
         print()
-        print("Talishar Assets are missing or empty.")
-        print("Clone this repository with submodules / subtrees, or set TALISHAR_ASSETS_PATH.")
-        print(f"  expected: {assets}")
+        print("Talishar checkout or Assets missing — cloning/syncing…")
+        try:
+            ensure_talishar(clone=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 1
+        assets = talishar_assets_dir()
+    if not assets.is_dir() or not any(assets.glob("*.txt")):
         print()
-        print("  git clone https://github.com/pdfosborne/flesh-and-blood-rlbridge.git")
-        print("  # then populate Talishar/ (see README)")
+        print("Talishar Assets are missing or empty.")
+        print(f"  expected: {assets}")
         return 1
 
     if not talishar_dir().is_dir():
