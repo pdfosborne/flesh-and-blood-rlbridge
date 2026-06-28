@@ -43,6 +43,7 @@ class MetaEngineControls:
 
     # ── Talishar HTTP ───────────────────────────────────────────────────────
     talishar_request_timeout: float = 30.0
+    talishar_backend: str = "fast"
 
     # ── Parallel training episode wall-clock limits ─────────────────────────
     episode_timeout_seconds_per_step: float = 3.0
@@ -61,8 +62,8 @@ class MetaUnifiedRandomMatchups:
     checkpoint_eval_episodes: int = 0  # 0 = min(100, episodes // 100)
     workers: int = 0  # 0 = inherit META.workers
     skip_converged: bool = False
-    build_cpp_engine: bool = True
-    require_cpp_engine: bool = True
+    build_cpp_engine: bool = False
+    require_cpp_engine: bool = False
     seed: int | None = None
     cache_dir: str | None = None
     out_dir: str | None = None
@@ -340,6 +341,8 @@ def engine_env_kwargs(engine: EngineDefaults | MetaEngineControls) -> dict[str, 
             "damage_reward_scale": engine.damage_reward_scale,
             "max_consecutive_passes": engine.max_consecutive_passes,
             "request_timeout": engine.talishar_request_timeout,
+            "talishar_backend": engine.talishar_backend,
+            "cpp_obs_alignment": False,
         }
     return {
         "max_steps_per_turn": engine.max_steps_per_turn,
@@ -500,6 +503,7 @@ DEFAULT_REPEAT_ACTION_PENALTY = RUNTIME.engine.repeat_action_penalty
 DEFAULT_DAMAGE_REWARD_SCALE = RUNTIME.engine.damage_reward_scale
 DEFAULT_MAX_CONSECUTIVE_PASSES = RUNTIME.engine.max_consecutive_passes
 DEFAULT_TALISHAR_REQUEST_TIMEOUT = RUNTIME.engine.talishar_request_timeout
+DEFAULT_TALISHAR_BACKEND = RUNTIME.meta.engine.talishar_backend
 DEFAULT_EPISODE_TIMEOUT_SECONDS_PER_STEP = RUNTIME.engine.episode_timeout_seconds_per_step
 DEFAULT_EPISODE_TIMEOUT_FLOOR_SECONDS = RUNTIME.engine.episode_timeout_floor_seconds
 

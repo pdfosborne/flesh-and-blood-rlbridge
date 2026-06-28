@@ -216,13 +216,32 @@ Run `fab-bridge doctor` to verify your environment.
 
 ---
 
-## C++ Engine
+## Training engine backends
 
-`scripts/cpp/generate_cpp_engine.py` scans ≈50 Talishar PHP source files and auto-generates a self-contained C++ game engine. The compiled output is a Python extension module placed in a **content-hashed** directory under `results/cpp_engines/{matchup}-{hash}/`.
+Training defaults to the **Talishar fast backend** (`talishar_backend=fast`): optimized HTTP with optional `RLStep.php` overlay installed from `docker/talishar/rl-bridge/` at container start. No edits to upstream `Talishar/` are required.
 
-| | HTTP environments | C++ engine |
+| Backend | Default? | Fidelity | Typical speed | Use case |
+|---------|----------|----------|---------------|----------|
+| **Fast (Talishar)** | Yes | Full PHP rules | ~12–25 steps/s | Training rollouts |
+| HTTP (legacy) | No | Full PHP rules | ~2 steps/s | Debugging |
+| C++ (opt-in) | No | Stub approximate | 5–10 games/s | Future fast rollouts when parity complete |
+
+Benchmark backends:
+
+```bash
+python scripts/benchmark_talishar_backends.py --base-url http://localhost:8080/game
+```
+
+Set `TALISHAR_URL=http://localhost:8080/game` (Docker compose default).
+
+## C++ Engine (optional)
+
+`scripts/cpp/generate_cpp_engine.py` scans Talishar PHP and auto-generates a self-contained C++ stub engine. Pass `use_cpp_engine=True` to prefer it when a compiled module exists under `results/cpp_engines/{matchup}-{hash}/`.
+
+| | Fast Talishar | C++ engine |
 |--|--|--|
-| Typical speed | 0.05 games/s | 5-10 games/s |
+| Typical speed | ~0.1–0.2 games/s | 5–10 games/s |
+| Rules fidelity | Full Talishar | Approximate stubs |
 
 ---
 

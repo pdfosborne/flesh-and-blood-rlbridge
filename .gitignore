@@ -34,7 +34,20 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
+/docker/talishar/APIKeys.local.php
+
 /results/
 /Talishar-FE/
-/Talishar-FE/
-/Talishar/Assets/
+/Talishar/
+/Talishar/Assets/*.txt
+/Talishar/Assets/*.png
+/Talishar/Assets/*.jpg
+/Talishar/Assets/*.jpeg
+/Talishar/Assets/*.gif
+/Talishar/Assets/*.mp4
+/Talishar/Assets/*.mp3
+/Talishar/Assets/*.wav
+/Talishar/Assets/*.ogg
+/Talishar/Assets/*.svg
+/Talishar/APIs/
+Talishar/docker-compose.yml

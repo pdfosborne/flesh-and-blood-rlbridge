@@ -93,6 +93,7 @@ from runtime_defaults import (  # noqa: E402
     DEFAULT_WARMUP_EPISODES,
     DEFAULT_CHECKPOINT_INTERVAL_PCT,
     DEFAULT_CHECKPOINT_EVAL_EPISODES,
+    DEFAULT_TALISHAR_BACKEND,
     RUNTIME,
     engine_env_kwargs,
     episode_timeout_seconds,
@@ -224,31 +225,19 @@ def make_env(
     show_frontend: bool = False,
     frontend_url: Optional[str] = None,
     request_timeout: Optional[float] = None,
-    use_cpp_engine: bool = True,
+    use_cpp_engine: bool = False,
+    talishar_backend: str = DEFAULT_TALISHAR_BACKEND,
     cpp_engine_cache_dir: Optional[str] = None,
     enable_combat_tracker: bool = False,
     require_fast_training: Optional[bool] = None,
 ) -> TalisharEngineEnvironment:
     """Create a :class:`TalisharEngineEnvironment` for *matchup*.
 
-    When ``use_cpp_engine=True`` (default) and a compiled C++ engine exists in
-    the cache for this matchup, the environment will use it instead of HTTP
-    Talishar — roughly 100× faster per step.  Falls back to HTTP silently if
-    no compiled module is found.
+    By default uses the Talishar **fast** backend (optimized HTTP + optional
+    RLStep overlay) for full-rules training rollouts.  Pass ``use_cpp_engine=True``
+    to prefer a compiled C++ stub engine when available.
 
-    Generate a C++ engine for a matchup with::
-
-        python scripts/generate_cpp_engine.py \\
-            --talishar-src Talishar \\
-            --deck1 {p1_deck} --deck2 {p2_deck}
-
-    Then implement the stubs in ``results/cpp_engines/<matchup>/cards.h`` and
-    build with ``cmake``.
-
-    When ``require_fast_training`` is omitted, it defaults to ``use_cpp_engine``.
-    If a C++ engine is active but lacks the fast training API, a
-    :class:`RuntimeError` is raised instead of silently using the slow
-    ``step()`` + JSON path.
+    When ``require_fast_training`` is omitted, it defaults to ``True``.
     """
     resolved_frontend_url = frontend_url
     if show_frontend and not resolved_frontend_url:
@@ -278,23 +267,21 @@ def make_env(
         max_turns=max_turns,
         render_mode=("rgb_array" if show_frontend else None),
         use_cpp_engine=use_cpp_engine,
+        talishar_backend=talishar_backend,
         cpp_engine_cache_dir=effective_cache_dir,
         cpp_engine_deck1=matchup.cpp_engine_deck1,
         cpp_engine_deck2=matchup.cpp_engine_deck2,
         cpp_engine_dir=matchup.cpp_engine_dir,
         enable_combat_tracker=enable_combat_tracker,
+        cpp_obs_alignment=False,
         **engine_kw,
     )
     if require_fast_training is None:
-        require_fast_training = use_cpp_engine or bool(matchup.cpp_engine_dir)
-    if (
-        require_fast_training
-        and getattr(env, "_using_cpp", False)
-        and not _env_supports_fast_training(env)
-    ):
+        require_fast_training = True
+    if require_fast_training and not _env_supports_fast_training(env):
         reasons = "; ".join(_fast_training_unavailable_reasons(env)) or "unknown"
         raise RuntimeError(
-            "C++ engine is loaded but fast training is unavailable: "
+            "Fast training is unavailable: "
             f"{reasons}"
         )
     return env
@@ -1237,15 +1224,25 @@ def _env_supports_fast_training(env: Any) -> bool:
 
 
 def _fast_training_unavailable_reasons(env: Any) -> list[str]:
-    """Collect blockers for the C++ numeric training path."""
+    """Collect blockers for the fast training path (Talishar fast or C++)."""
+    if hasattr(env, "fast_training_unavailable_reasons"):
+        return list(env.fast_training_unavailable_reasons())
     inner = getattr(env, "_cpp_env", None)
     if inner is not None and hasattr(inner, "fast_training_unavailable_reasons"):
         return list(inner.fast_training_unavailable_reasons())
-    if hasattr(env, "fast_training_unavailable_reasons"):
-        return list(env.fast_training_unavailable_reasons())
-    if not getattr(env, "_using_cpp", False):
-        return ["not using C++ engine"]
+    if getattr(env, "_using_cpp", False):
+        return ["C++ fast training API not exposed"]
+    if hasattr(env, "_using_fast_talishar") and not env._using_fast_talishar:
+        return ["talishar_backend is not fast"]
     return ["fast training API not exposed on environment wrapper"]
+
+
+def _fast_rollout_backend_label(env: Any) -> str:
+    """Short label for the active fast rollout backend."""
+    if bool(getattr(env, "_using_cpp", False)):
+        return "C++ engine"
+    backend = getattr(env, "talishar_backend", DEFAULT_TALISHAR_BACKEND)
+    return f"Talishar {backend}"
 
 
 def _announce_training_backend(
@@ -1256,10 +1253,19 @@ def _announce_training_backend(
 ) -> None:
     """Log which rollout path is active and optionally require the fast path."""
     using_cpp = bool(getattr(env, "_using_cpp", False))
+    using_fast_talishar = bool(getattr(env, "_using_fast_talishar", False))
     fast = _env_supports_fast_training(env)
-    if fast:
+    if fast and using_cpp:
         print(
             f"  [fast] {label}: C++ numeric path "
+            "(fast_reset / fast_step_index)",
+            flush=True,
+        )
+        return
+    if fast and using_fast_talishar:
+        backend = getattr(env, "talishar_backend", "fast")
+        print(
+            f"  [fast] {label}: Talishar {backend} path "
             "(fast_reset / fast_step_index)",
             flush=True,
         )
@@ -1273,14 +1279,11 @@ def _announce_training_backend(
         if require_fast_training:
             raise RuntimeError(msg)
         print(f"  [WARN] {msg}", flush=True)
-        print(
-            f"  [slow] {label}: falling back to step() + JSON observations",
-            flush=True,
-        )
-        return
-
+    elif require_fast_training:
+        reasons = "; ".join(_fast_training_unavailable_reasons(env)) or "unknown"
+        raise RuntimeError(f"Fast {label} is unavailable: {reasons}")
     print(
-        f"  [slow] {label}: HTTP Talishar path (no compiled C++ engine)",
+        f"  [slow] {label}: falling back to step() + JSON observations",
         flush=True,
     )
 
@@ -1948,7 +1951,7 @@ def train_agents_from_both_perspectives_parallel(
     _announce_training_backend(
         probe_env,
         label="parallel training bootstrap",
-        require_fast_training=bool(matchup.cpp_engine_dir),
+        require_fast_training=True,
     )
     if _env_supports_fast_training(probe_env):
         probe_state = probe_env.fast_reset(seed=seed)
@@ -2985,13 +2988,13 @@ class _CheckpointEvalTracker:
             max_steps=self.max_steps,
             episodes=self.checkpoint_eval_episodes,
             seed=(self.seed + completed) if self.seed is not None else None,
-            backend="cpp" if self.matchup.cpp_engine_dir else "auto",
+            backend=DEFAULT_TALISHAR_BACKEND,
             eval_label="Checkpoint eval (self-play)",
             live_progress_path=live_progress_path,
         )
         vs_logic: Optional[dict[str, Any]] = None
         logic_vs_logic: Optional[dict[str, Any]] = None
-        if self.matchup.cpp_engine_dir:
+        if self.checkpoint_eval_episodes > 0:
             from train_play import (  # noqa: PLC0415
                 evaluate_agent_vs_logic_both_seats,
                 evaluate_logic_vs_logic,
@@ -3005,7 +3008,7 @@ class _CheckpointEvalTracker:
                 max_steps=self.max_steps,
                 episodes=self.checkpoint_eval_episodes,
                 seed=(self.seed + completed) if self.seed is not None else None,
-                backend="cpp",
+                backend=DEFAULT_TALISHAR_BACKEND,
                 eval_label_prefix="Checkpoint eval vs logic",
                 live_progress_path=live_progress_path,
             )
@@ -3016,13 +3019,9 @@ class _CheckpointEvalTracker:
                 max_steps=self.max_steps,
                 episodes=self.checkpoint_eval_episodes,
                 seed=(self.seed + completed + 100_000) if self.seed is not None else None,
-                backend="cpp",
+                backend=DEFAULT_TALISHAR_BACKEND,
                 eval_label="Checkpoint eval logic vs logic",
                 live_progress_path=live_progress_path,
-            )
-        else:
-            print(
-                "  Checkpoint eval vs logic: skipped (no C++ engine for matchup)"
             )
         record = {
             "matchup": self.matchup.name,
@@ -3196,7 +3195,7 @@ def _train_matchup_parallel_seeds(
     show_frontend: bool,
     frontend_url: Optional[str],
     n_workers: int,
-    build_cpp_engine: bool = True,
+    build_cpp_engine: bool = False,
     require_cpp_engine: bool = False,
 ) -> dict:
     workers_per_seed = workers_per_parallel_seed(n_workers, parallel_seeds)
@@ -3395,7 +3394,7 @@ def train_matchup(
     checkpoint_interval_pct: float = DEFAULT_CHECKPOINT_INTERVAL_PCT,
     checkpoint_interval: Optional[int] = None,
     checkpoint_eval_episodes: int = DEFAULT_CHECKPOINT_EVAL_EPISODES,
-    build_cpp_engine: bool = True,
+    build_cpp_engine: bool = False,
     require_cpp_engine: bool = False,
     _seed_run_capture: Optional[dict[str, Any]] = None,
     _skip_cache_converge: bool = False,
@@ -3415,12 +3414,15 @@ def train_matchup(
         )
         matchup.cpp_engine_dir = None
 
-    ensure_matchup_cpp_engine(
-        matchup,
-        base_url=base_url,
-        build=build_cpp_engine,
-        require=require_cpp_engine,
-    )
+    if build_cpp_engine or require_cpp_engine:
+        ensure_matchup_cpp_engine(
+            matchup,
+            base_url=base_url,
+            build=build_cpp_engine,
+            require=require_cpp_engine,
+        )
+    else:
+        matchup.cpp_engine_dir = None
 
     if parallel_seeds > 1 and _seed_run_capture is None:
         return _train_matchup_parallel_seeds(
@@ -3472,7 +3474,7 @@ def train_matchup(
         )
         write_unified_random_matchups_dashboard(out_dir, auto_refresh_seconds=5.0)
 
-    if matchup.cpp_engine_dir:
+    if build_cpp_engine and matchup.cpp_engine_dir:
         print(f"  C++ engine : {matchup.cpp_engine_dir}")
 
     if cache_store is None:
@@ -3556,14 +3558,20 @@ def train_matchup(
             if attempt == 0:
                 print(f"  CreateGame failed ({exc}), restarting Talishar Docker...")
                 subprocess.run(
-                    ["docker", "compose", "restart"],
-                    cwd=REPO_ROOT / "Talishar",
+                    ["docker", "compose", "restart", "web-server"],
+                    cwd=REPO_ROOT,
                     capture_output=True,
                     check=False,
                 )
                 time.sleep(5)
             else:
                 raise
+
+    _announce_training_backend(
+        probe_env,
+        label="matchup training",
+        require_fast_training=True,
+    )
 
     unified_bundle = _bootstrap_unified_policy(cache_store, probe_env, seed)
     unified_policy = unified_bundle.policy
@@ -3581,8 +3589,14 @@ def train_matchup(
 
     use_fast_parallel = _env_supports_fast_training(probe_env)
     rollout_workers = max(1, int(n_workers))
-    if use_fast_parallel and rollout_workers == 1:
-        print("  Using C++ fast-path rollouts (single worker)")
+    if use_fast_parallel:
+        backend_label = _fast_rollout_backend_label(probe_env)
+        worker_note = (
+            f" ({rollout_workers} workers)"
+            if rollout_workers > 1
+            else " (single worker)"
+        )
+        print(f"  Using {backend_label} fast-path rollouts{worker_note}")
 
     if n_workers <= 1 and probe_env is not None:
         env = probe_env
@@ -3723,8 +3737,8 @@ def train_matchup(
                     if attempt == 0:
                         print(f"  CreateGame failed ({exc}), restarting Talishar Docker...")
                         subprocess.run(
-                            ["docker", "compose", "restart"],
-                            cwd=REPO_ROOT / "Talishar",
+                            ["docker", "compose", "restart", "web-server"],
+                            cwd=REPO_ROOT,
                             capture_output=True,
                             check=False,
                         )
@@ -3984,7 +3998,7 @@ def run_matchup_training(
     checkpoint_interval: Optional[int] = None,
     checkpoint_eval_episodes: int = DEFAULT_CHECKPOINT_EVAL_EPISODES,
     skip_converged: bool = True,
-    build_cpp_engine: bool = True,
+    build_cpp_engine: bool = False,
     require_cpp_engine: bool = False,
 ) -> tuple[list[dict], list[str]]:
     from agent_cache import AgentCacheStore

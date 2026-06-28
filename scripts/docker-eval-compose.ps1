@@ -20,6 +20,6 @@ function Initialize-FabDockerEvalCompose {
 
 function Write-FabDockerEvalComposeNote {
     if ($env:FAB_DOCKER_STACK -eq "eval") {
-        Write-Host "[docker] Eval stack — Talishar backend + GUI (no Talishar-FE / Playwright)"
+        Write-Host "[docker] Eval stack - Talishar backend + GUI (no Talishar-FE / Playwright)"
     }
 }

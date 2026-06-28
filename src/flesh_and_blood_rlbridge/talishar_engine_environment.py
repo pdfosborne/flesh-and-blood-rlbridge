@@ -94,6 +94,7 @@ from .obs_alignment import (
     cpp_obs_alignment_enabled,
 )
 from .player_observation import (
+    ACTION_CAPACITY,
     PLAYER_OBS_SCHEMA_VERSION,
     player_observation_payload,
     player_observation_vector,
@@ -126,6 +127,7 @@ from .talishar_default_policy import (
     _BLOCK_PHASES as _dp_block_phases,
     _DEFENSE_PHASES as _dp_defense_phases,
 )
+from .talishar_fast_client import DEFAULT_TALISHAR_URL, TalisharFastClient
 from .talishar_oracle import TalisharConnectionError
 
 # ── Optional C++ engine integration ──────────────────────────────────────────
@@ -154,6 +156,10 @@ _PRIORITY_POLL_INTERVAL = 0.15
 _PRIORITY_MAX_POLLS = 120
 _PRIORITY_DEADLOCK_POLLS = 12
 _PRIORITY_STEP_SYNC_POLLS = 40
+_FAST_PRIORITY_POLL_INTERVAL = 0.02
+_FAST_PRIORITY_MAX_POLLS = 15
+_FAST_PRIORITY_DEADLOCK_POLLS = 6
+_FAST_PRIORITY_STEP_SYNC_POLLS = 8
 _HTTP_REQUEST_RETRIES = 6
 _HTTP_RETRY_BASE_SLEEP_S = 0.5
 _DISABLE_CARD_HOVER_STORAGE_KEY = "talishar-disable-card-hover"
@@ -268,7 +274,8 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         block_max_pitch_value: int = 3,
         block_min_resource_cost: int = 0,
         # C++ engine options ─────────────────────────────────────────────────
-        use_cpp_engine: bool = True,
+        use_cpp_engine: bool = False,
+        talishar_backend: str = "fast",
         cpp_engine_cache_dir: Optional[str] = None,
         # Override the deck names used *only* for C++ engine cache lookup.
         # Useful when the game files use UUID-based names (Phase 3) but the
@@ -297,7 +304,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         enable_frontend_card_hover: bool = False,
     ) -> None:
         self._base_url = (
-            base_url or os.environ.get("TALISHAR_URL", "http://localhost")
+            base_url or os.environ.get("TALISHAR_URL", DEFAULT_TALISHAR_URL)
         ).rstrip("/")
         self._frontend_url = (
             frontend_url or os.environ.get("TALISHAR_FE_URL", "http://localhost:5173")
@@ -344,16 +351,16 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             engine_name="talishar_http",
             enabled=self._enable_combat_tracker,
         )
-        self._cpp_obs_alignment = (
-            cpp_obs_alignment_enabled()
-            if cpp_obs_alignment is None
-            else bool(cpp_obs_alignment)
-        )
+        self._talishar_backend_requested = str(talishar_backend or "auto").strip().lower()
+        self._resolved_talishar_backend = "http"
+        self._fast_client: Optional[TalisharFastClient] = None
+        self._rlstep_available = False
+        alignment_default = cpp_obs_alignment_enabled() if cpp_obs_alignment is None else bool(cpp_obs_alignment)
+        self._cpp_obs_alignment = alignment_default
 
         # HTTP session with connection pooling and automatic retry on transient
-        # server errors.  One persistent TCP connection is reused for all steps
-        # in an episode (keep-alive), eliminating per-step TCP handshake cost.
-        self._session: requests.Session = self._make_session()
+        # server errors.  Fast backend uses keep-alive via TalisharFastClient.
+        self._session: requests.Session = self._make_session(keep_alive=False)
 
         # Per-episode state
         self._game_name: Optional[str] = None
@@ -464,6 +471,189 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                     stacklevel=2,
                 )
 
+        self._finalize_talishar_backend(use_cpp_engine=use_cpp_engine)
+
+    def _finalize_talishar_backend(self, *, use_cpp_engine: bool) -> None:
+        """Resolve fast/http backend and observation alignment after C++ probe."""
+        if self._using_cpp:
+            return
+        requested = self._talishar_backend_requested
+        if requested == "http":
+            self._resolved_talishar_backend = "http"
+        elif requested in ("fast", "auto", "cpp"):
+            self._fast_client = TalisharFastClient(
+                self._base_url,
+                request_timeout=self._request_timeout,
+                keep_alive=True,
+            )
+            self._session = self._fast_client.session
+            self._resolved_talishar_backend = "fast"
+            self._rlstep_available = self._fast_client.probe_rlstep()
+            self._combat_tracker._engine_name = "talishar_fast"  # noqa: SLF001
+        else:
+            self._resolved_talishar_backend = "http"
+        # Full Talishar backends use native obs — alignment is C++-only.
+        self._cpp_obs_alignment = False
+
+    @property
+    def _using_fast_talishar(self) -> bool:
+        return self._resolved_talishar_backend == "fast" and not self._using_cpp
+
+    @property
+    def talishar_backend(self) -> str:
+        if self._using_cpp:
+            return "cpp"
+        return self._resolved_talishar_backend
+
+    def _priority_poll_interval(self) -> float:
+        return _FAST_PRIORITY_POLL_INTERVAL if self._using_fast_talishar else _PRIORITY_POLL_INTERVAL
+
+    def _priority_max_polls(self) -> int:
+        return _FAST_PRIORITY_MAX_POLLS if self._using_fast_talishar else _PRIORITY_MAX_POLLS
+
+    def _priority_deadlock_polls(self) -> int:
+        return _FAST_PRIORITY_DEADLOCK_POLLS if self._using_fast_talishar else _PRIORITY_DEADLOCK_POLLS
+
+    def _priority_step_sync_polls(self) -> int:
+        return (
+            _FAST_PRIORITY_STEP_SYNC_POLLS
+            if self._using_fast_talishar
+            else _PRIORITY_STEP_SYNC_POLLS
+        )
+
+    def _absolute_p1_p2_health(self, state: dict[str, Any]) -> tuple[int, int]:
+        acting_hp = int(state.get("playerHealth", self._player_hp) or 0)
+        opp_hp = int(state.get("opponentHealth", self._opp_hp) or 0)
+        if self._acting_player_id == 1:
+            return acting_hp, opp_hp
+        return opp_hp, acting_hp
+
+    def _fast_training_unavailable_reasons(self) -> list[str]:
+        if self._using_cpp:
+            return ["delegating to C++ engine"]
+        if not self._using_fast_talishar:
+            return ["talishar_backend is not fast"]
+        if self._fast_client is None:
+            return ["TalisharFastClient not initialized"]
+        return []
+
+    def _apply_rlstep_states(self, resp: dict[str, Any]) -> dict[str, Any]:
+        if resp.get("notYourTurn"):
+            server_current = int(resp.get("currentPlayer", self._acting_player_id))
+            self._acting_player_id = server_current
+            self._auth_key = self._auth_key_for(server_current)
+        states = resp.get("states") or {}
+        for pid in (1, 2):
+            raw = states.get(str(pid)) or states.get(pid)
+            if not isinstance(raw, dict):
+                continue
+            if raw.get("havePriority", False) or self._is_game_over(raw):
+                return self._adopt_player_state(raw, pid)
+        return self._resolve_priority_from_states(states)
+
+    def _resolve_priority_from_states(
+        self,
+        states: dict[Any, Any],
+    ) -> dict[str, Any]:
+        normalized: dict[int, dict[str, Any]] = {}
+        for key, value in states.items():
+            if not isinstance(value, dict):
+                continue
+            try:
+                pid = int(key)
+            except (TypeError, ValueError):
+                continue
+            normalized[pid] = value
+        if not normalized:
+            return self._last_state
+        inferred = self._infer_priority_player(normalized)
+        if inferred is not None:
+            return self._adopt_player_state(normalized[inferred], inferred)
+        return self._adopt_player_state(normalized.get(1, {}), 1)
+
+    def _submit_action_and_sync(
+        self,
+        mode: int,
+        button_input: str,
+        *,
+        player_id: Optional[int] = None,
+    ) -> dict[str, Any]:
+        pid = player_id if player_id is not None else self._acting_player_id
+        if self._using_fast_talishar and self._rlstep_available and self._fast_client:
+            payload: dict[str, Any] = {
+                "gameName": self._game_name or "",
+                "playerID": pid,
+                "authKey": self._auth_key_for(pid),
+                "mode": int(mode),
+            }
+            if button_input:
+                payload["buttonInput"] = button_input
+                payload["cardID"] = button_input
+            resp = self._fast_client.post_rlstep(payload)
+            if resp.get("success"):
+                state = self._apply_rlstep_states(resp)
+                try:
+                    self._last_update = int(resp.get("lastUpdate", self._last_update))
+                except (TypeError, ValueError):
+                    pass
+                return state
+        self._submit_action(mode, button_input, player_id=pid)
+        return self._sync_after_action()
+
+    def _sync_after_action(self) -> dict[str, Any]:
+        if self._using_fast_talishar:
+            if self._self_play:
+                return self._wait_for_any_priority(
+                    max_polls=self._priority_max_polls(),
+                    interval=self._priority_poll_interval(),
+                )
+            return self._poll_until_priority(
+                interval=self._priority_poll_interval(),
+                max_polls=self._priority_max_polls(),
+            )
+        time.sleep(0.35)
+        if self._self_play:
+            return self._wait_for_any_priority()
+        return self._poll_until_priority()
+
+    def _build_fast_step_result(
+        self,
+        *,
+        reward: float,
+        terminated: bool,
+        truncated: bool,
+        winner: int = -1,
+        loop_guard: Optional[Any] = None,
+    ) -> dict[str, Any]:
+        legal_raw = self._legal_actions(self._last_state)
+        legal = self._filter_legal_actions(self._last_state, legal_raw)
+        obs_vec = np.asarray(self._last_observation_vec, dtype=np.float64)
+        p1_hp, p2_hp = self._absolute_p1_p2_health(self._last_state)
+        result: dict[str, Any] = {
+            "obs_vec": obs_vec,
+            "legal_count": len(legal),
+            "acting_player_id": self._acting_player_id,
+            "reward": float(reward),
+            "terminated": terminated,
+            "truncated": truncated,
+            "winner": winner,
+            "p1_health": p1_hp,
+            "p2_health": p2_hp,
+            "p1_deck": int(self._last_state.get("playerDeckCount", 0) or 0)
+            if self._acting_player_id == 1
+            else int(self._last_state.get("opponentDeckCount", 0) or 0),
+            "p2_deck": int(self._last_state.get("opponentDeckCount", 0) or 0)
+            if self._acting_player_id == 1
+            else int(self._last_state.get("playerDeckCount", 0) or 0),
+            "turn_no": int(self._last_state.get("turnNo", 0) or 0),
+        }
+        if loop_guard is not None:
+            result["loop_guard_forced_pass"] = bool(getattr(loop_guard, "force_pass", False))
+            result["loop_guard_reason"] = getattr(loop_guard, "reason", "")
+            result["turn_steps"] = getattr(loop_guard, "turn_steps", 0)
+            result["decision_loop_streak"] = getattr(loop_guard, "loop_streak", 0)
+        return result
+
     # ── C++ engine delegation helpers ────────────────────────────────────────
 
     @property
@@ -473,15 +663,14 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
 
     @property
     def supports_fast_training(self) -> bool:
-        return bool(
-            self._using_cpp
-            and getattr(self._cpp_env, "supports_fast_training", False)
-        )
+        if self._using_cpp:
+            return bool(getattr(self._cpp_env, "supports_fast_training", False))
+        return self._using_fast_talishar
 
     def fast_action_capacity(self) -> int:
         if self._using_cpp and hasattr(self._cpp_env, "fast_action_capacity"):
             return int(self._cpp_env.fast_action_capacity())  # type: ignore[union-attr]
-        return 32
+        return ACTION_CAPACITY
 
     def fast_reset(
         self,
@@ -489,44 +678,223 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         *,
         starting_player_id: int = 1,
     ) -> dict[str, Any]:
-        if not self._using_cpp or not hasattr(self._cpp_env, "fast_reset"):
-            raise RuntimeError("fast_reset requires a C++ engine with fast training support")
-        result = self._cpp_env.fast_reset(  # type: ignore[union-attr]
-            seed=seed,
-            starting_player_id=starting_player_id,
-        )
-        self._acting_player_id = int(result["acting_player_id"])
-        self._player_hp = int(result["p1_health"])
-        self._opp_hp = int(result["p2_health"])
+        if self._using_cpp and hasattr(self._cpp_env, "fast_reset"):
+            result = self._cpp_env.fast_reset(  # type: ignore[union-attr]
+                seed=seed,
+                starting_player_id=starting_player_id,
+            )
+            self._acting_player_id = int(result["acting_player_id"])
+            self._player_hp = int(result["p1_health"])
+            self._opp_hp = int(result["p2_health"])
+            self._steps = 0
+            return result
+        if not self._using_fast_talishar:
+            raise RuntimeError(
+                "fast_reset requires talishar_backend='fast' or use_cpp_engine=True"
+            )
+
+        _ = seed  # Talishar shuffles server-side; seed not wired yet.
+        self._session.cookies.clear()
+        self._last_update = 0
+        self._game_name, self._p1_auth_key, self._p2_auth_key = self._create_game()
+        self._acting_player_id = 2 if int(starting_player_id) == 2 else 1
+        started_key = self._start_game(self._game_name)
+        if started_key:
+            self._p1_auth_key = started_key
+        self._auth_key = self._auth_key_for(self._acting_player_id)
+
+        if self._self_play:
+            self._last_state = self._wait_for_any_priority(
+                max_polls=self._priority_step_sync_polls(),
+                interval=self._priority_poll_interval(),
+            )
+        else:
+            self._last_state = self._poll_until_priority(
+                max_polls=self._priority_max_polls(),
+                interval=self._priority_poll_interval(),
+            )
+        self._player_hp = int(self._last_state.get("playerHealth", 20))
+        self._opp_hp = int(self._last_state.get("opponentHealth", 20))
         self._steps = 0
-        return result
+        self._deck_nonzero_ever_seen = False
+        self._loop_guard.reset()
+        self._multi_select_inputs = []
+        self._pending_chk_inputs = None
+        self._reset_repeat_tracking(
+            turn_no=int(self._last_state.get("turnNo", 0) or 0),
+            acting_player_id=self._acting_player_id,
+        )
+        self._refresh_episode_contexts(
+            first_player=_dp_to_int(self._last_state.get("firstPlayer"), 1),
+        )
+        self._initialized = True
+        legal_actions = self._legal_actions(self._last_state)
+        self._encode_observation(self._last_state, legal_actions)
+        return self._build_fast_step_result(
+            reward=0.0,
+            terminated=self._is_game_over(self._last_state),
+            truncated=False,
+        )
 
     def fast_step_index(self, action_index: int) -> dict[str, Any]:
-        if not self._using_cpp or not hasattr(self._cpp_env, "fast_step_index"):
-            raise RuntimeError("fast_step_index requires a C++ engine with fast training support")
-        result = dict(self._cpp_env.fast_step_index(action_index))  # type: ignore[union-attr]
-        self._acting_player_id = int(result["acting_player_id"])
-        self._player_hp = int(result["p1_health"])
-        self._opp_hp = int(result["p2_health"])
-        self._steps = int(getattr(self._cpp_env, "_steps", self._steps + 1))  # type: ignore[union-attr]
-        if "truncated" not in result:
-            terminated = bool(result.get("terminated", False))
-            result["truncated"] = (
-                not terminated and self._steps >= self._max_turns
+        if self._using_cpp and hasattr(self._cpp_env, "fast_step_index"):
+            result = dict(self._cpp_env.fast_step_index(action_index))  # type: ignore[union-attr]
+            self._acting_player_id = int(result["acting_player_id"])
+            self._player_hp = int(result["p1_health"])
+            self._opp_hp = int(result["p2_health"])
+            self._steps = int(getattr(self._cpp_env, "_steps", self._steps + 1))  # type: ignore[union-attr]
+            if "truncated" not in result:
+                terminated = bool(result.get("terminated", False))
+                result["truncated"] = (
+                    not terminated and self._steps >= self._max_turns
+                )
+            return result
+        if not self._using_fast_talishar:
+            raise RuntimeError(
+                "fast_step_index requires talishar_backend='fast' or use_cpp_engine=True"
             )
-        return result
+
+        state = self._last_state
+        if not self._is_game_over(state):
+            prior_acting = self._acting_player_id
+            if not state.get("havePriority", False) or player_must_wait(state):
+                state = self._ensure_acting_priority(
+                    max_polls=self._priority_step_sync_polls(),
+                )
+                if (
+                    (not state.get("havePriority", False) or player_must_wait(state))
+                    and self._self_play
+                ):
+                    state = self._wait_for_any_priority(
+                        max_polls=self._priority_step_sync_polls(),
+                        interval=self._priority_poll_interval(),
+                    )
+            if player_must_wait(state):
+                legal_actions = self._legal_actions(state)
+                self._encode_observation(state, legal_actions)
+                return self._build_fast_step_result(
+                    reward=self._step_penalty,
+                    terminated=self._is_game_over(state),
+                    truncated=False,
+                )
+            self._last_state = state
+
+        legal_actions = self._legal_actions(state)
+        loop_guard = self._loop_guard_for_step(state, legal_actions)
+        mode, button_input = self._parse_action(str(action_index), legal_actions)
+        if loop_guard.force_pass:
+            mode, button_input = self._force_pass_submission(legal_actions)
+        mode, button_input = self._sanitize_revert_submission(
+            mode,
+            button_input,
+            legal_actions,
+            state,
+        )
+
+        prev_player_hp = self._player_hp
+        prev_opp_hp = self._opp_hp
+        try:
+            new_state = self._submit_action_and_sync(mode, button_input)
+        except RuntimeError as exc:
+            msg = str(exc)
+            if "ProcessInput.php" not in msg and "RLStep.php" not in msg:
+                raise
+            try:
+                new_state = self._submit_action_and_sync(99, "")
+            except Exception:
+                new_state = self._sync_after_action()
+
+        self._steps += 1
+        new_player_hp = int(new_state.get("playerHealth", self._player_hp))
+        new_opp_hp = int(new_state.get("opponentHealth", self._opp_hp))
+        terminated = self._is_game_over(new_state)
+        truncated = not terminated and self._steps >= self._max_turns
+
+        action_key = (mode, button_input)
+        turn_no = int(new_state.get("turnNo", 0) or 0)
+        if terminated or truncated:
+            self._reset_repeat_tracking(
+                turn_no=turn_no,
+                acting_player_id=self._acting_player_id,
+            )
+            repeat_penalty = 0.0
+        else:
+            repeat_penalty = self._compute_repeat_action_penalty(
+                action_key,
+                turn_no=turn_no,
+                acting_player_id=self._acting_player_id,
+            )
+
+        if terminated:
+            won = self._did_player_win(new_player_hp, new_opp_hp)
+            draw = self._is_draw(new_state)
+            exhausted_loss = self._is_resource_exhausted_loss(new_state)
+            if draw:
+                reward = 0.0
+            elif exhausted_loss:
+                reward = -1.0 if self._acting_player_id == 1 else 1.0
+            else:
+                reward = 1.0 if won else -1.0
+            winner = 0 if reward > 0 else (1 if reward < 0 else -1)
+        elif truncated:
+            reward = self._truncation_penalty
+            winner = -1
+        else:
+            dmg_dealt = max(0, prev_opp_hp - new_opp_hp)
+            dmg_taken = max(0, prev_player_hp - new_player_hp)
+            scale = self._damage_reward_scale
+            reward = dmg_dealt * scale - dmg_taken * scale + self._step_penalty
+            winner = -1
+        reward += repeat_penalty
+
+        self._player_hp = new_player_hp
+        self._opp_hp = new_opp_hp
+        self._last_state = new_state
+        new_legal_actions = self._legal_actions(new_state)
+        self._encode_observation(new_state, new_legal_actions)
+        return self._build_fast_step_result(
+            reward=reward,
+            terminated=terminated,
+            truncated=truncated,
+            winner=winner,
+            loop_guard=loop_guard,
+        )
 
     def fast_logic_policy_action_index(self) -> int:
-        if not self._using_cpp or not hasattr(self._cpp_env, "logic_policy_action_index"):
-            raise RuntimeError(
-                "fast_logic_policy_action_index requires a C++ engine with fast training support"
+        if self._using_cpp and hasattr(self._cpp_env, "logic_policy_action_index"):
+            return int(
+                self._cpp_env.logic_policy_action_index(  # type: ignore[union-attr]
+                    max_pitch_value=self._block_max_pitch_value,
+                    min_resource_cost=self._block_min_resource_cost,
+                )
             )
-        return int(
-            self._cpp_env.logic_policy_action_index(  # type: ignore[union-attr]
-                max_pitch_value=self._block_max_pitch_value,
-                min_resource_cost=self._block_min_resource_cost,
+
+        if not self._last_state:
+            return 0
+        legal = self._legal_actions(self._last_state)
+        if not legal:
+            return 0
+
+        loop_guard = self._loop_guard_for_step(self._last_state, legal)
+        if loop_guard.force_pass:
+            pass_action = first_pass_action(legal)
+            if pass_action is not None:
+                for index, action in enumerate(legal):
+                    if action is pass_action or action == pass_action:
+                        return index
+            pass_index = next(
+                (i for i, a in enumerate(legal) if _is_pass_action(a)),
+                0,
             )
+            return pass_index
+
+        idx = choose_talishar_action_index(
+            legal,
+            self._last_state,
+            max_pitch_value=self._block_max_pitch_value,
+            min_resource_cost=self._block_min_resource_cost,
         )
+        return min(max(0, int(idx)), len(legal) - 1)
 
     def _tracker_state_snapshot(
         self,
@@ -655,7 +1023,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
 
     # ── HTTP helpers ──────────────────────────────────────────────────────────
 
-    def _make_session(self) -> requests.Session:
+    def _make_session(self, *, keep_alive: bool = False) -> requests.Session:
         """Build a requests.Session with connection pooling, keep-alive, and retry."""
         session = requests.Session()
         retry = Retry(
@@ -676,7 +1044,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         session.mount("https://", adapter)
         session.headers.update({
             "User-Agent": "TalisharRLEnv/1.0",
-            "Connection": "close",
+            "Connection": "keep-alive" if keep_alive else "close",
         })
         return session
 
@@ -2160,29 +2528,19 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                   f"mode={mode} btn={button_input!r}  "
                   f"→ POST ProcessInput.php...", flush=True)
         try:
-            self._submit_action(mode, button_input)
+            new_state = self._submit_action_and_sync(mode, button_input)
         except RuntimeError as exc:
             msg = str(exc)
-            if "ProcessInput.php" not in msg or "non-JSON response" not in msg:
+            if "ProcessInput.php" not in msg and "RLStep.php" not in msg and "non-JSON response" not in msg:
                 raise
-            # Defensive fallback for Talishar PHP warning pages on specific card
-            # interactions: pass priority and continue the episode.
             try:
-                self._submit_action(99, "")
+                new_state = self._submit_action_and_sync(99, "")
             except Exception:
-                pass
+                new_state = self._sync_after_action()
 
         if self._verbose:
-            print(f"    [step {self._steps + 1}] ProcessInput.php done, "
+            print(f"    [step {self._steps + 1}] action submitted, "
                   f"waiting for priority...", flush=True)
-        # Brief pause so Talishar has time to finish writing the gamestate file
-        # before we poll GetNextTurn.php.  Without this a race condition causes
-        # "ParseGamestate: gamestate too short" on the very first poll.
-        time.sleep(0.35)
-        if self._self_play:
-            new_state = self._wait_for_any_priority()
-        else:
-            new_state = self._poll_until_priority()
         if self._verbose:
             print(f"    [step {self._steps + 1}] priority → P{self._acting_player_id}  "
                   f"phase={self._phase_str(new_state)!r}  "

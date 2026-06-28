@@ -59,6 +59,7 @@ from runtime_defaults import (  # noqa: E402
     DEFAULT_STALL_MAX_SINGLE_LOW_HAND_TURNS,
     DEFAULT_STALL_MIN_ATTACK_HAND,
     DEFAULT_STALL_NO_DAMAGE_TURNS,
+    DEFAULT_TALISHAR_BACKEND,
 )
 from fab_bridge.unified_results import (  # noqa: E402
     find_latest_unified_checkpoint_metadata,
@@ -511,6 +512,7 @@ def _run_render_episode(
         self_play=True,
         render_mode="rgb_array",
         use_cpp_engine=False,
+        talishar_backend=DEFAULT_TALISHAR_BACKEND,
     )
 
     def _record_frame(obs: Any, path: Path) -> None:
@@ -1017,6 +1019,7 @@ def _run_eval_episode_batch(
         self_play=True,
         render_mode=None,
         use_cpp_engine=False,
+        talishar_backend=DEFAULT_TALISHAR_BACKEND,
         verbose=verbose,
     )
     logs: list[dict[str, Any]] = []

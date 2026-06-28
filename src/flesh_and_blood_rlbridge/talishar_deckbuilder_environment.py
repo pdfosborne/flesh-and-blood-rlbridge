@@ -245,7 +245,7 @@ class TalisharDeckBuilderEnvironment(rlbridgeEnvironment):
         max_build_steps: int = 200,
         step_penalty: float = 0.005,
         render_mode: Optional[str] = None,
-        use_cpp_engine: bool = True,
+        use_cpp_engine: bool = False,
         cpp_engine_dir: Optional[str] = None,
         cpp_engine_cache_dir: Optional[str] = None,
         cpp_engine_deck1: Optional[str] = None,
@@ -640,6 +640,7 @@ class TalisharDeckBuilderEnvironment(rlbridgeEnvironment):
                 max_turns=60,
                 self_play=True,
                 use_cpp_engine=False,
+                talishar_backend="fast",
             )
             try:
                 return run_matchup_win_rate_eval(

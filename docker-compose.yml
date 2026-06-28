@@ -23,6 +23,9 @@ services:
           cp /fab-bridge-stubs/APIKeys.local.php /var/www/html/game/APIKeys/APIKeys.php
         fi
         chmod 644 /var/www/html/game/APIKeys/APIKeys.php
+        if [ -d /fab-bridge-stubs/rl-bridge/APIs ]; then
+          cp -f /fab-bridge-stubs/rl-bridge/APIs/*.php /var/www/html/game/APIs/
+        fi
         exec apache2-foreground
 
   # Clone Talishar-FE into the repo checkout on first compose up
@@ -85,8 +88,6 @@ services:
     depends_on:
       web-server:
         condition: service_started
-      talishar-fe:
-        condition: service_healthy
     restart: unless-stopped
 
   # Ensure host fab-* wrappers in bin/ are executable after compose up --build

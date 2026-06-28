@@ -109,6 +109,9 @@ def _runtime_backend_label(env: Any) -> str:
     try:
         if bool(getattr(env, "_using_cpp", False)):
             return "C++ engine"
+        if bool(getattr(env, "_using_fast_talishar", False)):
+            backend = getattr(env, "talishar_backend", "fast")
+            return f"Talishar {backend}"
     except Exception:
         pass
     return "HTTP Talishar"

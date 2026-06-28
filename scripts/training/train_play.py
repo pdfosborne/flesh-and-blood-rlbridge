@@ -90,6 +90,7 @@ from play_outcome_stats import (  # noqa: E402
 from runtime_defaults import (  # noqa: E402
     DEFAULT_CHECKPOINT_EVAL_EPISODES,
     DEFAULT_CHECKPOINT_INTERVAL_PCT,
+    DEFAULT_TALISHAR_BACKEND,
     RUNTIME,
 )
 
@@ -113,6 +114,7 @@ try:
         DEFAULT_N_EPISODES,
         DEFAULT_WARMUP_EPISODES,
         DEFAULT_WARMUP_BASELINE_EVAL_EPISODES,
+        DEFAULT_TALISHAR_BACKEND,
     )
     from agent_cache import (  # noqa: E402
         AgentCacheStore,
@@ -132,6 +134,7 @@ except ImportError:
     DEFAULT_N_EPISODES = RUNTIME.dual_matchup.episodes
     DEFAULT_WARMUP_EPISODES = RUNTIME.play.warmup_episodes
     DEFAULT_WARMUP_BASELINE_EVAL_EPISODES = RUNTIME.play.warmup_baseline_eval_episodes
+    DEFAULT_TALISHAR_BACKEND = "fast"
 
 
 def resolve_play_checkpoint_interval(
@@ -1110,11 +1113,15 @@ def run_phase3_play(
     try:
         print(f"  Runtime backend (Phase 3): {_runtime_backend_label(probe_env)}")
         _announce_training_backend(probe_env, label="Phase 3 training")
-        use_cpp_backend = bool(getattr(probe_env, "_using_cpp", False))
+        use_parallel_rollouts = _env_supports_fast_training(probe_env)
+        using_cpp = bool(getattr(probe_env, "_using_cpp", False))
+        using_fast_talishar = bool(getattr(probe_env, "_using_fast_talishar", False))
         train_runtime_backend = (
-            "C++ engine" if use_cpp_backend else "HTTP Talishar"
+            "C++ engine"
+            if using_cpp
+            else ("Talishar fast" if using_fast_talishar else "HTTP Talishar")
         )
-        if cpp_engine_dir and not use_cpp_backend:
+        if cpp_engine_dir and not using_cpp:
             raise RuntimeError(
                 f"C++ engine required (--cpp-engine-dir={cpp_engine_dir}) but "
                 f"failed to load for Python {sys.version_info.major}.{sys.version_info.minor}. "
@@ -1134,14 +1141,14 @@ def run_phase3_play(
             assets_path=assets_path,
         )
 
-    if use_cpp_backend:
+    if use_parallel_rollouts:
         print(
             f"  Parallel play: {n_episodes} episodes, "
             f"{n_workers} worker(s)"
         )
     elif n_workers > 1:
         print(
-            f"  WARNING: HTTP Talishar cannot run {n_workers} parallel game sessions — "
+            f"  WARNING: legacy HTTP Talishar cannot run {n_workers} parallel game sessions — "
             "capping workers to 1."
         )
         n_workers = 1
@@ -1230,7 +1237,7 @@ def run_phase3_play(
     def _record_checkpoint_eval(completed: int) -> None:
         if (
             checkpoint_eval_episodes <= 0
-            or not use_cpp_backend
+            or not use_parallel_rollouts
             or opponent_mode != "preset"
         ):
             return
@@ -1249,7 +1256,7 @@ def run_phase3_play(
                 max_steps=max_play_steps,
                 episodes=checkpoint_eval_episodes,
                 seed=(seed + completed) if seed is not None else None,
-                backend="cpp",
+                backend=DEFAULT_TALISHAR_BACKEND,
                 eval_label="Checkpoint eval",
             )
             eval_record = {
@@ -1424,7 +1431,7 @@ def run_phase3_play(
             _after_play_checkpoint(completed)
 
     try:
-        if use_cpp_backend:
+        if use_parallel_rollouts:
             p1_rewards, p2_rewards, train_stats = train_agents_from_both_perspectives_parallel(
                 matchup=matchup,
                 base_url=base_url,
@@ -1615,7 +1622,8 @@ def run_phase3_play(
                 "p1_play_path": str(p1_play_path),
                 "p2_play_path": str(p2_play_path) if p2_agent is not None else None,
                 "matchup": matchup,
-                "use_cpp_backend": use_cpp_backend,
+                "use_parallel_rollouts": use_parallel_rollouts,
+                "use_cpp_backend": using_cpp,
                 "p1_deck_fingerprint": p1_deck_fp,
                 "p2_deck_fingerprint": p2_deck_fp,
                 "temp_deck_files": temp_decks,
@@ -1661,7 +1669,7 @@ def _fast_logic_policy_action_index(env: Any) -> int:
     cpp_env = getattr(env, "_cpp_env", None)
     if cpp_env is not None and hasattr(cpp_env, "logic_policy_action_index"):
         return int(cpp_env.logic_policy_action_index())
-    raise RuntimeError("logic policy fast eval requires a C++ engine")
+    raise RuntimeError("logic policy fast eval requires Talishar fast training support")
 
 
 def _fast_action_for_policy(
@@ -1885,6 +1893,15 @@ def _record_eval_outcome(
     return wins, losses, draws, timeouts, errors
 
 
+def _fast_eval_runtime_backend_label(env: Any) -> str:
+    if bool(getattr(env, "_using_cpp", False)):
+        return "C++ engine fast sampled eval"
+    if bool(getattr(env, "_using_fast_talishar", False)):
+        backend = getattr(env, "talishar_backend", DEFAULT_TALISHAR_BACKEND)
+        return f"Talishar {backend} fast sampled eval"
+    return "Fast sampled eval"
+
+
 def _evaluate_fast_policy_matchup(
     env: Any,
     p1_policy: Any,
@@ -1903,6 +1920,7 @@ def _evaluate_fast_policy_matchup(
     if not _env_supports_fast_training(env):
         return None
 
+    runtime_backend_label = _fast_eval_runtime_backend_label(env)
     wins = losses = draws = timeouts = errors = 0
     anomalies: list[str] = []
     end_state_keys: set[tuple[Any, ...]] = set()
@@ -2043,7 +2061,7 @@ def _evaluate_fast_policy_matchup(
                         "errors": errors,
                         "p1_policy": _policy_label(p1_policy),
                         "p2_policy": _policy_label(p2_policy),
-                        "runtime_backend": "C++ engine fast sampled eval",
+                        "runtime_backend": runtime_backend_label,
                         "updated_at": datetime.now().isoformat(),
                     },
                     indent=2,
@@ -2118,7 +2136,7 @@ def _evaluate_fast_policy_matchup(
         "win_rate_decided": wins / decided,
         "draw_rate": draws / total,
         "timeout_rate": (timeouts + errors) / total,
-        "runtime_backend": "C++ engine fast sampled eval",
+        "runtime_backend": runtime_backend_label,
         "eval_anomalies": anomalies[:20],
         "p1_policy": _policy_label(p1_policy),
         "p2_policy": _policy_label(p2_policy),
@@ -2168,7 +2186,7 @@ def _evaluate_p1_vs_fixed_opponent(
     max_steps: int,
     episodes: int,
     seed: Optional[int] = None,
-    backend: str = "auto",
+    backend: str = DEFAULT_TALISHAR_BACKEND,
     eval_label: str = "Eval",
     live_progress_path: Optional[Path] = None,
     p1_deck_card_ids: Optional[set[str]] = None,
@@ -2176,9 +2194,10 @@ def _evaluate_p1_vs_fixed_opponent(
     """Evaluate frozen P1/P2 policies against each other.
 
     *backend*:
-    - ``auto`` — C++ fast path when available, else HTTP Talishar
+    - ``fast`` — Talishar fast path (default; ``fast_reset`` / ``fast_step_index``)
+    - ``auto`` — alias for ``fast``
     - ``cpp`` — C++ fast path only (raises if unavailable)
-    - ``http`` — HTTP Talishar only
+    - ``http`` — legacy HTTP Talishar only
     """
     empty = {
         "episodes": 0,
@@ -2195,36 +2214,42 @@ def _evaluate_p1_vs_fixed_opponent(
     if not _DUAL_AGENT_AVAILABLE or episodes <= 0:
         return empty
 
-    backend = str(backend or "auto").lower()
-    if backend not in {"auto", "cpp", "http"}:
-        backend = "auto"
+    backend = str(backend or DEFAULT_TALISHAR_BACKEND).lower()
+    if backend == "auto":
+        backend = DEFAULT_TALISHAR_BACKEND
+    if backend not in {DEFAULT_TALISHAR_BACKEND, "cpp", "http", "auto"}:
+        backend = DEFAULT_TALISHAR_BACKEND
     if _is_logic_policy(p1_agent) or _is_logic_policy(p2_agent):
         if backend == "http":
-            raise RuntimeError("logic policy evaluation requires C++ backend")
-        backend = "cpp"
+            raise RuntimeError(
+                "logic policy evaluation requires the fast Talishar or C++ backend"
+            )
 
-    use_cpp = backend != "http"
+    use_cpp = backend == "cpp"
+    talishar_backend = "http" if backend == "http" else DEFAULT_TALISHAR_BACKEND
     env = make_env(
         matchup,
         base_url=base_url,
         game_format=game_format,
         max_turns=max_steps,
         use_cpp_engine=use_cpp,
-        require_fast_training=(backend == "cpp"),
+        talishar_backend=talishar_backend,
+        require_fast_training=backend in {DEFAULT_TALISHAR_BACKEND, "cpp"},
         enable_combat_tracker=True,
     )
     swap_env = None
-    if p2_agent is not None and use_cpp:
+    if p2_agent is not None and backend in {DEFAULT_TALISHAR_BACKEND, "cpp"}:
         swap_env = make_env(
             swapped_matchup(matchup),
             base_url=base_url,
             game_format=game_format,
             max_turns=max_steps,
             use_cpp_engine=use_cpp,
-            require_fast_training=(backend == "cpp"),
+            talishar_backend=talishar_backend,
+            require_fast_training=backend in {DEFAULT_TALISHAR_BACKEND, "cpp"},
             enable_combat_tracker=True,
         )
-    if backend in {"auto", "cpp"}:
+    if backend in {DEFAULT_TALISHAR_BACKEND, "auto", "cpp"}:
         fast_metrics = _evaluate_fast_policy_matchup(
             env,
             p1_agent,
@@ -2243,7 +2268,7 @@ def _evaluate_p1_vs_fixed_opponent(
             finally:
                 if swap_env is not None:
                     swap_env.close()
-            print(f"  {eval_label} backend: C++ engine fast sampled eval")
+            print(f"  {eval_label} backend: {fast_metrics.get('runtime_backend', _fast_eval_runtime_backend_label(env))}")
             return fast_metrics
         if backend == "cpp":
             try:
@@ -2253,6 +2278,15 @@ def _evaluate_p1_vs_fixed_opponent(
                     swap_env.close()
             raise RuntimeError(
                 f"C++ fast eval required for {matchup.name} but unavailable"
+            )
+        if backend == DEFAULT_TALISHAR_BACKEND:
+            try:
+                env.close()
+            finally:
+                if swap_env is not None:
+                    swap_env.close()
+            raise RuntimeError(
+                f"Talishar fast eval required for {matchup.name} but unavailable"
             )
 
     if backend == "cpp":
@@ -2270,6 +2304,7 @@ def _evaluate_p1_vs_fixed_opponent(
             game_format=game_format,
             max_turns=max_steps,
             use_cpp_engine=False,
+            talishar_backend="http",
             require_fast_training=False,
             request_timeout=60.0,
             enable_combat_tracker=True,
@@ -2472,7 +2507,7 @@ def evaluate_policy_matchup(
     max_steps: int,
     episodes: int,
     seed: Optional[int] = None,
-    backend: str = "cpp",
+    backend: str = DEFAULT_TALISHAR_BACKEND,
     eval_label: str = "Eval",
     live_progress_path: Optional[Path] = None,
     p1_deck_card_ids: Optional[set[str]] = None,
@@ -2503,7 +2538,7 @@ def evaluate_fixed_matchup(
     max_steps: int,
     episodes: int,
     seed: Optional[int] = None,
-    backend: str = "auto",
+    backend: str = DEFAULT_TALISHAR_BACKEND,
     eval_label: str = "Eval",
     live_progress_path: Optional[Path] = None,
     p1_deck_card_ids: Optional[set[str]] = None,
@@ -2538,11 +2573,11 @@ def evaluate_logic_vs_logic(
     max_steps: int,
     episodes: int,
     seed: Optional[int] = None,
-    backend: str = "cpp",
+    backend: str = DEFAULT_TALISHAR_BACKEND,
     eval_label: str = "Eval logic vs logic",
     live_progress_path: Optional[Path] = None,
 ) -> dict[str, Any]:
-    """Evaluate C++ logic policy on both seats (deck matchup baseline)."""
+    """Evaluate Talishar logic/heuristic policy on both seats (deck matchup baseline)."""
     empty: dict[str, Any] = {
         "episodes": 0,
         "p1_wins": 0,
@@ -2588,11 +2623,11 @@ def evaluate_agent_vs_logic_both_seats(
     max_steps: int,
     episodes: int,
     seed: Optional[int] = None,
-    backend: str = "cpp",
+    backend: str = DEFAULT_TALISHAR_BACKEND,
     eval_label_prefix: str = "Eval vs logic",
     live_progress_path: Optional[Path] = None,
 ) -> dict[str, Any]:
-    """Evaluate an agent against the C++ logic policy from both seats."""
+    """Evaluate an agent against the Talishar logic policy from both seats."""
     empty: dict[str, Any] = {
         "episodes": 0,
         "agent_win_rate": 0.0,
@@ -3859,6 +3894,7 @@ def run_final_evaluation(
     episode_log: list[dict[str, Any]] = []
     turn_trajectories: list[dict[int, tuple[int, int]]] = []
     episode_damage_breakdowns: list[dict[str, Any]] = []
+    eval_runtime_backend = f"Talishar {DEFAULT_TALISHAR_BACKEND}"
 
     progress_t0 = datetime.now()
 
@@ -3889,99 +3925,142 @@ def run_final_evaluation(
             "losses": losses,
             "draws": draws,
             "timeouts": timeouts,
-            "runtime_backend": "HTTP Talishar",
+            "runtime_backend": eval_runtime_backend,
         }
         live_path = out_dir / "final_eval_live.json"
         live_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
-    backend_printed = False
     try:
-        for ep in range(1, num_eval_episodes + 1):
-            env = TalisharEngineEnvironment(
+        if (
+            _DUAL_AGENT_AVAILABLE
+            and agents.play is not None
+            and hasattr(agents.play, "act_greedy")
+        ):
+            final_matchup = Matchup(
+                name=f"final_{player}_{uuid.uuid4().hex[:8]}",
+                p1_deck=deck_name,
+                p2_deck=opp_name,
+                description=f"Final eval ({player})",
+            )
+            metrics = evaluate_fixed_matchup(
+                final_matchup,
+                agents.play,
                 base_url=base_url,
                 game_format=game_format,
-                local_deck_name=deck_name,
-                opponent_deck_name=opp_name,
-                max_turns=max_steps,
-                self_play=True,
-                render_mode=None,
-                enable_combat_tracker=True,
+                max_steps=max_steps,
+                episodes=num_eval_episodes,
+                backend=DEFAULT_TALISHAR_BACKEND,
+                eval_label=f"[{player}] Final eval",
+                p1_deck_card_ids=set(game_deck.keys()),
             )
-            try:
-                if not backend_printed:
-                    print(f"  [{player}] Runtime backend (final eval): {_runtime_backend_label(env)}")
-                    backend_printed = True
-                result = env.reset(options={"acting_player_id": 1 + ((ep - 1) % 2)})
-                obs = result.observation
-                turn_hp: dict[int, tuple[int, int]] = {}
-                t0, p1_hp0, p2_hp0 = _parse_obs_hp(obs)
-                _track_turn_hp(turn_hp, t0, p1_hp0, p2_hp0)
-                done = False
-                steps = 0
-                terminated = False
-                truncated = False
-                while not done:
-                    if agents.play is not None and hasattr(agents.play, "act"):
-                        action = agents.play.act(obs)
-                    elif agents.play is not None and hasattr(agents.play, "act_greedy"):
-                        action = agents.play.act_greedy(obs)
-                    else:
-                        action = env.sample_action()
-                    step = env.step(action)
-                    obs = step.observation
-                    terminated = bool(step.terminated)
-                    truncated = bool(step.truncated)
-                    done = terminated or truncated
-                    steps += 1
-                    turn_no, p1_hp, p2_hp = _parse_obs_hp(obs)
-                    _track_turn_hp(turn_hp, turn_no, p1_hp, p2_hp)
-
-                obs_data = json.loads(obs) if isinstance(obs, str) else (obs or {})
-                p1_hp, p2_hp = absolute_p1_p2_hp_from_env(env)
-                p1_deck, p2_deck = absolute_p1_p2_deck_from_env(env)
-                if p1_hp is None or p2_hp is None:
-                    p1_hp_f, p2_hp_f = absolute_p1_p2_hp_from_obs(obs_data)
-                    p1_hp = int(p1_hp_f) if p1_hp_f is not None else None
-                    p2_hp = int(p2_hp_f) if p2_hp_f is not None else None
-                if p1_deck is None or p2_deck is None:
-                    p1_deck, p2_deck = absolute_p1_p2_deck_from_obs(obs_data)
-                outcome = classify_p1_episode_outcome(
-                    p1_hp=p1_hp,
-                    p2_hp=p2_hp,
-                    p1_deck=p1_deck,
-                    p2_deck=p2_deck,
-                    terminated=terminated,
-                    truncated=truncated and not terminated,
-                )
-                if outcome == "win":
-                    wins += 1
-                elif outcome == "loss":
-                    losses += 1
-                elif outcome == "draw":
-                    draws += 1
-                else:
-                    timeouts += 1
-
-                turn_trajectories.append(turn_hp)
-                damage_acc = EvalDamageAccumulator(deck_card_ids=set(game_deck.keys()))
-                damage_acc.ingest_trace(env.get_combat_trace())
-                episode_damage_breakdowns.append(damage_acc.to_dict())
-                episode_log.append({
-                    "episode": ep,
-                    "outcome": outcome,
-                    "steps": steps,
-                    "p1_hp": p1_hp,
-                    "p2_hp": p2_hp,
-                    "turns_played": max(turn_hp) if turn_hp else 0,
-                })
-                wr = wins / ep
+            eval_runtime_backend = str(
+                metrics.get("runtime_backend", eval_runtime_backend)
+            )
+            print(f"  [{player}] Runtime backend (final eval): {eval_runtime_backend}")
+            wins = int(metrics.get("p1_wins", 0))
+            losses = int(metrics.get("losses", metrics.get("p2_wins", 0)))
+            draws = int(metrics.get("draws", 0))
+            timeouts = int(metrics.get("timeouts", 0)) + int(metrics.get("errors", 0))
+            if metrics.get("damage_breakdown"):
+                episode_damage_breakdowns.append(metrics["damage_breakdown"])
+            for ep in range(1, num_eval_episodes + 1):
+                wr = wins / ep if ep else 0.0
                 print(
                     f"  [{player}] Ep {ep:>3}/{num_eval_episodes}  "
-                    f"{outcome:<4}  steps={steps:3d}  win_rate={wr:.1%}"
+                    f"progress  win_rate={wr:.1%}"
                 )
                 _write_final_eval_live(completed=ep, phase="episodes")
-            finally:
-                env.close()
+        else:
+            backend_printed = False
+            for ep in range(1, num_eval_episodes + 1):
+                env = TalisharEngineEnvironment(
+                    base_url=base_url,
+                    game_format=game_format,
+                    local_deck_name=deck_name,
+                    opponent_deck_name=opp_name,
+                    max_turns=max_steps,
+                    self_play=True,
+                    render_mode=None,
+                    use_cpp_engine=False,
+                    talishar_backend=DEFAULT_TALISHAR_BACKEND,
+                    enable_combat_tracker=True,
+                )
+                try:
+                    if not backend_printed:
+                        eval_runtime_backend = _runtime_backend_label(env)
+                        print(f"  [{player}] Runtime backend (final eval): {eval_runtime_backend}")
+                        backend_printed = True
+                    result = env.reset(options={"acting_player_id": 1 + ((ep - 1) % 2)})
+                    obs = result.observation
+                    turn_hp: dict[int, tuple[int, int]] = {}
+                    t0, p1_hp0, p2_hp0 = _parse_obs_hp(obs)
+                    _track_turn_hp(turn_hp, t0, p1_hp0, p2_hp0)
+                    done = False
+                    steps = 0
+                    terminated = False
+                    truncated = False
+                    while not done:
+                        if agents.play is not None and hasattr(agents.play, "act"):
+                            action = agents.play.act(obs)
+                        elif agents.play is not None and hasattr(agents.play, "act_greedy"):
+                            action = agents.play.act_greedy(obs)
+                        else:
+                            action = env.sample_action()
+                        step = env.step(action)
+                        obs = step.observation
+                        terminated = bool(step.terminated)
+                        truncated = bool(step.truncated)
+                        done = terminated or truncated
+                        steps += 1
+                        turn_no, p1_hp, p2_hp = _parse_obs_hp(obs)
+                        _track_turn_hp(turn_hp, turn_no, p1_hp, p2_hp)
+
+                    obs_data = json.loads(obs) if isinstance(obs, str) else (obs or {})
+                    p1_hp, p2_hp = absolute_p1_p2_hp_from_env(env)
+                    p1_deck, p2_deck = absolute_p1_p2_deck_from_env(env)
+                    if p1_hp is None or p2_hp is None:
+                        p1_hp_f, p2_hp_f = absolute_p1_p2_hp_from_obs(obs_data)
+                        p1_hp = int(p1_hp_f) if p1_hp_f is not None else None
+                        p2_hp = int(p2_hp_f) if p2_hp_f is not None else None
+                    if p1_deck is None or p2_deck is None:
+                        p1_deck, p2_deck = absolute_p1_p2_deck_from_obs(obs_data)
+                    outcome = classify_p1_episode_outcome(
+                        p1_hp=p1_hp,
+                        p2_hp=p2_hp,
+                        p1_deck=p1_deck,
+                        p2_deck=p2_deck,
+                        terminated=terminated,
+                        truncated=truncated and not terminated,
+                    )
+                    if outcome == "win":
+                        wins += 1
+                    elif outcome == "loss":
+                        losses += 1
+                    elif outcome == "draw":
+                        draws += 1
+                    else:
+                        timeouts += 1
+
+                    turn_trajectories.append(turn_hp)
+                    damage_acc = EvalDamageAccumulator(deck_card_ids=set(game_deck.keys()))
+                    damage_acc.ingest_trace(env.get_combat_trace())
+                    episode_damage_breakdowns.append(damage_acc.to_dict())
+                    episode_log.append({
+                        "episode": ep,
+                        "outcome": outcome,
+                        "steps": steps,
+                        "p1_hp": p1_hp,
+                        "p2_hp": p2_hp,
+                        "turns_played": max(turn_hp) if turn_hp else 0,
+                    })
+                    wr = wins / ep
+                    print(
+                        f"  [{player}] Ep {ep:>3}/{num_eval_episodes}  "
+                        f"{outcome:<4}  steps={steps:3d}  win_rate={wr:.1%}"
+                    )
+                    _write_final_eval_live(completed=ep, phase="episodes")
+                finally:
+                    env.close()
 
     except Exception as exc:
         print(f"  [{player}] Eval error: {exc}")

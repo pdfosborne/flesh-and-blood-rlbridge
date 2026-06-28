@@ -14,9 +14,9 @@ function Initialize-FabDockerGpuCompose {
 
 function Write-FabDockerGpuComposeNote {
     if ($env:FAB_DOCKER_GPU -eq "1") {
-        Write-Host "[docker] GPU detected — fab-bridge will use CUDA PyTorch (gpus: all)"
+        Write-Host "[docker] GPU detected - fab-bridge will use CUDA PyTorch (gpus: `all`)"
     } else {
-        Write-Host "[docker] No Docker GPU — fab-bridge training uses CPU PyTorch"
+        Write-Host "[docker] No Docker GPU - fab-bridge training uses CPU PyTorch"
     }
 }
 

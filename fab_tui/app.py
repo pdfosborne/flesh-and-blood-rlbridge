@@ -699,8 +699,8 @@ def wizard_unified_random_matchups_train(env: EnvironmentSettings) -> None:
         default=spec.skip_converged,
     )
     console.print(
-        "[dim]C++ engine is required for training and checkpoint eval "
-        "(no HTTP Talishar fallback).[/dim]"
+        "[dim]Training uses the Talishar fast backend "
+        "(fast_reset / fast_step_index via RLStep).[/dim]"
     )
     if Confirm.ask("Set a random seed?", default=False):
         spec.seed = IntPrompt.ask("Seed", default=0)
@@ -718,7 +718,7 @@ def wizard_unified_random_matchups_train(env: EnvironmentSettings) -> None:
         ("Checkpoint interval", f"{spec.checkpoint_interval_pct:g}%"),
         ("Checkpoint eval games", str(spec.checkpoint_eval_episodes)),
         ("Workers", str(spec.workers)),
-        ("C++ engine", "required"),
+        ("Backend", "Talishar fast"),
         ("Skip converged", str(spec.skip_converged)),
         ("Seed", str(spec.seed) if spec.seed is not None else "random"),
         ("Output", str(out_dir)),

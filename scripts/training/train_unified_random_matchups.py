@@ -99,7 +99,7 @@ def _parse_args() -> argparse.Namespace:
         "--workers",
         type=int,
         default=DEFAULT_UNIFIED_WORKERS,
-        help="Parallel Talishar/C++ worker sessions per matchup",
+        help="Parallel Talishar fast worker sessions per matchup",
     )
     parser.add_argument(
         "--cache-dir",
@@ -200,6 +200,7 @@ def main() -> None:
     )
 
     print(f"Talishar URL : {base_url}")
+    print(f"Backend      : Talishar fast (fast_reset / fast_step_index)")
     print(f"Format       : {format_name}")
     print(f"Deck pool    : {len(decks)} fabrary decks")
     print(f"Matchups     : {len(selected)} random pairs")

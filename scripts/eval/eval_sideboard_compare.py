@@ -45,7 +45,7 @@ from flesh_and_blood_rlbridge.player_observation import (  # noqa: E402
     PLAYER_OBS_SCHEMA_VERSION,
 )
 from rl_agents.ppo import PPOAgent, UNIFIED_AGENT_WEIGHT_VERSION  # noqa: E402
-from runtime_defaults import RUNTIME  # noqa: E402
+from runtime_defaults import DEFAULT_TALISHAR_BACKEND, RUNTIME  # noqa: E402
 from train_dual_agent_common import Matchup, make_env, _env_supports_fast_training  # noqa: E402
 from train_pipeline_common import (  # noqa: E402
     DEFAULT_EQUIPMENT_HEADER,
@@ -357,7 +357,7 @@ def _eval_candidate(
         phase="cpp_checkpoint",
         completed=0,
         target=args.cpp_eval_episodes if cpp_dir else 0,
-        runtime_backend="C++ engine",
+        runtime_backend=f"Talishar {DEFAULT_TALISHAR_BACKEND}",
     )
     _write_partial_candidate_result(candidate_dir, candidate=candidate, args=args)
     _refresh_dashboard(out_dir)
@@ -378,7 +378,7 @@ def _eval_candidate(
                 phase="cpp_checkpoint",
                 completed=0,
                 target=args.cpp_eval_episodes,
-                runtime_backend="C++ engine",
+                runtime_backend=f"Talishar {DEFAULT_TALISHAR_BACKEND}",
                 variant=variant_key,
                 p1_policy=p1_kind,
                 p2_policy=p2_kind,
@@ -393,7 +393,7 @@ def _eval_candidate(
                 max_steps=args.max_eval_steps,
                 episodes=args.cpp_eval_episodes,
                 seed=variant_seed,
-                backend="cpp",
+                backend=DEFAULT_TALISHAR_BACKEND,
                 eval_label=variant_label,
                 live_progress_path=eval_live_path,
                 p1_deck_card_ids=set(candidate.game_deck.keys()),
@@ -474,7 +474,7 @@ def _eval_candidate(
             phase="final_eval",
             completed=0,
             target=args.talishar_eval_episodes,
-            runtime_backend="HTTP Talishar",
+            runtime_backend=f"Talishar {DEFAULT_TALISHAR_BACKEND}",
         )
         _refresh_dashboard(out_dir)
         talishar_metrics = evaluate_fixed_matchup(
@@ -485,7 +485,7 @@ def _eval_candidate(
             max_steps=args.max_eval_steps,
             episodes=args.talishar_eval_episodes,
             seed=eval_seed + 10_000,
-            backend="http",
+            backend=DEFAULT_TALISHAR_BACKEND,
             eval_label="Talishar final eval",
             live_progress_path=final_live_path,
             p1_deck_card_ids=set(candidate.game_deck.keys()),
