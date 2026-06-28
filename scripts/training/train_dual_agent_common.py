@@ -61,6 +61,7 @@ from flesh_and_blood_rlbridge.talishar_engine_environment import (  # noqa: E402
     TalisharEngineEnvironment,
     run_talishar_eval_episode,
 )
+from flesh_and_blood_rlbridge.talishar_backend_pool import TalisharBackendPool  # noqa: E402
 from flesh_and_blood_rlbridge.player_observation import (  # noqa: E402
     ACTION_CAPACITY,
     PLAYER_OBS_SCHEMA_VERSION,
@@ -1097,13 +1098,19 @@ def _announce_rollout_config(
     rollout_mode: str,
     rollout_processes: int,
     n_workers: int,
-    base_url: str,
+    base_url: str = "",
+    backend_pool: TalisharBackendPool | None = None,
 ) -> None:
     envs_per_proc = envs_per_rollout_process(n_workers, rollout_processes)
+    talishar_label = (
+        backend_pool.format_log_label()
+        if backend_pool is not None
+        else base_url
+    )
     print(
         f"  [rollout] mode={rollout_mode}  "
         f"processes={rollout_processes} × envs={envs_per_proc} "
-        f"(budget={n_workers})  Talishar={base_url}",
+        f"(budget={n_workers})  Talishar={talishar_label}",
         flush=True,
     )
 
@@ -2238,7 +2245,13 @@ def _safe_run_one_episode(
         except Exception:
             pass
         try:
-            new_env = make_env(matchup, base_url=base_url, game_format=game_format, max_turns=max_steps)
+            recycle_url = getattr(env, "_base_url", None) or base_url
+            new_env = make_env(
+                matchup,
+                base_url=recycle_url,
+                game_format=game_format,
+                max_turns=max_steps,
+            )
             # Reuse the same object slot so the caller's envs[] reference stays valid.
             env.__dict__.update(new_env.__dict__)
         except Exception:
@@ -2266,6 +2279,7 @@ def train_agents_from_both_perspectives_parallel(
     rollout_mode: Optional[str] = None,
     rollout_processes: Optional[int] = None,
     shared_buffer: Any = None,
+    backend_pool: TalisharBackendPool | None = None,
 ) -> tuple[list[float], list[float], dict[str, Any]]:
     """Parallel rollout version of ``train_agents_from_both_perspectives``.
 
@@ -2284,6 +2298,7 @@ def train_agents_from_both_perspectives_parallel(
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
+    talishar_pool = backend_pool or TalisharBackendPool.from_runtime(fallback_url=base_url)
     batch_parallelism = max(1, n_workers)
     resolved_rollout_mode = normalize_rollout_mode(
         rollout_mode or DEFAULT_ROLLOUT_MODE
@@ -2296,7 +2311,7 @@ def train_agents_from_both_perspectives_parallel(
         rollout_mode=resolved_rollout_mode,
         rollout_processes=resolved_rollout_processes,
         n_workers=batch_parallelism,
-        base_url=base_url,
+        backend_pool=talishar_pool,
     )
     use_process_rollouts = resolved_rollout_processes > 1
     if use_process_rollouts:
@@ -2310,7 +2325,12 @@ def train_agents_from_both_perspectives_parallel(
     p2_policy = p2_tiers[0]
 
     # ── bootstrap: infer dims and init nets on a throw-away env ──────────────
-    probe_env = make_env(matchup, base_url=base_url, game_format=game_format, max_turns=max_steps)
+    probe_env = make_env(
+        matchup,
+        base_url=talishar_pool.primary_url,
+        game_format=game_format,
+        max_turns=max_steps,
+    )
     _announce_training_backend(
         probe_env,
         label="parallel training bootstrap",
@@ -2370,16 +2390,24 @@ def train_agents_from_both_perspectives_parallel(
     )
     envs: list[TalisharEngineEnvironment] = []
     swap_envs: list[TalisharEngineEnvironment] = []
+    worker_base_urls: list[str] = []
     swap_matchup = swapped_matchup(matchup)
     if not use_process_rollouts:
         for w in range(batch_parallelism):
+            worker_url = talishar_pool.allocate_url()
+            worker_base_urls.append(worker_url)
             envs.append(
-                make_env(matchup, base_url=base_url, game_format=game_format, max_turns=max_steps)
+                make_env(
+                    matchup,
+                    base_url=worker_url,
+                    game_format=game_format,
+                    max_turns=max_steps,
+                )
             )
             swap_envs.append(
                 make_env(
                     swap_matchup,
-                    base_url=base_url,
+                    base_url=worker_url,
                     game_format=game_format,
                     max_turns=max_steps,
                 )
@@ -2456,13 +2484,14 @@ def train_agents_from_both_perspectives_parallel(
                         n_episodes=batch_size,
                         n_workers=batch_size,
                         max_steps=max_steps,
-                        base_url=base_url,
+                        base_url=talishar_pool.primary_url,
                         game_format=game_format,
                         rollout_mode=resolved_rollout_mode,
                         rollout_processes=resolved_rollout_processes,
                         seed_base=seed_base,
                         warmup=in_warmup,
                         staging_dir=rollout_staging,
+                        backend_pool_urls=list(talishar_pool.urls),
                     )
                 elif use_fast_rollout:
                     batch_results = _safe_parallel_fast_episode_batch(
@@ -2496,7 +2525,7 @@ def train_agents_from_both_perspectives_parallel(
                             _safe_run_one_episode,
                             episode_env, p1_policy, p2_policy,
                             max_steps, ep_seed, in_warmup, p1_rng, p2_rng,
-                            matchup, base_url, game_format,
+                            matchup, worker_base_urls[w], game_format,
                             starting_player_id,
                         )
                         futures[fut] = w
@@ -3196,22 +3225,32 @@ def save_agent(
     }
 
 
-def _talishar_deck_spec(deck_stem: str) -> dict[str, Any]:
+def _talishar_deck_spec(
+    deck_stem: str,
+    *,
+    role: str,
+    hero_id: str,
+    matchup_dir: Optional[Path] = None,
+) -> dict[str, Any]:
     """Build phase-3-compatible ``deck_spec`` from a Talishar Assets deck stem."""
     from flesh_and_blood_rlbridge.deck_context import _read_asset_deck  # noqa: PLC0415
-    from flesh_and_blood_rlbridge.talishar_deck_assets import resolve_talishar_deck_stem  # noqa: PLC0415
+    from flesh_and_blood_rlbridge.talishar_deck_assets import (  # noqa: PLC0415
+        load_guide_sideboard_record,
+        resolve_matchup_equipment_header,
+        resolve_talishar_deck_stem,
+    )
 
     assets = talishar_assets_path()
     resolved = resolve_talishar_deck_stem(assets, deck_stem)
     _hero_id, counts = _read_asset_deck(assets, resolved)
-    from flesh_and_blood_rlbridge.talishar_deck_assets import (  # noqa: PLC0415
-        equipment_header_from_deck_stem,
-    )
-
-    equipment_header = equipment_header_from_deck_stem(
-        deck_stem,
-        assets,
+    guide = load_guide_sideboard_record(matchup_dir) if matchup_dir else {}
+    equipment_header = resolve_matchup_equipment_header(
+        role=role,
+        hero_id=hero_id or _hero_id,
+        deck_stem=resolved,
+        assets_dir=assets,
         fallback=_hero_id,
+        guide_sideboard=guide,
     )
     return {"equipment_header": equipment_header, "cards": counts}
 
@@ -3227,8 +3266,18 @@ def _save_unified_selfplay_checkpoint(
 ) -> None:
     """Persist discoverable unified self-play checkpoints for Talishar eval."""
     matchup_dir = matchup_out_dir(out_dir, matchup)
-    p1_spec = _talishar_deck_spec(matchup.p1_deck)
-    p2_spec = _talishar_deck_spec(matchup.p2_deck)
+    p1_spec = _talishar_deck_spec(
+        matchup.p1_deck,
+        role="p1",
+        hero_id=matchup.p1_hero,
+        matchup_dir=matchup_dir,
+    )
+    p2_spec = _talishar_deck_spec(
+        matchup.p2_deck,
+        role="p2",
+        hero_id=matchup.p2_hero,
+        matchup_dir=matchup_dir,
+    )
     role_specs = {
         "p1": p1_spec,
         "p2": p2_spec,
@@ -3347,14 +3396,23 @@ def _unified_run_progress_callback(
 
 
 def _combined_unified_training_progress(
-    ckpt_tracker: Optional["_CheckpointEvalTracker"],
-    dash_cb: Optional[Callable[..., None]],
+    *,
+    ckpt_tracker: Optional["_CheckpointEvalTracker"] = None,
+    checkpoint_coordinator: Optional[Any] = None,
+    matchup_live_key: Optional[str] = None,
+    dash_cb: Optional[Callable[..., None]] = None,
 ) -> Optional[Callable[..., None]]:
-    if ckpt_tracker is None and dash_cb is None:
+    if (
+        ckpt_tracker is None
+        and checkpoint_coordinator is None
+        and dash_cb is None
+    ):
         return None
 
     def _callback(completed: int, *args: Any) -> None:
-        if ckpt_tracker is not None:
+        if checkpoint_coordinator is not None and matchup_live_key:
+            checkpoint_coordinator.report_progress(matchup_live_key, completed)
+        elif ckpt_tracker is not None:
             ckpt_tracker.on_parallel_progress(completed, *args)
         if dash_cb is not None:
             try:
@@ -3680,6 +3738,7 @@ def _train_matchup_parallel_seeds(
     n_workers: int,
     build_cpp_engine: bool = False,
     require_cpp_engine: bool = False,
+    backend_pool: TalisharBackendPool | None = None,
 ) -> dict:
     workers_per_seed = workers_per_parallel_seed(n_workers, parallel_seeds)
     if workers_per_seed != n_workers:
@@ -3706,6 +3765,7 @@ def _train_matchup_parallel_seeds(
         _force_train=True,
         build_cpp_engine=build_cpp_engine,
         require_cpp_engine=require_cpp_engine,
+        backend_pool=backend_pool,
     )
 
     def _run_one_seed(
@@ -3890,6 +3950,8 @@ def train_matchup(
     _shared_buffer: Any = None,
     _skip_persist: bool = False,
     _matchup_live_key: Optional[str] = None,
+    _checkpoint_coordinator: Optional[Any] = None,
+    backend_pool: TalisharBackendPool | None = None,
 ) -> dict:
     if matchup.p1_fabrary_entry and matchup.p2_fabrary_entry:
         from runtime_defaults import RUNTIME  # noqa: PLC0415
@@ -3932,6 +3994,7 @@ def train_matchup(
             n_workers=n_workers,
             build_cpp_engine=build_cpp_engine,
             require_cpp_engine=require_cpp_engine,
+            backend_pool=backend_pool,
         )
     from agent_cache import AgentCacheStore, talishar_asset_deck_fingerprint
     print(f"\n{'=' * 60}")
@@ -4048,6 +4111,11 @@ def train_matchup(
     )
 
     # Probe environment once to bootstrap the unified shared policy.
+    talishar_pool = backend_pool or TalisharBackendPool.from_runtime(fallback_url=base_url)
+    if backend_pool is None:
+        talishar_pool = talishar_pool.filter_healthy()
+        print(f"  Talishar backends: {talishar_pool.format_log_label()}")
+
     probe_env = None
     for attempt in range(2):
         probe_env = make_env(
@@ -4170,7 +4238,7 @@ def train_matchup(
         checkpoint_interval=checkpoint_interval,
         checkpoint_interval_pct=checkpoint_interval_pct,
     )
-    if checkpoint_eval_episodes > 0:
+    if checkpoint_eval_episodes > 0 and _checkpoint_coordinator is None:
         ckpt_tracker = _CheckpointEvalTracker(
             matchup=matchup,
             base_url=base_url,
@@ -4210,12 +4278,15 @@ def train_matchup(
             live_state_image_path=live_state_image_path,
             episode_cache=episode_cache,
             on_episodes_progress=_combined_unified_training_progress(
-                ckpt_tracker,
-                dash_cb,
+                ckpt_tracker=ckpt_tracker,
+                checkpoint_coordinator=_checkpoint_coordinator,
+                matchup_live_key=_matchup_live_key,
+                dash_cb=dash_cb,
             ),
             rollout_mode=rollout_mode,
             rollout_processes=rollout_processes,
             shared_buffer=_shared_buffer,
+            backend_pool=talishar_pool,
         )
         p1_rewards.extend(rem_p1)
         p2_rewards.extend(rem_p2)
@@ -4371,11 +4442,35 @@ def train_matchup(
     training_stats = dict(overall_stats)
     if ckpt_tracker is not None and ckpt_tracker.log:
         training_stats["checkpoint_eval_history"] = ckpt_tracker.log
+    elif (
+        _checkpoint_coordinator is not None
+        and _matchup_live_key
+    ):
+        matchup_ckpt_hist = _checkpoint_coordinator.get_matchup_checkpoint_history(
+            _matchup_live_key
+        )
+        if matchup_ckpt_hist:
+            training_stats["checkpoint_eval_history"] = matchup_ckpt_hist
+
+    if (
+        _checkpoint_coordinator is not None
+        and not _skip_persist
+        and _matchup_live_key
+    ):
+        from checkpoint_eval_async import wait_for_checkpoint_evals  # noqa: PLC0415
+
+        wait_for_checkpoint_evals()
 
     persist_summary: Optional[dict[str, Any]] = None
     if len(p1_rewards) >= n_episodes and not _skip_cache_converge:
+        coordinator_wr = (
+            _checkpoint_coordinator.get_matchup_checkpoint_win_rate(_matchup_live_key)
+            if _checkpoint_coordinator is not None and _matchup_live_key
+            else None
+        )
         persist_summary = {
             "matchup_name": matchup.name,
+            "matchup_dir": _matchup_live_key,
             "p1_fingerprint": p1_deck_fp,
             "p2_fingerprint": p2_deck_fp,
             "p1_hero": matchup.p1_hero,
@@ -4384,15 +4479,21 @@ def train_matchup(
             "target_episodes": n_episodes,
             "p1_win_rate": p1_wr,
             "p2_win_rate": p2_wr,
-            "first_checkpoint_win_rate": ckpt_tracker.first_win_rate
-            if ckpt_tracker is not None
-            else None,
-            "final_checkpoint_win_rate": ckpt_tracker.final_win_rate
-            if ckpt_tracker is not None
-            else None,
-            "checkpoint_eval_win_rate": ckpt_tracker.final_win_rate
-            if ckpt_tracker is not None
-            else None,
+            "first_checkpoint_win_rate": (
+                _checkpoint_coordinator.first_win_rate
+                if _checkpoint_coordinator is not None
+                else ckpt_tracker.first_win_rate if ckpt_tracker is not None else None
+            ),
+            "final_checkpoint_win_rate": (
+                coordinator_wr
+                if coordinator_wr is not None
+                else ckpt_tracker.final_win_rate if ckpt_tracker is not None else None
+            ),
+            "checkpoint_eval_win_rate": (
+                coordinator_wr
+                if coordinator_wr is not None
+                else ckpt_tracker.final_win_rate if ckpt_tracker is not None else None
+            ),
             "training_stats": training_stats,
         }
 
@@ -4551,6 +4652,7 @@ def run_matchup_training(
     require_cpp_engine: bool = False,
     rollout_mode: Optional[str] = None,
     rollout_processes: Optional[int] = None,
+    backend_pool: TalisharBackendPool | None = None,
 ) -> tuple[list[dict], list[str]]:
     from agent_cache import AgentCacheStore
     from unified_parallel_training import (
@@ -4588,6 +4690,10 @@ def run_matchup_training(
 
     shared_policy: Optional[PPOAgent] = None
     matchups_completed_count = 0
+    talishar_pool = backend_pool or TalisharBackendPool.from_runtime(fallback_url=base_url)
+    talishar_pool = talishar_pool.filter_healthy()
+    if len(talishar_pool.urls) > 1:
+        print(f"  Talishar backends: {talishar_pool.format_log_label()}")
 
     for batch_start in range(0, len(matchups), parallel_matchups):
         batch = matchups[batch_start : batch_start + parallel_matchups]
@@ -4653,9 +4759,79 @@ def run_matchup_training(
                 f"{workers_per_matchup} worker(s)/matchup",
                 flush=True,
             )
+        elif unified_run and checkpoint_eval_episodes > 0 and shared_policy is None and batch:
+            bootstrap_matchup = batch[0]
+            probe_env = make_env(
+                bootstrap_matchup,
+                base_url=base_url,
+                game_format=game_format,
+                max_turns=max_steps,
+                show_frontend=False,
+                frontend_url=frontend_url,
+            )
+            try:
+                if _env_supports_fast_training(probe_env):
+                    probe_env.fast_reset(seed=seed)
+                else:
+                    probe_env.reset(seed=seed)
+                shared_policy = _bootstrap_unified_policy(
+                    cache_store, probe_env, seed,
+                ).policy
+            finally:
+                try:
+                    probe_env.close()
+                except Exception:
+                    pass
 
         persist_payloads: list[dict[str, Any]] = []
         persist_lock = threading.Lock()
+        checkpoint_coordinator: Optional[Any] = None
+        effective_ckpt_interval = resolve_checkpoint_interval(
+            n_episodes,
+            checkpoint_interval=checkpoint_interval,
+            checkpoint_interval_pct=checkpoint_interval_pct,
+        )
+        if unified_run and checkpoint_eval_episodes > 0:
+            from unified_checkpoint_eval import UnifiedCheckpointCoordinator  # noqa: PLC0415
+
+            batch_matchups = {
+                _resolve_matchup_subdir(out_dir, matchup): matchup
+                for matchup in batch
+            }
+
+            def _policy_snapshot_for_batch() -> tuple[PPOAgent, PPOAgent]:
+                if shared_buffer is not None:
+                    snap = shared_buffer.clone_policy_snapshot()
+                    return snap, snap
+                from agent_cache import clone_agent_weights  # noqa: PLC0415
+
+                if shared_policy is None:
+                    raise RuntimeError("Merged checkpoint eval requires a shared policy")
+                snap = PPOAgent()
+                clone_agent_weights(shared_policy, snap)
+                return snap, snap
+
+            if shared_policy is not None:
+                checkpoint_coordinator = UnifiedCheckpointCoordinator(
+                    out_dir=out_dir,
+                    matchups=batch_matchups,
+                    base_url=base_url,
+                    game_format=game_format,
+                    max_steps=max_steps,
+                    n_episodes=n_episodes,
+                    warmup_episodes=warmup_episodes,
+                    checkpoint_interval=effective_ckpt_interval,
+                    checkpoint_eval_episodes=checkpoint_eval_episodes,
+                    unified_policy=shared_policy,
+                    policy_snapshot_fn=_policy_snapshot_for_batch,
+                    seed=seed,
+                )
+                print(
+                    f"  Merged checkpoint eval: every {effective_ckpt_interval} episode(s) "
+                    f"when all {len(batch)} matchup(s) reach bucket; "
+                    f"{checkpoint_eval_episodes} total eval games split across matchups "
+                    f"(async, non-blocking)"
+                )
 
         def _train_one(matchup: Matchup) -> dict[str, Any]:
             nonlocal shared_policy
@@ -4672,6 +4848,12 @@ def run_matchup_training(
                 train_kwargs["_matchup_live_key"] = _resolve_matchup_subdir(
                     out_dir, matchup
                 )
+            if checkpoint_coordinator is not None:
+                train_kwargs["_checkpoint_coordinator"] = checkpoint_coordinator
+                if "_matchup_live_key" not in train_kwargs:
+                    train_kwargs["_matchup_live_key"] = _resolve_matchup_subdir(
+                        out_dir, matchup
+                    )
             meta = train_matchup(
                 matchup,
                 base_url=base_url,
@@ -4695,6 +4877,7 @@ def run_matchup_training(
                 require_cpp_engine=require_cpp_engine,
                 rollout_mode=rollout_mode,
                 rollout_processes=rollout_processes,
+                backend_pool=talishar_pool,
                 **train_kwargs,
             )
             payload = meta.get("_persist_summary")
@@ -4713,6 +4896,29 @@ def run_matchup_training(
             failed.extend(batch_failed)
             if shared_buffer is not None and shared_policy is not None:
                 shared_buffer.flush_remaining(shared_policy)
+            if checkpoint_coordinator is not None:
+                from checkpoint_eval_async import wait_for_checkpoint_evals  # noqa: PLC0415
+
+                wait_for_checkpoint_evals()
+                for payload in persist_payloads:
+                    matchup_dir = str(payload.get("matchup_dir") or "")
+                    if not matchup_dir:
+                        continue
+                    wr = checkpoint_coordinator.get_matchup_checkpoint_win_rate(
+                        matchup_dir
+                    )
+                    if wr is not None:
+                        payload["checkpoint_eval_win_rate"] = wr
+                        payload["final_checkpoint_win_rate"] = wr
+                    hist = checkpoint_coordinator.get_matchup_checkpoint_history(
+                        matchup_dir
+                    )
+                    if hist:
+                        stats = payload.get("training_stats")
+                        if not isinstance(stats, dict):
+                            stats = {}
+                        stats["checkpoint_eval_history"] = hist
+                        payload["training_stats"] = stats
             if shared_policy is not None and persist_payloads:
                 persist_batch_to_cache(
                     cache_store,
@@ -4757,6 +4963,10 @@ def run_matchup_training(
                 out_dir,
                 auto_refresh_seconds=5.0,
             )
+
+    from checkpoint_eval_async import shutdown_checkpoint_eval_executor  # noqa: PLC0415
+
+    shutdown_checkpoint_eval_executor(wait=True)
 
     return summary, failed
 
@@ -4876,23 +5086,18 @@ def fabrary_sideboard_card_pool(
 
 def resolve_fabrary_equipment_header(deck_entry: dict, assets_path: Path) -> str:
     from flesh_and_blood_rlbridge.talishar_deck_assets import (  # noqa: PLC0415
-        ensure_full_equipment_header,
-        resolve_equipment_header_line,
+        resolve_matchup_equipment_header,
     )
 
     hero_id = str(deck_entry.get("hero_id", "")).removeprefix("hero_")
     explicit = str(deck_entry.get("equipment_header", "") or "").strip()
-    header = resolve_equipment_header_line(
-        hero_id,
-        assets_path,
-        fallback=explicit or hero_id,
-    )
     deck_stem = str(deck_entry.get("id", "") or deck_entry.get("deck_id", "") or "").strip()
-    return ensure_full_equipment_header(
-        hero_id,
-        header,
-        assets_path,
+    return resolve_matchup_equipment_header(
+        role="p1",
+        hero_id=hero_id,
         deck_stem=deck_stem,
+        assets_dir=assets_path,
+        fallback=explicit or hero_id,
     )
 
 
@@ -4924,6 +5129,24 @@ def apply_unified_matchup_sideboards(
     p2_hero = _hero_talishar_id(matchup.p2_hero)
     p1_equipment = resolve_fabrary_equipment_header(entry1, assets_path)
     p2_equipment = resolve_fabrary_equipment_header(entry2, assets_path)
+    from flesh_and_blood_rlbridge.talishar_deck_assets import (  # noqa: PLC0415
+        resolve_matchup_equipment_header,
+    )
+
+    p1_equipment = resolve_matchup_equipment_header(
+        role="p1",
+        hero_id=p1_hero,
+        deck_stem=matchup.p1_deck,
+        assets_dir=assets_path,
+        fallback=p1_equipment,
+    )
+    p2_equipment = resolve_matchup_equipment_header(
+        role="p2",
+        hero_id=p2_hero,
+        deck_stem=matchup.p2_deck,
+        assets_dir=assets_path,
+        fallback=p2_equipment,
+    )
     p1_pool = fabrary_sideboard_card_pool(entry1, game_format, assets_path)
     p2_pool = fabrary_sideboard_card_pool(entry2, game_format, assets_path)
 

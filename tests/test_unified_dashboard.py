@@ -11,6 +11,8 @@ from fab_bridge.unified_dashboard import (
     LOGIC_VS_LOGIC_BASELINE_NAME,
     UNIFIED_DASHBOARD_NAME,
     UNIFIED_LIVE_STATE,
+    _merged_aggregate_points,
+    _rows_from_latest_merged,
     aggregate_checkpoint_points,
     collect_unified_run_state,
     count_completed_matchups,
@@ -191,22 +193,8 @@ def test_collect_and_render_dashboard(tmp_path: Path) -> None:
     assert "Matchups 1/3" in html
     assert "250/1000" in html
 
-    from fab_bridge.cpp_eval_live_dashboard import (
-        CPP_EVAL_LIVE_DASHBOARD,
-        CPP_EVAL_LIVE_STATE,
-    )
-
-    (run_dir / CPP_EVAL_LIVE_DASHBOARD).write_text("<html></html>", encoding="utf-8")
-    (run_dir / CPP_EVAL_LIVE_STATE).write_text(
-        json.dumps({"engine": "talishar_fast", "engine_display": "Talishar fast"}),
-        encoding="utf-8",
-    )
-    state_with_live = collect_unified_run_state(run_dir)
-    assert state_with_live["cpp_eval_live_dashboard_path"]
-    assert state_with_live["checkpoint_eval_replay_label"] == "Talishar fast"
-    html_with_live = render_unified_random_matchups_html(state_with_live)
-    assert CPP_EVAL_LIVE_DASHBOARD in html_with_live
-    assert "Talishar fast checkpoint eval replay" in html_with_live
+    assert "cpp_eval_live_dashboard.html" not in html
+    assert "checkpoint eval replay" not in html.lower()
 
     html_path = write_unified_random_matchups_dashboard(run_dir, auto_refresh_seconds=5.0)
     assert html_path == run_dir / UNIFIED_DASHBOARD_NAME
@@ -321,3 +309,87 @@ def test_parallel_active_matchups_and_aggregate(tmp_path: Path) -> None:
     assert "a-vs-b" in html
     assert "c-vs-d" in html
     assert "matchup-progress" in html
+
+
+def test_merged_checkpoint_eval_dashboard(tmp_path: Path) -> None:
+    run_dir = _write_run(tmp_path)
+    merged_record = {
+        "eval_mode": "merged",
+        "episodes_completed": 100,
+        "target_episodes": 1000,
+        "eval_episodes_total": 100,
+        "matchups_evaluated": 2,
+        "checkpoint_bucket": "periodic",
+        "aggregate": {
+            "self_play_win_rate_mean": 0.55,
+            "self_play_win_rate_se": 0.05,
+            "vs_logic_win_rate_mean": 0.42,
+            "vs_logic_win_rate_se": 0.04,
+            "total_eval_games": 100,
+        },
+        "per_matchup": {
+            "match_a": {
+                "matchup": "a-vs-b",
+                "episodes_completed": 100,
+                "eval_episodes": 50,
+                "p1_win_rate": 0.50,
+                "timeout_rate": 0.02,
+                "vs_logic": {
+                    "agent_p1_seat": {"agent_win_rate": 0.40},
+                    "agent_p2_seat": {"agent_win_rate": 0.44},
+                },
+            },
+            "match_b": {
+                "matchup": "c-vs-d",
+                "episodes_completed": 100,
+                "eval_episodes": 50,
+                "p1_win_rate": 0.60,
+                "timeout_rate": 0.01,
+                "vs_logic": {
+                    "agent_p1_seat": {"agent_win_rate": 0.38},
+                    "agent_p2_seat": {"agent_win_rate": 0.46},
+                },
+            },
+        },
+    }
+    (run_dir / "checkpoint_eval_history.json").write_text(
+        json.dumps([merged_record]),
+        encoding="utf-8",
+    )
+    update_unified_matchup_live(
+        run_dir,
+        "match_a",
+        name="a-vs-b",
+        episodes_completed=100,
+        status="training",
+    )
+    update_unified_matchup_live(
+        run_dir,
+        "match_b",
+        name="c-vs-d",
+        episodes_completed=100,
+        status="training",
+    )
+
+    aggregate = _merged_aggregate_points([merged_record])
+    assert aggregate[0]["win_rate_mean"] == pytest.approx(0.55)
+    assert aggregate[0]["n_matchups"] == 2
+
+    rows = _rows_from_latest_merged(
+        [merged_record],
+        {
+            "match_a": {"name": "a-vs-b"},
+            "match_b": {"name": "c-vs-d"},
+        },
+    )
+    assert len(rows) == 2
+    assert rows[0]["eval_episodes"] == 50
+
+    state = collect_unified_run_state(run_dir)
+    assert state["checkpoint_aggregate_points"][0]["win_rate_mean"] == pytest.approx(0.55)
+    assert len(state["active_checkpoint_rows"]) == 2
+    assert state["active_checkpoint_rows"][0]["eval_episodes"] == 50
+
+    html = render_unified_random_matchups_html(state)
+    assert "Eval games" in html
+    assert "50" in html

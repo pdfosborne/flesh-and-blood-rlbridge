@@ -55,6 +55,67 @@ def read_checkpoint_eval_scope(run_dir: Path) -> dict:
     return raw if isinstance(raw, dict) else {}
 
 
+def active_merged_matchup_dirs(run_dir: Path) -> list[Path]:
+    """Matchup folders in the current merged training batch."""
+    scope = read_checkpoint_eval_scope(run_dir)
+    matchups = scope.get("matchups")
+    if isinstance(matchups, list) and matchups:
+        dirs: list[Path] = []
+        for row in matchups:
+            if not isinstance(row, dict):
+                continue
+            subdir = str(row.get("matchup_dir") or "").strip()
+            if not subdir:
+                continue
+            candidate = run_dir / subdir
+            if candidate.is_dir():
+                dirs.append(candidate)
+        if dirs:
+            return dirs
+    single = str(scope.get("matchup_dir") or "").strip()
+    if single:
+        candidate = run_dir / single
+        if candidate.is_dir():
+            return [candidate]
+    return iter_unified_matchup_dirs(run_dir)
+
+
+def find_latest_merged_unified_bucket(
+    run_dir: Path,
+    *,
+    matchup_dirs: list[Path] | None = None,
+) -> tuple[int, dict[Path, Path]] | None:
+    """Return ``(episode, {matchup_dir: p1_checkpoint_dir})`` when all matchups align."""
+    dirs = list(matchup_dirs or active_merged_matchup_dirs(run_dir))
+    if not dirs:
+        return None
+    per_dir_episodes: dict[Path, set[int]] = {}
+    per_dir_ckpts: dict[Path, dict[int, Path]] = {}
+    for matchup_dir in dirs:
+        episodes: set[int] = set()
+        ckpts: dict[int, Path] = {}
+        for meta_path in matchup_dir.glob("unified_selfplay/p1/episode_*/metadata.json"):
+            episode_name = meta_path.parent.name.removeprefix("episode_")
+            try:
+                episode = int(episode_name)
+            except ValueError:
+                continue
+            episodes.add(episode)
+            ckpts[episode] = meta_path.parent
+        if not episodes:
+            return None
+        per_dir_episodes[matchup_dir] = episodes
+        per_dir_ckpts[matchup_dir] = ckpts
+    common = set.intersection(*per_dir_episodes.values())
+    if not common:
+        return None
+    best_episode = max(common)
+    return best_episode, {
+        matchup_dir: per_dir_ckpts[matchup_dir][best_episode]
+        for matchup_dir in dirs
+    }
+
+
 def _episode_dir_sort_key(meta_path: Path) -> tuple[int, float]:
     episode_name = meta_path.parent.name.removeprefix("episode_")
     try:

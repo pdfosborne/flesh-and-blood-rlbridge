@@ -707,6 +707,8 @@ def run_unified_random_matchups(
         "--talishar-url",
         env.talishar_url,
     ]
+    if env.talishar_urls.strip():
+        cmd.extend(["--talishar-urls", env.talishar_urls.strip()])
     if spec.seed is not None:
         cmd.extend(["--seed", str(spec.seed)])
     if spec.skip_converged:

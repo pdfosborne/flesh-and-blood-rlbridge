@@ -1313,6 +1313,10 @@ def wizard_settings(env: EnvironmentSettings) -> EnvironmentSettings:
     _header("Settings", "Talishar, FaBrary, and card database maintenance")
 
     env.talishar_url = Prompt.ask("Talishar URL", default=env.talishar_url)
+    env.talishar_urls = Prompt.ask(
+        "Talishar backend URLs (comma-separated, blank = single URL)",
+        default=env.talishar_urls,
+    )
     env.talishar_fe_url = Prompt.ask("Talishar frontend URL", default=env.talishar_fe_url)
     env.assets_path = Prompt.ask("Talishar Assets path", default=env.assets_path)
     env.fabrary_api_key = Prompt.ask(

@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 
 from fab_bridge.unified_results import (
+    active_merged_matchup_dirs,
+    find_latest_merged_unified_bucket,
     find_latest_unified_checkpoint_metadata,
     has_unified_selfplay_checkpoints,
     is_unified_random_matchup_run,
@@ -109,3 +111,67 @@ def test_find_latest_checkpoint_across_all_matchups(tmp_path: Path) -> None:
     all_paths = iter_unified_checkpoint_metadata(run_dir, "p1")
     assert all_paths[-1] == latest_meta
     assert find_latest_unified_checkpoint_metadata(run_dir, "p1") == latest_meta
+
+
+def test_active_merged_matchup_dirs_reads_scope_list(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "run_manifest.json").write_text("{}", encoding="utf-8")
+    match_a = run_dir / "match_a"
+    match_b = run_dir / "match_b"
+    match_a.mkdir()
+    match_b.mkdir()
+    (run_dir / "checkpoint_eval_scope.json").write_text(
+        json.dumps(
+            {
+                "matchups": [
+                    {"matchup_dir": "match_a"},
+                    {"matchup_dir": "match_b"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert active_merged_matchup_dirs(run_dir) == [match_a, match_b]
+
+
+def test_find_latest_merged_unified_bucket_requires_all_matchups(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "run_manifest.json").write_text("{}", encoding="utf-8")
+    match_a = run_dir / "match_a"
+    match_b = run_dir / "match_b"
+    match_a.mkdir()
+    match_b.mkdir()
+    (run_dir / "checkpoint_eval_scope.json").write_text(
+        json.dumps(
+            {
+                "matchups": [
+                    {"matchup_dir": "match_a"},
+                    {"matchup_dir": "match_b"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    ckpt_a = _write_unified_checkpoint(match_a, 50)
+    assert find_latest_merged_unified_bucket(run_dir) is None
+
+    ckpt_b = _write_unified_checkpoint(match_b, 50)
+    merged = find_latest_merged_unified_bucket(run_dir)
+    assert merged is not None
+    episode, bucket = merged
+    assert episode == 50
+    assert bucket[match_a] == ckpt_a.parent
+    assert bucket[match_b] == ckpt_b.parent
+
+    _write_unified_checkpoint(match_a, 100)
+    merged_stale = find_latest_merged_unified_bucket(run_dir)
+    assert merged_stale is not None
+    assert merged_stale[0] == 50
+
+    ckpt_b_100 = _write_unified_checkpoint(match_b, 100)
+    merged_100 = find_latest_merged_unified_bucket(run_dir)
+    assert merged_100 is not None
+    assert merged_100[0] == 100
+    assert merged_100[1][match_b] == ckpt_b_100.parent

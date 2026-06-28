@@ -1,0 +1,36 @@
+# Per-shard Talishar backend overlay (shards 1..N-1).
+# Used with: docker compose -p fab-rl-bridge-shard-N -f docker-compose.yml \
+#   -f docker-compose.training.yml -f docker/docker-compose.shard.yml up -d web-server
+#
+# Environment (set by start_talishar.py):
+#   TALISHAR_SHARD_PORT        host HTTP port (e.g. 8081)
+#   TALISHAR_SHARD_INDEX       shard index (e.g. 1)
+#   TALISHAR_SHARD_REDIS_PORT  host Redis port (e.g. 6383)
+
+services:
+  web-server:
+    ports: !override
+      - "${TALISHAR_SHARD_PORT}:80"
+    volumes:
+      - ${TALISHAR_HOSTFILES_SEED_DIR}:/seed-hostfiles:ro
+      - shard_hostfiles:/var/www/html/game/HostFiles
+    environment:
+      # Talishar upstream pins redis container_name=app_redis; shards use compose DNS instead.
+      REDIS_HOST: redis
+      MYSQL_SERVER_NAME: mysql-server
+
+  redis:
+    container_name: fabrlbridge_shard_${TALISHAR_SHARD_INDEX}_redis
+    ports: !override
+      - "${TALISHAR_SHARD_REDIS_PORT}:6379"
+
+  mysql-server:
+    volumes: !override
+      - shard_mysql_data:/var/lib/mysql
+      - ${TALISHAR_INITDB_DIR}:/docker-entrypoint-initdb.d:ro
+
+volumes:
+  shard_hostfiles:
+    name: fabrlbridge_shard_${TALISHAR_SHARD_INDEX}_hostfiles
+  shard_mysql_data:
+    name: fabrlbridge_shard_${TALISHAR_SHARD_INDEX}_mysql

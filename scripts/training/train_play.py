@@ -1770,10 +1770,14 @@ def _touch_cpp_eval_live_replay(
         from fab_bridge.cpp_eval_live_dashboard import (  # noqa: PLC0415
             collect_cpp_eval_live_state,
             cpp_eval_live_paths,
+            env_uses_cpp_eval_live_dashboard,
             update_cpp_eval_live_replay,
             write_cpp_eval_live_dashboard,
             write_cpp_eval_live_state,
         )
+
+        if not env_uses_cpp_eval_live_dashboard(env):
+            return
 
         if force_html:
             state_path, html_path = cpp_eval_live_paths(live_progress_path)
@@ -1918,6 +1922,7 @@ def _evaluate_fast_policy_matchup(
     seed: Optional[int] = None,
     eval_label: str = "Eval",
     live_progress_path: Optional[Path] = None,
+    live_progress_extra: Optional[dict[str, Any]] = None,
     progress_interval: int = 100,
     live_phase: str = "cpp_checkpoint",
     p1_deck_card_ids: Optional[set[str]] = None,
@@ -2054,24 +2059,24 @@ def _evaluate_fast_policy_matchup(
             )
         if live_progress_path is not None:
             live_progress_path.parent.mkdir(parents=True, exist_ok=True)
+            live_payload: dict[str, Any] = {
+                "phase": live_phase,
+                "episodes_completed": completed,
+                "target_episodes": episodes,
+                "wins": wins,
+                "losses": losses,
+                "draws": draws,
+                "timeouts": timeouts,
+                "errors": errors,
+                "p1_policy": _policy_label(p1_policy),
+                "p2_policy": _policy_label(p2_policy),
+                "runtime_backend": runtime_backend_label,
+                "updated_at": datetime.now().isoformat(),
+            }
+            if live_progress_extra:
+                live_payload.update(live_progress_extra)
             live_progress_path.write_text(
-                json.dumps(
-                    {
-                        "phase": live_phase,
-                        "episodes_completed": completed,
-                        "target_episodes": episodes,
-                        "wins": wins,
-                        "losses": losses,
-                        "draws": draws,
-                        "timeouts": timeouts,
-                        "errors": errors,
-                        "p1_policy": _policy_label(p1_policy),
-                        "p2_policy": _policy_label(p2_policy),
-                        "runtime_backend": runtime_backend_label,
-                        "updated_at": datetime.now().isoformat(),
-                    },
-                    indent=2,
-                ),
+                json.dumps(live_payload, indent=2),
                 encoding="utf-8",
             )
             _maybe_refresh_sideboard_dashboard(
@@ -2195,7 +2200,9 @@ def _evaluate_p1_vs_fixed_opponent(
     backend: str = DEFAULT_TALISHAR_BACKEND,
     eval_label: str = "Eval",
     live_progress_path: Optional[Path] = None,
+    live_progress_extra: Optional[dict[str, Any]] = None,
     p1_deck_card_ids: Optional[set[str]] = None,
+    **_: Any,
 ) -> dict[str, Any]:
     """Evaluate frozen P1/P2 policies against each other.
 
@@ -2265,6 +2272,7 @@ def _evaluate_p1_vs_fixed_opponent(
             seed=seed,
             eval_label=eval_label,
             live_progress_path=live_progress_path,
+            live_progress_extra=live_progress_extra,
             p1_deck_card_ids=p1_deck_card_ids,
             swap_env=swap_env,
         )
@@ -2449,22 +2457,22 @@ def _evaluate_p1_vs_fixed_opponent(
             )
             if live_progress_path is not None:
                 live_progress_path.parent.mkdir(parents=True, exist_ok=True)
+                live_payload: dict[str, Any] = {
+                    "phase": "final_eval",
+                    "episodes_completed": completed,
+                    "target_episodes": episodes,
+                    "wins": wins,
+                    "losses": losses,
+                    "draws": draws,
+                    "timeouts": timeouts,
+                    "errors": errors,
+                    "runtime_backend": runtime_backend or "HTTP Talishar",
+                    "updated_at": datetime.now().isoformat(),
+                }
+                if live_progress_extra:
+                    live_payload.update(live_progress_extra)
                 live_progress_path.write_text(
-                    json.dumps(
-                        {
-                            "phase": "final_eval",
-                            "episodes_completed": completed,
-                            "target_episodes": episodes,
-                            "wins": wins,
-                            "losses": losses,
-                            "draws": draws,
-                            "timeouts": timeouts,
-                            "errors": errors,
-                            "runtime_backend": runtime_backend or "HTTP Talishar",
-                            "updated_at": datetime.now().isoformat(),
-                        },
-                        indent=2,
-                    ),
+                    json.dumps(live_payload, indent=2),
                     encoding="utf-8",
                 )
                 _maybe_refresh_sideboard_dashboard(
@@ -2516,7 +2524,9 @@ def evaluate_policy_matchup(
     backend: str = DEFAULT_TALISHAR_BACKEND,
     eval_label: str = "Eval",
     live_progress_path: Optional[Path] = None,
+    live_progress_extra: Optional[dict[str, Any]] = None,
     p1_deck_card_ids: Optional[set[str]] = None,
+    **kwargs: Any,
 ) -> dict[str, Any]:
     """Evaluate arbitrary P1/P2 seat policies (PPO agent or ``LOGIC_POLICY``)."""
     return _evaluate_p1_vs_fixed_opponent(
@@ -2531,7 +2541,9 @@ def evaluate_policy_matchup(
         backend=backend,
         eval_label=eval_label,
         live_progress_path=live_progress_path,
+        live_progress_extra=live_progress_extra,
         p1_deck_card_ids=p1_deck_card_ids,
+        **kwargs,
     )
 
 
@@ -2582,6 +2594,8 @@ def evaluate_logic_vs_logic(
     backend: str = DEFAULT_TALISHAR_BACKEND,
     eval_label: str = "Eval logic vs logic",
     live_progress_path: Optional[Path] = None,
+    live_progress_extra: Optional[dict[str, Any]] = None,
+    **kwargs: Any,
 ) -> dict[str, Any]:
     """Evaluate Talishar logic/heuristic policy on both seats (deck matchup baseline)."""
     empty: dict[str, Any] = {
@@ -2612,6 +2626,8 @@ def evaluate_logic_vs_logic(
         backend=backend,
         eval_label=eval_label,
         live_progress_path=live_progress_path,
+        live_progress_extra=live_progress_extra,
+        **kwargs,
     )
     return {
         **metrics,
@@ -2632,6 +2648,8 @@ def evaluate_agent_vs_logic_both_seats(
     backend: str = DEFAULT_TALISHAR_BACKEND,
     eval_label_prefix: str = "Eval vs logic",
     live_progress_path: Optional[Path] = None,
+    live_progress_extra: Optional[dict[str, Any]] = None,
+    **kwargs: Any,
 ) -> dict[str, Any]:
     """Evaluate an agent against the Talishar logic policy from both seats."""
     empty: dict[str, Any] = {
@@ -2658,6 +2676,8 @@ def evaluate_agent_vs_logic_both_seats(
         backend=backend,
         eval_label=f"{eval_label_prefix} (agent @ P1)",
         live_progress_path=live_progress_path,
+        live_progress_extra=live_progress_extra,
+        **kwargs,
     )
     agent_as_p2 = evaluate_policy_matchup(
         matchup,
@@ -2671,6 +2691,8 @@ def evaluate_agent_vs_logic_both_seats(
         backend=backend,
         eval_label=f"{eval_label_prefix} (agent @ P2)",
         live_progress_path=live_progress_path,
+        live_progress_extra=live_progress_extra,
+        **kwargs,
     )
     return {
         "agent_p1_seat": {
@@ -3278,8 +3300,13 @@ def _save_end_state_frame(
             tmp.unlink(missing_ok=True)
 
     obs_data = json.loads(obs) if isinstance(obs, str) else (obs or {})
-    p1_hp = obs_data.get("playerHealth", "?")
-    p2_hp = obs_data.get("opponentHealth", "?")
+    p1_hp_f, p2_hp_f = absolute_p1_p2_hp_from_obs(obs_data)
+    if (p1_hp_f is None or p2_hp_f is None) and env is not None:
+        p1_hp_env, p2_hp_env = absolute_p1_p2_hp_from_env(env)
+        p1_hp_f = p1_hp_f if p1_hp_f is not None else p1_hp_env
+        p2_hp_f = p2_hp_f if p2_hp_f is not None else p2_hp_env
+    p1_hp = p1_hp_f if p1_hp_f is not None else "?"
+    p2_hp = p2_hp_f if p2_hp_f is not None else "?"
 
     labels: dict[str, tuple[str, tuple[int, int, int]]] = {
         "win": ("WIN", (34, 197, 94)),
@@ -3335,11 +3362,16 @@ def _save_state_image(env: Any, obs: Any, out_path: Path) -> bool:
         lines = [
             f"Turn {obs_data.get('turnNo', '?')}  Phase {obs_data.get('turnPhase', '?')}",
             f"Acting player: {obs_data.get('actingPlayerID', '?')}",
-            f"P1 HP: {obs_data.get('playerHealth', '?')}   "
-            f"P2 HP: {obs_data.get('opponentHealth', '?')}",
+        ]
+        p1_hp_f, p2_hp_f = absolute_p1_p2_hp_from_obs(obs_data)
+        lines.append(
+            f"P1 HP: {p1_hp_f if p1_hp_f is not None else '?'}   "
+            f"P2 HP: {p2_hp_f if p2_hp_f is not None else '?'}"
+        )
+        lines.extend([
             f"Legal actions: {len(obs_data.get('legalActions', []) or [])}",
             f"Prompt: {obs_data.get('prompt', '')}",
-        ]
+        ])
         font = ImageFont.load_default()
         img = Image.new("RGB", (800, 200), color=(18, 18, 18))
         draw = ImageDraw.Draw(img)

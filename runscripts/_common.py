@@ -40,6 +40,12 @@ def talishar_url() -> str:
     return env_or_default("TALISHAR_URL", "http://localhost:8080/game")
 
 
+def talishar_backend_urls() -> tuple[str, ...]:
+    from runtime_defaults import resolve_talishar_backend_urls  # noqa: PLC0415
+
+    return resolve_talishar_backend_urls(fallback_url=talishar_url())
+
+
 def assets_path() -> Path:
     return Path(env_or_default("TALISHAR_ASSETS_PATH", str(REPO_ROOT / "Talishar" / "Assets")))
 

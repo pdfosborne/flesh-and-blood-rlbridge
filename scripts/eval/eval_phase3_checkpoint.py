@@ -16,10 +16,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import sys
+import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
@@ -62,6 +64,7 @@ from runtime_defaults import (  # noqa: E402
     DEFAULT_TALISHAR_BACKEND,
 )
 from fab_bridge.unified_results import (  # noqa: E402
+    find_latest_merged_unified_bucket,
     find_latest_unified_checkpoint_metadata,
     is_unified_random_matchup_run,
     iter_unified_checkpoint_metadata,
@@ -69,6 +72,7 @@ from fab_bridge.unified_results import (  # noqa: E402
     resolve_latest_unified_matchup_dir,
     resolve_unified_run_root,
 )
+from scripts.training.unified_checkpoint_eval import uniform_matchup_schedule  # noqa: E402
 from scripts.training.train_pipeline_common import _write_deck_file  # noqa: E402
 
 UNIFIED_LIVE_RENDER_IMAGE = "optimal_policy_live.png"
@@ -400,24 +404,19 @@ def _equipment_header(bundle: CheckpointBundle, *, assets_path: str = "") -> str
     deck_stem = str(bundle.metadata.get(deck_key, "") or "").strip()
     if assets_path:
         from flesh_and_blood_rlbridge.talishar_deck_assets import (  # noqa: PLC0415
-            ensure_full_equipment_header,
-            equipment_header_from_deck_stem,
-            resolve_equipment_header_line,
+            load_guide_sideboard_record,
+            resolve_matchup_equipment_header,
         )
 
-        if deck_stem:
-            header = equipment_header_from_deck_stem(
-                deck_stem,
-                assets_path,
-                fallback=header,
-            )
-        else:
-            header = resolve_equipment_header_line(hero_id, assets_path, fallback=header)
-        header = ensure_full_equipment_header(
-            hero_id or header.split()[0] if header else "",
-            header,
-            assets_path,
+        matchup_dir = bundle.checkpoint_dir.parent.parent.parent
+        guide = load_guide_sideboard_record(matchup_dir)
+        header = resolve_matchup_equipment_header(
+            role=bundle.role,
+            hero_id=hero_id or (header.split()[0] if header else ""),
             deck_stem=deck_stem,
+            assets_dir=assets_path,
+            fallback=header,
+            guide_sideboard=guide,
         )
     if hero_id and header:
         first = header.split()[0]
@@ -470,6 +469,437 @@ def _print_dashboard(
           f"(excl. timeouts: {win_rate_dec * 100:.1f}%)")
     print(f"  Last result  : {last_outcome}  ({last_steps} steps)")
     print("=" * 72)
+
+
+@dataclass
+class _UnifiedMatchupEvalAssets:
+    matchup_dir: Path
+    p1_bundle: CheckpointBundle
+    p2_bundle: Optional[CheckpointBundle]
+    p1_deck_name: str
+    p2_deck_name: str
+    opponent_label: str
+    cleanup_files: list[Path] = field(default_factory=list)
+
+
+@dataclass
+class _UnifiedRenderState:
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    stop: threading.Event = field(default_factory=threading.Event)
+    merged_episode: Optional[int] = None
+    bucket: Optional[dict[Path, Path]] = None
+    matchup_dirs: list[Path] = field(default_factory=list)
+
+
+def _print_unified_merged_dashboard(
+    *,
+    merged_episode: int,
+    matchups_total: int,
+    current_matchup: str,
+    episode: int,
+    total_episodes: int,
+    wins: int,
+    losses: int,
+    timeouts: int,
+    last_outcome: str,
+    last_steps: int,
+    eval_dir: Path,
+    reference_bundle: CheckpointBundle,
+) -> None:
+    total_done = max(1, episode)
+    decided = max(1, total_done - timeouts)
+    win_rate_all = wins / total_done
+    win_rate_dec = wins / decided
+    print("\033[2J\033[H", end="")
+    print("=" * 72)
+    print("  Phase 3 Eval Dashboard (merged unified batch)")
+    print("=" * 72)
+    print(f"  Merged bucket: episode {merged_episode:06d} ({matchups_total} matchup(s))")
+    print(f"  Current matchup: {current_matchup}")
+    print(f"  Format       : {reference_bundle.game_format}")
+    print(
+        f"  Train eps    : {merged_episode}/"
+        f"{reference_bundle.metadata.get('target_episodes', '?')}"
+    )
+    print(f"  Eval dir     : {eval_dir}")
+    print("-" * 72)
+    print(f"  Episode      : {episode}/{total_episodes}")
+    print(f"  Record       : {wins}W  {losses}L  {timeouts}T")
+    print(
+        f"  Win %        : {win_rate_all * 100:6.2f}%  "
+        f"(excl. timeouts: {win_rate_dec * 100:.1f}%)"
+    )
+    print(f"  Last result  : {last_outcome}  ({last_steps} steps)")
+    print("=" * 72)
+
+
+def _prepare_unified_matchup_eval_assets(
+    *,
+    matchup_dir: Path,
+    p1_checkpoint_dir: Path,
+    assets_path: str,
+) -> _UnifiedMatchupEvalAssets:
+    p1_bundle = _load_checkpoint(p1_checkpoint_dir, "p1")
+    if p1_bundle is None:
+        raise RuntimeError(f"Missing P1 checkpoint under {p1_checkpoint_dir}")
+    p2_bundle = _paired_checkpoint(p1_bundle, "p2")
+    p1_cards = _deck_cards(p1_bundle, assets_path=assets_path)
+    if not p1_cards:
+        raise RuntimeError(f"Checkpoint missing P1 deck spec: {p1_checkpoint_dir}")
+
+    p1_deck_name = f"eval_p1_{uuid.uuid4().hex[:8]}"
+    p1_deck_file = _write_deck_file(
+        p1_cards,
+        _equipment_header(p1_bundle, assets_path=assets_path),
+        p1_deck_name,
+        assets_path,
+    )
+    cleanup_files = [p1_deck_file]
+
+    opponent_mode = str(p1_bundle.metadata.get("opponent_mode", "preset") or "preset")
+    if p2_bundle is not None and _deck_cards(p2_bundle, assets_path=assets_path):
+        p2_deck_name = f"eval_p2_{uuid.uuid4().hex[:8]}"
+        p2_deck_file = _write_deck_file(
+            _deck_cards(p2_bundle, assets_path=assets_path),
+            _equipment_header(p2_bundle, assets_path=assets_path),
+            p2_deck_name,
+            assets_path,
+        )
+        cleanup_files.append(p2_deck_file)
+        opponent_label = (
+            f"trained P2 agent — {p2_bundle.role} checkpoint "
+            f"({p2_bundle.episodes_completed} eps)"
+        )
+    elif opponent_mode == "mirror":
+        p2_deck_name = p1_deck_name
+        opponent_label = "mirror (same checkpoint)"
+    else:
+        preset_stem = _resolve_p2_preset_deck_name(p1_bundle, p2_bundle)
+        p2_hero = (
+            (p2_bundle.own_hero if p2_bundle is not None else "")
+            or p1_bundle.p2_hero
+            or preset_stem
+        ).replace("-", "_")
+        p2_cards = (
+            _deck_cards(p2_bundle, assets_path=assets_path)
+            if p2_bundle is not None
+            else {}
+        )
+        if not p2_cards:
+            from flesh_and_blood_rlbridge.deck_context import _read_asset_deck  # noqa: PLC0415
+
+            _, counts = _read_asset_deck(Path(assets_path), preset_stem)
+            p2_cards = {str(card_id): int(count) for card_id, count in counts.items()}
+        from flesh_and_blood_rlbridge.talishar_deck_assets import (  # noqa: PLC0415
+            ensure_full_equipment_header,
+            equipment_header_from_deck_stem,
+        )
+
+        p2_header = ensure_full_equipment_header(
+            p2_hero,
+            equipment_header_from_deck_stem(preset_stem, assets_path),
+            assets_path,
+            deck_stem=preset_stem,
+        )
+        p2_deck_name = f"eval_p2_{uuid.uuid4().hex[:8]}"
+        p2_deck_file = _write_deck_file(
+            p2_cards,
+            p2_header,
+            p2_deck_name,
+            assets_path,
+        )
+        cleanup_files.append(p2_deck_file)
+        if p2_bundle is not None:
+            opponent_label = (
+                f"preset deck {preset_stem} + trained P2 agent "
+                f"({p2_bundle.episodes_completed} eps)"
+            )
+        else:
+            opponent_label = f"preset deck {preset_stem} (P2 default heuristic)"
+
+    return _UnifiedMatchupEvalAssets(
+        matchup_dir=matchup_dir,
+        p1_bundle=p1_bundle,
+        p2_bundle=p2_bundle,
+        p1_deck_name=p1_deck_name,
+        p2_deck_name=p2_deck_name,
+        opponent_label=opponent_label,
+        cleanup_files=cleanup_files,
+    )
+
+
+def _cleanup_eval_deck_files(paths: list[Path]) -> None:
+    for file_path in paths:
+        try:
+            if file_path.is_file():
+                file_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _unified_continuous_render_loop(
+    *,
+    results_dir: Path,
+    render_state: _UnifiedRenderState,
+    base_url: str,
+    fe_url: str,
+    assets_path: str,
+    render_max_steps: int,
+    poll_seconds: float,
+) -> None:
+    """Continuously render one greedy-policy episode on a random merged matchup."""
+    eval_dir = results_dir / "eval_dashboard"
+    eval_dir.mkdir(parents=True, exist_ok=True)
+    live_frame_path = eval_dir / UNIFIED_LIVE_RENDER_IMAGE
+    rng = random.Random()
+    print(
+        f"  [render] Unified live render started → {live_frame_path} "
+        f"(random matchup, one episode per cycle)",
+        flush=True,
+    )
+    while not render_state.stop.is_set():
+        with render_state.lock:
+            bucket = dict(render_state.bucket or {})
+            merged_episode = render_state.merged_episode
+        if not bucket or merged_episode is None:
+            if render_state.stop.wait(timeout=max(1.0, poll_seconds)):
+                break
+            continue
+        matchup_dirs = list(bucket.keys())
+        if not matchup_dirs:
+            if render_state.stop.wait(timeout=max(1.0, poll_seconds)):
+                break
+            continue
+        matchup_dir = rng.choice(matchup_dirs)
+        ckpt_dir = bucket.get(matchup_dir)
+        if ckpt_dir is None:
+            continue
+        try:
+            assets = _prepare_unified_matchup_eval_assets(
+                matchup_dir=matchup_dir,
+                p1_checkpoint_dir=ckpt_dir,
+                assets_path=assets_path,
+            )
+            p1_agent = _load_agent(assets.p1_bundle.weights_path)
+            p2_agent = (
+                _load_agent(assets.p2_bundle.weights_path)
+                if assets.p2_bundle is not None
+                else None
+            )
+            print(
+                f"  [render] episode @ merged ep {merged_episode:06d} — "
+                f"{assets.p1_bundle.matchup}",
+                flush=True,
+            )
+            _run_render_episode(
+                p1_agent=p1_agent,
+                p2_agent=p2_agent,
+                base_url=base_url,
+                fe_url=fe_url,
+                game_format=assets.p1_bundle.game_format,
+                p1_deck_name=assets.p1_deck_name,
+                p2_deck_name=assets.p2_deck_name,
+                max_steps=render_max_steps,
+                render_dir=eval_dir,
+                player_label=assets.p1_bundle.role,
+                live_frame_path=live_frame_path,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"  [render] Unified live render error: {exc}", flush=True)
+        finally:
+            if "assets" in locals():
+                _cleanup_eval_deck_files(assets.cleanup_files)
+        if render_state.stop.wait(timeout=max(1.0, poll_seconds)):
+            break
+
+
+def _evaluate_unified_merged_checkpoint(
+    *,
+    results_dir: Path,
+    merged_episode: int,
+    bucket: dict[Path, Path],
+    episodes: int,
+    max_steps: int,
+    base_url: str,
+    assets_path: str,
+    seed: Optional[int],
+    stall_no_damage_turns: int,
+    stall_low_hand_turns: int,
+    stall_max_single_low_hand_turns: int,
+    stall_min_attack_hand: int,
+    verbose: bool,
+    run_parity: bool,
+    cpp_engine_dir: Optional[str],
+    cpp_engine_cache_dir: Optional[str],
+) -> dict[str, Any]:
+    matchup_dirs = list(bucket.keys())
+    if not matchup_dirs:
+        raise RuntimeError("Merged unified eval requires at least one matchup")
+
+    reference_ckpt = bucket[matchup_dirs[0]]
+    reference_bundle = _load_checkpoint(reference_ckpt, "p1")
+    if reference_bundle is None:
+        raise RuntimeError(f"Missing reference checkpoint: {reference_ckpt}")
+
+    eval_dir = _resolve_eval_dashboard_dir(results_dir, reference_bundle)
+    eval_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"\n{'='*72}")
+    print("  Evaluating merged unified checkpoint")
+    print(f"  Merged episode : {merged_episode:06d}")
+    print(f"  Matchups       : {len(matchup_dirs)}")
+    print(f"  Eval episodes  : {episodes} (uniform random matchup per episode)")
+    print(f"  Eval dir       : {eval_dir}")
+    print(f"{'='*72}", flush=True)
+
+    matchup_assets: dict[Path, _UnifiedMatchupEvalAssets] = {}
+    for matchup_dir, ckpt_dir in bucket.items():
+        matchup_assets[matchup_dir] = _prepare_unified_matchup_eval_assets(
+            matchup_dir=matchup_dir,
+            p1_checkpoint_dir=ckpt_dir,
+            assets_path=assets_path,
+        )
+
+    schedule = uniform_matchup_schedule(
+        episodes,
+        list(matchup_assets.keys()),
+        seed=seed,
+    )
+
+    parity_result: Optional[dict[str, Any]] = None
+    if run_parity:
+        first = matchup_assets[matchup_dirs[0]]
+        parity_result = _run_checkpoint_parity_check(
+            p1_bundle=first.p1_bundle,
+            p2_bundle=first.p2_bundle,
+            base_url=base_url,
+            eval_dir=eval_dir,
+            cpp_engine_dir=cpp_engine_dir,
+            cpp_engine_cache_dir=cpp_engine_cache_dir,
+            deck1=first.p1_deck_name,
+            deck2=first.p2_deck_name,
+        )
+
+    wins = losses = timeouts = stall_timeouts = 0
+    episode_log: list[dict[str, Any]] = []
+    per_matchup_counts: dict[str, int] = {}
+
+    try:
+        for episode_index, matchup_dir in enumerate(schedule, start=1):
+            assets = matchup_assets[matchup_dir]
+            per_matchup_counts[assets.p1_bundle.matchup] = (
+                per_matchup_counts.get(assets.p1_bundle.matchup, 0) + 1
+            )
+            ep_seed = (seed + episode_index) if seed is not None else None
+            mirror_opponent = (
+                str(assets.p1_bundle.metadata.get("opponent_mode", "preset") or "preset")
+                == "mirror"
+            )
+            p2_weights = (
+                assets.p2_bundle.weights_path if assets.p2_bundle is not None else None
+            )
+            logs = _run_eval_episode_batch(
+                episode_numbers=[episode_index],
+                seed=ep_seed,
+                base_url=base_url,
+                game_format=assets.p1_bundle.game_format,
+                p1_deck_name=assets.p1_deck_name,
+                p2_deck_name=assets.p2_deck_name,
+                max_steps=max_steps,
+                p1_weights_path=assets.p1_bundle.weights_path,
+                p2_weights_path=p2_weights,
+                mirror_opponent=mirror_opponent,
+                stall_no_damage_turns=stall_no_damage_turns,
+                stall_low_hand_turns=stall_low_hand_turns,
+                stall_max_single_low_hand_turns=stall_max_single_low_hand_turns,
+                stall_min_attack_hand=stall_min_attack_hand,
+                verbose=verbose,
+            )
+            for rec in logs:
+                outcome = str(rec.get("outcome", "timeout"))
+                if outcome == "win":
+                    wins += 1
+                elif outcome == "loss":
+                    losses += 1
+                else:
+                    timeouts += 1
+                    if outcome == "stall_timeout":
+                        stall_timeouts += 1
+                episode_log.append({**rec, "matchup": assets.p1_bundle.matchup})
+                _print_unified_merged_dashboard(
+                    merged_episode=merged_episode,
+                    matchups_total=len(matchup_dirs),
+                    current_matchup=assets.p1_bundle.matchup,
+                    episode=episode_index,
+                    total_episodes=episodes,
+                    wins=wins,
+                    losses=losses,
+                    timeouts=timeouts,
+                    last_outcome=outcome,
+                    last_steps=int(rec.get("steps", 0) or 0),
+                    eval_dir=eval_dir,
+                    reference_bundle=reference_bundle,
+                )
+    finally:
+        for assets in matchup_assets.values():
+            _cleanup_eval_deck_files(assets.cleanup_files)
+
+    eval_section = {
+        "episodes": episodes,
+        "wins": wins,
+        "losses": losses,
+        "timeouts": timeouts,
+        "stall_timeouts": stall_timeouts,
+        "win_rate": wins / max(1, episodes),
+        "win_rate_decided": wins / max(1, episodes - timeouts),
+        "episode_log": episode_log,
+        "merged_episode": merged_episode,
+        "matchups_evaluated": len(matchup_dirs),
+        "per_matchup_counts": per_matchup_counts,
+    }
+    summary = {
+        "checkpoint_dir": str(reference_ckpt),
+        "matchup": f"merged@{merged_episode:06d}",
+        "episodes_completed": merged_episode,
+        "eval": eval_section,
+        "render": {
+            "live_frame": str(eval_dir / UNIFIED_LIVE_RENDER_IMAGE),
+            "continuous": True,
+        },
+        "parity": parity_result,
+        "render_only": False,
+    }
+    summary_path = eval_dir / "latest_eval.json"
+    summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    print(f"\nSaved merged evaluation summary -> {summary_path}")
+
+    history_path = eval_dir / "eval_history.json"
+    chart_path = eval_dir / "winrate_chart.png"
+    cumulative_chart_path = eval_dir / "winrate_chart_cumulative.png"
+    history = _append_to_history(summary, history_path)
+    chart_matchup = f"merged unified ({len(matchup_dirs)} matchups)"
+    chart_ok = _update_winrate_chart(history, chart_path, matchup=chart_matchup)
+    cumulative_chart_ok = _update_cumulative_winrate_chart(
+        history, cumulative_chart_path, matchup=chart_matchup
+    )
+    if chart_ok:
+        print(f"Updated win-rate chart   -> {chart_path}  ({len(history)} checkpoint(s))")
+    if cumulative_chart_ok:
+        print(
+            f"Updated cumulative chart -> {cumulative_chart_path}  "
+            f"({len(history)} checkpoint(s))"
+        )
+    if not chart_ok and not cumulative_chart_ok:
+        print(f"Updated eval history     -> {history_path}  ({len(history)} checkpoint(s))")
+
+    summary["history"] = {
+        "history_path": str(history_path),
+        "chart_path": str(chart_path) if chart_ok else None,
+        "cumulative_chart_path": str(cumulative_chart_path) if cumulative_chart_ok else None,
+        "checkpoints_in_history": len(history),
+    }
+    summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    return summary
 
 
 def _run_render_episode(
@@ -1195,6 +1625,7 @@ def _evaluate_checkpoint(
     render_only: bool = False,
     cpp_engine_dir: Optional[str] = None,
     cpp_engine_cache_dir: Optional[str] = None,
+    skip_post_eval_render: bool = False,
 ) -> dict[str, Any]:
     print(f"\n{'='*72}")
     print(f"  Evaluating checkpoint  : {p1_bundle.checkpoint_dir.name}")
@@ -1437,7 +1868,7 @@ def _evaluate_checkpoint(
     render_outcome: Optional[str] = None
     unified_live_render = is_unified_random_matchup_run(results_dir)
     try:
-        if render_gif:
+        if render_gif and not skip_post_eval_render:
             if unified_live_render:
                 live_frame_path = eval_dir / UNIFIED_LIVE_RENDER_IMAGE
                 if render_only:
@@ -1692,24 +2123,23 @@ def main() -> None:
             else:
                 print("  Candidate     : (all under candidates/)")
     elif is_unified_random_matchup_run(results_dir):
-        print("  Run type      : unified random matchups")
-        latest_meta = find_latest_unified_checkpoint_metadata(results_dir, "p1")
-        if latest_meta is not None:
-            latest_matchup = matchup_dir_from_unified_checkpoint(latest_meta.parent)
-            episode = latest_meta.parent.name
-            if latest_matchup is not None:
-                print(
-                    f"  Latest checkpoint: {episode} "
-                    f"({latest_matchup.name})"
-                )
-            else:
-                print(f"  Latest checkpoint: {episode}")
+        print("  Run type      : unified random matchups (merged-batch eval)")
+        merged = find_latest_merged_unified_bucket(results_dir)
+        if merged is not None:
+            merged_episode, bucket = merged
+            print(
+                f"  Merged bucket : episode {merged_episode:06d} "
+                f"({len(bucket)} matchup(s) aligned)"
+            )
         else:
             active = resolve_latest_unified_matchup_dir(results_dir)
             if active is not None:
-                print(f"  Latest matchup: {active.name} (waiting for checkpoints)")
+                print(
+                    f"  Merged bucket : waiting for all matchups "
+                    f"(latest activity: {active.name})"
+                )
             else:
-                print("  Latest matchup: (waiting for first matchup output)")
+                print("  Merged bucket : waiting for first matchup output")
     print(f"  Talishar URL  : {args.talishar_url}")
     print(f"  Assets path   : {args.assets_path}")
     if args.render_only:
@@ -1747,76 +2177,169 @@ def main() -> None:
     print("=" * 72, flush=True)
 
     last_seen: Optional[Path] = None
+    last_seen_merged_episode: Optional[int] = None
     last_matchup_dir: Optional[Path] = None
     poll_count = 0
+    unified_mode = is_unified_random_matchup_run(results_dir)
+    render_state: Optional[_UnifiedRenderState] = None
+    render_thread: Optional[threading.Thread] = None
+    if unified_mode and not args.no_render_gif:
+        render_state = _UnifiedRenderState()
+        render_thread = threading.Thread(
+            target=_unified_continuous_render_loop,
+            kwargs={
+                "results_dir": results_dir,
+                "render_state": render_state,
+                "base_url": args.talishar_url,
+                "fe_url": args.talishar_fe_url,
+                "assets_path": args.assets_path,
+                "render_max_steps": render_max_steps,
+                "poll_seconds": args.poll_seconds,
+            },
+            daemon=True,
+            name="unified-live-render",
+        )
+        render_thread.start()
+
     while True:
-        unified_matchup_scope: Optional[Path] = None
-        if is_unified_random_matchup_run(results_dir):
-            if args.watch:
-                unified_matchup_scope = resolve_latest_unified_matchup_dir(results_dir)
-            active_matchup = unified_matchup_scope or resolve_latest_unified_matchup_dir(
-                results_dir
-            )
-            if active_matchup != last_matchup_dir:
-                last_seen = None
-                last_matchup_dir = active_matchup
-                if active_matchup is not None and args.watch:
+        if unified_mode and not args.checkpoint_dir:
+            bucket_result = find_latest_merged_unified_bucket(results_dir)
+            if render_state is not None and bucket_result is not None:
+                merged_episode, bucket = bucket_result
+                with render_state.lock:
+                    render_state.merged_episode = merged_episode
+                    render_state.bucket = bucket
+                    render_state.matchup_dirs = list(bucket.keys())
+
+            if bucket_result is None:
+                scope = results_dir
+                active = resolve_latest_unified_matchup_dir(results_dir)
+                if active is not None:
+                    scope = active
+                print(
+                    f"  [watch] Waiting for all matchups to reach the same checkpoint "
+                    f"under {scope}  (poll #{poll_count + 1})",
+                    flush=True,
+                )
+            elif bucket_result[0] != last_seen_merged_episode:
+                merged_episode, bucket = bucket_result
+                if args.render_only:
                     print(
-                        f"  [watch] Eval scope → latest matchup {active_matchup.name}",
+                        f"  [watch] Merged checkpoint {merged_episode:06d} ready "
+                        f"({len(bucket)} matchup(s)); render-only — skipping eval episodes",
                         flush=True,
                     )
-
-        if args.checkpoint_dir:
-            p1_bundle = _load_checkpoint(Path(args.checkpoint_dir).expanduser().resolve(), "p1")
+                    last_seen_merged_episode = merged_episode
+                else:
+                    _evaluate_unified_merged_checkpoint(
+                        results_dir=results_dir,
+                        merged_episode=merged_episode,
+                        bucket=bucket,
+                        episodes=args.episodes,
+                        max_steps=args.max_steps,
+                        base_url=args.talishar_url,
+                        assets_path=args.assets_path,
+                        seed=args.seed,
+                        stall_no_damage_turns=args.stall_no_damage_turns,
+                        stall_low_hand_turns=args.stall_low_hand_turns,
+                        stall_max_single_low_hand_turns=args.stall_max_single_low_hand_turns,
+                        stall_min_attack_hand=args.stall_min_attack_hand,
+                        verbose=args.verbose,
+                        run_parity=not args.skip_parity,
+                        cpp_engine_dir=args.parity_cpp_engine_dir,
+                        cpp_engine_cache_dir=args.parity_cpp_engine_cache_dir,
+                    )
+                    last_seen_merged_episode = merged_episode
+            else:
+                merged_episode = bucket_result[0]
+                print(
+                    f"  [watch] Merged checkpoint {merged_episode:06d} already evaluated "
+                    f"— waiting {args.poll_seconds:.0f}s for next bucket "
+                    f"(poll #{poll_count + 1})",
+                    flush=True,
+                )
         else:
-            p1_bundle = _latest_checkpoint(
-                results_dir,
-                "p1",
-                candidate_id=args.candidate_id,
-                unified_matchup_dir=unified_matchup_scope,
-            )
+            unified_matchup_scope: Optional[Path] = None
+            if is_unified_random_matchup_run(results_dir):
+                if args.watch:
+                    unified_matchup_scope = resolve_latest_unified_matchup_dir(results_dir)
+                active_matchup = unified_matchup_scope or resolve_latest_unified_matchup_dir(
+                    results_dir
+                )
+                if active_matchup != last_matchup_dir:
+                    last_seen = None
+                    last_matchup_dir = active_matchup
+                    if active_matchup is not None and args.watch:
+                        print(
+                            f"  [watch] Eval scope → latest matchup {active_matchup.name}",
+                            flush=True,
+                        )
 
-        if p1_bundle is None:
-            scope = results_dir
-            if args.candidate_id and is_sideboard_compare_dir(results_dir):
-                scope = results_dir / _SIDEBOARD_CANDIDATES_DIR / args.candidate_id
-            elif last_matchup_dir is not None:
-                scope = last_matchup_dir
-            print(f"  [watch] No checkpoints found under {scope}  "
-                  f"(poll #{poll_count + 1})", flush=True)
-        elif p1_bundle.checkpoint_dir != last_seen:
-            p2_bundle = _paired_checkpoint(p1_bundle, "p2")
-            _evaluate_checkpoint(
-                results_dir=results_dir,
-                p1_bundle=p1_bundle,
-                p2_bundle=p2_bundle,
-                candidate_id=args.candidate_id,
-                episodes=args.episodes,
-                max_steps=args.max_steps,
-                base_url=args.talishar_url,
-                fe_url=args.talishar_fe_url,
-                assets_path=args.assets_path,
-                render_gif=not args.no_render_gif or args.render_only,
-                render_max_steps=render_max_steps,
-                gif_fps=args.gif_fps,
-                seed=args.seed,
-                stall_no_damage_turns=args.stall_no_damage_turns,
-                stall_low_hand_turns=args.stall_low_hand_turns,
-                stall_max_single_low_hand_turns=args.stall_max_single_low_hand_turns,
-                stall_min_attack_hand=args.stall_min_attack_hand,
-                parallel_workers=args.parallel_workers,
-                verbose=args.verbose,
-                run_parity=not args.skip_parity,
-                render_only=args.render_only,
-                cpp_engine_dir=args.parity_cpp_engine_dir,
-                cpp_engine_cache_dir=args.parity_cpp_engine_cache_dir,
-            )
-            last_seen = p1_bundle.checkpoint_dir
-        else:
-            print(f"  [watch] checkpoint already evaluated "
-                  f"({p1_bundle.checkpoint_dir.name})  "
-                  f"— waiting {args.poll_seconds:.0f}s for new checkpoint "
-                  f"(poll #{poll_count + 1})", flush=True)
+            if args.checkpoint_dir:
+                p1_bundle = _load_checkpoint(
+                    Path(args.checkpoint_dir).expanduser().resolve(), "p1"
+                )
+            else:
+                p1_bundle = _latest_checkpoint(
+                    results_dir,
+                    "p1",
+                    candidate_id=args.candidate_id,
+                    unified_matchup_dir=unified_matchup_scope,
+                )
+
+            if p1_bundle is None:
+                scope = results_dir
+                if args.candidate_id and is_sideboard_compare_dir(results_dir):
+                    scope = results_dir / _SIDEBOARD_CANDIDATES_DIR / args.candidate_id
+                elif last_matchup_dir is not None:
+                    scope = last_matchup_dir
+                print(
+                    f"  [watch] No checkpoints found under {scope}  "
+                    f"(poll #{poll_count + 1})",
+                    flush=True,
+                )
+            elif p1_bundle.checkpoint_dir != last_seen:
+                p2_bundle = _paired_checkpoint(p1_bundle, "p2")
+                skip_post_eval_render = (
+                    unified_mode
+                    and render_state is not None
+                    and is_unified_random_matchup_run(results_dir)
+                )
+                _evaluate_checkpoint(
+                    results_dir=results_dir,
+                    p1_bundle=p1_bundle,
+                    p2_bundle=p2_bundle,
+                    candidate_id=args.candidate_id,
+                    episodes=args.episodes,
+                    max_steps=args.max_steps,
+                    base_url=args.talishar_url,
+                    fe_url=args.talishar_fe_url,
+                    assets_path=args.assets_path,
+                    render_gif=not args.no_render_gif or args.render_only,
+                    render_max_steps=render_max_steps,
+                    gif_fps=args.gif_fps,
+                    seed=args.seed,
+                    stall_no_damage_turns=args.stall_no_damage_turns,
+                    stall_low_hand_turns=args.stall_low_hand_turns,
+                    stall_max_single_low_hand_turns=args.stall_max_single_low_hand_turns,
+                    stall_min_attack_hand=args.stall_min_attack_hand,
+                    parallel_workers=args.parallel_workers,
+                    verbose=args.verbose,
+                    run_parity=not args.skip_parity,
+                    render_only=args.render_only,
+                    cpp_engine_dir=args.parity_cpp_engine_dir,
+                    cpp_engine_cache_dir=args.parity_cpp_engine_cache_dir,
+                    skip_post_eval_render=skip_post_eval_render,
+                )
+                last_seen = p1_bundle.checkpoint_dir
+            else:
+                print(
+                    f"  [watch] checkpoint already evaluated "
+                    f"({p1_bundle.checkpoint_dir.name})  "
+                    f"— waiting {args.poll_seconds:.0f}s for new checkpoint "
+                    f"(poll #{poll_count + 1})",
+                    flush=True,
+                )
 
         poll_count += 1
         if not args.watch:

@@ -122,6 +122,18 @@ def _board_state_key(snapshot: dict[str, Any]) -> str:
     return json.dumps(key_data, sort_keys=True, separators=(",", ":"))
 
 
+_GAMESTATE_REVERT_NEEDLE = "reverting gamestate prior to"
+
+
+def talishar_gamestate_revert_detected(state: dict[str, Any]) -> bool:
+    """Return True when Talishar reverted the gamestate after an invalid action."""
+    chat_log = state.get("chatLog", "")
+    for line in extract_talishar_chat_log_lines(chat_log):
+        if _GAMESTATE_REVERT_NEEDLE in line.lower():
+            return True
+    return False
+
+
 def extract_talishar_chat_log_lines(chat_log: Any) -> list[str]:
     """Convert Talishar chatLog HTML into normalized plain-text lines."""
     if chat_log is None:

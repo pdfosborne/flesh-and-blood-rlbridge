@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from typing import Any, Optional
 
 # SAGE precon decks (hero slug → Assets file stem)
 SAGE_PRECON_BY_HERO: dict[str, str] = {
@@ -216,6 +218,55 @@ def ensure_full_equipment_header(
     if active:
         return rebuild_equipment_header(hero, [*active[1:], *extras])
     return hero
+
+
+def load_guide_sideboard_record(matchup_dir: Path) -> dict[str, Any]:
+    """Load ``guide_sideboard.json`` when present under a matchup output directory."""
+    path = Path(matchup_dir) / "guide_sideboard.json"
+    if not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def resolve_matchup_equipment_header(
+    *,
+    role: str,
+    hero_id: str,
+    deck_stem: str,
+    assets_dir: str | Path,
+    fallback: str = "",
+    guide_sideboard: Optional[dict[str, Any]] = None,
+) -> str:
+    """Resolve a complete Talishar line-1 equipment header for eval/training.
+
+    Prefers headers persisted by the guide sideboard step, then the on-disk
+    ``Assets/<deck_stem>.txt`` line, then the hero equipment index.
+    """
+    hero = hero_id.removeprefix("hero_").replace("-", "_").strip()
+    role_key = f"{role.strip().lower()}_equipment_header"
+    from_sideboard = ""
+    if guide_sideboard:
+        from_sideboard = str(guide_sideboard.get(role_key, "") or "").strip()
+
+    header = (from_sideboard or fallback or hero).strip()
+    stem = (deck_stem or "").strip()
+    if stem:
+        header = equipment_header_from_deck_stem(
+            stem,
+            assets_dir,
+            fallback=header,
+        )
+    header = resolve_equipment_header_line(hero, assets_dir, fallback=header)
+    return ensure_full_equipment_header(
+        hero,
+        header,
+        assets_dir,
+        deck_stem=stem,
+    )
 
 
 def _asset_exists(assets_dir: Path, stem: str) -> bool:

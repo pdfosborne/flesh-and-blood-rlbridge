@@ -6,10 +6,23 @@
  * when RLStep runs in training mode.
  */
 
+function _rlAppendTrainingLog($text)
+{
+    global $FAB_RL_LOG_TAIL;
+    if (!isset($FAB_RL_LOG_TAIL)) {
+        $FAB_RL_LOG_TAIL = [];
+    }
+    $FAB_RL_LOG_TAIL[] = strval($text);
+    if (count($FAB_RL_LOG_TAIL) > 32) {
+        $FAB_RL_LOG_TAIL = array_slice($FAB_RL_LOG_TAIL, -32);
+    }
+}
+
 function WriteLog($text, $playerColor = 0, $highlight = false, $path = "./", $highlightColor = "brown")
 {
     global $FAB_RL_TRAINING_MODE;
     if (!empty($FAB_RL_TRAINING_MODE)) {
+        _rlAppendTrainingLog($text);
         return;
     }
     global $gameName;
@@ -89,9 +102,12 @@ function WriteSystemMessage($text, $path = "./")
 
 function JSONLog($gameName, $playerID, $path = "./")
 {
-    global $FAB_RL_TRAINING_MODE;
+    global $FAB_RL_TRAINING_MODE, $FAB_RL_LOG_TAIL;
     if (!empty($FAB_RL_TRAINING_MODE)) {
-        return "";
+        if (empty($FAB_RL_LOG_TAIL)) {
+            return "";
+        }
+        return implode("<br>", $FAB_RL_LOG_TAIL);
     }
     $response = "";
     $filename = "{$path}Games/$gameName/gamelog.txt";

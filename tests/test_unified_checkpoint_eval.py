@@ -8,12 +8,14 @@ from pathlib import Path
 
 _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO / "scripts" / "eval"))
+sys.path.insert(0, str(_REPO / "scripts" / "training"))
 
 from eval_phase3_checkpoint import (  # noqa: E402
     CheckpointBundle,
     _latest_checkpoint,
     _resolve_eval_dashboard_dir,
 )
+from scripts.training.unified_checkpoint_eval import uniform_matchup_schedule  # noqa: E402
 
 
 def _write_unified_checkpoint(
@@ -185,3 +187,12 @@ def test_eval_dashboard_dir_at_unified_run_root(tmp_path: Path) -> None:
 
     eval_dir = _resolve_eval_dashboard_dir(run_dir, bundle)
     assert eval_dir == run_dir / "eval_dashboard"
+
+
+def test_uniform_matchup_schedule_is_reproducible() -> None:
+    keys = ["a", "b", "c"]
+    first = uniform_matchup_schedule(20, keys, seed=42)
+    second = uniform_matchup_schedule(20, keys, seed=42)
+    assert first == second
+    assert len(first) == 20
+    assert all(item in keys for item in first)

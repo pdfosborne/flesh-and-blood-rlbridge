@@ -112,6 +112,9 @@ class EnvironmentSettings:
     talishar_url: str = field(
         default_factory=lambda: os.environ.get("TALISHAR_URL", "http://localhost:8080/game")
     )
+    talishar_urls: str = field(
+        default_factory=lambda: os.environ.get("TALISHAR_URLS", "")
+    )
     talishar_fe_url: str = field(
         default_factory=lambda: os.environ.get("TALISHAR_FE_URL", "http://localhost:5173")
     )
@@ -126,6 +129,10 @@ class EnvironmentSettings:
 
     def apply_to_environ(self) -> None:
         os.environ["TALISHAR_URL"] = self.talishar_url
+        if self.talishar_urls.strip():
+            os.environ["TALISHAR_URLS"] = self.talishar_urls.strip()
+        elif "TALISHAR_URLS" in os.environ:
+            del os.environ["TALISHAR_URLS"]
         os.environ["TALISHAR_FE_URL"] = self.talishar_fe_url
         os.environ["TALISHAR_ASSETS_PATH"] = self.assets_path
         if self.fabrary_api_key:

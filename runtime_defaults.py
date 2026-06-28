@@ -45,6 +45,8 @@ class MetaEngineControls:
     # ── Talishar HTTP ───────────────────────────────────────────────────────
     talishar_request_timeout: float = 30.0
     talishar_backend: str = "fast"
+    # Multi-backend sharding; empty = resolve from TALISHAR_URLS / TALISHAR_URL at runtime
+    talishar_backends: tuple[str, ...] = ()
 
     # ── Parallel training episode wall-clock limits ─────────────────────────
     episode_timeout_seconds_per_step: float = 3.0
@@ -66,14 +68,14 @@ class MetaRolloutControls:
 class MetaUnifiedRandomMatchups:
     """Unified random fabrary matchup training (``train_unified_random_matchups.py``)."""
 
-    matchups: int = 10
+    matchups: int = 20
     episodes: int = 1000
     max_steps: int = 1_000
     warmup_episodes: int = 50
     checkpoint_interval_pct: float = 10.0
-    checkpoint_eval_episodes: int = 0  # 0 = min(100, episodes // 100)
+    checkpoint_eval_episodes: int = 100  # 0 = min(100, episodes // 100)
     workers: int = 0  # 0 = inherit META.workers
-    parallel_matchups: int = 5
+    parallel_matchups: int = 4
     skip_converged: bool = False
     # cpp engine is not implemented fully to match talishar engine, so we disable it by default
     build_cpp_engine: bool = False
@@ -426,6 +428,21 @@ def envs_per_rollout_process(
     total = max(1, int(total_workers))
     processes = max(1, int(rollout_processes))
     return max(1, total // processes)
+
+
+def resolve_talishar_backend_urls(
+    *,
+    fallback_url: str | None = None,
+) -> tuple[str, ...]:
+    """Resolve Talishar backend URLs from env, ``META.engine.talishar_backends``, and fallbacks."""
+    from flesh_and_blood_rlbridge.talishar_backend_pool import (  # noqa: PLC0415
+        resolve_talishar_backend_urls as _resolve,
+    )
+
+    return _resolve(
+        configured_backends=META.engine.talishar_backends,
+        fallback_url=fallback_url,
+    )
 
 
 def episode_timeout_seconds(

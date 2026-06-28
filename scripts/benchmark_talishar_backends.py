@@ -199,9 +199,52 @@ def _bench_rlstep_profile(
     return 0
 
 
+def _bench_urls(
+    *,
+    urls: list[str],
+    deck1: str,
+    deck2: str,
+    steps: int,
+) -> int:
+    print(f"Multi-shard benchmark — {deck1} vs {deck2}  ({steps} steps)\n")
+    any_ok = False
+    for url in urls:
+        print(f"=== {url} ===")
+        env = TalisharEngineEnvironment(
+            base_url=url,
+            local_deck_name=deck1,
+            opponent_deck_name=deck2,
+            self_play=True,
+            max_turns=500,
+            talishar_backend="fast",
+            cpp_obs_alignment=False,
+            cpp_engine_cache_dir=str(_CPP_CACHE_DIR),
+        )
+        try:
+            if not env.supports_fast_training:
+                print("  fast training UNAVAILABLE\n")
+                continue
+            elapsed, completed = _bench_steps(env, steps=steps)
+            if completed == 0:
+                print("  FAILED\n")
+                continue
+            ms = elapsed / completed * 1000
+            sps = completed / elapsed
+            print(f"  {completed} steps in {elapsed:.2f}s  ({ms:.1f} ms/step, {sps:.1f} steps/s)\n")
+            any_ok = True
+        finally:
+            env.close()
+    return 0 if any_ok else 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default=DEFAULT_TALISHAR_URL)
+    parser.add_argument(
+        "--urls",
+        default=None,
+        help="Comma-separated Talishar backend URLs (benchmark each shard)",
+    )
     parser.add_argument("--deck1", default="Ira")
     parser.add_argument("--deck2", default="Ira")
     parser.add_argument("--steps", type=int, default=40)
@@ -224,6 +267,22 @@ def main() -> int:
         help="Print median RLStep PHP timingsMs (requires training overlay)",
     )
     args = parser.parse_args()
+
+    if args.urls:
+        from flesh_and_blood_rlbridge.talishar_backend_pool import (  # noqa: PLC0415
+            parse_talishar_urls_string,
+        )
+
+        url_list = list(parse_talishar_urls_string(str(args.urls)))
+        if not url_list:
+            print("No URLs in --urls")
+            return 1
+        return _bench_urls(
+            urls=url_list,
+            deck1=args.deck1,
+            deck2=args.deck2,
+            steps=args.steps,
+        )
 
     if args.profile_rlstep:
         return _bench_rlstep_profile(

@@ -41,6 +41,11 @@ def _resolve_trace_env(env: Any) -> Any:
     return inner if inner is not None else env
 
 
+def env_uses_cpp_eval_live_dashboard(env: Any) -> bool:
+    """True when live replay dashboard updates should run (C++ engine only)."""
+    return eval_engine_from_env(env)[0] == "cpp"
+
+
 def eval_engine_from_env(env: Any) -> tuple[str, str]:
     """Return ``(engine_key, display_label)`` for a training/eval environment."""
     if bool(getattr(env, "_using_cpp", False)):
@@ -514,6 +519,8 @@ def update_cpp_eval_live_replay(
 ) -> tuple[Path, Optional[Path]]:
     """Write live JSON state and (throttled) regenerate the HTML dashboard."""
     state_path, html_path = cpp_eval_live_paths(live_progress_path)
+    if not env_uses_cpp_eval_live_dashboard(env):
+        return state_path, None
     state = collect_cpp_eval_live_state(
         env,
         episode=episode,

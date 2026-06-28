@@ -49,7 +49,9 @@ from runtime_defaults import (  # noqa: E402
     DEFAULT_ROLLOUT_MODE,
     DEFAULT_ROLLOUT_PROCESSES,
     RUNTIME,
+    resolve_talishar_backend_urls,
 )
+from flesh_and_blood_rlbridge.talishar_backend_pool import TalisharBackendPool  # noqa: E402
 
 DEFAULT_MAX_STEPS = DEFAULT_UNIFIED_MAX_STEPS
 _UR = RUNTIME.unified_random_matchups
@@ -143,6 +145,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--frontend-url", default=None)
     parser.add_argument("--talishar-url", default=None)
     parser.add_argument(
+        "--talishar-urls",
+        default=None,
+        help="Comma-separated Talishar backend URLs for multi-shard rollouts",
+    )
+    parser.add_argument(
         "--no-build-cpp-engine",
         action="store_true",
         help=argparse.SUPPRESS,
@@ -200,6 +207,11 @@ def main() -> None:
         "TALISHAR_URL",
         "http://localhost:8080/game",
     )
+    if args.talishar_urls:
+        os.environ["TALISHAR_URLS"] = str(args.talishar_urls)
+    backend_urls = resolve_talishar_backend_urls(fallback_url=base_url)
+    backend_pool = TalisharBackendPool(urls=backend_urls)
+    base_url = backend_pool.primary_url
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     if args.run_dir:
         out_dir = Path(args.run_dir)
@@ -213,6 +225,7 @@ def main() -> None:
         "matchups_sampled": [m.name for m in selected],
         "episodes_per_matchup": int(args.episodes),
         "parallel_matchups": max(1, int(args.parallel_matchups)),
+        "talishar_backends": list(backend_pool.urls),
         "seed": args.seed,
         "started_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -221,7 +234,7 @@ def main() -> None:
         encoding="utf-8",
     )
 
-    print(f"Talishar URL : {base_url}")
+    print(f"Talishar URL : {backend_pool.format_log_label()}")
     print(f"Backend      : Talishar fast (fast_reset / fast_step_index)")
     print(f"Rollout mode : {args.rollout_mode} ({args.rollout_processes} process(es))")
     print(f"Format       : {format_name}")
@@ -284,6 +297,7 @@ def main() -> None:
             require_cpp_engine=require_cpp_engine,
             rollout_mode=str(args.rollout_mode),
             rollout_processes=int(args.rollout_processes),
+            backend_pool=backend_pool,
         )
     finally:
         if dashboard_proc is not None:

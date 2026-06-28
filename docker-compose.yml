@@ -13,6 +13,9 @@ services:
       - -c
       - |
         mkdir -p /var/www/html/game/Games /var/www/html/game/HostFiles /var/www/html/game/APIKeys
+        if [ -f /seed-hostfiles/RedirectorTemplate.php ]; then
+          cp -n /seed-hostfiles/RedirectorTemplate.php /var/www/html/game/HostFiles/RedirectorTemplate.php
+        fi
         cp -n /var/www/html/game/HostFiles/RedirectorTemplate.php /var/www/html/game/HostFiles/Redirector.php
         if [ ! -f /var/www/html/game/HostFiles/GameIDCounter.txt ]; then
           echo "1" > /var/www/html/game/HostFiles/GameIDCounter.txt
@@ -28,8 +31,8 @@ services:
         fi
         if [ -d /fab-bridge-stubs/rl-bridge ]; then
           for f in /fab-bridge-stubs/rl-bridge/*.php; do
-            if [ -f "$f" ]; then
-              cp -f "$f" /var/www/html/game/
+            if [ -f "$$f" ]; then
+              cp -f "$$f" /var/www/html/game/
             fi
           done
         fi

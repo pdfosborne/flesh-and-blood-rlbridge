@@ -11,12 +11,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from fab_bridge.cpp_eval_live_dashboard import (
-    CPP_EVAL_LIVE_DASHBOARD,
-    CPP_EVAL_LIVE_STATE,
-    checkpoint_eval_replay_display_label,
-    format_checkpoint_eval_replay_heading,
-)
 from fab_bridge.unified_results import (
     RUN_MANIFEST,
     iter_unified_matchup_dirs,
@@ -152,30 +146,6 @@ def _apply_checkpoint_history_to_row(
         row["episodes_completed"] = int(last["episodes_completed"])
 
 
-def _resolve_checkpoint_eval_replay_label(
-    run_dir: Path,
-    *,
-    ckpt_history: list[Any],
-    live: dict[str, Any],
-) -> str:
-    """Infer the eval replay engine label for unified training runs."""
-    live_state = _read_json(run_dir / CPP_EVAL_LIVE_STATE)
-    if isinstance(live_state, dict):
-        label = checkpoint_eval_replay_display_label(live_state)
-        if label:
-            return label
-    for row in reversed(ckpt_history):
-        if isinstance(row, dict) and row.get("runtime_backend"):
-            label = checkpoint_eval_replay_display_label(str(row["runtime_backend"]))
-            if label:
-                return label
-    if isinstance(live, dict) and live.get("runtime_backend"):
-        label = checkpoint_eval_replay_display_label(str(live["runtime_backend"]))
-        if label:
-            return label
-    return "Talishar fast"
-
-
 def _matchup_label(matchup_dir: Path) -> str:
     raw = _read_json(matchup_dir / "matchup_label.json")
     if isinstance(raw, dict):
@@ -300,6 +270,9 @@ def _checkpoint_point_from_row(row: dict[str, Any]) -> dict[str, Any]:
     timeout_rate: Optional[float] = None
     if row.get("timeout_rate") is not None:
         timeout_rate = float(row["timeout_rate"])
+    eval_episodes: Optional[int] = None
+    if row.get("eval_episodes") is not None:
+        eval_episodes = int(row["eval_episodes"])
     return {
         "episode": int(row.get("episodes_completed") or 0),
         "win_rate": float(row.get("p1_win_rate") or 0.0),
@@ -312,7 +285,55 @@ def _checkpoint_point_from_row(row: dict[str, Any]) -> dict[str, Any]:
         "logic_vs_agent_win_rate": _logic_vs_agent_win_rate(row),
         "agent_vs_agent_win_rate": float(row.get("p1_win_rate") or 0.0),
         "timeout_rate": timeout_rate,
+        "eval_episodes": eval_episodes,
     }
+
+
+def _merged_aggregate_points(
+    ckpt_history: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    points: list[dict[str, Any]] = []
+    for row in ckpt_history:
+        if row.get("eval_mode") != "merged":
+            continue
+        aggregate = row.get("aggregate")
+        if not isinstance(aggregate, dict):
+            continue
+        points.append(
+            {
+                "episode": int(row.get("episodes_completed") or 0),
+                "win_rate_mean": aggregate.get("self_play_win_rate_mean"),
+                "win_rate_se": aggregate.get("self_play_win_rate_se"),
+                "vs_logic_mean": aggregate.get("vs_logic_win_rate_mean"),
+                "vs_logic_se": aggregate.get("vs_logic_win_rate_se"),
+                "n_matchups": int(row.get("matchups_evaluated") or 0),
+            }
+        )
+    return points
+
+
+def _rows_from_latest_merged(
+    ckpt_history: list[dict[str, Any]],
+    active_matchups: dict[str, Any],
+) -> list[dict[str, Any]]:
+    for row in reversed(ckpt_history):
+        if row.get("eval_mode") != "merged":
+            continue
+        per_matchup = row.get("per_matchup")
+        if not isinstance(per_matchup, dict):
+            continue
+        rows: list[dict[str, Any]] = []
+        for subdir, matchup_row in per_matchup.items():
+            if not isinstance(matchup_row, dict):
+                continue
+            point = _checkpoint_point_from_row(matchup_row)
+            info = active_matchups.get(str(subdir), {})
+            name = info.get("name") if isinstance(info, dict) else None
+            point["matchup"] = str(name or point.get("matchup") or subdir)
+            point["matchup_dir"] = str(subdir)
+            rows.append(point)
+        return rows
+    return []
 
 
 def _load_matchup_checkpoint_history(matchup_dir: Path) -> list[dict[str, Any]]:
@@ -339,6 +360,18 @@ def aggregate_checkpoint_points(
     by_episode: dict[int, list[dict[str, Any]]] = {}
     for _key, hist in histories.items():
         for row in hist:
+            if row.get("eval_mode") == "merged":
+                per_matchup = row.get("per_matchup")
+                if isinstance(per_matchup, dict):
+                    for matchup_row in per_matchup.values():
+                        if not isinstance(matchup_row, dict):
+                            continue
+                        if matchup_row.get("episodes_completed") is None:
+                            continue
+                        point = _checkpoint_point_from_row(matchup_row)
+                        episode = int(point["episode"])
+                        by_episode.setdefault(episode, []).append(point)
+                continue
             if row.get("episodes_completed") is None:
                 continue
             point = _checkpoint_point_from_row(row)
@@ -384,6 +417,8 @@ def _latest_checkpoint_rows_for_active(
         point = _checkpoint_point_from_row(latest)
         point["matchup"] = str(info.get("name") or point.get("matchup") or subdir)
         point["matchup_dir"] = str(subdir)
+        if latest.get("eval_episodes") is not None:
+            point["eval_episodes"] = int(latest["eval_episodes"])
         rows.append(point)
     return rows
 
@@ -430,6 +465,13 @@ def collect_unified_run_state(run_dir: Path) -> dict[str, Any]:
         or manifest.get("parallel_matchups")
         or 1
     )
+    talishar_backends = (
+        live.get("talishar_backends")
+        or manifest.get("talishar_backends")
+        or []
+    )
+    if not isinstance(talishar_backends, list):
+        talishar_backends = []
     batch_index = int(live.get("batch_index") or 0)
 
     active_raw = live.get("active_matchups")
@@ -485,10 +527,14 @@ def collect_unified_run_state(run_dir: Path) -> dict[str, Any]:
             row for row in ckpt_history if isinstance(row, dict)
         ]
 
-    checkpoint_aggregate_points = aggregate_checkpoint_points(active_histories)
-    active_checkpoint_rows = _latest_checkpoint_rows_for_active(
-        run_dir, active_matchups
-    )
+    checkpoint_aggregate_points = _merged_aggregate_points(ckpt_history)
+    if not checkpoint_aggregate_points:
+        checkpoint_aggregate_points = aggregate_checkpoint_points(active_histories)
+    active_checkpoint_rows = _rows_from_latest_merged(ckpt_history, active_matchups)
+    if not active_checkpoint_rows:
+        active_checkpoint_rows = _latest_checkpoint_rows_for_active(
+            run_dir, active_matchups
+        )
     if not active_checkpoint_rows and ckpt_history:
         latest = ckpt_history[-1]
         if isinstance(latest, dict):
@@ -523,20 +569,6 @@ def collect_unified_run_state(run_dir: Path) -> dict[str, Any]:
             intra = 0.0
         overall_pct = ((matchups_completed + intra) / matchups_total) * 100.0
 
-    cpp_eval_live_dashboard = run_dir / CPP_EVAL_LIVE_DASHBOARD
-    cpp_eval_live_dashboard_path = (
-        str(cpp_eval_live_dashboard) if cpp_eval_live_dashboard.is_file() else ""
-    )
-    all_ckpt_for_label: list[Any] = ckpt_history
-    for hist in active_histories.values():
-        all_ckpt_for_label = list(hist)
-        break
-    checkpoint_eval_replay_label = _resolve_checkpoint_eval_replay_label(
-        run_dir,
-        ckpt_history=all_ckpt_for_label,
-        live=live,
-    )
-
     return {
         "run_dir": str(run_dir),
         "format": str(manifest.get("format") or "—"),
@@ -546,6 +578,7 @@ def collect_unified_run_state(run_dir: Path) -> dict[str, Any]:
         "matchups_sampled": list(manifest.get("matchups_sampled") or []),
         "target_episodes": target_episodes,
         "parallel_matchups": parallel_matchups,
+        "talishar_backends": talishar_backends,
         "batch_index": batch_index,
         "active_matchups": active_matchups,
         "current_matchup": current_name or "—",
@@ -560,8 +593,6 @@ def collect_unified_run_state(run_dir: Path) -> dict[str, Any]:
         "completed_matchups": completed_rows,
         "overall_pct": overall_pct,
         "complete": status == "complete",
-        "cpp_eval_live_dashboard_path": cpp_eval_live_dashboard_path,
-        "checkpoint_eval_replay_label": checkpoint_eval_replay_label,
     }
 
 
@@ -739,22 +770,6 @@ def render_unified_random_matchups_html(
         <div class="progress-bar"><div class="progress-fill" style="width:{pct:.1f}%"></div></div>
       </div>"""
 
-    cpp_live_path = str(state.get("cpp_eval_live_dashboard_path") or "").strip()
-    replay_heading = format_checkpoint_eval_replay_heading(
-        str(state.get("checkpoint_eval_replay_label") or "")
-    )
-    if cpp_live_path:
-        cpp_live_link = (
-            f'<p class="muted">{html.escape(replay_heading)}: '
-            f'<a href="{html.escape(CPP_EVAL_LIVE_DASHBOARD)}">'
-            f"{html.escape(CPP_EVAL_LIVE_DASHBOARD)}</a></p>"
-        )
-    else:
-        cpp_live_link = (
-            f'<p class="muted">{html.escape(replay_heading)} appears here during checkpoint eval '
-            f"({html.escape(CPP_EVAL_LIVE_DASHBOARD)}).</p>"
-        )
-
     ckpt_chart = _svg_winrate_chart_with_error_bands(
         state.get("checkpoint_aggregate_points") or [],
         target_episodes=target_eps,
@@ -781,10 +796,15 @@ def render_unified_random_matchups_html(
 
     ckpt_rows = ""
     for row in state.get("active_checkpoint_rows") or []:
+        eval_games = row.get("eval_episodes")
+        eval_games_cell = (
+            str(int(eval_games)) if eval_games is not None else "—"
+        )
         ckpt_rows += (
             f"<tr>"
             f"<td>{html.escape(str(row.get('matchup') or '—'))}</td>"
             f"<td>{int(row.get('episode', 0))}</td>"
+            f"<td>{eval_games_cell}</td>"
             f"<td>{_pct(row.get('vs_logic_win_rate'))}</td>"
             f"<td>{_pct(row.get('logic_vs_agent_win_rate'))}</td>"
             f"<td>{_pct(row.get('agent_vs_agent_win_rate'))}</td>"
@@ -794,11 +814,12 @@ def render_unified_random_matchups_html(
         f'<table class="history"><thead><tr>'
         f"<th>Matchup</th>"
         f"<th>Episode</th>"
+        f"<th>Eval games</th>"
         f"<th>Agent win% vs logic</th>"
         f"<th>Logic vs agent win%</th>"
         f"<th>Agent win% vs agent</th>"
         f"<th>Timeout %</th>"
-        f"</tr></thead><tbody>{ckpt_rows or '<tr><td colspan=\"6\" class=\"muted\">No checkpoint eval yet</td></tr>'}</tbody></table>"
+        f"</tr></thead><tbody>{ckpt_rows or '<tr><td colspan=\"7\" class=\"muted\">No checkpoint eval yet</td></tr>'}</tbody></table>"
     )
 
     return f"""<!DOCTYPE html>
@@ -862,7 +883,6 @@ def render_unified_random_matchups_html(
 
     <div class="card">
       <h2>Checkpoint eval (active batch)</h2>
-      {cpp_live_link}
       {ckpt_chart}
       {ckpt_table}
     </div>

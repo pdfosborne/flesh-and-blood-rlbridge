@@ -99,23 +99,11 @@ class TalisharFastClient:
     def probe_rlstep(self, *, force: bool = False) -> bool:
         if self._rlstep_available is not None and not force:
             return self._rlstep_available
-        url = self.base_url + self.RLSTEP_PATH
-        try:
-            resp = self.session.post(
-                url,
-                json={"gameName": "0", "playerID": 1, "authKey": "", "mode": 99},
-                timeout=min(5.0, self.request_timeout),
-            )
-            if resp.status_code == 404:
-                self._rlstep_available = False
-                return False
-            # Any JSON body (even validation error) means the overlay endpoint exists.
-            _parse_json_body(resp.text, allow_empty=False)
-            self._rlstep_available = True
-            return True
-        except Exception:
-            self._rlstep_available = False
-            return False
+        from .talishar_backend_pool import probe_backend_health  # noqa: PLC0415
+
+        ok, _reason = probe_backend_health(self.base_url, timeout=min(5.0, self.request_timeout))
+        self._rlstep_available = ok
+        return ok
 
     def http_get(
         self,

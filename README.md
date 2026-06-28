@@ -237,6 +237,27 @@ After updating `docker/talishar/rl-bridge/` overlays, restart the backend so cop
 
 Set `TALISHAR_URL=http://localhost:8080/game` (Docker compose default).
 
+### Multi-backend training
+
+Run several independent Talishar backends to scale rollout throughput (PHP simulation is the bottleneck, not Python CPU):
+
+```bash
+python start_talishar.py --backend-only --shards 4
+python scripts/training/train_unified_random_matchups.py --workers 32 --parallel-matchups 4
+```
+
+`start_talishar.py` writes `docker/talishar/talishar-training.local.env` with `TALISHAR_URL` / `TALISHAR_URLS`; training scripts, the TUI, and `fab-tui` load it automatically (shell env vars still take precedence). `python start_talishar.py --down` removes that file.
+
+Sizing: aim for roughly 20–40 concurrent games per shard. Set `workers` to at least `shards × games_per_shard`. Watch **Docker/WSL CPU** during training, not `python.exe` (workers block on HTTP).
+
+Stop all shards: `python start_talishar.py --down`
+
+Benchmark each shard:
+
+```bash
+python scripts/benchmark_talishar_backends.py --urls "http://localhost:8080/game,http://localhost:8081/game"
+```
+
 
 ---
 

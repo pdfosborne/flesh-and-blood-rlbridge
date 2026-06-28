@@ -82,7 +82,11 @@ from urllib3.util.retry import Retry
 from rlbridge.environments.base import rlbridgeEnvironment
 from rlbridge.protocol.messages import RenderResult, ResetResult, StepResult, TextSpace
 
-from .combat_log_tracker import CombatTurnTracker, extract_talishar_chat_log_lines
+from .combat_log_tracker import (
+    CombatTurnTracker,
+    extract_talishar_chat_log_lines,
+    talishar_gamestate_revert_detected,
+)
 from .frontend_action_overlay import (
     ActionCoachHint,
     overlay_hints_payload,
@@ -896,6 +900,11 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                 new_state = self._submit_action_and_sync(99, "")
             except Exception:
                 new_state = self._sync_after_action()
+        new_state = self._recover_from_gamestate_revert_if_needed(
+            new_state,
+            submitted_mode=mode,
+            submitted_button=button_input,
+        )
 
         self._steps += 1
         new_player_hp = int(new_state.get("playerHealth", self._player_hp))
@@ -928,7 +937,11 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                 reward = -1.0 if self._acting_player_id == 1 else 1.0
             else:
                 reward = 1.0 if won else -1.0
-            winner = 0 if reward > 0 else (1 if reward < 0 else -1)
+            winner = self._absolute_p1_seat_winner(
+                new_state,
+                exhausted_loss=exhausted_loss,
+                draw=draw,
+            )
         elif truncated:
             reward = self._truncation_penalty
             winner = -1
@@ -1790,8 +1803,29 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         return isinstance(hand, list) and len(hand) == 0
 
     def _did_player_win(self, player_hp: int, opp_hp: int) -> bool:
-        """Return True if the agent (player 1) won the game."""
+        """Return True if the acting player won (lethal on opponent, self alive)."""
         return opp_hp <= 0 and player_hp > 0
+
+    def _absolute_p1_seat_winner(
+        self,
+        state: dict[str, Any],
+        *,
+        exhausted_loss: bool = False,
+        draw: bool = False,
+    ) -> int:
+        """Return winner in fixed seat numbering (0=P1, 1=P2, -1=draw/undecided)."""
+        if draw:
+            return -1
+        if exhausted_loss:
+            return 1 if self._acting_player_id == 1 else 0
+        p1_hp, p2_hp = self._absolute_p1_p2_health(state)
+        if p1_hp <= 0 and p2_hp <= 0:
+            return -1
+        if p2_hp <= 0 and p1_hp > 0:
+            return 0
+        if p1_hp <= 0 and p2_hp > 0:
+            return 1
+        return -1
 
     def _reset_repeat_tracking(self, *, turn_no: int, acting_player_id: int) -> None:
         self._repeat_tracker.reset(turn_no=turn_no, acting_player_id=acting_player_id)
@@ -2066,6 +2100,40 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         ):
             return mode, button_input
         return self._first_pass_action(legal_actions)
+
+    def _is_pass_submission(self, mode: int, button_input: str) -> bool:
+        if mode in {99, 101, 105}:
+            return True
+        return _is_pass_action(
+            {
+                "action_code": mode,
+                "button_input": button_input,
+                "label": "",
+            }
+        )
+
+    def _recover_from_gamestate_revert_if_needed(
+        self,
+        state: dict[str, Any],
+        *,
+        submitted_mode: int,
+        submitted_button: str,
+    ) -> dict[str, Any]:
+        """Force pass when Talishar reverts an invalid declaration to escape loops."""
+        if self._using_cpp or not talishar_gamestate_revert_detected(state):
+            return state
+        if self._is_pass_submission(submitted_mode, submitted_button):
+            return state
+        if not state.get("havePriority", False) or player_must_wait(state):
+            return state
+        legal_actions = self._legal_actions(state)
+        pass_mode, pass_button = self._force_pass_submission(legal_actions)
+        if pass_mode == submitted_mode and pass_button == submitted_button:
+            return state
+        try:
+            return self._submit_action_and_sync(pass_mode, pass_button)
+        except RuntimeError:
+            return state
 
     def _legal_actions(self, state: dict[str, Any]) -> list[dict[str, Any]]:
         """Return filtered legal actions for *state* (single call-site helper)."""
@@ -2630,6 +2698,11 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                 new_state = self._submit_action_and_sync(99, "")
             except Exception:
                 new_state = self._sync_after_action()
+        new_state = self._recover_from_gamestate_revert_if_needed(
+            new_state,
+            submitted_mode=mode,
+            submitted_button=button_input,
+        )
 
         if self._verbose:
             print(f"    [step {self._steps + 1}] action submitted, "

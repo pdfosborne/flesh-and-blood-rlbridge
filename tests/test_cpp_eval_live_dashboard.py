@@ -180,6 +180,24 @@ def test_collect_and_render_talishar_fast_dashboard() -> None:
     assert "C++ engine eval" not in html
 
 
+def test_update_skips_non_cpp_engine(tmp_path: Path) -> None:
+    progress = tmp_path / "eval_live.json"
+    env = _FakeTalisharFastEnv()
+    state_path, html_path = update_cpp_eval_live_replay(
+        progress,
+        env,
+        episode=1,
+        episodes_total=5,
+        step=1,
+        eval_label="checkpoint_eval",
+        aggregate={"wins": 0, "losses": 0, "draws": 0, "timeouts": 0, "episodes_completed": 0},
+        announce=False,
+    )
+    assert state_path.name == CPP_EVAL_LIVE_STATE
+    assert not state_path.is_file()
+    assert html_path is None
+
+
 def test_write_and_update_roundtrip(tmp_path: Path) -> None:
     progress = tmp_path / "eval_live.json"
     env = _FakeEnv()

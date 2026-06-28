@@ -40,4 +40,5 @@ Thumbs.db
 /Talishar-FE/
 # Upstream Talishar is cloned locally (see fab_bridge/talishar_setup.py).
 # Bundled training decks live in assets/talishar_decks/ and are synced into Talishar/Assets/.
+docker/talishar/talishar-training.local.env
 /Talishar/

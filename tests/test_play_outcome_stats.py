@@ -11,6 +11,8 @@ _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO / "scripts" / "training"))
 
 from play_outcome_stats import (  # noqa: E402
+    absolute_p1_p2_deck_from_env,
+    absolute_p1_p2_hp_from_env,
     absolute_p1_p2_hp_from_obs,
     classify_p1_episode_outcome,
     compute_eval_stability,
@@ -59,6 +61,39 @@ def test_absolute_p1_p2_hp_from_obs_swaps_when_p2_acting() -> None:
         p2_hp=p2_hp,
         terminated=True,
     ) == "win"
+
+
+def test_absolute_p1_p2_hp_from_env_uses_acting_player_view() -> None:
+    class _Env:
+        _acting_player_id = 2
+        _player_hp = 0
+        _opp_hp = 18
+        _last_state = {"playerHealth": 0, "opponentHealth": 18}
+
+    p1_hp, p2_hp = absolute_p1_p2_hp_from_env(_Env())
+    assert p1_hp == 18
+    assert p2_hp == 0
+    assert classify_p1_episode_outcome(
+        p1_hp=p1_hp,
+        p2_hp=p2_hp,
+        terminated=True,
+    ) == "win"
+
+    p1_deck, p2_deck = absolute_p1_p2_deck_from_env(
+        type(
+            "_DeckEnv",
+            (),
+            {
+                "_acting_player_id": 2,
+                "_last_state": {
+                    "playerDeckCount": 3,
+                    "opponentDeckCount": 11,
+                },
+            },
+        )()
+    )
+    assert p1_deck == 11
+    assert p2_deck == 3
 
 
 def test_summarize_includes_draws_and_timeouts_in_denominator() -> None:
@@ -153,3 +188,25 @@ def test_fast_outcome_requires_lethal_hp() -> None:
         }
     )
     assert outcome == "loss"
+
+    _, stale_winner_anomaly = classify_p1_fast_episode_outcome(
+        {
+            "terminated": True,
+            "truncated": False,
+            "winner": 0,
+            "p1_health": 0,
+            "p2_health": 12,
+        }
+    )
+    assert stale_winner_anomaly is not None
+
+    _, fixed_winner = classify_p1_fast_episode_outcome(
+        {
+            "terminated": True,
+            "truncated": False,
+            "winner": 1,
+            "p1_health": 0,
+            "p2_health": 12,
+        }
+    )
+    assert fixed_winner is None

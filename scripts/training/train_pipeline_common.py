@@ -655,12 +655,11 @@ def _write_deck_file(
 
     hero_token = (equipment_header or "").split()[0] if equipment_header else deck_name
     assets_root = Path(assets_path)
-    deck_stem = deck_name if (assets_root / f"{deck_name}.txt").is_file() else ""
     equipment_header = ensure_full_equipment_header(
         hero_token,
         equipment_header,
         assets_path,
-        deck_stem=deck_stem,
+        deck_stem=deck_name,
     )
 
     # ── Equipment fallback extraction ─────────────────────────────────────────
@@ -764,6 +763,13 @@ def _write_deck_file(
                 f"  [deck] Extracted {len(found)} equipment card(s) from deck "
                 f"into header: {found}"
             )
+
+    equipment_header = ensure_full_equipment_header(
+        hero_token,
+        equipment_header,
+        assets_path,
+        deck_stem=deck_name,
+    )
 
     if str(REPO_ROOT / "src") not in sys.path:
         sys.path.insert(0, str(REPO_ROOT / "src"))

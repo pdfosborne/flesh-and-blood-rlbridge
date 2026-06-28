@@ -82,4 +82,10 @@ def configure_import_paths() -> Path:
     # Insert src first so repo root ends up at index 0 (runtime_defaults, fab_tui, …).
     for entry in (src, root):
         prepend_sys_path(entry)
+    try:
+        from fab_bridge.talishar_env import apply_training_env  # noqa: PLC0415
+
+        apply_training_env()
+    except ImportError:
+        pass
     return repo_root()

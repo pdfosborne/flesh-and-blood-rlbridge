@@ -339,6 +339,8 @@ function BuildRLGameStateResponse($gameName, $playerID)
         $response->winner = $winner;
     }
 
+    $response->chatLog = JSONLog($gameName, $playerID);
+
     return $response;
 }
 

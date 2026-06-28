@@ -102,6 +102,26 @@ def absolute_p1_p2_hp_from_obs(obs: Any) -> tuple[Optional[float], Optional[floa
     return p_player, p_opponent
 
 
+def _acting_player_id_from_env(env: Any) -> Optional[int]:
+    acting_id = getattr(env, "_acting_player_id", None)
+    if acting_id in (1, 2):
+        return int(acting_id)
+    return None
+
+
+def _absolute_p1_p2_from_acting_view(
+    player_value: Any,
+    opponent_value: Any,
+    *,
+    acting_player_id: int,
+) -> tuple[int, int]:
+    p_player = int(player_value or 0)
+    p_opponent = int(opponent_value or 0)
+    if acting_player_id == 2:
+        return p_opponent, p_player
+    return p_player, p_opponent
+
+
 def absolute_p1_p2_hp_from_env(env: Any) -> tuple[Optional[int], Optional[int]]:
     """Return absolute P1/P2 HP from a training or eval environment."""
     cpp_env = getattr(env, "_cpp_env", None)
@@ -113,9 +133,22 @@ def absolute_p1_p2_hp_from_env(env: Any) -> tuple[Optional[int], Optional[int]]:
     if getattr(env, "_using_cpp", False):
         return int(getattr(env, "_player_hp", 0)), int(getattr(env, "_opp_hp", 0))
 
+    acting_id = _acting_player_id_from_env(env)
+    player_hp = getattr(env, "_player_hp", None)
+    opp_hp = getattr(env, "_opp_hp", None)
+    if acting_id is not None and player_hp is not None and opp_hp is not None:
+        return _absolute_p1_p2_from_acting_view(
+            player_hp,
+            opp_hp,
+            acting_player_id=acting_id,
+        )
+
     last_state = getattr(env, "_last_state", None)
     if isinstance(last_state, dict) and last_state:
-        p1_hp, p2_hp = absolute_p1_p2_hp_from_obs(last_state)
+        view = dict(last_state)
+        if acting_id is not None:
+            view["actingPlayerID"] = acting_id
+        p1_hp, p2_hp = absolute_p1_p2_hp_from_obs(view)
         if p1_hp is not None and p2_hp is not None:
             return int(p1_hp), int(p2_hp)
 
@@ -152,7 +185,11 @@ def absolute_p1_p2_deck_from_env(env: Any) -> tuple[Optional[int], Optional[int]
 
     last_state = getattr(env, "_last_state", None)
     if isinstance(last_state, dict) and last_state:
-        return absolute_p1_p2_deck_from_obs(last_state)
+        view = dict(last_state)
+        acting_id = _acting_player_id_from_env(env)
+        if acting_id is not None:
+            view["actingPlayerID"] = acting_id
+        return absolute_p1_p2_deck_from_obs(view)
 
     return None, None
 
