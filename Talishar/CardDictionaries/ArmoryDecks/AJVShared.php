@@ -36,7 +36,7 @@ function AJVPlayAbility($cardID, $from, $resourcesPaid, $target = "-", $addition
       if (DelimStringContains($additionalCosts, "ICE")) {
         Mangle();
       }
-      $otherPlayer = $currentPlayer == 1 ? 2 : 1;
+      $otherPlayer = 3 - $currentPlayer;
       FrostbiteExposed($otherPlayer, $currentPlayer);
       return "";
     default:
@@ -114,7 +114,7 @@ function FrostbiteExposed($otherPlayer, $player, $may=false) {
     }
     else {
       AddDecisionQueue("SETDQVAR", $player, "0", 1);
-      AddDecisionQueue("EQUIPCARD", $otherPlayer, "frostbite-{0}", 1);
+      AddDecisionQueue("EQUIPCARD", $player, "frostbite-{0}-THEIR", 1);
     }
   }
 }
@@ -122,8 +122,11 @@ function FrostbiteExposed($otherPlayer, $player, $may=false) {
 function CheckHeavy($player) {
   $count = 0;
   $char = GetPlayerCharacter($player);
-  for ($i = 0; $i < count($char); $i += CharacterPieces()) {
-    if (TypeContains($char[$i], "W", $player) || SubtypeContains($char[$i], "Off-Hand", $player)) ++$count;
+  $charCount = count($char);
+  $charPieces = CharacterPieces();
+  for ($i = 0; $i < $charCount; $i += $charPieces) {
+    $charCard = $char[$i];
+    if (TypeContains($charCard, "W", $player) || SubtypeContains($charCard, "Off-Hand", $player)) ++$count;
   }
   return $count == 1;
   // $weapons = SearchCharacter($player, type:"W");

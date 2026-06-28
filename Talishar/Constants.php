@@ -223,9 +223,10 @@ function LayerPieces()
 //4 - Additional Costs
 //5 - Unique ID (the unique ID of the object that created the layer)
 //6 - Layer Unique ID (the unique ID of the layer)
+//7 - queued buffs
 function AttackQueuePieces()
 {
-  return 7;
+  return 8;
 }
 
 //0 - Card ID
@@ -419,6 +420,10 @@ $CS_NumInstantsPutInGrave = 118;
 $CS_NumControlledAurasDestroyed = 119;
 $CS_NumFragmented = 120;
 $CS_WeaponsAttackedWith = 121;
+$CS_PendingNAACard = 122; // Card ID of a NAA queued to auto-play after chain closes (or "-" if none)
+$CS_HaveIntimidatedOpponent = 123;
+$CS_LayerResolved = 124;
+$CS_PreventionCache = 125;
 
 //Combat Chain State (State for the current combat chain)
 $CCS_CurrentAttackGainedGoAgain = 0;
@@ -453,7 +458,7 @@ $CCS_CachedNumBlockedFromHand = 28; //Deprecated by 6/22/23 Rules Bulletin
 $CCS_IsBoosted = 29;
 $CCS_AttackTargetUID = 30;
 $CCS_CachedOverpowerActive = 31;
-$CSS_CachedNumActionBlocked = 32;
+$CCS_CachedNumActionBlocked = 32;
 $CCS_CachedNumDefendedFromHand = 33;
 $CCS_HitThisLink = 34;
 $CCS_WagersThisLinkDupe = 35; //somehow duplicated?
@@ -472,6 +477,7 @@ $CCS_AttackCost = 47; // the base cost of the attack (necessary for X cost attac
 $CCS_CachedGoAgain = 48; // cached result of DoesAttackHaveGoAgain() set before EvaluateCombatChain
 $CCS_AttackDamageDealtToHero = 49; // how much damage the active attack has dealt (including arcane pings)
 $CCS_NumInstantsPlayedByDefendingPlayer = 50;
+$CCS_CachedPreBlockValue = 51;
 
 //Deprecated
 //$CCS_ChainAttackBuff -- Use persistent combat effect with RemoveEffectsFromCombatChain instead
@@ -483,11 +489,11 @@ function ResetCombatChainState()
   global $CCS_NumBoosted, $CCS_AttackFused, $CCS_AttackTotalDamage, $CCS_AttackTarget, $CCS_WasRuneGate, $CCS_PhantasmThisLink;
   global $CCS_LinkTotalPower, $CCS_LinkBasePower, $CCS_BaseAttackDefenseMax, $CCS_ResourceCostDefenseMin, $CCS_CardTypeDefenseRequirement;
   global $CCS_CachedTotalPower, $CCS_CachedTotalBlock, $CCS_CombatDamageReplaced, $CCS_AttackUniqueID, $CCS_RequiredEquipmentBlock, $CCS_RequiredNegCounterEquipmentBlock;
-  global $mainPlayer, $defPlayer, $CCS_CachedDominateActive, $CCS_IsBoosted, $CCS_AttackTargetUID, $CCS_CachedOverpowerActive, $CSS_CachedNumActionBlocked;
+  global $mainPlayer, $defPlayer, $CCS_CachedDominateActive, $CCS_IsBoosted, $CCS_AttackTargetUID, $CCS_CachedOverpowerActive, $CCS_CachedNumActionBlocked;
   global $chainLinks, $chainLinkSummary, $CCS_CachedNumDefendedFromHand, $CCS_HitThisLink, $CCS_HasAimCounter, $CCS_AttackNumCharged, $CCS_NumInstantsPlayedByAttackingPlayer; 
   global $CCS_NextInstantBouncesAura, $CCS_EclecticMag, $CCS_FlickedDamage, $CCS_NumUsedInReactions, $CCS_NumReactionPlayedActivated, $CCS_NumCardsBlocking;
   global $CCS_NumPowerCounters, $CCS_SoulBanishedThisChain, $CCS_AttackCost, $CCS_CachedGoAgain, $CCS_AttackDamageDealtToHero;
-  global $CCS_NumInstantsPlayedByDefendingPlayer;
+  global $CCS_NumInstantsPlayedByDefendingPlayer, $CCS_CachedPreBlockValue;
 
   if(count($chainLinks) > 0) WriteLog("The combat chain was closed.");
   $combatChainState[$CCS_CurrentAttackGainedGoAgain] = 0;
@@ -516,11 +522,10 @@ function ResetCombatChainState()
   $combatChainState[$CCS_CombatDamageReplaced] = 0;
   $combatChainState[$CCS_AttackUniqueID] = -1;
   $combatChainState[$CCS_RequiredEquipmentBlock] = 0;
-  $combatChainState[$CCS_CachedDominateActive] = 0;
   $combatChainState[$CCS_IsBoosted] = 0;
   $combatChainState[$CCS_AttackTargetUID] = "-";
   $combatChainState[$CCS_CachedOverpowerActive] = 0;
-  $combatChainState[$CSS_CachedNumActionBlocked] = 0;
+  $combatChainState[$CCS_CachedNumActionBlocked] = 0;
   $combatChainState[$CCS_CachedNumDefendedFromHand] = 0;
   $combatChainState[$CCS_HitThisLink] = 0;
   $combatChainState[$CCS_PhantasmThisLink] = 0;
@@ -538,20 +543,29 @@ function ResetCombatChainState()
   $combatChainState[$CCS_CachedGoAgain] = 0;
   $combatChainState[$CCS_AttackDamageDealtToHero] = 0;
   $combatChainState[$CCS_NumInstantsPlayedByDefendingPlayer] = 0;
-  
+  $combatChainState[$CCS_CachedPreBlockValue] = 0;
+
   $aGoodCleanFight = false;
-  for($i = 0; $i < count($chainLinks); ++$i) {
+  $numChainLinks = count($chainLinks);
+  $chainLinkPieces = ChainLinksPieces();
+  for($i = 0; $i < $numChainLinks; ++$i) {
+    if (!isset($chainLinks[$i])) {
+      WriteLog("Something odd happened while closing the chain, please submit a bug report", highlight:true);
+      continue;
+    }
     if (!is_array($chainLinks[$i])) continue;
-    for($j = 0; $j < count($chainLinks[$i]); $j += ChainLinksPieces()) {
+    $innerCount = count($chainLinks[$i]);
+    for($j = 0; $j < $innerCount; $j += $chainLinkPieces) {
       if($chainLinks[$i][$j + 2] != "1") continue;
       CombatChainCloseAbilities($chainLinks[$i][$j + 1], $chainLinks[$i][$j], $i);
       if ($chainLinks[$i][$j] == "a_good_clean_fight_red" && $chainLinks[$i][$j+1] == $mainPlayer) $aGoodCleanFight = true;
     }
   }
 
-  for($i = 0; $i < count($chainLinks); ++$i) {
-    if (!is_array($chainLinks[$i])) continue;
-    for($j = 0; $j < count($chainLinks[$i]); $j += ChainLinksPieces()) {
+  for($i = 0; $i < $numChainLinks; ++$i) {
+    if (!isset($chainLinks[$i]) || !is_array($chainLinks[$i])) continue;
+    $innerCount = count($chainLinks[$i]);
+    for($j = 0; $j < $innerCount; $j += $chainLinkPieces) {
       if($chainLinks[$i][$j + 2] != "1") continue;
       $linkID = $aGoodCleanFight ? BlindCard($chainLinks[$i][$j], true, true) : $chainLinks[$i][$j];
       $cardType = CardType($linkID);
@@ -559,9 +573,9 @@ function ResetCombatChainState()
         if(!SubtypeContains($linkID, "Evo")) continue;
         if($chainLinks[$i][$j+3] != "HAND" && BlockValue($linkID) >= 0) continue;
       }
-      if(CardType($linkID) == "AR" && $chainLinks[$i][$j+1] == $mainPlayer) continue;
+      if($cardType == "AR" && $chainLinks[$i][$j+1] == $mainPlayer) continue;
       else {
-        if(CardType($linkID) == "T" || CardType($linkID) == "Macro") continue;//Don't need to add to anywhere if it's a token
+        if($cardType == "T" || $cardType == "Macro") continue;//Don't need to add to anywhere if it's a token
         if ($j == 0 && !TypeContains($linkID, "AA", $mainPlayer)) continue; //Don't do anything with attack proxies
         // $j + 7 instead of just $j to grab the "original CardID" in case the card became a copy
         $origLinkID = $aGoodCleanFight ? BlindCard($chainLinks[$i][$j+7], true, true) : $chainLinks[$i][$j+7];
@@ -578,7 +592,9 @@ function ResetCombatChainState()
   RemoveEffectsFromCombatChain();
   RemoveThisLinkEffects();
   $defCharacter = &GetPlayerCharacter($defPlayer);
-  for($i = 0; $i < count($defCharacter); $i += CharacterPieces()) {
+  $defCharCount = count($defCharacter);
+  $charPieces = CharacterPieces();
+  for ($i = 0; $i < $defCharCount; $i += $charPieces) {
     $defCharacter[$i + 6] = 0;
   }
   $defItems = new Items($defPlayer);
@@ -613,7 +629,8 @@ function AttackReplaced($cardID, $player)
   $combatChain[9] = $cardID; //new original id
   $combatChain[10] = "-"; // get rid of any layer continuous buffs
   //1.8.10 in the CR
-  for ($i = count(value: $currentTurnEffects) - CurrentTurnEffectPieces(); $i >= 0; $i -= CurrentTurnEffectPieces()) {
+  $currentTurnEffectPieces = CurrentTurnEffectPieces();
+  for ($i = count($currentTurnEffects) - $currentTurnEffectPieces; $i >= 0; $i -= $currentTurnEffectPieces) {
     if (IsCombatEffectActive($currentTurnEffects[$i]) && !IsCombatEffectLimited($i) && IsLayerContinuousBuff($currentTurnEffects[$i]) && $currentTurnEffects[$i + 1] == $mainPlayer) {
       if ($combatChain[10] == "-") $combatChain[10] = ConvertToSetID($currentTurnEffects[$i]); //saving them as set ids saves space
       else $combatChain[10] .= "," . ConvertToSetID($currentTurnEffects[$i]);
@@ -629,10 +646,10 @@ function ResetChainLinkState()
   global $CCS_AttackPlayedFrom, $CCS_ChainLinkHitEffectsPrevented, $CCS_AttackFused, $CCS_AttackTotalDamage, $CCS_AttackTarget;
   global $CCS_LinkTotalPower, $CCS_LinkBasePower, $CCS_BaseAttackDefenseMax, $CCS_ResourceCostDefenseMin, $CCS_CardTypeDefenseRequirement;
   global $CCS_CachedTotalPower, $CCS_CachedTotalBlock, $CCS_CombatDamageReplaced, $CCS_AttackUniqueID, $CCS_RequiredEquipmentBlock, $CCS_RequiredNegCounterEquipmentBlock;
-  global $CCS_CachedDominateActive, $CCS_IsBoosted, $CCS_AttackTargetUID, $CCS_CachedOverpowerActive, $CSS_CachedNumActionBlocked;
+  global $CCS_CachedDominateActive, $CCS_IsBoosted, $CCS_AttackTargetUID, $CCS_CachedOverpowerActive, $CCS_CachedNumActionBlocked;
   global $CCS_CachedNumDefendedFromHand, $CCS_HitThisLink, $CCS_AttackNumCharged, $CCS_WasRuneGate, $CCS_WagersThisLink, $CCS_PhantasmThisLink, $CCS_NumInstantsPlayedByAttackingPlayer;
   global $CCS_NextInstantBouncesAura, $CCS_EclecticMag, $CCS_NumUsedInReactions, $CCS_NumReactionPlayedActivated, $CCS_NumCardsBlocking, $CCS_NumPowerCounters;
-  global $CCS_AttackCost, $CCS_CachedGoAgain, $CCS_AttackDamageDealtToHero, $CCS_NumInstantsPlayedByDefendingPlayer;
+  global $CCS_AttackCost, $CCS_CachedGoAgain, $CCS_AttackDamageDealtToHero, $CCS_NumInstantsPlayedByDefendingPlayer, $CCS_CachedPreBlockValue;
 
   WriteLog("The chain link was resolved.");
   $combatChainState[$CCS_CurrentAttackGainedGoAgain] = 0;
@@ -659,11 +676,10 @@ function ResetChainLinkState()
   $combatChainState[$CCS_CombatDamageReplaced] = 0;
   $combatChainState[$CCS_AttackUniqueID] = -1;
   $combatChainState[$CCS_RequiredEquipmentBlock] = 0;
-  $combatChainState[$CCS_CachedDominateActive] = 0;
   $combatChainState[$CCS_IsBoosted] = 0;
   $combatChainState[$CCS_AttackTargetUID] = "-";
   $combatChainState[$CCS_CachedOverpowerActive] = 0;
-  $combatChainState[$CSS_CachedNumActionBlocked] = 0;
+  $combatChainState[$CCS_CachedNumActionBlocked] = 0;
   $combatChainState[$CCS_CachedNumDefendedFromHand] = 0;
   $combatChainState[$CCS_HitThisLink] = 0;
   $combatChainState[$CCS_PhantasmThisLink] = 0;
@@ -677,6 +693,7 @@ function ResetChainLinkState()
   $combatChainState[$CCS_CachedGoAgain] = 0;
   $combatChainState[$CCS_AttackDamageDealtToHero] = 0;
   $combatChainState[$CCS_NumInstantsPlayedByDefendingPlayer] = 0;
+  $combatChainState[$CCS_CachedPreBlockValue] = 0;
   RemoveThisLinkEffects();
 }
 
@@ -701,7 +718,8 @@ function ResetMainClassState()
   global $CS_CheeredThisTurn, $CS_BooedThisTurn, $CS_SuspensePoppedThisTurn, $CS_SeismicSurgesCreated, $CS_CardsInDeckBeforeOpt;
   global $CS_NumToughnessDestroyed, $CS_NumConfidenceDestroyed, $CS_NumCostedCardsPlayed, $CS_HitCounter, $CS_CreatedCardsThisTurn;
   global $CS_ArcaneDamageDealtToOpponent, $CS_EvosBoosted, $CS_NumWeaponsActivated, $CS_NumLightningFlowDestroyed, $CS_HoloAurasEntered;
-  global $CS_NumInstantsPutInGrave, $CS_NumControlledAurasDestroyed, $CS_NumFragmented, $CS_WeaponsAttackedWith;
+  global $CS_NumInstantsPutInGrave, $CS_NumControlledAurasDestroyed, $CS_NumFragmented, $CS_WeaponsAttackedWith, $CS_PendingNAACard, $CS_HaveIntimidatedOpponent;
+  global $CS_LayerResolved, $CS_PreventionCache;
 
   $mainClassState[$CS_Num6PowDisc] = 0;
   $mainClassState[$CS_NumBoosted] = 0;
@@ -823,6 +841,10 @@ function ResetMainClassState()
   $mainClassState[$CS_NumControlledAurasDestroyed] = 0;
   $mainClassState[$CS_NumFragmented] = 0;
   $mainClassState[$CS_WeaponsAttackedWith] = "-";
+  $mainClassState[$CS_PendingNAACard] = "-";
+  $mainClassState[$CS_HaveIntimidatedOpponent] = 0;
+  $mainClassState[$CS_LayerResolved] = 0;
+  $mainClassState[$CS_PreventionCache] = 0;
 }
 
 function ResetCardPlayed($cardID, $from="-")
@@ -882,12 +904,13 @@ function GetAttackTarget()
     $uidArr = explode(",", $uid);
     $targetArr = explode(",", $MZTarget);
     $ret = [];
-    for ($i = 0; $i < count($uidArr); ++$i) {
-      if ($uidArr[$i] == "-") array_push($ret, $targetArr[$i]);
+    $numUids = count($uidArr);
+    for ($i = 0; $i < $numUids; ++$i) {
+      if ($uidArr[$i] == "-") $ret[] = $targetArr[$i];
       else {
         $mzArr = explode("-", $targetArr[$i]);
         $index = SearchZoneForUniqueID($uidArr[$i], $defPlayer, $mzArr[0]);
-        array_push($ret, $mzArr[0] . "-" . $index . "-" . $uidArr[$i]);
+        $ret[] = "{$mzArr[0]}-{$index}-{$uidArr[$i]}";
       }
     }
     return implode(",", $ret);
@@ -899,7 +922,7 @@ function GetAttackTargetNames($player)
   $targets = GetAttackTarget();
   $ret = [];
   foreach(explode(",", $targets) as $target) {
-    array_push($ret, CardName(GetMZCard($player, $target)));
+    $ret[] = CardName(GetMZCard($player, $target));
   }
   return implode("|", $ret);
 }

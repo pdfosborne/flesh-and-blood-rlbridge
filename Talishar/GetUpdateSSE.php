@@ -85,6 +85,7 @@ if (!empty($friendsListParam)) {
     $sessionData['friendList'] = json_decode($friendsListParam, true) ?? [];
   } catch (Exception $e) {
     // friendsList parameter parsing failed
+    error_log("GetUpdateSSE: failed to parse friendsList param: " . $e->getMessage());
   }
 }
 
@@ -123,9 +124,12 @@ if (is_string($initialState)) {
 echo ("data: " . json_encode($initialState) . "\n\n");
 ob_flush();
 flush();
+unset($initialState);
+gc_collect_cycles();
 
 $sleepMs = 50;
 $otherP = $playerID == 1 ? 2 : 1;
+$lastSendTime = microtime(true); // last time anything was written to the client
 $lastFileCheckTime = microtime(true);
 $fileCheckInterval = 30.0;
 $gameFileExists = true;
@@ -135,6 +139,7 @@ $lastSpectatorRefresh = microtime(true);
 $spectatorRefreshInterval = 30.0;
 $rateLimitStartInterval = microtime(true);
 $rateLimitProcessCount = 0;
+$buildFailureStreak = 0;
 $loopStartTimeMs = round(microtime(true) * 1000);
 
 while (true) {
@@ -151,8 +156,9 @@ while (true) {
     $lastSpectatorRefresh = $currentRealTime;
   }
 
-  $cacheStr = GetCachePiece($gameName, 1);
-  $lastUpdateTime = GetCachePiece($gameName, 6);
+  $cacheArr = ReadCacheArray($gameName);
+  $cacheStr = $cacheArr[0] ?? "";
+  $lastUpdateTime = $cacheArr[5] ?? "";
   // Check if game file still exists
   if ($currentRealTime - $lastFileCheckTime >= $fileCheckInterval || $lastUpdateTime == "" || $cacheStr === "") {
     if (!file_exists("./Games/" . $gameName . "/GameFile.txt")) {
@@ -163,7 +169,7 @@ while (true) {
   }
 
   // Check if game is over (status 99)
-  $gameStatus = intval(GetCachePiece($gameName, 14));
+  $gameStatus = intval($cacheArr[13] ?? 0);
   if ($gameStatus == 99) {
     // Send final state before exiting
     $finalState = BuildGameStateResponse($gameName, $playerID, $authKey, $sessionData, false);
@@ -177,18 +183,37 @@ while (true) {
   $cacheVal = intval($cacheStr);
   $timeout = 60 * 1000; //seconds
   $inactive = 1000 * $currentRealTime - intval($lastUpdateTime) > $timeout;
-  $previouslyInactive = GetCachePiece($gameName, 17);
+  $previouslyInactive = $cacheArr[16] ?? "";
   if ($cacheVal > $lastUpdate || $inactive && $previouslyInactive == 0) {
-    $lastUpdate = $cacheVal;
-    if ($inactive) SetCachePiece($gameName, 17, 1);
-    else SetCachePiece($gameName, 17, 0);
     // Build and send full game state
     $gameState = BuildGameStateResponse($gameName, $playerID, $authKey, $sessionData, false, $inactive);
     if (is_string($gameState)) {
-      SendContent(["error" => $gameState]);
-      exit;
+      // Only kill the stream for genuinely fatal errors. Transient ones (e.g.
+      // "Game state reverted." mid-undo) resolve on a retry.
+      $fatal = str_contains($gameState, "no longer exists")
+        || str_contains($gameState, "Invalid Authkey")
+        || str_contains($gameState, "Spectators not allowed")
+        || str_contains($gameState, "Invalid game name")
+        || str_contains($gameState, "Invalid player ID");
+      if ($fatal) {
+        SendContent(["error" => $gameState]);
+        exit;
+      }
+      $buildFailureStreak++;
+      if ($buildFailureStreak > 100) {
+        SendContent(["error" => $gameState]);
+        exit;
+      }
+      usleep(intval($sleepMs * 1000));
+      continue;
     }
+    $buildFailureStreak = 0;
+    $lastUpdate = $cacheVal;
+    if ($inactive) SetCachePiece($gameName, 17, 1);
+    else SetCachePiece($gameName, 17, 0);
     SendContent($gameState);
+    unset($gameState);
+    gc_collect_cycles();
     set_time_limit(120);
   }
 
@@ -210,23 +235,38 @@ while (true) {
       echo "data: " . json_encode(["opponentIsTyping" => $opponentIsTyping]) . "\n\n";
       ob_flush();
       flush();
+      $lastSendTime = $currentRealTime;
     }
   }
 
+  if ($currentRealTime - $lastSendTime >= 15) {
+    echo "event: hb\n";
+    echo "data: {}\n\n";
+    ob_flush();
+    flush();
+    $lastSendTime = $currentRealTime;
+    if (connection_aborted()) exit;
+  }
+
+  $msSinceLastChange = 1000 * $currentRealTime - intval($lastUpdateTime);
+  $sleepMs = $msSinceLastChange > 5000 ? 150 : 50;
   usleep(intval($sleepMs * 1000));
 }
 
 function SendContent($jsonContent) {
-  global $rateLimitStartInterval, $rateLimitProcessCount;
+  global $rateLimitStartInterval, $rateLimitProcessCount, $lastSendTime;
   $currentRealTime = microtime(true);
+  $lastSendTime = $currentRealTime;
   if($currentRealTime - $rateLimitStartInterval > 1.0) {
     // Reset rate limit counters every second
     $rateLimitStartInterval = $currentRealTime;
     $rateLimitProcessCount = 0;
   } else {
     $rateLimitProcessCount++;
-    if($rateLimitProcessCount > 5) {
-      SendContent(["error" => "Too many game updates in last second. A likely logic error has occurred."]);
+    if($rateLimitProcessCount > 15) {
+      echo ("data: " . json_encode(["error" => "Too many game updates in last second. A likely logic error has occurred."]) . "\n\n");
+      ob_flush();
+      flush();
       exit;
     }
   }

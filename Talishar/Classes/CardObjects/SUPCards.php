@@ -35,7 +35,11 @@ class backspin_thrust_red extends Card {
       }
       if ($from == "CC" || $from == "COMBATCHAINATTACKS") {
         $inds = GetTapped($this->controller, "MYITEMS", "subtype=Cog");
-        if($inds != "") Tap(explode(",", $inds)[0], $this->controller, 0);
+        if ($inds != "") {
+          AddDecisionQueue("SETDQCONTEXT", $this->controller, "Choose a Cog to untap for " . CardLink($this->cardID));
+          AddDecisionQueue("CHOOSEMULTIZONE", $this->controller, $inds, 1);
+          AddDecisionQueue("MZTAP", $this->controller, "0", 1);
+        }
         if ($from == "COMBATCHAINATTACKS") ++$chainLinks[$i][9];
         else ++$combatChain[$i + 11];
       }
@@ -415,9 +419,11 @@ class hunter_or_hunted_blue extends Card {
       AddDecisionQueue("SETDQVAR", $player, 1, 1);
       AddDecisionQueue("NOTEQUALNAMEPASS", $player, "{0}", 1);
       // show their hand, arsenal, and deck
-      AddDecisionQueue("WRITELOG", $player, CardLink($parameter, $parameter) . " shows opponent's hand and arsenal", 1);
-      AddDecisionQueue("SHOWHANDWRITELOG", $mainPlayer, "-", 1);
-      AddDecisionQueue("SHOWARSENALWRITELOG", $mainPlayer, "-", 1);
+      if(count(GetHand($mainPlayer)) > 0 || count(GetArsenal($mainPlayer)) > 0) {
+        AddDecisionQueue("WRITELOG", $player, CardLink($parameter, $parameter) . " shows opponent's hand and arsenal", 1);
+        AddDecisionQueue("SHOWHANDWRITELOG", $mainPlayer, "-", 1);
+        AddDecisionQueue("SHOWARSENALWRITELOG", $mainPlayer, "-", 1);
+      }
 
       AddDecisionQueue("FINDINDICES", $mainPlayer, "DECKTOPXINDICES," . $count, 1);
       AddDecisionQueue("DECKCARDS", $mainPlayer, "<-", 1);
@@ -707,7 +713,9 @@ class fight_fair_red extends Card {
 
   function PowerModifier($from = '', $resourcesPaid = 0, $repriseActive = -1, $attackID = "-") {
     global $combatChain, $defPlayer;
-    for ($i = CombatChainPieces(); $i < count($combatChain); $i += CombatChainPieces()) {
+    $combatChainPieces = CombatChainPieces();
+    $combatChainCount = count($combatChain);
+    for ($i = $combatChainPieces; $i < $combatChainCount; $i += $combatChainPieces) {
       if ($combatChain[$i + 1] == $defPlayer && TalentContains($combatChain[$i], "REVILED", $defPlayer)) return 1;
     }
     return 0;
@@ -745,7 +753,9 @@ class fight_dirty_red extends Card {
 
   function PowerModifier($from = '', $resourcesPaid = 0, $repriseActive = -1, $attackID = "-") {
     global $combatChain, $defPlayer;
-    for ($i = CombatChainPieces(); $i < count($combatChain); $i += CombatChainPieces()) {
+    $combatChainPieces = CombatChainPieces();
+    $combatChainCount = count($combatChain);
+    for ($i = $combatChainPieces; $i < $combatChainCount; $i += $combatChainPieces) {
       if ($combatChain[$i + 1] == $defPlayer && TalentContains($combatChain[$i], "REVERED", $defPlayer)) return 1;
     }
     return 0;
@@ -1329,9 +1339,37 @@ class cutting_retort_red extends Card {
       AddDecisionQueue("SETDQCONTEXT", $this->controller, "Choose a number of resources to pay");
       AddDecisionQueue("CHOOSENUMBER", $this->controller, "0,1,2,3", 1);
       AddDecisionQueue("PAYRESOURCES", $this->controller, "<-", 1);
-      AddDecisionQueue("SPECIFICCARD", $this->controller, "CUTTING", 1);
+      Await($this->controller, $this->cardID, lastResultName:"num", initial:1, final:true);
     }
     return;
+  }
+
+  function SpecificLogic() {
+    global $defPlayer, $dqVars;
+    $num = $dqVars["num"] ?? 0;
+    $initial = $dqVars["initial"];
+    if ($initial == 1) { //outer loop
+      if (SearchCurrentTurnEffects("amnesia_red", $defPlayer)) {
+        WriteLog(CardLink("cutting_retort_red", "cutting_retort_red") . " does not work on an opponent under amnesia");
+        return "";
+      }
+      for ($i = 0; $i < $num; ++$i) {
+        Await($this->controller, $this->cardID, "currentIDs", initial:0, prepend:true);
+        Await($this->controller, "ChooseMultiZone", "choice", prepend:true);
+        Await($this->controller, "CuttingIndices", "indices", prepend:true, subsequent:$i > 0);
+      }
+      return "";
+    }
+    else { //inside the loop, check if the destruction was successful
+      $choice = $dqVars["choice"];
+      $Card = MZIndexToObject($this->controller, $choice);
+      $selectedID = $Card->CardID();
+      $selectedIDs = $dqVars["currentIDs"] ?? "";
+      $selectedIDs = $selectedIDs == "" ? $selectedID : "$selectedIDs,$selectedID";
+      $cardID = $Card->Destroy();
+      if ($cardID != "") CombatChainPowerModifier("COMBATCHAINLINK-0", 1);
+      return $selectedIDs;
+    }
   }
 }
 
@@ -1493,7 +1531,9 @@ class show_of_strength_red extends Card {
   function PowerModifier($from = '', $resourcesPaid = 0, $repriseActive = -1, $attackID = '-') {
     global $combatChain, $defPlayer, $CombatChain;
     $modifier = 0;
-    for ($i = CombatChainPieces(); $i < count($combatChain); $i += CombatChainPieces()) {
+    $combatChainPieces = CombatChainPieces();
+    $combatChainCount = count($combatChain);
+    for ($i = $combatChainPieces; $i < $combatChainCount; $i += $combatChainPieces) {
       if ($combatChain[$i + 1] == $defPlayer && $CombatChain->Card($i)->TotalPower() >= 6) $modifier -= 1;
     }
     return $modifier;
@@ -1516,7 +1556,9 @@ class good_natured_brutality_yellow extends Card {
     global $combatChain, $CombatChain;
     $hand = GetHand($this->controller);
     if (count($hand) == 0) {
-      for ($i = CombatChainPieces(); $i < count($combatChain); $i += CombatChainPieces()) {
+      $combatChainPieces = CombatChainPieces();
+      $combatChainCount = count($combatChain);
+      for ($i = $combatChainPieces; $i < $combatChainCount; $i += $combatChainPieces) {
         if ($combatChain[$i + 7] == $uniqueID) {
           $CombatChain->Card($i)->ModifyDefense(6);
           Cheer($this->controller);
@@ -1590,7 +1632,8 @@ class song_of_sinew_yellow extends Card {
     if ($deck->Reveal(4)) {
       $cards = explode(",", $deck->Top(true, amount: 4));
       $numSixes = 0;
-      for ($i = 0; $i < count($cards); ++$i) {
+      $cardsCount = count($cards);
+      for ($i = 0; $i < $cardsCount; ++$i) {
         if (ModifiedPowerValue($cards[$i], $this->controller, "DECK") >= 6) ++$numSixes;
       }
       WriteLog(CardLink($this->cardID, $this->cardID) . " is buffing the next attack by $numSixes!");
@@ -1598,7 +1641,7 @@ class song_of_sinew_yellow extends Card {
       $cardList = implode(",", $cards);
       AddDecisionQueue("PASSPARAMETER", $this->controller, $cardList);
       AddDecisionQueue("SETDQVAR", $this->controller, "0", 1);
-      for ($i = 0; $i < count($cards); ++$i) {
+      for ($i = 0; $i < $cardsCount; ++$i) {
         AddDecisionQueue("SETDQCONTEXT", $this->controller, "Put a card on top of your deck, the last card chosen will be the top card at the end", 1);
         AddDecisionQueue("CHOOSECARDID", $this->controller, "<-", 1);
         AddDecisionQueue("ADDTOPDECK", $this->controller, "<-", 1);
@@ -1646,7 +1689,9 @@ class gauntlets_of_tyrannical_rex extends Card {
   function IsPlayRestricted(&$restriction, $from = '', $index = -1, $resolutionCheck = false) {
     if (CheckTapped("MYCHAR-$index", $this->controller)) return true;
     $pitch = GetPitch($this->controller);
-    for ($i = 0; $i < count($pitch); $i += PitchPieces()) {
+    $pitchCount = count($pitch);
+    $pitchPieces = PitchPieces();
+    for ($i = 0; $i < $pitchCount; $i += $pitchPieces) {
       if (ModifiedPowerValue($pitch[$i], $this->controller, "PITCH") >= 6) return false;
     }
     return true;
@@ -2086,8 +2131,10 @@ class ironfist_revelation extends Card {
   function ProcessTrigger($uniqueID, $target = '-', $additionalCosts = '-', $from = '-') {
     $arsenal = &GetArsenal($this->controller);
     $choices = [];
-    for ($i = 0; $i < count($arsenal); $i += ArsenalPieces()) {
-      if ($arsenal[$i + 1] == "DOWN" && HasCrush($arsenal[$i])) array_push($choices, "MYARS-$i");
+    $arsenalCount = count($arsenal);
+    $arsenalPieces = ArsenalPieces();
+    for ($i = 0; $i < $arsenalCount; $i += $arsenalPieces) {
+      if ($arsenal[$i + 1] == "DOWN" && HasCrush($arsenal[$i])) $choices[] = "MYARS-$i";
     }
     if (count($choices) > 0) {
       $choices = implode(",", $choices);
@@ -2755,7 +2802,7 @@ class hit_the_gas_blue extends Card {
   function PlayAbility($from, $resourcesPaid, $target = '-', $additionalCosts = '-', $uniqueID = '-1', $layerIndex = -1) {
     //eventually we'll want to make this check if it should draw only after you finish flipping cards
     $search = "MYBANISH:isSameName=hyper_driver_red";
-    $count = count(explode(",", SearchMultizone($this->controller, $search)));
+    $count = SearchCount(SearchMultizone($this->controller, $search));
     // AddDecisionQueue("PASSPARAMETER", $this->controller, 1);
     // AddDecisionQueue("SETDQVAR", $this->controller, 0, 1); // number of cards flipped
     for ($i = 0; $i < $count; ++$i) {
@@ -3188,7 +3235,9 @@ class energetic_impact_blue extends Card {
   function OnBlockResolveEffects($blockedFromHand, $i, $start) {
     global $combatChain;
     $num6Block = 0;
-    for ($j = $start; $j < count($combatChain); $j += CombatChainPieces()) {
+    $combatChainPieces = CombatChainPieces();
+    $combatChainCount = count($combatChain);
+    for ($j = $start; $j < $combatChainCount; $j += $combatChainPieces) {
       if ($j == $i) continue;
       if (ModifiedPowerValue($combatChain[$j], $this->controller, "CC", "energetic_impact_blue") >= 6) ++$num6Block;
     }
@@ -3458,7 +3507,9 @@ class in_the_palm_of_your_hand_red extends Card {
 class buckwild extends BaseCard {
   function DoesAttackHaveGoAgain() {
     $pitch = GetPitch($this->controller);
-    for ($i = 0; $i < count($pitch); $i += PitchPieces()) {
+    $pitchCount = count($pitch);
+    $pitchPieces = PitchPieces();
+    for ($i = 0; $i < $pitchCount; $i += $pitchPieces) {
       if (ModifiedPowerValue($pitch[$i], $this->controller, "PITCH") >= 6) return true;
     }
     return false;
@@ -3606,7 +3657,9 @@ class disperse_blue extends Card {
 class rough_up extends BaseCard {
   function PowerModifier() {
     $pitch = GetPitch($this->controller);
-    for ($i = 0; $i < count($pitch); $i += PitchPieces()) {
+    $pitchCount = count($pitch);
+    $pitchPieces = PitchPieces();
+    for ($i = 0; $i < $pitchCount; $i += $pitchPieces) {
       if (ModifiedPowerValue($pitch[$i], $this->controller, "PITCH") >= 6) return 1;
     }
     return 0;
@@ -3685,7 +3738,9 @@ class never_give_up_yellow extends Card {
   function IsPlayRestricted(&$restriction, $from = '', $index = -1, $resolutionCheck = false) {
     global $combatChain;
     if ($from == "GY") {
-      for ($i = CombatChainPieces(); $i < count($combatChain); $i += CombatChainPieces()) {
+      $combatChainPieces = CombatChainPieces();
+      $combatChainCount = count($combatChain);
+      for ($i = $combatChainPieces; $i < $combatChainCount; $i += $combatChainPieces) {
         if ($combatChain[$i + 1] == $this->controller && (TypeContains($combatChain[$i], "A") || TypeContains($combatChain[$i], "AA"))) return false;
       }
       return true;
@@ -3827,8 +3882,8 @@ class the_suspense_is_killing_me_blue extends Card {
   function AuraPowerModifiers($index, &$powerModifiers) {
     global $CS_NumAttacks;
     if (GetClassState($this->controller, $CS_NumAttacks) == 1) {
-      array_push($powerModifiers, $this->cardID);
-      array_push($powerModifiers, 1);
+      $powerModifiers[] = $this->cardID;
+      $powerModifiers[] = 1;
       return 1;
     }
     return 0;
@@ -4472,7 +4527,9 @@ class shining_courage_red extends Card {
 
   function IsPlayRestricted(&$restriction, $from = '', $index = -1, $resolutionCheck = false) {
     global $combatChain;
-    for ($i = CombatChainPieces(); $i < count($combatChain); $i += CombatChainPieces()) {
+    $combatChainPieces = CombatChainPieces();
+    $combatChainCount = count($combatChain);
+    for ($i = $combatChainPieces; $i < $combatChainCount; $i += $combatChainPieces) {
       if ($combatChain[$i + 1] == $this->controller && (TypeContains($combatChain[$i], "A") || TypeContains($combatChain[$i], "AA"))) return false;
     }
     return true;
@@ -4718,7 +4775,9 @@ class vigorous_roar_red extends Card {
   function PlayAbility($from, $resourcesPaid, $target = '-', $additionalCosts = '-', $uniqueID = '-1', $layerIndex = -1) {
     AddCurrentTurnEffect($this->cardID, $this->controller);
     $pitch = GetPitch($this->controller);
-    for ($i = 0; $i < count($pitch); $i += PitchPieces()) {
+    $pitchCount = count($pitch);
+    $pitchPieces = PitchPieces();
+    for ($i = 0; $i < $pitchCount; $i += $pitchPieces) {
       if (ModifiedPowerValue($pitch[$i], $this->controller, "PITCH") >= 6) {
         PlayAura("vigor", $this->controller, 1, true, effectController:$this->controller, effectSource:$this->cardID);
         return;
@@ -5215,8 +5274,9 @@ class channel_the_tranquil_domain_yellow extends Card {
       ChannelTalent($target, "EARTH");
     }
     else {
-      $targetPlayer = explode("-", $target)[0];
-      $targetUID = explode("-", $target)[1];
+      $targetParts = explode("-", $target, 2);
+      $targetPlayer = $targetParts[0];
+      $targetUID = $targetParts[1];
       $targetIndex = SearchAurasForUniqueID($targetUID, $targetPlayer);
       if ($targetIndex != -1) {
         $targetMZIndex = $targetPlayer == $this->controller ? "MYAURAS-$targetIndex" : "THEIRAURAS-$targetIndex";
@@ -5345,7 +5405,9 @@ class overbearing_presence extends Card {
 
   function IsPlayRestricted(&$restriction, $from = '', $index = -1, $resolutionCheck = false) {
     $pitch = GetPitch($this->controller);
-    for ($i = 0; $i < count($pitch); $i += PitchPieces()) {
+    $pitchCount = count($pitch);
+    $pitchPieces = PitchPieces();
+    for ($i = 0; $i < $pitchCount; $i += $pitchPieces) {
       if (ModifiedPowerValue($pitch[$i], $this->controller, "PITCH") >= 6) return false;
     }
     return true;
@@ -5462,7 +5524,9 @@ class familiar_stench_red extends Card {
 
   function AttackGetsBlockedEffect($start) {
     global $combatChain, $defPlayer;
-    for ($i = $start; $i < count($combatChain); $i += CombatChainPieces()) {
+    $combatChainPieces = CombatChainPieces();
+    $combatChainCount = count($combatChain);
+    for ($i = $start; $i < $combatChainCount; $i += $combatChainPieces) {
       if ($combatChain[$i+1] == $defPlayer && ClassContains($combatChain[$i], "BRUTE", $defPlayer)) {
         AddLayer("TRIGGER", $this->controller, $this->cardID);
         return;
@@ -5484,7 +5548,9 @@ class familiar_story_red extends Card {
 
   function AttackGetsBlockedEffect($start) {
     global $combatChain, $defPlayer;
-    for ($i = $start; $i < count($combatChain); $i += CombatChainPieces()) {
+    $combatChainPieces = CombatChainPieces();
+    $combatChainCount = count($combatChain);
+    for ($i = $start; $i < $combatChainCount; $i += $combatChainPieces) {
       if ($combatChain[$i+1] == $defPlayer && ClassContains($combatChain[$i], "GUARDIAN", $defPlayer)) {
         AddLayer("TRIGGER", $this->controller, $this->cardID);
         return;
@@ -5506,7 +5572,9 @@ class bash_guardian_red extends Card {
 
   function PowerModifier($from = '', $resourcesPaid = 0, $repriseActive = -1, $attackID = '-') {
     global $combatChain, $defPlayer;
-    for ($i = CombatChainPieces(); $i < count($combatChain); $i += CombatChainPieces()) {
+    $combatChainPieces = CombatChainPieces();
+    $combatChainCount = count($combatChain);
+    for ($i = $combatChainPieces; $i < $combatChainCount; $i += $combatChainPieces) {
       if ($combatChain[$i + 1] == $defPlayer && ClassContains($combatChain[$i], "GUARDIAN", $defPlayer)) return 1;
     }
     return 0;
@@ -5538,7 +5606,9 @@ class high_pitched_howl extends BaseCard {
 
   function ProcessTrigger() {
     $pitch = GetPitch($this->controller);
-    for ($i = 0; $i < count($pitch); $i += PitchPieces()) {
+    $pitchCount = count($pitch);
+    $pitchPieces = PitchPieces();
+    for ($i = 0; $i < $pitchCount; $i += $pitchPieces) {
       if (ModifiedPowerValue($pitch[$i], $this->controller, "PITCH") >= 6) {
         PlayAura("vigor", $this->controller, 1, true, effectSource:$this->cardID, effectController:$this->controller);
         return;
@@ -5927,7 +5997,9 @@ class bash_brute_red extends Card {
 
   function PowerModifier($from = '', $resourcesPaid = 0, $repriseActive = -1, $attackID = '-') {
     global $combatChain, $defPlayer;
-    for ($i = CombatChainPieces(); $i < count($combatChain); $i += CombatChainPieces()) {
+    $combatChainPieces = CombatChainPieces();
+    $combatChainCount = count($combatChain);
+    for ($i = $combatChainPieces; $i < $combatChainCount; $i += $combatChainPieces) {
       if ($combatChain[$i + 1] == $defPlayer && ClassContains($combatChain[$i], "BRUTE", $defPlayer)) return 1;
     }
     return 0;

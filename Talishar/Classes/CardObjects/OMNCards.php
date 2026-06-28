@@ -218,7 +218,7 @@ class nebula_duality extends BaseCard {
   }
 
   function ProcessAbility($target) {
-    DealArcane(1, source:$this->cardID, player:$this->controller, resolvedTarget:$target);
+    DealArcane(1, source:"$this->cardID-ABILITY", player:$this->controller, resolvedTarget:$target);
     PlayAura("lightning_flow", $this->controller);
   }
 
@@ -395,13 +395,14 @@ class zyggy_base extends BaseCard {
     $CharacterCard->Tap();
     $CharacterCard->AddUse(1); //unlimited uses
     $CharacterCard->SetUsed(2);
-    $Auras = new Auras($this->controller);
-    $Flow = $Auras->FindCardID("lightning_flow");
-    $Flow->Destroy();
+    Await($this->controller, "MultiZoneIndices", "indices", search:"MYAURAS:isSameName=lightning_flow", subsequent:0);
+    Await($this->controller, "ChooseMultiZone", "MZInd", context:"Destroy a " . CardLink("lightning_flow") . " you control", subsequent:0);
+    Await($this->controller, "MZDestroy", final:true); // destroys the lightning flow
     $context = "Choose a {{element|Lightning|" . GetElementColorCode("LIGHTNING") . "}} aura permanent to banish";
-    $indices = FindHoloAuras($this->controller, excludeFirstFlow:false);
-    Await($this->controller, "ChooseMultizone", returnName:"MZIndex", subsequent:0, indices:$indices, context:$context);
+    Await($this->controller, "FindHoloAuras", "indices");
+    Await($this->controller, "ChooseMultizone", returnName:"MZIndex", context:$context);
     Await($this->controller, $this->cardID, final:true);
+    
   }
 
   function SpecificLogic() {
@@ -502,7 +503,7 @@ class voltbound_duality_red extends Card {
   }
 
   function ProcessAbility($uniqueID, $target = '-', $additionalCosts = '-', $from = '-') {
-    DealArcane(1, source:$this->cardID, player:$this->controller, resolvedTarget:$target);
+    DealArcane(1, source:"$this->cardID-ABILITY", player:$this->controller, resolvedTarget:$target);
     PlayAura("lightning_flow", $this->controller);
   }
 
@@ -932,7 +933,7 @@ class aphrodias extends Card {
     $format = GetCachePiece($gameName, 13);
     if ($CharacterCard->Tapped()) return true;
     if (GetClassState($this->controller, $CS_HoloAurasEntered) == 0) return true;
-    if($format != FORMAT_SEALED && $format != FORMAT_DRAFT) {
+    if($format == FORMAT_SEALED || $format == FORMAT_DRAFT) {
       $hand = &GetHand($this->controller);
       $resources = &GetResources($this->controller);
       if (Count($hand) == 0 && $resources[0] == 0) return true;
@@ -1264,7 +1265,7 @@ class auric_shards extends BaseCard {
 
   function ProcessTrigger($val, $target, $additionalCosts) {
     $pow = $additionalCosts == "HOLO" ? $val : 1;
-    $zone = explode("-", $target)[0];
+    $zone = explode("-", $target, 2)[0];
     if ($zone == "LAYER" || $zone == "COMBATCHAINLINK")
       AddCurrentTurnEffect("$this->cardID-$pow", $this->controller);
   }
@@ -1855,6 +1856,7 @@ class core_reaction extends BaseCard {
   function ProcessTrigger($target, $additionalCosts, $damage) {
     $Auras = new Auras($this->controller);
     $AuraCard = $Auras->FindCardUID($additionalCosts);
+    SetDamageSourceUID($AuraCard->UniqueID());
     $AuraCard->Destroy();
     DealArcane($damage, source:$this->cardID, resolvedTarget:$target);
   }
@@ -2131,14 +2133,15 @@ class ominous_aggression_red extends Card {
   
   function PlayAbility($from, $resourcesPaid, $target = '-', $additionalCosts = '-', $uniqueID = '-1', $layerIndex = -1) {
     global $CS_NumControlledAurasDestroyed, $CombatChain, $combatChainState, $CCS_GoesWhereAfterLinkResolves;
-    $index = explode("-", $target)[1];
+    $targetParts = explode("-", $target, 2);
+    $index = $targetParts[1];
     $amount = GetClassState($this->controller, $CS_NumControlledAurasDestroyed) > 0 ? 4 : 2;
-    if (explode("-", $target)[0] == "COMBATCHAINLINK" && $CombatChain->HasCurrentLink() && $index != -1) {
+    if ($targetParts[0] == "COMBATCHAINLINK" && $CombatChain->HasCurrentLink() && $index != -1) {
       if ($index == 0 && $combatChainState[$CCS_GoesWhereAfterLinkResolves] == "-") return "FAILED";
       CombatChainPowerModifier($index, $amount);
       AddCurrentTurnEffect($this->cardID."-VISUAL", $this->controller);//For Visual Effect only
     }
-    elseif (explode("-", $target)[0] == "PASTCHAINLINK") {
+    elseif ($targetParts[0] == "PASTCHAINLINK") {
       // targeting a past chain link, do nothing for now
     }
     //only add current turn effect if there's no target (ie. played in layer step)
@@ -2311,8 +2314,8 @@ class feral_instinct_yellow extends Card {
   }
 
   function SelfCostModifier($from) {
-    global $CS_HaveIntimidated;
-    return GetClassState($this->controller, $CS_HaveIntimidated) ? -3 : 0;
+    global $CS_HaveIntimidatedOpponent;
+    return GetClassState($this->controller, $CS_HaveIntimidatedOpponent) ? -3 : 0;
   }
 }
 
@@ -2696,7 +2699,7 @@ class crash_site_salvage_yellow extends Card {
   }
   
   function PlayAbility($from, $resourcesPaid, $target = '-', $additionalCosts = '-', $uniqueID = '-1', $layerIndex = -1) {
-    $scrappedID = explode("-", $additionalCosts)[1] ?? "";
+    $scrappedID = explode("-", $additionalCosts, 2)[1] ?? "";
     AddLayer("TRIGGER", $this->controller, $this->cardID, $scrappedID, "ATTACKTRIGGER");
     return "";
   }
@@ -3215,13 +3218,14 @@ class gauntlet_of_sword_and_sorcery extends Card {
 class livewire_press extends BaseCard {
 
   function PlayAbility($target) {
-    $zone = explode("-", $target)[0];
+    $targetParts = explode("-", $target, 2);
+    $zone = $targetParts[0];
     switch($zone) {
       case "LAYER":
         AddCurrentTurnEffect($this->cardID, $this->controller);
         break;
       case "COMBATCHAINLINK":
-        $index = intval(explode("-", $target)[1] ?? 0);
+        $index = intval($targetParts[1] ?? 0);
         if ($index == 0)
           AddCurrentTurnEffect($this->cardID, $this->controller);
         break;
@@ -3751,7 +3755,7 @@ class draco_fire_red extends Card {
   function SpecificLogic() {
     $Discard = new Discard($this->controller);
     $num = 0;
-    for ($i = $Discard->NumCards() - 1; $i >= 0; --$i) {
+    for ($i = $Discard->NumTotalCards() - 1; $i >= 0; --$i) {
       $Card = $Discard->Card($i, true);
       if (CardName($Card->CardID()) == CardName($this->cardID)) {
         $Card->Banish();
@@ -3920,12 +3924,14 @@ class astral_bridge_red extends Card {
     global $CS_NumInstantsPutInGrave;
     $deck = new Deck($this->controller);
     $cardID = $deck->Top(true);
-    $uid = AddGraveyard($cardID, $this->controller, "DECK");
-    AddDecisionQueue("WRITELOG", $this->controller, CardLink($cardID) . " was put into the graveyard.");
-    if (TypeContains($cardID, "I"))
-      AddCurrentTurnEffect($this->cardID, $this->controller, uniqueID:$uid);
-    if (GetClassState($this->controller, $CS_NumInstantsPutInGrave) > 0)
-      DealArcane(1, source:$this->cardID, resolvedTarget:$target);
+    if ($cardID != "") {
+      $uid = AddGraveyard($cardID, $this->controller, "DECK");
+      AddDecisionQueue("WRITELOG", $this->controller, CardLink($cardID) . " was put into the graveyard.");
+      if (TypeContains($cardID, "I"))
+        AddCurrentTurnEffect($this->cardID, $this->controller, uniqueID:$uid);
+      if (GetClassState($this->controller, $CS_NumInstantsPutInGrave) > 0)
+        DealArcane(1, source:$this->cardID, resolvedTarget:$target);
+    }
     return "";
   }
 
@@ -4271,7 +4277,7 @@ class swift_pickup_red extends Card {
   function SpecificLogic() {
     global $dqVars;
     $MZIndex = $dqVars["choice"];
-    $ind = explode("-", $MZIndex)[1] ?? -1;
+    $ind = explode("-", $MZIndex, 2)[1] ?? -1;
     if ($ind != -1) {
       $DiscardCard = new DiscardCard($ind, $this->controller);
       $cardID = $DiscardCard->ID();
@@ -4399,6 +4405,7 @@ class plutonic_starplate extends Card {
 
   function ProcessTrigger($uniqueID, $target = '-', $additionalCosts = '-', $from = '-') {
     GainResources($this->controller, 1);
+    LogPlayCardStats($this->controller, $this->cardID, "PASSIVE");
   }
 }
 
@@ -4410,7 +4417,7 @@ class beckon_steel_blue extends Card {
   
   function PlayAbility($from, $resourcesPaid, $target = '-', $additionalCosts = '-', $uniqueID = '-1', $layerIndex = -1) {
     global $CombatChain;
-    if (explode("-", $target)[0] == "COMBATCHAINLINK") {
+    if (explode("-", $target, 2)[0] == "COMBATCHAINLINK") {
       $uid = $CombatChain->AttackCard()->OriginUniqueID();
       if ($uid != "") {
         $Character = new PlayerCharacter($this->controller);
@@ -4733,12 +4740,13 @@ class crackle_from_afar_blue extends Card {
   }
 
   function ProcessTrigger($uniqueID, $target = '-', $additionalCosts = '-', $from = '-') {
-    $targetZone = explode("-", $target)[0];
+    global $mainPlayer;
+    $targetZone = explode("-", $target, 2)[0];
     if ($targetZone == "ATTACKQUEUE") {
       WriteLog("Targeting the attack queue not supported yet");
     }
     elseif ($targetZone != "PASTCHAINLINK") {
-      AddCurrentTurnEffect($this->cardID, $this->controller);
+      AddCurrentTurnEffect($this->cardID, $mainPlayer);
     }
   }
 
@@ -4768,7 +4776,7 @@ class fleeing_starbreeze_blue extends Card {
   }
 
   function ProcessTrigger($uniqueID, $target = '-', $additionalCosts = '-', $from = '-') {
-    $targetZone = explode("-", $target)[0];
+    $targetZone = explode("-", $target, 2)[0];
     if ($targetZone == "ATTACKQUEUE") {
       WriteLog("Targeting the attack queue not supported yet");
     }
@@ -5007,8 +5015,9 @@ class tempt_over_yellow extends Card {
   function SpecificLogic() {
     global $dqVars;
     $choice = $dqVars["choice"];
-    $from = explode("-", $choice)[0];
-    $index = explode("-", $choice)[1] ?? -1;
+    $choiceParts = explode("-", $choice, 2);
+    $from = $choiceParts[0];
+    $index = $choiceParts[1] ?? -1;
     $otherPlayer = $this->controller == 1 ? 2 : 1;
     if ($index != -1)
       StealAura($otherPlayer, $index, $this->controller, $from, "Temporary");
@@ -5691,8 +5700,9 @@ class nucleus_aetherbolt_red extends Card {
   }
   
   function PlayAbility($from, $resourcesPaid, $target = '-', $additionalCosts = '-', $uniqueID = '-1', $layerIndex = -1) {
-    $firstTarget = explode(",", $target)[0];
-    $secondTarget = explode(",", $target)[1] ?? "";
+    $targetParts = explode(",", $target, 2);
+    $firstTarget = $targetParts[0];
+    $secondTarget = $targetParts[1] ?? "";
     DealArcane(3, source:$this->cardID, resolvedTarget: $firstTarget);
     Await($this->controller, $this->cardID, mode:"first", pingTarget:$secondTarget, final:true);
     return "";
@@ -5924,7 +5934,8 @@ class starlight_road_blue extends Card {
 
   function SpecificLogic() {
     global $dqVars;
-    $choice = explode("-", $dqVars["choice"])[1];
+    $parts = explode("-", $dqVars["choice"] ?? "");
+    $choice = $parts[1] ?? $parts[0] ?? "";
     PlayAura($choice, $this->controller);
   }
 }
@@ -6520,7 +6531,7 @@ class singeing_flowstride_blue extends Card {
 class stunning_swipe extends BaseCard {
   function PlayAbility() {
     $otherPlayer = $this->controller == 1 ? 2 : 1;
-    if (DoesAttackHaveGoAgain() && IsHeroAttackTarget() && IsHeroLightning($otherPlayer))
+    if (DoesAttackHaveGoAgain() && IsHeroAttackTarget())
       AddLayer("TRIGGER", $this->controller, $this->cardID, "-", "ATTACKTRIGGER");
     return "";
   }
@@ -6530,14 +6541,16 @@ class stunning_swipe extends BaseCard {
   }
 
   function DamageDealtAbilities($target) {
-    FirstDamageTrigger($target, $this->cardID, $this->controller);
+    if (IsHeroLightning($target))
+      FirstDamageTrigger($target, $this->cardID, $this->controller);
   }
 
   function ProcessTrigger() {
-    $search = "THEIRCHAR:type=C&THEIRCHAR:type=W";
-    Await($this->controller, "MultiZoneIndices", "indices", search:$search, subsequent:0);
-    Await($this->controller, "ChooseMultiZone", "MZIndex", context:"Tap the defending hero or their weapon");
-    Await($this->controller, "MZTap", final:true);
+    $inds = GetUntapped($this->controller, "THEIRCHAR", cond:"type=C&THEIRCHAR:type=W");
+    if ($inds != "") {
+      Await($this->controller, "ChooseMultiZone", "MZIndex", indices:$inds, context:"Tap the defending hero or their weapon", subsequent:0);
+      Await($this->controller, "MZTap", final:true);
+    }
   }
 }
 
@@ -6705,6 +6718,7 @@ class quick_succession extends BaseCard {
     $attackID = $CombatChain->AttackCard()->ID();
     switch ($parameter) {
       case "GOAGAIN":
+        if (!TypeContains($attackID, "AA")) return false;
         return ClassContains($attackID, "RUNEBLADE", $this->controller) || TalentContains($attackID, "LIGHTNING", $this->controller);
       case "ACTIVE":
         return true;

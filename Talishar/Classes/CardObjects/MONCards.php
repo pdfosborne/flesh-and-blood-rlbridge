@@ -3219,8 +3219,8 @@ class sonata_arcanix_red extends Card {
     Await($this->controller, "MultiChooseDeck", "indices");
     Await($this->controller, "MultiRemoveDeck", "cardIDs");
     Await($this->controller, "MultiAddHand");
-    Await($this->controller, $this->cardID, mode:"deal_arcane", target:$target);
-    Await($this->controller, "ShuffleDeck", final:true);
+    Await($this->controller, $this->cardID, mode:"deal_arcane", target:$target, final:true);
+    Await($this->controller, "ShuffleDeck", subsequent:0, final:true);
     return "";
   }
 
@@ -3231,16 +3231,17 @@ class sonata_arcanix_red extends Card {
         $cards = explode(",", $dqVars["cardIDs"]);
         $numAA = 0;
         $numNAA = 0;
-        $AAIndices = "";
-        for ($i = 0; $i < count($cards); ++$i) {
+        $AAIndicesArr = [];
+        $cardsCount = count($cards);
+        for ($i = 0; $i < $cardsCount; ++$i) {
           $cardType = CardType($cards[$i]);
           if (DelimStringContains($cardType, "A")) ++$numNAA;
           else if ($cardType == "AA") {
             ++$numAA;
-            if ($AAIndices != "") $AAIndices .= ",";
-            $AAIndices .= $i;
+            $AAIndicesArr[] = $i;
           }
         }
+        $AAIndices = implode(",", $AAIndicesArr);
         $numMatch = $numAA > $numNAA ? $numNAA : $numAA;
         if ($numMatch == 0) return "PASS";
         $dqVars["maxNumber"] = $numMatch;
@@ -3248,8 +3249,10 @@ class sonata_arcanix_red extends Card {
         $dqVars["indices"] = $AAIndices;
         break;
       case "deal_arcane":
-        $numArcane = count(explode(",", $dqVars["cardIDs"]));
+        $numArcane = substr_count($dqVars["cardIDs"], ",") + 1;
         DealArcane($numArcane, 0, "PLAYCARD", "sonata_arcanix_red", true, resolvedTarget:$dqVars["target"]);
+        $deck = new Deck($this->controller);
+        $deck->Shuffle("-");
         break;
       default:
         break;

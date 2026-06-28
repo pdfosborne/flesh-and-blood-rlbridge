@@ -17,7 +17,7 @@ $response->cardBacks = [];
 $response->playmats = [];
 
 // Define default playmat IDs (kept in sync with frontend PLAYER_PLAYMATS)
-$defaultPlaymatIds = [0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 30, 31, 32, 33, 34, 35, 36, 42, 44];
+$defaultPlaymatIds = [0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15, 30, 31, 32, 33, 34, 35, 36, 42, 44];
 
 //Add default card back
 $cardBack = new stdClass();
@@ -36,25 +36,28 @@ foreach ($defaultPlaymatIds as $playmatId) {
 if(IsUserLoggedIn()) {
   foreach(PatreonCampaign::cases() as $campaign) {
     if(isset($_SESSION[$campaign->SessionID()]) || (isset($_SESSION["useruid"]) && $campaign->IsTeamMember($_SESSION["useruid"]))) {
-      $cardBacks = $campaign->CardBacks();
-      $cardBacks = explode(",", $cardBacks);
-      for($i = 0; $i < count($cardBacks); ++$i) {
+      $cardBacks = explode(",", $campaign->CardBacks());
+      $cbCount = count($cardBacks);
+      $campaignName = $campaign->CampaignName();
+      $showSuffix = $cbCount > 1;
+      for($i = 0; $i < $cbCount; ++$i) {
         $cardBack = new stdClass();
-        $cardBack->name = $campaign->CampaignName() . (count($cardBacks) > 1 ? " " . ($i + 1) : "");
+        $cardBack->name = $campaignName . ($showSuffix ? " " . ($i + 1) : "");
         $cardBack->id = $cardBacks[$i];
-        array_push($response->cardBacks, $cardBack);
+        $response->cardBacks[] = $cardBack;
       }
 
-    $playmats = $campaign->Playmats();
-    $playmats = explode(",", $playmats);
-    for($i = 0; $i < count($playmats); ++$i) {
-      $playmat = new stdClass();
-      $playmat->id = trim($playmats[$i]);
-      $playmat->name = GetPlaymatName($playmat->id);
-      if (!empty($playmat->id)) {
-        array_push($response->playmats, $playmat);
+      $playmats = explode(",", $campaign->Playmats());
+      $pmCount = count($playmats);
+      for($i = 0; $i < $pmCount; ++$i) {
+        $id = trim($playmats[$i]);
+        if (!empty($id)) {
+          $playmat = new stdClass();
+          $playmat->id = $id;
+          $playmat->name = GetPlaymatName($id);
+          $response->playmats[] = $playmat;
+        }
       }
-    }
     }
   }
 
@@ -77,8 +80,8 @@ if(IsUserLoggedIn()) {
       $uniqueCommunities = [];
       foreach ($communities as $c) {
         $cid = $c['id'] ?? null;
-        if ($cid && !in_array($cid, $seenCommunityIds)) {
-          $seenCommunityIds[] = $cid;
+        if ($cid && !isset($seenCommunityIds[$cid])) {
+          $seenCommunityIds[$cid] = true;
           $uniqueCommunities[] = $c;
         }
       }
@@ -93,22 +96,26 @@ if(IsUserLoggedIn()) {
                 $cardBacks = $metafyCommunity->CardBacks();
                 if (!empty($cardBacks)) {
                   $cardBackIds = explode(",", $cardBacks);
-                  for($i = 0; $i < count($cardBackIds); ++$i) {
+                  $cbCount = count($cardBackIds);
+                  $communityName = $metafyCommunity->CommunityName();
+                  $showSuffix = $cbCount > 1;
+                  for($i = 0; $i < $cbCount; ++$i) {
                     $cardBack = new stdClass();
-                    $cardBack->name = $metafyCommunity->CommunityName() . (count($cardBackIds) > 1 ? " " . ($i + 1) : "");
+                    $cardBack->name = $communityName . ($showSuffix ? " " . ($i + 1) : "");
                     $cardBack->id = trim($cardBackIds[$i]);
-                    array_push($response->cardBacks, $cardBack);
+                    $response->cardBacks[] = $cardBack;
                   }
                 }
                 // Add playmats
                 $playmats = $metafyCommunity->Playmats();
                 if (!empty($playmats)) {
                   $playmatIds = explode(",", $playmats);
-                  for($i = 0; $i < count($playmatIds); ++$i) {
+                  $pmCount = count($playmatIds);
+                  for($i = 0; $i < $pmCount; ++$i) {
                     $playmat = new stdClass();
                     $playmat->id = trim($playmatIds[$i]);
                     $playmat->name = GetPlaymatName($playmat->id);
-                    array_push($response->playmats, $playmat);
+                    $response->playmats[] = $playmat;
                   }
                 }
                 break;
@@ -122,8 +129,10 @@ if(IsUserLoggedIn()) {
   mysqli_close($conn);
 }
 
-// Sort playmats alphabetically by name
+// Sort playmats: Plain (Default) first, then alphabetically
 usort($response->playmats, function($a, $b) {
+  if ($a->id === 0 || $a->id === '0') return -1;
+  if ($b->id === 0 || $b->id === '0') return 1;
   return strcmp($a->name, $b->name);
 });
 
@@ -131,8 +140,17 @@ usort($response->playmats, function($a, $b) {
 $seenCardBackIds = [];
 $response->cardBacks = array_values(array_filter($response->cardBacks, function($cb) use (&$seenCardBackIds) {
   $id = (string)($cb->id ?? '');
-  if (in_array($id, $seenCardBackIds)) return false;
-  $seenCardBackIds[] = $id;
+  if (isset($seenCardBackIds[$id])) return false;
+  $seenCardBackIds[$id] = true;
+  return true;
+}));
+
+// Deduplicate playmats by id (safety net for multiple sources)
+$seenPlaymatIds = [];
+$response->playmats = array_values(array_filter($response->playmats, function($pm) use (&$seenPlaymatIds) {
+  $id = (string)($pm->id ?? '');
+  if (isset($seenPlaymatIds[$id])) return false;
+  $seenPlaymatIds[$id] = true;
   return true;
 }));
 
@@ -143,7 +161,7 @@ function GetPlaymatName($id)
 {
   switch ($id) {
     case 0:
-      return "Plain";
+      return "Plain (Default)";
     case 1:
       return "Demonastery";
     case 2:
@@ -232,6 +250,8 @@ function GetPlaymatName($id)
       return "Taddle Down";
     case 44:
       return "Omens of the Third Age";
+    case 45:
+      return "Talishar, The Lost Prince";
     default:
       return "N/A";
   }

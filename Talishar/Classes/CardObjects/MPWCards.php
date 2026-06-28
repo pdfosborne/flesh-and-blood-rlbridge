@@ -197,6 +197,10 @@ class golden_company_yellow extends Card {
 	function CurrentTurnEffectPaid($cardID, $from, &$remove, $index) {
 		return $this->baseCard->CurrentTurnEffectPaid($remove);
 	}
+
+	function SpecialBlock() {
+		return 5;
+	}
 }
 
 class golden_company_blue extends Card {
@@ -216,6 +220,10 @@ class golden_company_blue extends Card {
 
 	function CurrentTurnEffectPaid($cardID, $from, &$remove, $index) {
 		return $this->baseCard->CurrentTurnEffectPaid($remove);
+	}
+
+	function SpecialBlock() {
+		return 4;
 	}
 }
 
@@ -544,7 +552,7 @@ class downswing_red extends Card {
  	}
   
   	function PlayAbility($from, $resourcesPaid, $target = '-', $additionalCosts = '-', $uniqueID = '-1', $layerIndex = -1) {
-		if (explode("-", $target)[0] == "COMBATCHAINLINK") {
+		if (explode("-", $target, 2)[0] == "COMBATCHAINLINK") {
 			AddCurrentTurnEffect($this->cardID, $this->controller);
 			AddOnWagerEffects();
 		}
@@ -570,8 +578,8 @@ class downswing_red extends Card {
 	}
 
 	function WonWager($wonWager, $amount) {
-    LoseHealth(1, $wonWager);
-  }
+		LoseHealth(1, $wonWager);
+	}
 
 	function IsWagerEffect($index) {
 		return true;
@@ -587,7 +595,7 @@ class drawing_dead_yellow extends Card {
   	}
   
   	function PlayAbility($from, $resourcesPaid, $target = '-', $additionalCosts = '-', $uniqueID = '-1', $layerIndex = -1) {
-		if (explode("-", $target)[0] == "COMBATCHAINLINK") {
+		if (explode("-", $target, 2)[0] == "COMBATCHAINLINK") {
 			AddCurrentTurnEffect($this->cardID, $this->controller);
 			AddOnWagerEffects();
 		}
@@ -630,7 +638,7 @@ class donkey_blue extends Card {
   	}
   
   	function PlayAbility($from, $resourcesPaid, $target = '-', $additionalCosts = '-', $uniqueID = '-1', $layerIndex = -1) {
-		if (explode("-", $target)[0] == "COMBATCHAINLINK") {
+		if (explode("-", $target, 2)[0] == "COMBATCHAINLINK") {
 			AddCurrentTurnEffect($this->cardID, $this->controller);
 			AddOnWagerEffects();
 		}
@@ -668,14 +676,15 @@ class donkey_blue extends Card {
 }
 
 class and_again_blue extends Card {
-  function __construct($controller) {
-    $this->cardID = "and_again_blue";
-    $this->controller = $controller;
-  }
+	function __construct($controller) {
+		$this->cardID = "and_again_blue";
+		$this->controller = $controller;
+	}
   
-  function PlayAbility($from, $resourcesPaid, $target = '-', $additionalCosts = '-', $uniqueID = '-1', $layerIndex = -1) {
-		$Sword = CleanTargetToObject($this->controller, explode(",", $target)[0]);
-		$attackTarget = explode(",", $target)[1] ?? "NA";
+  	function PlayAbility($from, $resourcesPaid, $target = '-', $additionalCosts = '-', $uniqueID = '-1', $layerIndex = -1) {
+		$targetParts = explode(",", $target, 2);
+		$Sword = CleanTargetToObject($this->controller, $targetParts[0]);
+		$attackTarget = $targetParts[1] ?? "NA";
 		if ($Sword->Index() != -1) {
 			$index = $Sword->Index();
 			$uniqueID = $Sword->UniqueID();
@@ -683,12 +692,12 @@ class and_again_blue extends Card {
 			$parameter = "EQUIP|0|$index|$uniqueID|MYCHAR";
 			AddAttackQueue($cardID, $this->controller, $attackTarget, $parameter, $uniqueID);
 		}
-    return "";
-  }
+    	return "";
+  	}
 
-  function IsAttackLayer() {
+	function IsAttackLayer() {
 		return true;
-  }
+	}
 
 	function GetTargets() {
 		global $CurrentTurnEffects, $CS_WeaponsAttackedWith;
@@ -705,9 +714,9 @@ class and_again_blue extends Card {
 		return $targets;
 	}
 
-  function IsPlayRestricted(&$restriction, $from = '', $index = -1, $resolutionCheck = false) {
+	function IsPlayRestricted(&$restriction, $from = '', $index = -1, $resolutionCheck = false) {
 		return count($this->GetTargets()) == 0;
-  }
+	}
 
 	function PayAdditionalCosts($from, $index = '-') {
 		$targetSwords = $this->GetTargets();
@@ -725,4 +734,201 @@ class and_again_blue extends Card {
 		$Layer = $Stack->TopLayer($this->cardID);
 		$Layer->AddTarget($target);
 	}
+}
+
+class durendal extends Card {
+	function __construct($controller) {
+		$this->cardID = "durendal";
+		$this->controller = $controller;
+	}
+  
+	function PlayAbility($from, $resourcesPaid, $target = '-', $additionalCosts = '-', $uniqueID = '-1', $layerIndex = -1) {
+		return "";
+	}
+
+	function AbilityType($index = -1, $from = '-') {
+		return "AA";
+	}
+
+	function AbilityCost() {
+		return 1;
+	}
+
+	function CombatChainBlockModifier($cardID, $from, $index, $sourceIndex) {
+		global $CombatChain;
+		if ($sourceIndex != 0) return 0;
+		$AttackCard = $CombatChain->AttackCard();
+		$uid = $AttackCard->OriginUniqueID();
+		$Character = new PlayerCharacter($this->controller);
+		$Weapon = $Character->FindCardUID($uid);
+		if ($Weapon->NumPowerCounters() <= 0) return 0;
+		return TypeContains($cardID, "AR") || TypeContains($cardID, "DR") ? -1 : 0;
+	}
+}
+
+class raise_blades_red extends Card {
+  function __construct($controller) {
+    $this->cardID = "raise_blades_red";
+    $this->controller = $controller;
+  }
+  
+  function PlayAbility($from, $resourcesPaid, $target = '-', $additionalCosts = '-', $uniqueID = '-1', $layerIndex = -1) {
+		Draw($this->controller, effectSource:$this->cardID);
+		Await($this->controller, "MultiZoneIndices", "indices", search:"MYHAND", subsequent:0);
+		Await($this->controller, "ChooseMultiZone", "MZIndex", context:"Put a card from hand back on top");
+		Await($this->controller, "MZRemove", "cardID");
+		Await($this->controller, "AddTopDeck", final:true);
+		$hand = GetHand($this->controller);
+		if (count($hand) == 0) { //handle case where the game automates putting a card back
+			AddDecisionQueue("DECKCARDS", $this->controller, "0", 1);
+			AddDecisionQueue("SETDQVAR", $this->controller, "1", 1);
+			AddDecisionQueue("SETDQCONTEXT", $this->controller, "you drew <1> and placed it back on top", 1);
+			AddDecisionQueue("OK", $this->controller, "-", 1);
+			AddDecisionQueue("SETDQCONTEXT", $this->controller, "-");
+		}
+		AddCurrentTurnEffect($this->cardID, $this->controller);
+    return "";
+  }
+
+	function CombatEffectActive($parameter = '-', $defendingCard = '', $flicked = false) {
+		global $CombatChain;
+		return SubtypeContains($CombatChain->AttackCard()->ID(), "Sword", $this->controller);
+	}
+
+	function EffectPowerModifier($param, $attached = false) {
+		return 3;
+	}
+}
+
+class overwhelming_swing_yellow extends Card {
+  function __construct($controller) {
+    $this->cardID = "overwhelming_swing_yellow";
+    $this->controller = $controller;
+  }
+  
+  function PlayAbility($from, $resourcesPaid, $target = '-', $additionalCosts = '-', $uniqueID = '-1', $layerIndex = -1) {
+		$targetParts = explode("-", $target, 3);
+		$zone = $targetParts[0];
+		$linkNum = $targetParts[2] ?? -1;
+		$numDefended = match($zone) {
+			"COMBATCHAINLINK" => NumCardsDefended(),
+			"PASTCHAINLINK" => NumCardsDefended($linkNum), //future proofing
+			default => 0
+		};
+		$val = 2 * $numDefended + 1;
+		if ($zone == "COMBATCHAINLINK")
+			AddCurrentTurnEffect("$this->cardID-$val", $this->controller);
+    return "";
+  }
+
+	function CombatEffectActive($parameter = '-', $defendingCard = '', $flicked = false) {
+		return true;
+	}
+
+	function EffectPowerModifier($param, $attached = false) {
+		return $param;
+	}
+
+	private
+	function GetTargets() {
+		$attacks = TargetAttack($this->controller);
+		$targets = [];
+		foreach($attacks as $attack) {
+			$Card = MZIndexToObject($this->controller, $attack);
+			if (is_object($Card) && TypeContains($Card->ID(), "W"))
+				$targets[] = $attack;
+		}
+		return implode(",", $targets);
+	}
+
+	function IsPlayRestricted(&$restriction, $from = '', $index = -1, $resolutionCheck = false) {
+		return $this->GetTargets() == "";
+	}
+
+	function PayAdditionalCosts($from, $index = '-') {
+		$targets = $this->GetTargets();
+		Await($this->controller, "ChooseMultiZone", "index", indices:$targets, subsequent:0);
+		Await($this->controller, "SetLayerTarget", layerID:$this->cardID, final:true);
+	}
+
+	function CardCost($from = '-') {
+		return NumCardsDefended();
+	}
+}
+
+class rake_back_blue extends Card {
+  function __construct($controller) {
+    $this->cardID = "rake_back_blue";
+    $this->controller = $controller;
+  }
+  
+  function PlayAbility($from, $resourcesPaid, $target = '-', $additionalCosts = '-', $uniqueID = '-1', $layerIndex = -1) {
+		AddCurrentTurnEffect($this->cardID, $this->controller);
+    return "";
+  }
+
+	function CombatEffectActive($parameter = '-', $defendingCard = '', $flicked = false) {
+		global $CombatChain;
+		return SubtypeContains($CombatChain->AttackCard()->ID(), "Sword");
+	}
+
+	function EffectPowerModifier($param, $attached = false) {
+		return $param != "WAGER" ? 2 : 0;
+	}
+
+	function OnAttackEffect($cardID, $i) {
+    global $CombatChain;
+    $Effect = new CurrentEffect($i);
+    if (SubtypeContains($CombatChain->AttackCard()->ID(), "Sword") && $Effect->EffectID() == $this->cardID)
+      AddLayer("TRIGGER", $this->controller, $this->cardID);
+    return false;
+  }
+
+	function ProcessTrigger($uniqueID, $target = '-', $additionalCosts = '-', $from = '-') {
+    AddCurrentTurnEffect("$this->cardID-WAGER", $this->controller, from:"PLAY"); // contains the wager effect
+    AddOnWagerEffects();
+  }
+
+	function AddPrePitchDecisionQueue($from, $index = -1, $facing = '-') {
+		PayGoldInstead($this->controller, $this->cardID);
+	}
+
+	function CurrentTurnEffectPaid($cardID, $from, &$remove, $index) {
+		$Effect = new CurrentEffect($index);
+		if (str_contains($Effect->EffectID(), "PAID")) {
+			$remove = true;
+			return true;
+		}
+		return false;
+	}
+
+	function WonWager($wonWager, $amount) {
+    Await($wonWager, "MultiZoneIndices", "indices", search:"MYDISCARD:type=E", subsequent:0);
+		Await($wonWager, "ChooseMultiZone", "MZInd", may:true, context:"Equip an equipment from your graveyard (or pass)");
+		Await($wonWager, $this->cardID, final:true);
+  }
+
+	function SpecificLogic() {
+		global $dqVars;
+		$Card = MZIndexToObject($this->controller, $dqVars["MZInd"]);
+		$cardSubtype = CardSubType($Card->CardID());
+		$subType = "-";
+		if (str_contains($cardSubtype, "Head"))
+			$subType = "Head";
+		elseif (str_contains($cardSubtype, "Chest"))
+			$subType = "Chest";
+		elseif (str_contains($cardSubtype, "Legs"))
+			$subType = "Legs";
+		elseif (str_contains($cardSubtype, "Arms"))
+			$subType = "Arms";
+		if (!SearchCharacterAliveSubtype($this->controller, $subType)) {
+			EquipEquipment($this->controller, $Card->CardID(), from:"DISCARD");
+			$Card->Remove();
+		}
+	}
+
+  function IsWagerEffect($index) {
+    $Effect = new CurrentEffect($index);
+    return $Effect->EffectID() == "$this->cardID-WAGER"; // no -WAGER or -BUFF
+  }
 }

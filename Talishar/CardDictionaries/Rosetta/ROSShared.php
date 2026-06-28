@@ -6,7 +6,7 @@ function ROSAbilityType($cardID): string
     "aurora_shooting_star", "aurora", "oscilio_constella_intelligence", "oscilio", "volzar_the_lightning_rod", "sanctuary_of_aria",
     "well_grounded", "lightning_greaves", "twinkle_toes", "ink_lined_cloak", "hood_of_second_thoughts", "bruised_leather",
     "four_finger_gloves", "calming_cloak", "calming_gesture", "aether_bindings_of_the_third_age" => "I",
-    "staff_of_verdant_shoots", "bloodtorn_bodice", "runehold_release", "hold_focus" => "A",
+    "staff_of_verdant_shoots", "runehold_release", "hold_focus" => "A",
     "rotwood_reaper", "star_fall" => "AA",
     "adaptive_dissolver" => "A",
     default => ""
@@ -28,7 +28,7 @@ function ROSAbilityCost($cardID): int
 function ROSAbilityHasGoAgain($cardID): bool
 {
   return match ($cardID) {
-    "staff_of_verdant_shoots", "bloodtorn_bodice", "runehold_release", "hold_focus" => true,
+    "staff_of_verdant_shoots", "runehold_release", "hold_focus" => true,
     default => false,
   };
 }
@@ -50,7 +50,6 @@ function ROSCombatEffectActive($cardID, $attackID): bool
   $actionsPlayed = explode(",", GetClassState($mainPlayer, $CS_ActionsPlayed) ?? "");
   $numActions = count($actionsPlayed);
   return match ($cardID) {
-    "arc_lightning_yellow-GOAGAIN" => TypeContains($attackID, "AA", $mainPlayer) || TypeContains($attackID, "A", $mainPlayer), //Arc Lightning giving next action go again.
     "strong_yield_red", "strong_yield_yellow", "strong_yield_blue", "burn_up__shock_red" => true,
     "current_funnel_blue" => $actionsPlayed[$numActions-2] == "current_funnel_blue" && $actionsPlayed[$numActions-1] != "current_funnel_blue" && (TypeContains($attackID, "AA", $mainPlayer) || TypeContains($attackID, "AA", $mainPlayer)),
     "eclectic_magnetism_red" => true,
@@ -81,11 +80,6 @@ function ROSPlayAbility($cardID, $from, $resourcesPaid, $target = "-", $addition
     case "aurora_shooting_star":
     case "aurora":
       PlayAura("embodiment_of_lightning", $currentPlayer);
-      return "";
-    case "arc_lightning_yellow":
-      
-      AddCurrentTurnEffect($cardID, $currentPlayer, uniqueID:GetClassState($currentPlayer, $CS_ResolvingLayerUniqueID));
-      AddCurrentTurnEffect($cardID . "-GOAGAIN", $currentPlayer);
       return "";
     case "staff_of_verdant_shoots":
       AddCurrentTurnEffect($cardID . "-AMP", $currentPlayer, from: "ABILITY");
@@ -232,12 +226,6 @@ function ROSPlayAbility($cardID, $from, $resourcesPaid, $target = "-", $addition
     case "electrostatic_discharge_blue":
       AddCurrentTurnEffectNextAttack($cardID, $currentPlayer);
       return "";
-    case "bloodtorn_bodice":
-      AddDecisionQueue("MULTIZONEINDICES", $currentPlayer, "MYAURAS");
-      AddDecisionQueue("CHOOSEMULTIZONE", $currentPlayer, "<-", 1);
-      AddDecisionQueue("MZDESTROY", $currentPlayer, "-", 1);
-      AddDecisionQueue("GAINRESOURCES", $currentPlayer, "1", 1);
-      return "";
     case "machinations_of_dominion_blue":
     case "succumb_to_temptation_yellow":
       AddCurrentTurnEffect($cardID, $currentPlayer);
@@ -309,7 +297,7 @@ function ROSPlayAbility($cardID, $from, $resourcesPaid, $target = "-", $addition
     case "glyph_overlay_blue":
       $numSigils = 0;
       $sigils = SearchAura($currentPlayer, nameIncludes: "Sigil");
-      if($sigils != "") $numSigils = count(explode(",", $sigils));
+      if($sigils != "") $numSigils = substr_count($sigils, ",") + 1;
       DealArcane(ArcaneDamage($cardID) + $numSigils, 0, "PLAYCARD", $cardID, resolvedTarget: $target);
       return "";
     case "save_the_thought_red":
@@ -547,7 +535,9 @@ function GetTrapIndices($player)
 function HasAuraWithSigilInName($player)
 {
   $auras = &GetAuras($player);
-  for ($i = 0; $i < count($auras); $i += AuraPieces()) {
+  $auraCount = count($auras);
+  $auraPieces = AuraPieces();
+  for ($i = 0; $i < $auraCount; $i += $auraPieces) {
     if (CardNameContains($auras[$i], "Sigil", $player, partial: true)) return true;
   }
   return false;
@@ -555,7 +545,8 @@ function HasAuraWithSigilInName($player)
 
 function HasLayerWithSigilInName($player) {
   global $Stack;
-  for ($i = 0; $i < $Stack->NumLayers(); ++$i) {
+  $numLayers = $Stack->NumLayers();
+  for ($i = 0; $i < $numLayers; ++$i) {
     $Layer = $Stack->Card($i, true);
     if ($Layer->PlayerID() != $player) continue;
     if (CardNameContains($Layer->ID(), "Sigil", $player, partial: true)) return true;

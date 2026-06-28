@@ -30,7 +30,7 @@ class Arsenal {
 		$cardIDs = [];
 		for ($i = $this->NumCards() - 1; $i >= 0; --$i) {
 			$Card = $this->Card($i, true);
-			array_push($cardIDs, $Card->CardID());
+			$cardIDs[] = $Card->CardID();
 			$Card->Destroy($effectController);
 		}
 		$this->arsenal = [];
@@ -78,7 +78,8 @@ class ArsenalCard {
 
 	function Remove() {
 		$cardID = $this->CardID();
-		for ($i = $this->index + ArsenalPieces() - 1; $i >= $this->index; --$i) {
+		$arsenalPieces = ArsenalPieces();
+		for ($i = $this->index + $arsenalPieces - 1; $i >= $this->index; --$i) {
 			unset($this->pieces[$i]);
 		}
 		$this->pieces = array_values($this->pieces);

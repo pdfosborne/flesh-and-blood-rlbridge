@@ -13,7 +13,7 @@ function CanPlayAura($cardID, $player, $effectSource="-", $effectController="-",
   if ($isToken) {
     $ind = SearchCurrentTurnEffectsForIndex("break_stature_yellow", $effectController);
     if ($ind != -1 && $currentTurnEffects[$ind + 2] != "") {
-      if (NameOverride($cardID, $player) == NameOverride($currentTurnEffects[$ind + 2], $player)) {
+      if (NameOverride($cardID, $player) === NameOverride($currentTurnEffects[$ind + 2], $player)) {
         return false;
       }
     }
@@ -30,7 +30,7 @@ function PlayAura($cardID, $player, $number = 1, $isToken = false, $rogueHeronSp
   global $CS_NumAuras, $EffectContext, $defPlayer, $CS_FealtyCreated, $currentTurnEffects, $CS_SeismicSurgesCreated, $CS_HoloAurasEntered;
   global $CS_CreatedCardsThisTurn;
   if ($number == 0) return; //there is no event
-  $otherPlayer = $player == 1 ? 2 : 1;
+  $otherPlayer = 3 - $player;
   if ($effectController == "-") $effectController = $player;
   if ($effectAgent == "-") $effectAgent = $effectController;
   if (TypeContains($cardID, "T", $player)) $isToken = true;
@@ -81,14 +81,13 @@ function PlayAura($cardID, $player, $number = 1, $isToken = false, $rogueHeronSp
   }
   if ($cardID == "manifestation_of_miragai_blue") SearchCardList($additionalCosts, $player, subtype: "Chi") != "" ? $numPowerCounters += 4 : $numPowerCounters += 2;
   if ($cardID == "waxing_specter_red" || $cardID == "waxing_specter_yellow" || $cardID == "waxing_specter_blue") $numPowerCounters += SearchPitchForColor($player, 3) > 0 ? 1 : 0;
-  if (ClassContains($cardID, "ILLUSIONIST", $player) && SearchCurrentTurnEffects("vengeful_apparition_red", $player, true) && CardCost($cardID, $from) <= 2 && CardCost($cardID, $from) > -1) {
-    ++$numPowerCounters;
-  }
-  if (ClassContains($cardID, "ILLUSIONIST", $player) && SearchCurrentTurnEffects("vengeful_apparition_yellow", $player, true) && CardCost($cardID, $from) <= 1 && CardCost($cardID, $from) > -1) {
-    ++$numPowerCounters;
-  }
-  if (ClassContains($cardID, "ILLUSIONIST", $player) && SearchCurrentTurnEffects("vengeful_apparition_blue", $player, true) && CardCost($cardID, $from) <= 0 && CardCost($cardID, $from) > -1) {
-    ++$numPowerCounters;
+  if (ClassContains($cardID, "ILLUSIONIST", $player)) {
+    $apparitionCost = CardCost($cardID, $from);
+    if ($apparitionCost > -1) {
+      if (SearchCurrentTurnEffects("vengeful_apparition_red", $player, true) && $apparitionCost <= 2) ++$numPowerCounters;
+      if (SearchCurrentTurnEffects("vengeful_apparition_yellow", $player, true) && $apparitionCost <= 1) ++$numPowerCounters;
+      if (SearchCurrentTurnEffects("vengeful_apparition_blue", $player, true) && $apparitionCost <= 0) ++$numPowerCounters;
+    }
   }
 
   $defaultHoldState = AuraDefaultHoldTriggerState($cardID);
@@ -103,24 +102,22 @@ function PlayAura($cardID, $player, $number = 1, $isToken = false, $rogueHeronSp
   $isTokenFlag = $isToken ? 1 : 0;
   
   for ($i = 0; $i < $number; ++$i) {
-    array_push($auras, 
-      $cardID, // 0: Card ID
-      2, // 1: Status
-      $rogueHeronSpecial ? 0 : $cachedAuraPlayCounters, // 2: Miscellaneous Counters
-      $numPowerCounters, // 3: Power counters
-      $isTokenFlag, // 4: Is token 0=No, 1=Yes
-      $cachedAuraNumUses, // 5: Number of uses
-      GetUniqueId($cardID, $player), // 6: Unique ID
-      $myHoldState, // 7: My Hold priority for triggers setting 2=Always hold, 1=Hold, 0=Don't hold
-      $theirHoldState, // 8: Opponent Hold priority for triggers setting 2=Always hold, 1=Hold, 0=Don't hold
-      $from, // 9: Where it's played from
-      "-", // 10: modalities
-      0, // frozen, (0 = no, 1 = yes)
-      0, // tapped (0 = no, 1 = yes)
-      $holoCounters, // holo counters
-    );
-    if ($holoCounters > 0) IncrementClassState($player, $CS_HoloAurasEntered);
+    $auras[] = $cardID; // 0: Card ID
+    $auras[] = 2; // 1: Status
+    $auras[] = $rogueHeronSpecial ? 0 : $cachedAuraPlayCounters; // 2: Miscellaneous Counters
+    $auras[] = $numPowerCounters; // 3: Power counters
+    $auras[] = $isTokenFlag; // 4: Is token 0=No, 1=Yes
+    $auras[] = $cachedAuraNumUses; // 5: Number of uses
+    $auras[] = GetUniqueId($cardID, $player); // 6: Unique ID
+    $auras[] = $myHoldState; // 7: My Hold priority for triggers setting 2=Always hold, 1=Hold, 0=Don't hold
+    $auras[] = $theirHoldState; // 8: Opponent Hold priority for triggers setting 2=Always hold, 1=Hold, 0=Don't hold
+    $auras[] = $from; // 9: Where it's played from
+    $auras[] = "-"; // 10: modalities
+    $auras[] = 0; // frozen, (0 = no, 1 = yes)
+    $auras[] = 0; // tapped (0 = no, 1 = yes)
+    $auras[] = $holoCounters; // holo counters
   }
+  if ($holoCounters > 0) IncrementClassState($player, $CS_HoloAurasEntered, $number);
   if (DelimStringContains(CardSubType($cardID), "Affliction")) IncrementClassState($otherPlayer, $CS_NumAuras, $number);
   else if (DelimStringContains(CardSubType($EffectContext), "Trap") || CardType($EffectContext) == "DR") IncrementClassState($defPlayer, $CS_NumAuras, $number);
   else if (CreatesAuraForOpponent($EffectContext)) IncrementClassState($effectController, $CS_NumAuras, $number);
@@ -138,24 +135,21 @@ function StealAura($srcPlayer, $index, $destPlayer, $from, $mod=0)
   $srcAuras = &GetAuras($srcPlayer);
   $destAuras = &GetAuras($destPlayer);
   $auraPieces = AuraPieces();
-  for ($i = $auraPieces - 1; $i >= 0; --$i) {
-    if($i == 9) //9 - Where it's played from ... Important for where it'll go when destroyed for example.
-    {
-      if (strpos($srcAuras[$index + $i], 'MY') === 0) {
-          $srcAuras[$index + $i] = 'THEIR' . substr($srcAuras[$index + $i], 2);
-      } elseif (strpos($srcAuras[$index + $i], 'THEIR') === 0) {
-          $srcAuras[$index + $i] = 'MY' . substr($srcAuras[$index + $i], 5);
-      } else {
-          $srcAuras[$index + $i] = 'THEIR' . $srcAuras[$index + $i];
-      }
-    }
-    if($i == 10 && $mod != 0) {//8 - Modalities or e.g "Temporary" for cards that get stolen for a turn.
-      $srcAuras[$index + $i] = $srcAuras[$index + $i] == "-" ? $mod : $srcAuras[$index + $i] . ",$mod";
-    }
-    array_unshift($destAuras, $srcAuras[$index + $i]);
-    unset($srcAuras[$index + $i]);
+  $slice = array_slice($srcAuras, $index, $auraPieces);
+  // 9: Where it's played from ... Important for where it'll go when destroyed for example.
+  if (strpos($slice[9], 'MY') === 0) {
+    $slice[9] = 'THEIR' . substr($slice[9], 2);
+  } elseif (strpos($slice[9], 'THEIR') === 0) {
+    $slice[9] = 'MY' . substr($slice[9], 5);
+  } else {
+    $slice[9] = 'THEIR' . $slice[9];
   }
-  $srcAuras = array_values($srcAuras);
+  // 10:  Modalities or e.g "Temporary" for cards that get stolen for a turn.
+  if ($mod != 0) {
+    $slice[10] = $slice[10] == "-" ? $mod : $slice[10] . ",$mod";
+  }
+  array_splice($destAuras, 0, 0, $slice);
+  array_splice($srcAuras, $index, $auraPieces);
 }
 
 //cards that instruct the player to create an aura under their opponent's control
@@ -262,7 +256,7 @@ function AuraLeavesPlay($player, $index, $uniqueID, $location = "AURAS", $mainPh
   $uniqueIDIndex = $auraConstants[1];
   $cardID = $auras[$index] ?? "";
   $uniqueID = $auras[$index + $uniqueIDIndex] ?? "";
-  $otherPlayer = $player == 1 ? 2 : 1;
+  $otherPlayer = 3 - $player;
   if ($cardID == "") return;
   $card = GetClass($cardID, $player);
   if ($card != "-") $card->LeavesPlayAbility($index, $uniqueID, $location, $mainPhase, $destinationUID);
@@ -303,8 +297,7 @@ function AuraLeavesPlay($player, $index, $uniqueID, $location = "AURAS", $mainPh
     case "vengeful_apparition_yellow":
     case "vengeful_apparition_blue":
       $illusionistAuras = SearchAura($player, class: "ILLUSIONIST");
-      $aurasArray = explode(",", $illusionistAuras);
-      if (count($aurasArray) <= 1) AddLayer("TRIGGER", $player, $cardID, "-", "-", $uniqueID);
+      if ($illusionistAuras == "" || strpos($illusionistAuras, ",") === false) AddLayer("TRIGGER", $player, $cardID, "-", "-", $uniqueID);
       break;
     case "sigil_of_brilliance_yellow":
       AddLayer("TRIGGER", $player, $cardID, "-", "LEAVES");
@@ -407,7 +400,7 @@ function DestroyAuraByID($player, $cardID)
 {
   $inds = SearchAurasForCard($cardID, $player);
   if ($inds != "") {
-    $index = explode(",", $inds)[0];
+    $index = explode(",", $inds, 2)[0];
     DestroyAura($player, $index);
   }
 }
@@ -483,8 +476,11 @@ function DestroyAura($player, $index, $uniqueID = "", $location = "AURAS", $skip
   }
   IncrementClassState($player, $CS_NumControlledAurasDestroyed);
   // Refreshes the aura index with the Unique ID in case of aura destruction
-  if ($CombatChain->HasCurrentLink() && DelimStringContains(CardSubtype($CombatChain->AttackCard()->ID()), "Aura") && $player == $mainPlayer) {
-    $combatChainState[$CCS_WeaponIndex] = SearchAurasForUniqueID($CombatChain->AttackCard()->OriginUniqueID(), $player);
+  if ($CombatChain->HasCurrentLink() && $player == $mainPlayer) {
+    $attackCard = $CombatChain->AttackCard();
+    if (DelimStringContains(CardSubtype($attackCard->ID()), "Aura")) {
+      $combatChainState[$CCS_WeaponIndex] = SearchAurasForUniqueID($attackCard->OriginUniqueID(), $player);
+    }
   }
   if ($cardID == "passing_mirage_blue") ReEvalCombatChain(); //check if phantasm should trigger
   return $cardID;
@@ -516,6 +512,7 @@ function RemoveAura($player, $index, $uniqueID = "", $location = "AURAS", $skipT
   if (!$skipTrigger) AuraLeavesPlay($player, $index, $uniqueID, $location, $mainPhase, $destinationUID);
   if ($location == "AURAS") {
     $auras = &GetAuras($player);
+    if (!isset($auras[$index]) || !isset($auras[$index + 6])) return;
     $uniqueID = $auras[$index + 6];
 
     // if it's on the combat chain, remove it
@@ -542,17 +539,17 @@ function RemoveAura($player, $index, $uniqueID = "", $location = "AURAS", $skipT
     $character = array_values($character);
   }
   if (!AfterDamage() && !$skipClose) {
-      if (IsSpecificAuraAttacking($player, $uniqueID) || (IsSpecificAuraAttackTarget($player, $index, $uniqueID))) {
-        CloseCombatChain();
-      }
+    if (IsSpecificAuraAttacking($player, $uniqueID) || (IsSpecificAuraAttackTarget($player, $index, $uniqueID))) {
+      CloseCombatChain();
     }
+  }
   return $cardID;
 }
 
 function AuraCostModifier($cardID = "", $from = "-")
 {
   global $currentPlayer;
-  $otherPlayer = $currentPlayer == 1 ? 2 : 1;
+  $otherPlayer = 3 - $currentPlayer;
   $myAuras = &GetAuras($currentPlayer);
   $theirAuras = &GetAuras($otherPlayer);
   $modifier = 0;
@@ -599,7 +596,7 @@ function AuraStartTurnAbilities()
     $EffectContext = $auras[$i];
     $card = GetClass($auras[$i], $mainPlayer);
     if ($card != "-") {
-      if ($card->StartTurnAbility($i)) array_push($toRemove, $auras[$i + 6]);
+      if ($card->StartTurnAbility($i)) $toRemove[] = $auras[$i + 6];
     }
     if (isset($auras[$i])) {
       switch ($auras[$i]) {
@@ -674,7 +671,7 @@ function AuraStartTurnAbilities()
         else $amount = ($auras[$i] == "blessing_of_ingenuity_yellow") ? 2 : 1;
         DestroyAuraUniqueID($mainPlayer, $auras[$i + 6]);
         $searchHyper = CombineSearches(SearchDiscardForCard($mainPlayer, "hyper_driver_red", "hyper_driver_yellow", "hyper_driver_blue"), SearchBanishForCardMulti($mainPlayer, "hyper_driver_red", "hyper_driver_yellow", "hyper_driver_blue"));
-        $countHyper = count(explode(",", $searchHyper));
+        $countHyper = substr_count($searchHyper, ",") + 1;
         if ($amount > $countHyper) $amount = $countHyper;
         for ($j = 0; $j < $amount; ++$j) {
           AddDecisionQueue("MULTIZONEINDICES", $mainPlayer, "MYDISCARD:cardID=hyper_driver_red;cardID=hyper_driver_yellow;cardID=hyper_driver_blue&MYBANISH:cardID=hyper_driver_red;cardID=hyper_driver_yellow;cardID=hyper_driver_blue");
@@ -791,14 +788,14 @@ function AuraStartTurnAbilities()
         $currentTurnEffectsPieces = CurrentTurnEffectsPieces();
         for ($k = 0; $k < $countCharacter; $k += $characterPieces) {
           if ($character[$k] == "frostbite") {
-            $slot = "";
+            $frostbiteKey = "frostbite-" . $character[$k + 11];
             for ($j = 0; $j < $countCurrentTurnEffects; $j += $currentTurnEffectsPieces) {
-              $effect = explode(",", $currentTurnEffects[$j]);
-              if ($effect[0] == "frostbite-" . $character[$k + 11]) {
-                $slot = $effect[1];
+              if (strpos($currentTurnEffects[$j], $frostbiteKey) === 0) {
+                $slot = explode(",", $currentTurnEffects[$j])[1];
                 if ($slot == "Arms" || $slot == "Legs" || $slot == "Head" || $slot == "Chest") { // Only count these Frostbites if they are in an equipment slot.
                   $eqFrostbiteCount += 1;
                 }
+                break;
               }
             }
           }
@@ -812,8 +809,9 @@ function AuraStartTurnAbilities()
         break;
       case "flurry_stance_red":
         $character = &GetPlayerCharacter($mainPlayer);
-        $weaponIndex1 = CharacterPieces();
-        $weaponIndex2 = CharacterPieces() * 2;
+        $charPieces = CharacterPieces();
+        $weaponIndex1 = $charPieces;
+        $weaponIndex2 = $charPieces * 2;
         if(SubtypeContains($character[$weaponIndex1], "Dagger")) AddCharacterUses($mainPlayer, $weaponIndex1, 1);
         if(SubtypeContains($character[$weaponIndex2], "Dagger")) AddCharacterUses($mainPlayer, $weaponIndex2, 1);
         DestroyAuraUniqueID($mainPlayer, $auras[$i + 6]);
@@ -889,14 +887,14 @@ function AuraStartTurnAbilities()
         $currentTurnEffectsPieces = CurrentTurnEffectsPieces();
         for ($k = 0; $k < $countCharacter; $k += $characterPieces) {
           if ($character[$k] == "frostbite") {
-            $slot = "";
+            $frostbiteKey = "frostbite-" . $character[$k + 11];
             for ($j = 0; $j < $countCurrentTurnEffects; $j += $currentTurnEffectsPieces) {
-              $effect = explode(",", $currentTurnEffects[$j]);
-              if ($effect[0] == "frostbite-" . $character[$k + 11]) {
-                $slot = $effect[1];
+              if (strpos($currentTurnEffects[$j], $frostbiteKey) === 0) {
+                $slot = explode(",", $currentTurnEffects[$j])[1];
                 if ($slot == "Arms" || $slot == "Legs" || $slot == "Head" || $slot == "Chest") { // Only count these Frostbites if they are in an equipment slot.
                   $eqFrostbiteCount += 1;
                 }
+                break;
               }
             }
           }
@@ -1202,10 +1200,10 @@ function ChannelTalent($uniqueID, $talent)
 
   $numTalent = SearchCount(SearchPitch($mainPlayer, talent: $talent));
   if ($toBottom <= $numTalent) {
+    $article = str_contains('aeiou', strtolower($talent[0])) ? 'an' : 'a';
     for ($j = $toBottom; $j > 0; --$j) {
-      $article = preg_match('/^[aeiou]/i', $talent) ? 'an' : 'a';
       $context = "Choose " . $article . " {{element|" . ucfirst(strtolower($talent)) . "|" . GetElementColorCode($talent) . "}} card" . ($toBottom > 1 ? "s" : "") . " for your " . CardLink($auraID, $auraID) . " with " . $toBottom . " flow counter" . ($toBottom > 1 ? "s" : "");
-      MZMoveCard($mainPlayer, "MYPITCH:talent=" . $talent, "MYBOTDECK", $j == $toBottom ? true : false, isSubsequent: $j < $toBottom, DQContext: $context);
+      MZMoveCard($mainPlayer, "MYPITCH:talent=" . $talent, "MYBOTDECK", $j == $toBottom, isSubsequent: $j < $toBottom, DQContext: $context);
     }
     AddDecisionQueue("ELSE", $mainPlayer, "-");
     AddDecisionQueue("PASSPARAMETER", $mainPlayer, "MYAURAS-" . $index, 1);
@@ -1224,18 +1222,20 @@ function ChannelPitchColor($uniqueID, $pitch)
   $auras = &GetAuras($mainPlayer);
   $countAuras = count($auras);
   $aurasPieces = AuraPieces();
+  $index = -1;
   for ($i = 0; $i < $countAuras; $i += $aurasPieces) {
-    if ($auras[$i + 6] == $uniqueID) $index = $i;
+    if ($auras[$i + 6] == $uniqueID) { $index = $i; break; }
   }
+  if ($index == -1) return;
   ++$auras[$index + 2];
   $toBottom = $auras[$index + 2];
   $numPitch = SearchCount(SearchDiscard($mainPlayer, pitch: $pitch));
   $colorToBanish = ($pitch == 1) ? "red" : (($pitch == 2) ? "yellow" : "blue");
   if ($toBottom <= $numPitch) {
+    $article = str_contains('aeiou', strtolower($colorToBanish[0])) ? 'an' : 'a';
     for ($j = $toBottom; $j > 0; --$j) {
-      $article = preg_match('/^[aeiou]/i', $colorToBanish) ? 'an' : 'a';
       $context = "Choose " . $article . " {{element|" . ucfirst(strtolower($colorToBanish)) . "|" . GetElementColorCode($colorToBanish) . "}} card" . ($toBottom > 1 ? "s" : "") . " for your " . CardLink($auras[$index], $auras[$index]) . " with " . $toBottom . " sand counter" . ($toBottom > 1 ? "s" : "");
-      MZMoveCard($mainPlayer, "MYDISCARD:pitch=" . $pitch, "MYBANISH", $j == $toBottom ? true : false, isSubsequent: $j < $toBottom, DQContext: $context);
+      MZMoveCard($mainPlayer, "MYDISCARD:pitch=" . $pitch, "MYBANISH", $j == $toBottom, isSubsequent: $j < $toBottom, DQContext: $context);
     }
     AddDecisionQueue("ELSE", $mainPlayer, "-");
     AddDecisionQueue("PASSPARAMETER", $mainPlayer, "MYAURAS-" . $index, 1);
@@ -1315,7 +1315,7 @@ function AuraDamagePreventionAmount($player, $index, $type, $damage = 0, $active
       if ($active) {
         $soul = &GetSoul($player);
         if (count($soul) > 0) {
-          $cancelRemove = count($soul) > 1 ? true : false;
+          $cancelRemove = count($soul) > 1;
           MZMoveCard($player, "MYSOUL", "MYBANISH,SOUL,-");
           if ($damage > 1) $auras[$index + 5] = 0;
           $preventedDamage = 1;
@@ -1423,7 +1423,7 @@ function AuraTakeDamageAbilities($player, $damage, $type, $source)
 function AuraDamageTakenAbilities($player, $damage, $source, $playerSource)
 {
   global $CS_DamageDealtToOpponent;
-  $otherPlayer = $player == 1 ? 2 : 1;
+  $otherPlayer = 3 - $player;
 
   $auras = &GetAuras($player);
   $selfInflicted = $source == "bloodrot_pox" || $player == $playerSource;
@@ -1527,6 +1527,7 @@ function AuraPlayAbilities($cardID, $from = "")
   $runechantUIDS = [];
   $countAuras = count($auras);
   $aurasPieces = AuraPieces();
+  $resolvedAbilityType = GetResolvedAbilityType($cardID, $from);
   for ($i = $countAuras - $aurasPieces; $i >= 0; $i -= $aurasPieces) {
     $remove = 0;
     $card = GetClass($auras[$i], $currentPlayer);
@@ -1535,8 +1536,7 @@ function AuraPlayAbilities($cardID, $from = "")
     }
     switch ($auras[$i]) {
       case "quicken":
-        $resolvedAbilityType = GetResolvedAbilityType($cardID, $from);
-        if (($cardType == "AA" && ($resolvedAbilityType == "" ||$resolvedAbilityType == "AA"))
+        if (($cardType == "AA" && ($resolvedAbilityType == "" || $resolvedAbilityType == "AA"))
           || (DelimStringContains($cardSubType, "Aura") && $from == "PLAY" && ($resolvedAbilityType == "" || $resolvedAbilityType == "AA") && IsWeapon($cardID, $from))
           || (TypeContains($cardID, "W") && $resolvedAbilityType == "AA" && ($from == "EQUIP" || $from == "PLAY"))) {
           WriteLog(CardLink($auras[$i], $auras[$i]) . " gives the attack go again");
@@ -1554,14 +1554,14 @@ function AuraPlayAbilities($cardID, $from = "")
         break;
       case "channel_thunder_steppe_yellow":
         if (IsActivated($cardID, $from)) break;
-        if ((DelimStringContains($cardType, "A") || $cardType == "AA") && (GetResolvedAbilityType($cardID, $from) == "" || GetResolvedAbilityType($cardID, $from) == "AA" || GetResolvedAbilityType($cardID, $from) == "A")) {
+        if ((DelimStringContains($cardType, "A") || $cardType == "AA") && ($resolvedAbilityType == "" || $resolvedAbilityType == "AA" || $resolvedAbilityType == "A")) {
           AddLayer("TRIGGER", $currentPlayer, $auras[$i], $cardType, "-", $auras[$i + 6]);
         }
         break;
       case "courage":
-        if ($cardType == "AA" && (GetResolvedAbilityType($cardID, $from) == "" || GetResolvedAbilityType($cardID, $from) == "AA")
+        if ($cardType == "AA" && ($resolvedAbilityType == "" || $resolvedAbilityType == "AA")
           || (DelimStringContains($cardSubType, "Aura") && $from == "PLAY" && IsWeapon($cardID, $from))
-          || (TypeContains($cardID, "W", $currentPlayer) && GetResolvedAbilityType($cardID) != "A") && GetResolvedAbilityType($cardID) != "I") {
+          || (TypeContains($cardID, "W", $currentPlayer) && $resolvedAbilityType!= "A") && $resolvedAbilityType!= "I") {
           AddCurrentTurnEffect("courage", $currentPlayer);
           $remove = 1;
         }
@@ -1573,9 +1573,8 @@ function AuraPlayAbilities($cardID, $from = "")
         }
         break;
       case "runechant":
-        $abilityType = GetResolvedAbilityType($cardID, $from);
-        if (($cardType == "AA" && $abilityType != "I" && $from != "PLAY") || (DelimStringContains($cardSubType, "Aura") && $from == "PLAY" && IsWeapon($cardID, $from)) || (TypeContains($cardID, "W", $currentPlayer) && $abilityType == "AA") && $abilityType != "I") {
-          array_push($runechantUIDS, $auras[$i+6]);
+        if (($cardType == "AA" && $resolvedAbilityType != "I" && $from != "PLAY") || (DelimStringContains($cardSubType, "Aura") && $from == "PLAY" && IsWeapon($cardID, $from)) || (TypeContains($cardID, "W", $currentPlayer) && $resolvedAbilityType == "AA") && $resolvedAbilityType != "I") {
+          $runechantUIDS[] = $auras[$i+6];
         }
         break;
       default:
@@ -1605,7 +1604,7 @@ function AuraPlayAbilities($cardID, $from = "")
       case "malefic_incantation_red":
       case "malefic_incantation_yellow":
       case "malefic_incantation_blue":
-        if ($cardType == "AA" && (GetResolvedAbilityType($cardID, $from) == "" || GetResolvedAbilityType($cardID, $from) == "AA") && $auras[$i + 5] > 0) {
+        if ($cardType == "AA" && ($resolvedAbilityType == "" || $resolvedAbilityType == "AA") && $auras[$i + 5] > 0) {
           --$auras[$i + 5];
           AddLayer("TRIGGER", $currentPlayer, $auras[$i], "-", $cardID, $auras[$i + 6]);
         }
@@ -1698,38 +1697,39 @@ function AuraPowerModifiers($index, &$powerModifiers, $onBlock=false)
   $myAuras = &GetAuras($player);
   $countAuras = count($myAuras);
   $aurasPieces = AuraPieces();
+  $attackIsAA = (CardType($chainCard->ID()) === "AA");
   if (!$onBlock) {//This codeblock was counting CMH twice on block
     for ($i = 0; $i < $countAuras; $i += $aurasPieces) {
       $card = GetClass($myAuras[$i], $player);
       if ($card != "-") $modifier += $card->AuraPowerModifiers($index, $powerModifiers);
       switch ($myAuras[$i]) {
         case "channel_mount_heroic_red":
-          if (CardType($chainCard->ID()) == "AA") {
+          if ($attackIsAA) {
             $modifier += 3;
-            array_push($powerModifiers, $myAuras[$i]);
-            array_push($powerModifiers, 3);
+            $powerModifiers[] = $myAuras[$i];
+            $powerModifiers[] = 3;
           }
           break;
         case $CID_Frailty:
           if ($index == 0 && (IsWeaponAttack() || $combatChainState[$CCS_AttackPlayedFrom] == "ARS")) {
             $modifier -= 1;
-            array_push($powerModifiers, $myAuras[$i]);
-            array_push($powerModifiers, -1);
+            $powerModifiers[] = $myAuras[$i];
+            $powerModifiers[] = -1;
           }
           break;
         case "sharpened_senses_yellow":
           if(IsWeaponAttack())
           {
             $modifier += 1;
-            array_push($powerModifiers, $myAuras[$i]);
-            array_push($powerModifiers, 1);
+            $powerModifiers[] = $myAuras[$i];
+            $powerModifiers[] = 1;
           }
         default:
           break;
       }
     }
   }
-  $otherPlayer = $player == 1 ? 2 : 1;
+  $otherPlayer = 3 - $player;
   $theirAuras = &GetAuras($otherPlayer);
   $countTheirAuras = count($theirAuras);
   for ($i = 0; $i < $countTheirAuras; $i += $aurasPieces) {
@@ -1737,10 +1737,10 @@ function AuraPowerModifiers($index, &$powerModifiers, $onBlock=false)
     if ($card != "-") $modifier += $card->StaticPowerModifier($index, $powerModifiers);
     switch ($theirAuras[$i]) {
       case "parable_of_humility_yellow":
-        if (CardType($CombatChain->Card($index)->ID()) == "AA") {
+        if ($attackIsAA) {
           $modifier -= 1;
-          array_push($powerModifiers, $theirAuras[$i]);
-          array_push($powerModifiers, -1);
+          $powerModifiers[] = $theirAuras[$i];
+          $powerModifiers[] = -1;
         }
         break;
       default:
@@ -1794,7 +1794,7 @@ function GetAuraGemState($player, $cardID)
 function AuraIntellectModifier()
 {
   global $mainPlayer;
-  $otherPlayer = $mainPlayer == 1 ? 2 : 1;
+  $otherPlayer = 3 - $mainPlayer ;
   $intellectModifier = 0;
   $auras = &GetAuras($mainPlayer);
   $countAuras = count($auras);
@@ -1873,7 +1873,8 @@ function isSpectraAttackTarget() {
   $targetArr = explode(",", $combatChainState[$CCS_AttackTarget]);
   $uidArr = explode(",", $combatChainState[$CCS_AttackTargetUID]);
   for ($i = count($targetArr) - 1; $i >= 0; --$i) {
-    if (explode("-", $targetArr[$i])[0] == "THEIRAURAS") {
+    $dashPos = strpos($targetArr[$i], '-');
+    if (($dashPos === false ? $targetArr[$i] : substr($targetArr[$i], 0, $dashPos)) == "THEIRAURAS") {
       // remove spectra cards from target
       $ind = SearchAurasForUniqueID($uidArr[$i], $defPlayer);
       if ($ind != -1) {

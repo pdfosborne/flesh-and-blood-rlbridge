@@ -21,7 +21,7 @@ class hala_base extends BaseCard {
 	}
 
 	function PlayAbility($target) {
-		$uid = explode("-", $target)[1] ?? -1;
+		$uid = explode("-", $target, 2)[1] ?? -1;
 		$index = SearchCharacterForUniqueID($uid, $this->controller);
 		if ($index != -1) Sharpen("MYCHAR-$index", $this->controller);
 	}
@@ -109,7 +109,7 @@ class edict_of_steel extends BaseCard {
 	}
 
 	function PlayAbility($target, $threshold) {
-		$uid = explode("-", $target)[1] ?? -1;
+		$uid = explode("-", $target, 2)[1] ?? -1;
 		$index = SearchCharacterForUniqueID($uid, $this->controller);
 		if ($index != -1) {
 			Sharpen("MYCHAR-$index", $this->controller);
@@ -658,23 +658,23 @@ class visit_the_dawnsmith_blue extends Card {
 }
 
 class toe_the_line_red extends Card {
-  function __construct($controller) {
-    $this->cardID = "toe_the_line_red";
-    $this->controller = $controller;
-  }
-  
-  function PlayAbility($from, $resourcesPaid, $target = '-', $additionalCosts = '-', $uniqueID = '-1', $layerIndex = -1) {
-    AddCurrentTurnEffect($this->cardID, $this->controller);
-	return "";
-  }
+	function __construct($controller) {
+		$this->cardID = "toe_the_line_red";
+		$this->controller = $controller;
+	}
+	
+	function PlayAbility($from, $resourcesPaid, $target = '-', $additionalCosts = '-', $uniqueID = '-1', $layerIndex = -1) {
+		AddCurrentTurnEffect($this->cardID, $this->controller);
+		return "";
+	}
 
 	function CurrentEffectDamagePrevention($type, $damage, $source, $index, &$remove, $preventable, $amount = false) {
-    $prevented = 2;
-    if (!$amount) {
-		if ($preventable) PlayAura("flurry", $this->controller);
-      $remove = true;
-    }
-  	return $prevented;
+		$prevented = 2;
+		if (!$amount) {
+			if ($preventable) PlayAura("flurry", $this->controller);
+			$remove = true;
+		}
+		return $prevented;
 	}
 }
 
@@ -913,7 +913,7 @@ class ole_blue extends Card {
 			}
 		}
 		else {
-			$linkNum = explode("-", $target)[1] ?? "-";
+			$linkNum = explode("-", $target, 2)[1] ?? "-";
 			if ($linkNum != "-") {
 				$AttackCard = $ChainLinks->GetLink($linkNum)->AttackCard();
 				$Character = new PlayerCharacter($this->controller);

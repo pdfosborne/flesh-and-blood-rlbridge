@@ -51,43 +51,54 @@ include "../HostFiles/Redirector.php";
 include "../Libraries/UILibraries.php";
 include_once "../Libraries/SHMOPLibraries.php";
 
-$currentTime = round(microtime(true) * 1000);
+$currentTime = (int)(microtime(true) * 1000);
 SetCachePiece($gameName, $playerID + 1, $currentTime);
 
 $count = 0;
-$cacheVal = GetCachePiece($gameName, 1);
+$otherP = $playerID == 1 ? 2 : 1;
+$myTimeIdx   = $playerID;
+$oppTimeIdx  = $otherP;
+$oppStatIdx  = $otherP + 2;
+$kickPlayerTwo = false;
+
+$cacheArr = ReadCacheArray($gameName);
+$cacheVal = $cacheArr ? (int)($cacheArr[0] ?? 0) : 0;
 if ($cacheVal > 10000000) {
   SetCachePiece($gameName, 1, 1);
   $lastUpdate = 0;
+  $cacheVal = 1;
 }
-$kickPlayerTwo = false;
-$sleepMs = 50; // Exponential backoff start
+
+$sleepUs = 50000;
 while ($lastUpdate != 0 && $cacheVal <= $lastUpdate) {
-  usleep(intval($sleepMs * 1000));
-  $sleepMs = min($sleepMs * 1.5, 200); // Exponential backoff capped at 200ms
-  $currentTime = round(microtime(true) * 1000);
-  $cacheVal = GetCachePiece($gameName, 1);
-  SetCachePiece($gameName, $playerID + 1, $currentTime);
+  usleep($sleepUs);
+  $sleepUs = min((int)($sleepUs * 1.5), 200000);
+  $currentTime = (int)(microtime(true) * 1000);
+
+  $cacheArr = ReadCacheArray($gameName);
+  if (!$cacheArr) break;
+  $cacheVal     = (int)$cacheArr[0];
+  $oppLastTime  = $cacheArr[$oppTimeIdx] ?? "";
+  $oppStatus    = strval($cacheArr[$oppStatIdx] ?? "");
+
+  $cacheArr[$myTimeIdx] = $currentTime;
+  WriteCache($gameName, implode("!", $cacheArr));
+
   ++$count;
   if ($count == 20) break;
-  $otherP = $playerID == 1 ? 2 : 1;
-  $oppLastTime = GetCachePiece($gameName, $otherP + 1);
-  $oppStatus = strval(GetCachePiece($gameName, $otherP + 3));
 
-  if($oppStatus != "-1" && $oppLastTime != "") {
-    if(($currentTime - $oppLastTime) > 10000 && $oppStatus == "0") {
-      $kickSignal = GetCachePiece($gameName, 17);
+  if ($oppStatus !== "-1" && $oppLastTime !== "") {
+    if (($currentTime - (int)$oppLastTime) > 30000 && $oppStatus === "0") {
+      $kickSignal = $cacheArr[16] ?? ""; // slot 17 → index 16
       if ($otherP != 2 || $kickSignal !== "kicked") {
         WriteLog("🔌 Your opponent has disconnected.", path: "../");
       }
+      $cacheArr[$oppStatIdx] = "-1";
+      if ($otherP == 2) $cacheArr[$otherP + 5] = ""; // slot $otherP+6 → index $otherP+5
+      WriteCache($gameName, implode("!", $cacheArr));
       GamestateUpdated($gameName);
-      SetCachePiece($gameName, $otherP + 3, "-1");
-      if ($otherP == 2) SetCachePiece($gameName, $otherP + 6, "");
       $kickPlayerTwo = true;
-      include "./APIParseGamefile.php";
-      include "../MenuFiles/WriteGamefile.php";
-      $p1SideboardSubmitted = "0";
-      WriteGameFile();
+      break;
     }
   }
 }
@@ -120,11 +131,13 @@ if ($kickPlayerTwo) {
     $p2uid = "";
     $p2id = "";
     $p2SideboardSubmitted = "0";
+    $p1SideboardSubmitted = "0";
   } else {
     SetCachePiece($gameName, 7, "");
     $p1uid = "-";
     $p1id = "";
     $p1SideboardSubmitted = "0";
+    $p2SideboardSubmitted = "0";
   }
 
   WriteGameFile();
@@ -181,17 +194,15 @@ if ($lastUpdate != 0 && $cacheVal < $lastUpdate) {
   $response->playAudio = ($playerID == 1 && $gameStatus == $MGS_ChooseFirstPlayer ? 1 : 0);
 
   $otherHero = "CardBack";
-  $otherPlayer = $playerID == 1 ? 2 : 1;
+  $otherPlayer = $otherP; // $otherP already computed above
   $deckFile = "../Games/" . $gameName . "/p" . $otherPlayer . "Deck.txt";
   if (file_exists($deckFile)) {
     $handler = fopen($deckFile, "r");
-    $otherCharacter = GetArray($handler);
+    $firstLine = trim(fgets($handler));
     fclose($handler);
-    
-    if (is_array($otherCharacter) && count($otherCharacter) > 0) {
-      $otherHero = $otherCharacter[0];
-    } else {
-      $otherHero = "CardBack";
+    if ($firstLine !== '') {
+      $spacePos = strpos($firstLine, ' ');
+      $otherHero = $spacePos !== false ? substr($firstLine, 0, $spacePos) : $firstLine;
     }
   }
   $response->theirHero = $otherHero;
@@ -199,10 +210,14 @@ if ($lastUpdate != 0 && $cacheVal < $lastUpdate) {
 
   $theirName = ($playerID == 1 ? $p2uid : $p1uid);
   if ($theirName == '-') $theirName = "Player " . ($playerID == 1 ? 2 : 1);
-  $contentCreator = ContentCreators::tryFrom(($playerID == 1 ? $p2ContentCreatorID : $p1ContentCreatorID));
-  $nameColor = ($contentCreator != null ? $contentCreator->NameColor() : "");
-  $overlayURL = ($contentCreator != null ? $contentCreator->HeroOverlayURL($otherHero) : "");
-  $channelLink = ($contentCreator != null ? $contentCreator->ChannelLink() : "");
+  $contentCreator = ContentCreators::tryFrom($playerID == 1 ? $p2ContentCreatorID : $p1ContentCreatorID);
+  if ($contentCreator !== null) {
+    $nameColor = $contentCreator->NameColor();
+    $overlayURL = $contentCreator->HeroOverlayURL($otherHero);
+    $channelLink = $contentCreator->ChannelLink();
+  } else {
+    $nameColor = $overlayURL = $channelLink = "";
+  }
 
   $response->theirName = $theirName;
   $response->theirNameColor = $nameColor;
@@ -217,10 +232,10 @@ if ($lastUpdate != 0 && $cacheVal < $lastUpdate) {
   $response->theirIsPvtVoidPatron = ($theirUid === "PvtVoid");
   $response->theirMetafyTiers = ($playerID == 1 ? $p2MetafyTiers : $p1MetafyTiers) ?: [];
 
-  $response->submitSideboard = ($playerID == 1 ? ($gameStatus == $MGS_ReadyToStart ? "block" : "none") : ($gameStatus == $MGS_P2Sideboard ? "block" : "none"));
+  $response->submitSideboard = $playerID == 1 ? ($gameStatus == $MGS_ReadyToStart ? "block" : "none") : ($gameStatus == $MGS_P2Sideboard ? "block" : "none");
 
   $response->myPriority = true;
-  if ($gameStatus == $MGS_ChooseFirstPlayer) $response->myPriority = ($playerID == $firstPlayerChooser ? true : false);
+  if ($gameStatus == $MGS_ChooseFirstPlayer) $response->myPriority = $playerID == $firstPlayerChooser;
   else if ($playerID == 1 && $gameStatus < $MGS_ReadyToStart) $response->myPriority = false;
   else if ($playerID == 2 && $gameStatus >= $MGS_ReadyToStart) $response->myPriority = false;
 
@@ -255,7 +270,6 @@ if ($lastUpdate != 0 && $cacheVal < $lastUpdate) {
   // Typing indicator — same APCu key used by ChatTyping.php / CheckOpponentTyping.php.
   // Piggybacking on the existing lobby poll costs zero extra requests.
   if ($response->chatEnabled && ($playerID == 1 || $playerID == 2)) {
-    $otherP = $playerID == 1 ? 2 : 1;
     $typingCacheKey = "typing_" . md5($gameName) . "_player_" . $otherP;
     $opponentIsTyping = false;
     if (extension_loaded('apcu') && ini_get('apc.enabled')) {

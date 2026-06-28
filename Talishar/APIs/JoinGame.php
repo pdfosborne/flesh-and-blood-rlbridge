@@ -31,11 +31,8 @@ include_once "../Classes/CardObjects/LGSCards.php";
 if (!function_exists("DelimStringContains")) {
   function DelimStringContains($str, $find, $partial=false)
   {
-    $arr = explode(",", $str);
-    for($i=0; $i<count($arr); ++$i)
-    {
-      if($partial && str_contains($arr[$i], $find)) return true;
-      else if($arr[$i] == $find) return true;
+    foreach (explode(",", $str) as $item) {
+      if ($partial ? str_contains($item, $find) : $item == $find) return true;
     }
     return false;
   }
@@ -54,6 +51,59 @@ if (!function_exists("TypeContains")) {
   {
     $cardType = CardType($cardID);
     return DelimStringContains($cardType, $type);
+  }
+}
+
+if (!function_exists("CheckHeroPreference")) {
+  function CheckHeroPreference($character, $gameDescription) {
+    $knownClasses = ['assassin', 'brute', 'guardian', 'illusionist', 'mechanologist',
+                     'necromancer', 'ninja', 'pirate', 'ranger', 'runeblade', 'warrior', 'wizard'];
+
+    $preferMode = null;
+    $namesPart = null;
+
+    if (str_starts_with($gameDescription, 'Looking to play against ')) {
+      $after = trim(substr($gameDescription, strlen('Looking to play against ')));
+      if ($after !== 'a specific hero' && $after !== 'a specific class') {
+        $preferMode = 'include';
+        $namesPart = $after;
+      }
+    } elseif (str_starts_with($gameDescription, 'No interest in playing against ')) {
+      $after = trim(substr($gameDescription, strlen('No interest in playing against ')));
+      if ($after !== 'specific hero') {
+        $preferMode = 'exclude';
+        $namesPart = $after;
+      }
+    }
+
+    if (!$preferMode || !$namesPart) return null;
+
+    $rawTokens = explode(', ', $namesPart);
+    $tokens = array_map(function($t) { return strtolower(trim(str_replace(',', '', $t))); }, $rawTokens);
+    $candidates = $tokens;
+    $tokensCount = count($tokens) - 1;
+    for ($i = 0; $i < $tokensCount; $i++) {
+      $candidates[] = $tokens[$i] . ' ' . $tokens[$i + 1];
+    }
+
+    $isClassBased = !empty(array_intersect($tokens, $knownClasses));
+
+    if ($isClassBased) {
+      $heroClasses = explode(',', strtolower(CardClass($character)));
+      $matched = !empty(array_intersect($heroClasses, $candidates));
+    } else {
+      $normalizedHeroName = strtolower(str_replace(',', '', CardName($character)));
+      $matched = in_array($normalizedHeroName, $candidates);
+    }
+
+    if ($preferMode === 'include' && !$matched) {
+      return "⚠️ This lobby is looking to play against specific heroes. Your hero does not match the lobby's preferences.";
+    }
+    if ($preferMode === 'exclude' && $matched) {
+      return "⚠️ This lobby has specified they are not interested in playing against your hero.";
+    }
+
+    return null;
   }
 }
 
@@ -76,7 +126,7 @@ if (!IsGameNameValid($gameName)) {
   echo json_encode($response);
   exit;
 }
-if (!isset($playerID)) $playerID = intval($_POST["playerID"]);
+if (!isset($playerID)) $playerID = intval($_POST["playerID"] ?? 0);
 if (!isset($deck)) $deck = TryPOST("deck"); //This is for limited game modes (see JoinGameInput.php)
 if (!isset($decklink)) $decklink = TryPOST("fabdb", ""); //Deck builder decklink
 if (!isset($decksToTry)) $decksToTry = TryPOST("decksToTry"); //This is only used if there's no favorite deck or decklink. 1 = ira
@@ -327,13 +377,13 @@ $joinerName = ($_SESSION["useruid"] ?? "Player 2");
    $orderedSets = ["WTR", "ARC", "CRU", "MON", "ELE", "EVR", "UPR", "DYN", "OUT", "DTD", "TCC", "EVO", "HVY", "MST", "AKO", "ASB", "ROS", "AAZ", "TER", "AUR", "AIO", "AJV", "HNT", "ARK", "AST", "AMX", "HER", "SEA", "AGB", "MPG", "ASR", "APR", "AVS", "BDD", "SMP"];
 
    if (is_countable($cards)) {
+     $cardCount = count($cards);
      // need to get the character first to check legality
-     for ($i = 0; $i < count($cards); ++$i) {
+     for ($i = 0; $i < $cardCount; ++$i) {
        $id = GetCardId($cards[$i], $isFaBDB, $isFaBMeta, $orderedSets);
-       if (TypeContains($id, "C"))
-         $character = $id;
+       if (TypeContains($id, "C")) { $character = $id; break; }
      }
-     for ($i = 0; $i < count($cards); ++$i) {
+     for ($i = 0; $i < $cardCount; ++$i) {
        $count = $cards[$i]->{'total'};
        $numSideboard = (isset($cards[$i]->{'sideboardTotal'}) ? $cards[$i]->{'sideboardTotal'} : 0);
        $id = GetCardId($cards[$i], $isFaBDB, $isFaBMeta, $orderedSets);
@@ -345,57 +395,49 @@ $joinerName = ($_SESSION["useruid"] ?? "Player 2");
       if($id == "goldfin_harpoon") $id = "goldfin_harpoon_yellow";
        ProcessCard($id, $count, $numSideboard, $isFaBDB, $totalCards, $modularSideboard, $unsupportedCards, $character, $weapon1, $weapon2, $weaponSideboard, $head, $headSideboard, $chest, $chestSideboard, $arms, $armsSideboard, $legs, $legsSideboard, $offhand, $offhandSideboard, $quiver, $quiverSideboard, $deckCards, $sideboardCards, $format);
 
+       $cardName = CardName($id);
+       $pitchVal = PitchValue($id);
+       $cardLabel = $pitchVal > 0 ? $cardName . " (" . $pitchVal . ")" : $cardName;
+
        if (IsCardBanned($id, $format, $character) && $format != "draft") {
-         if ($bannedCard != "")
-           $bannedCard .= ", ";
-         $bannedCard .= PitchValue($id) > 0 ? CardName($id) . " (" . PitchValue($id) . ")" : CardName($id);
+         if ($bannedCard != "") $bannedCard .= ", ";
+         $bannedCard .= $cardLabel;
        }
        if (!isCardLegalinHero($id, $character, $format)) {
-         if ($bannedCard != "")
-           $bannedCard .= ", ";
-         $bannedCard .= PitchValue($id) > 0 ? CardName($id) . " (" . PitchValue($id) . ")" : CardName($id);
+         if ($bannedCard != "") $bannedCard .= ", ";
+         $bannedCard .= $cardLabel;
        }
 
        // Track the count of each card ID
-       $cardName = CardName($id);
-       if (!isset($cardCounts[$id])) {
-         $cardCounts[$id] = 0;
-       }
-       if (!isset($cardNameCounts[$cardName])) {
-         $cardNameCounts[$cardName] = 0;
-       }
+       if (!isset($cardCounts[$id])) $cardCounts[$id] = 0;
+       if (!isset($cardNameCounts[$cardName])) $cardNameCounts[$cardName] = 0;
        $cardCounts[$id] += $count;
        $cardNameCounts[$cardName] += $count;
-       if (isCardRestricted($cardName, $format, $cardNameCounts[CardName($id)])) {
-         if ($restrictedCard != "")
-           $restrictedCard .= ", ";
-         $restrictedCard .= PitchValue($id) > 0 ? CardName($id) . " (" . PitchValue($id) . ")" : CardName($id);
+       if (isCardRestricted($cardName, $format, $cardNameCounts[$cardName])) {
+         if ($restrictedCard != "") $restrictedCard .= ", ";
+         $restrictedCard .= $cardLabel;
        }
 
        if ($character != "brevant_civic_protector" && $id != "chivalry_blue") { //Exclude Brevant and Chivalry
          // Deck Check to make sure players don't run more than 2 copies of cards in Young Hero formats
          if (($format == "clash" || $format == "sage" || $format == "compsage" || $format == "futuresage") && $cardCounts[$id] > 2 && !hasUnlimited($id)) {
-           if ($isDeckLegal != "")
-             $isDeckLegal .= ", ";
-           $isDeckLegal .= PitchValue($id) > 0 ? CardName($id) . " (" . PitchValue($id) . ")" : CardName($id);
+           if ($isDeckLegal != "") $isDeckLegal .= ", ";
+           $isDeckLegal .= $cardLabel;
          }
          // Deck Check for singleton blitz
          elseif ($format == "blitz" && !hasUnlimited($id) && $cardCounts[$id] > 1) {
-           if ($isDeckLegal != "")
-             $isDeckLegal .= ", ";
-           $isDeckLegal .= PitchValue($id) > 0 ? CardName($id) . " (" . PitchValue($id) . ")" : CardName($id);
+           if ($isDeckLegal != "") $isDeckLegal .= ", ";
+           $isDeckLegal .= $cardLabel;
          }
        }
        // Deck Check to make sure players don't run more than 3 copies of cards in Classic Constructed formats
        if (($format == "cc" || $format == "compcc" || $format == "llcc" || $format == "compllcc" || $format == "futurecc" || $format == "futurell" || $format == "gage") && $cardCounts[$id] > 3 && !hasUnlimited($id)) {
-         if ($isDeckLegal != "")
-           $isDeckLegal .= ", ";
-         $isDeckLegal .= PitchValue($id) > 0 ? CardName($id) . " (" . PitchValue($id) . ")" : CardName($id);
+         if ($isDeckLegal != "") $isDeckLegal .= ", ";
+         $isDeckLegal .= $cardLabel;
        }
        if ($format != "draft" && $format != "open" && hasLegendary($id) && $cardCounts[$id] > 1) {
-         if ($isDeckLegal != "")
-           $isDeckLegal .= ", ";
-         $isDeckLegal .= PitchValue($id) > 0 ? CardName($id) . " (" . PitchValue($id) . ")" : CardName($id);
+         if ($isDeckLegal != "") $isDeckLegal .= ", ";
+         $isDeckLegal .= $cardLabel;
        }
      }
      $deckLoaded = true;
@@ -541,17 +583,36 @@ $joinerName = ($_SESSION["useruid"] ?? "Player 2");
    exit;
  }
 
+ if ($playerID == 2 && !$forceBaseDeckRefresh && $matchup === "") {
+   $preferenceError = CheckHeroPreference($character, $gameDescription);
+   if ($preferenceError !== null) {
+     $response->error = $preferenceError;
+     echo json_encode($response);
+     exit;
+   }
+ }
+
  if ($matchup == "") {
    if ($playerID == 2) {
 
      if (!$forceBaseDeckRefresh) {
+       $p2LockPath = "../Games/" . $gameName . "/p2join.lock";
+       $p2LH = @fopen($p2LockPath, 'c');
+       if ($p2LH) flock($p2LH, LOCK_EX);
        $slotValue = GetCachePiece($gameName, $playerID + 6);
        if ($slotValue != "") {
-         $response->error = "Another player has already joined the game.";
+         if ($p2LH) { flock($p2LH, LOCK_UN); fclose($p2LH); }
+         if ($gameStatus >= $MGS_GameStarted) {
+           $response->gameStarted = true;
+         } else {
+           $response->error = "Another player has already joined the game.";
+         }
+         WriteGameFile();
          echo json_encode($response);
          exit;
        }
        SetCachePiece($gameName, $playerID + 6, "joining");
+       if ($p2LH) { flock($p2LH, LOCK_UN); fclose($p2LH); }
      }
 
      $gameStatus = $MGS_Player2Joined;
@@ -682,61 +743,57 @@ function isCardLegalinHero($cardID, $hero, $format) {
   if (CardClass($cardID) == "GENERIC") return true;
   if ($hero == "shiyana_diamond_gemini" && HasSpecialization($cardID)) return true;
   if ($hero == "emperor_dracai_of_aesir" && PitchValue($cardID) > 1) return false; //missing burn bare for now
-  $class = explode(",", CardClass($cardID));
-  $talent = explode(",", CardTalent($cardID));
-  $heroClass = explode(",", CardClass($hero));
-  $heroTalent = explode(",", CardTalent($hero));
-  switch ($hero) {
-    case "lexi":
-    case "lexi_livewire":
-      array_push($heroTalent, "LIGHTNING");
-      array_push($heroTalent, "ICE");
-      break;
-    case "briar":
-    case "briar_warden_of_thorns":
-      array_push($heroTalent, "LIGHTNING");
-      array_push($heroTalent, "EARTH");
-      break;
-    case "oldhim":
-    case "oldhim_grandfather_of_eternity":
-    case "jarl_vetreidi":
-      array_push($heroTalent, "ICE");
-      array_push($heroTalent, "EARTH");
-      break;
-    case "aurora":
-    case "aurora_shooting_star":
-    case "oscilio":
-    case "oscilio_constella_intelligence":
-      array_push($heroTalent, "LIGHTNING");
-      break;
-    case "verdance":
-    case "verdance_thorn_of_the_rose":
-    case "florian":
-    case "florian_rotwood_harbinger":
-    case "terra":
-      array_push($heroTalent, "EARTH");
-      break;
-    case "iyslander":
-    case "iyslander_stormbind":
-      array_push($heroTalent, "ICE");
-      break;
-    case "bravo_star_of_the_show":
-      array_push($heroTalent, "LIGHTNING");
-      array_push($heroTalent, "EARTH");
-      array_push($heroTalent, "ICE");
-      break;
-    default:
-      break;
+
+  static $heroCache = [];
+  if (!isset($heroCache[$hero])) {
+    $heroTalent = explode(",", CardTalent($hero));
+    switch ($hero) {
+      case "lexi":
+      case "lexi_livewire":
+        $heroTalent[] = "LIGHTNING"; $heroTalent[] = "ICE"; break;
+      case "briar":
+      case "briar_warden_of_thorns":
+        $heroTalent[] = "LIGHTNING"; $heroTalent[] = "EARTH"; break;
+      case "oldhim":
+      case "oldhim_grandfather_of_eternity":
+      case "jarl_vetreidi":
+        $heroTalent[] = "ICE"; $heroTalent[] = "EARTH"; break;
+      case "aurora":
+      case "aurora_shooting_star":
+      case "oscilio":
+      case "oscilio_constella_intelligence":
+        $heroTalent[] = "LIGHTNING"; break;
+      case "verdance":
+      case "verdance_thorn_of_the_rose":
+      case "florian":
+      case "florian_rotwood_harbinger":
+      case "terra":
+        $heroTalent[] = "EARTH"; break;
+      case "iyslander":
+      case "iyslander_stormbind":
+        $heroTalent[] = "ICE"; break;
+      case "bravo_star_of_the_show":
+        $heroTalent[] = "LIGHTNING"; $heroTalent[] = "EARTH"; $heroTalent[] = "ICE"; break;
+      default: break;
+    }
+    $heroCache[$hero] = [
+      'classSet'  => array_flip(explode(",", CardClass($hero))),
+      'talentSet' => array_flip($heroTalent),
+    ];
   }
+  $heroClassSet  = $heroCache[$hero]['classSet'];
+  $heroTalentSet = $heroCache[$hero]['talentSet'];
+
   $inClass = false;
-  foreach($class as $c) {
-    if ($c == "NONE" || in_array($c, $heroClass)) $inClass = true;
+  foreach (explode(",", CardClass($cardID)) as $c) {
+    if ($c == "NONE" || isset($heroClassSet[$c])) { $inClass = true; break; }
   }
-  $inTalent = false;
-  foreach($talent as $t) {
-    if ($t == "NONE" || in_array($t, $heroTalent)) $inTalent = true;
+  if (!$inClass) return false;
+
+  foreach (explode(",", CardTalent($cardID)) as $t) {
+    if ($t == "NONE" || isset($heroTalentSet[$t])) return true;
   }
-  return $inClass && $inTalent;
+  return false;
 }
 
 function isClashLegal($cardID, $character) {
@@ -812,27 +869,41 @@ function IsCardBanned($cardID, $format, $character)
 function isCardRestricted($cardName, $format, $count) {
   //restrictions go by card name, not card id
   if ($format == "compllcc") $format = "llcc";
-  $restrictedCards = [
-    "llcc" => ["Awakening", "Bonds of Ancestry", "Electromagnetic Somersault", "Crippling Crush", "Cull", "Oaken Old",
-      "Open the Flood Gates", "Succumb to Temptation", "Count Your Blessings", "Deadwood Dirge"
-    ]
-  ];
-  return isset($restrictedCards[$format]) && in_array($cardName, $restrictedCards[$format]) && $count > 1;
+  static $restrictedSets = null;
+  if ($restrictedSets === null) {
+    $restrictedSets = [
+      "llcc" => array_flip(["Awakening", "Bonds of Ancestry", "Electromagnetic Somersault", "Crippling Crush", "Cull", "Oaken Old",
+        "Open the Flood Gates", "Succumb to Temptation", "Count Your Blessings", "Deadwood Dirge"
+      ])
+    ];
+  }
+  return isset($restrictedSets[$format]) && isset($restrictedSets[$format][$cardName]) && $count > 1;
 }
 
 function isSpecialUsePromo($cardID) {
-  $specialUsePromos = [
-      "taipanis_dracai_of_judgement", "taipanis_dracai_of_judgement", "proclamation_of_requisition", "proclamation_of_requisition", "gavel_of_natural_order", "theryon_magister_of_justice", "theryon_magister_of_justice", "proclamation_of_abundance",
-      "proclamation_of_production", "brutus_summa_rudis", "proclamation_of_combat", "magrar", "ruu'di_gem_keeper", "go_bananas_yellow", "taylor", "yorick_weaver_of_tales", "tales_of_adventure_blue",
-      "good_deeds_don't_go_unnoticed_yellow", "pink_visor", "diamond_hands", "hummingbird_call_of_adventure", "shitty_xmas_present_yellow", "squizzy_&_floof",
+  static $promoSet = null;
+  static $releaseSet = null;
+  static $unreleasedSetNames = null;
+  if ($promoSet === null) {
+    $promoSet = array_flip([
+      "taipanis_dracai_of_judgement", "proclamation_of_requisition", "gavel_of_natural_order",
+      "theryon_magister_of_justice", "proclamation_of_abundance", "proclamation_of_production",
+      "brutus_summa_rudis", "proclamation_of_combat", "magrar", "ruu'di_gem_keeper",
+      "go_bananas_yellow", "taylor", "yorick_weaver_of_tales", "tales_of_adventure_blue",
+      "good_deeds_don't_go_unnoticed_yellow", "pink_visor", "diamond_hands",
+      "hummingbird_call_of_adventure", "shitty_xmas_present_yellow", "squizzy_&_floof",
       "fabric_of_spring_yellow", "venomback_fabric_yellow", "silversheen_needle", "bank_breaker"
-  ];
-  $unreleasedSets = ["MPW", "AOL", "DDD", "IAR", ""];
-  // promos that are made legal ahead of thier set
-  $specialReleases = ["runechant_of_envy_yellow", "runechant_of_gluttony_yellow", "runechant_of_greed_yellow", "runechant_of_pride_yellow",
-                      "runechant_of_wrath_yellow", "runechant_of_lust_yellow", "runechant_of_sloth_yellow"];
-  if (in_array($cardID, $specialReleases)) return false;
-  return in_array($cardID, $specialUsePromos) || in_array(CardSet($cardID), $unreleasedSets);
+    ]);
+    // promos that are made legal ahead of their set
+    $releaseSet = array_flip([
+      "runechant_of_envy_yellow", "runechant_of_gluttony_yellow", "runechant_of_greed_yellow",
+      "runechant_of_pride_yellow", "runechant_of_wrath_yellow", "runechant_of_lust_yellow",
+      "runechant_of_sloth_yellow"
+    ]);
+    $unreleasedSetNames = array_flip(["MPW", "AOL", "DDD", "IAR", ""]);
+  }
+  if (isset($releaseSet[$cardID])) return false;
+  return isset($promoSet[$cardID]) || isset($unreleasedSetNames[CardSet($cardID)]);
 }
 
 function isUnimplemented($cardID) {
@@ -864,16 +935,17 @@ function isUnimplemented($cardID) {
 }
 
 function isBannedInFormat($cardID, $format) {
-  global $livingLegends, $benched;
   if ($format == "compblitz") $format = "blitz";
   if ($format == "compcc") $format = "cc";
   if ($format == "compllcc" || $format == "futurell") $format = "llcc";
   if ($format == "compsage" || $format == "futuresage") $format = "sage";
 
-  $bannedCards = [
-      "blitz" => [ // no cards banned in singleton blitz
-      ],
-      "cc" => array_merge([
+  static $bannedSets = null;
+  if ($bannedSets === null) {
+    global $livingLegends, $benched;
+    $bannedSets = [
+      "blitz" => [], // no cards banned in singleton blitz
+      "cc" => array_flip(array_merge([
           "tome_of_fyendal_yellow", "drone_of_brutality_red", "drone_of_brutality_yellow", "drone_of_brutality_blue", "tome_of_aetherwind_red", "art_of_war_yellow", "plunder_run_red", "plunder_run_yellow", "plunder_run_blue",
           "bloodsheath_skeleta", "cash_in_yellow", "prism_sculptor_of_arc_light", "luminaris", "tome_of_divinity_yellow", "galaxxi_black", "stubby_hammerers", "belittle_red",
           "belittle_yellow", "belittle_blue", "awakening_blue", "ball_lightning_red", "ball_lightning_yellow", "ball_lightning_blue", "duskblade", "crown_of_seeds", "lexi_livewire",
@@ -888,15 +960,15 @@ function isBannedInFormat($cardID, $format) {
           "electromagnetic_somersault_red", "electromagnetic_somersault_yellow", "electromagnetic_somersault_blue",
           "channel_lightning_valley_yellow", "phantom_tidemaw_blue", "reaping_blade", "skyward_serenade_yellow",
           "volzar_the_lightning_rod"
-      ], $livingLegends),
-      "commoner" => [
+      ], $livingLegends)),
+      "commoner" => array_flip([
           "amulet_of_ice_blue", "belittle_red", "belittle_yellow", "belittle_blue", "aether_ironweave", "rosetta_thorn",
           "waning_moon", "zephyr_needle", "reality_refractor"
-      ],
-      "llcc" => [
+      ]),
+      "llcc" => array_flip([
           "kraken's_aethervein", "crown_of_seeds", "carrion_husk", "zephyr_needle", "rosetta_thorn"
-      ],
-      "sage" => array_merge([
+      ]),
+      "sage" => array_flip(array_merge([
         "fiddlers_green_red", "fiddlers_green_yellow", "fiddlers_green_blue",
         "honing_hood", "nimby_red", "nimby_yellow", "nimby_blue",
         "old_knocker", "reality_refractor", "vigorous_smashup_red", "vigorous_smashup_yellow", "vigorous_smashup_blue",
@@ -922,19 +994,19 @@ function isBannedInFormat($cardID, $format) {
         "vantom_wraith_red", "vantom_wraith_yellow", "vantom_wraith_blue",
         "steelblade_shunt_red", "steelblade_shunt_yellow", "steelblade_shunt_blue",
         "sirens_of_safe_harbor_red", "sirens_of_safe_harbor_yellow", "sirens_of_safe_harbor_blue"
-      ], $benched),
-      "gage" => ["bravo_star_of_the_show", "bloodsheath_skeleta", "heavy_industry_power_plant", "kraken_aethervein", "stubby_hammerers",
+      ], $benched)),
+      "gage" => array_flip(["bravo_star_of_the_show", "bloodsheath_skeleta", "heavy_industry_power_plant", "kraken_aethervein", "stubby_hammerers",
         "count_your_blessings_red", "count_your_blessings_yellow", "count_your_blessings_blue", "chane_bound_by_shadow",
         "drone_of_brutality_red", "drone_of_brutality_yellow", "drone_of_brutality_blue", "zephyr_needle",
         "open_the_floodgates_red", "open_the_floodgates_yellow", "open_the_floodgates_blue",
         "tome_of_firebrand_red", "art_of_war_yellow", "berserk_yellow", "cash_in_yellow", "remembrance_yellow",
-        "tome_of_divinity_yellow", "tome_of_fyendal_yellow", "awakening_blue", "orihon_of_mystic_tenets_blue"]
-  ];
-  if ($format == "futurecc") {
-    $futureBans = [];
-    return in_array($cardID, $bannedCards["cc"]) || in_array($cardID, $futureBans);
+        "tome_of_divinity_yellow", "tome_of_fyendal_yellow", "awakening_blue", "orihon_of_mystic_tenets_blue"]),
+    ];
   }
-  return isset($bannedCards[$format]) && in_array($cardID, $bannedCards[$format]);
+  if ($format == "futurecc") {
+    return isset($bannedSets["cc"][$cardID]); // $futureBans is always [] so only check cc list
+  }
+  return isset($bannedSets[$format]) && isset($bannedSets[$format][$cardID]);
 }
 
 function ReverseArt($cardID)
@@ -990,28 +1062,28 @@ function ProcessCard($id, $count, $numSideboard, $isFaBDB, &$totalCards, &$modul
   $numMainBoard = ($isFaBDB ? $count - $numSideboard : $count);
 
   if (IsModular($id)) {
-      for ($j = 0; $j < $numMainBoard + $numSideboard; ++$j) {
-          if ($modularSideboard != "") $modularSideboard .= " ";
-          $modularSideboard .= $id;
-      }
-      $totalCards += $numMainBoard + $numSideboard;
+    for ($j = 0; $j < $numMainBoard + $numSideboard; ++$j) {
+        if ($modularSideboard != "") $modularSideboard .= " ";
+        $modularSideboard .= $id;
+    }
+    $totalCards += $numMainBoard + $numSideboard;
   } elseif (TypeContains($id, "C")) {
       $character = $id;
   } elseif (TypeContains($id, "W")) {
-      ++$totalCards;
+      $totalCards += $numMainBoard + $numSideboard;
       for ($j = 0; $j < $numMainBoard; ++$j) {
-          if ($j > 0) $id = ReverseArt($id);
-          if ($weapon1 == "") $weapon1 = $id;
-          elseif ($weapon2 == "") $weapon2 = $id;
-          else {
-              if ($weaponSideboard != "") $weaponSideboard .= " ";
-              $weaponSideboard .= $id;
-          }
-      }
-      for ($j = 0; $j < $numSideboard; ++$j) {
-          if ($numMainBoard > 0 || $j > 0) $id = ReverseArt($id);
+        if ($j > 0) $id = ReverseArt($id);
+        if ($weapon1 == "") $weapon1 = $id;
+        elseif ($weapon2 == "") $weapon2 = $id;
+        else {
           if ($weaponSideboard != "") $weaponSideboard .= " ";
           $weaponSideboard .= $id;
+        }
+      }
+      for ($j = 0; $j < $numSideboard; ++$j) {
+        if ($numMainBoard > 0 || $j > 0) $id = ReverseArt($id);
+        if ($weaponSideboard != "") $weaponSideboard .= " ";
+        $weaponSideboard .= $id;
       }
   } elseif (TypeContains($id, "E") || TypeContains($id, "Companion")) {
       ++$totalCards;
