@@ -1,6 +1,7 @@
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -60,10 +61,45 @@ def _build_talishar_env() -> TalisharEngineEnvironment:
 
 def _build_cpp_env(hand: list[_FakeCard], *, phase: int = 1) -> CppEngineEnvironment:
     env = object.__new__(CppEngineEnvironment)
-    env._gs = type("_GS", (), {"p1_hand": hand, "p2_hand": [], "phase": phase})()
+    env._gs = type(
+        "_GS",
+        (),
+        {
+            "p1_hand": hand,
+            "p2_hand": [],
+            "phase": phase,
+            "p1_health": 20,
+            "p2_health": 20,
+            "turn_no": 1,
+            "p1_hand_size": len(hand),
+            "p2_hand_size": 0,
+            "p1_deck_size": 30,
+            "p2_deck_size": 30,
+            "p1_pitch_size": 0,
+            "p2_pitch_size": 0,
+            "game_over": False,
+            "instant_window": False,
+            "pending_attack_power": 0,
+            "pending_block_value": 0,
+            "p1_equipment": [],
+            "p2_equipment": [],
+            "p1_arsenal": [],
+            "p2_arsenal": [],
+            "p1_pitch": [],
+            "p2_pitch": [],
+            "p1_discard": [],
+            "p2_discard": [],
+        },
+    )()
     env._acting_player = 1
     env._talishar_overlay = None
+    env._talishar_raw_state = None
+    env._talishar_parity_extra = None
     env._flow_phase = ""
+    env._turn_no_override = None
+    env._strict_simulation = False
+    env._steps = 0
+    env._hand_playability = {}
     return env
 
 
@@ -274,8 +310,44 @@ def test_instant_strips_unaffordable_hand_play_from_active_layers() -> None:
     assert 99 in codes
 
 
+def test_materialize_filtered_actions_injects_synthesized_pass() -> None:
+    from flesh_and_blood_rlbridge.legal_action_filter import materialize_filtered_actions
+
+    original = [
+        {
+            "action_code": 27,
+            "button_input": "0",
+            "zone": "hand",
+            "card_id": "WTR001",
+            "label": "Attack",
+        }
+    ]
+    filtered = [
+        {
+            "action_code": 99,
+            "button_input": "",
+            "zone": "button",
+            "card_id": "",
+            "label": "Pass",
+        }
+    ]
+    made: list[dict[str, Any]] = []
+
+    def _make(action: dict[str, Any]) -> dict[str, Any]:
+        made.append(action)
+        return action
+
+    out = materialize_filtered_actions(original, filtered, make_action=_make)
+    assert len(out) == 1
+    assert out[0]["action_code"] == 99
+    assert len(made) == 1
+
+
 def test_cpp_empty_pitch_window_offers_cancel_when_pass_ignored() -> None:
     env = _build_cpp_env([], phase=2)
+    env._strict_simulation = False
+    env._talishar_parity_extra = None
+    env._steps = 0
     legal = [
         _FakeAction(
             action_code=10000,

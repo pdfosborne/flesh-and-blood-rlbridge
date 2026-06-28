@@ -119,6 +119,7 @@ CPP_IMPLEMENTED_ZONES = {
     "equipment",
     "arsenal",
     "pitch",
+    "banish",
 }
 
 # Talishar phases not yet modeled 1:1 in the C++ stub.
@@ -474,13 +475,13 @@ def _cpp_raw_to_absolute(cpp_env: Any, raw: dict[str, Any]) -> dict[str, Any]:
         "p2_hand_size": _safe_int(getattr(gs, "p2_hand_size", 0)),
         "p1_deck_count": _safe_int(getattr(gs, "p1_deck_size", 0)),
         "p2_deck_count": _safe_int(getattr(gs, "p2_deck_size", 0)),
-        "p1_pitch_count": _safe_int(getattr(gs, "p1_pitch_size", 0)),
-        "p2_pitch_count": _safe_int(getattr(gs, "p2_pitch_size", 0)),
+        "p1_pitch_count": _safe_int(getattr(gs, "p1_resources", 0)),
+        "p2_pitch_count": _safe_int(getattr(gs, "p2_resources", 0)),
         "p1_resources": _talishar_action_points(
-            phase_code, _safe_int(getattr(gs, "p1_resources", 0))
+            phase_code, _safe_int(getattr(gs, "p1_action_points", 0))
         ),
         "p2_resources": _talishar_action_points(
-            phase_code, _safe_int(getattr(gs, "p2_resources", 0))
+            phase_code, _safe_int(getattr(gs, "p2_action_points", 0))
         ),
         "priority_player": _safe_int(getattr(gs, "priority", 0)) + 1,
         "p1_hand": zone_cards("p1", "hand"),
@@ -495,8 +496,8 @@ def _cpp_raw_to_absolute(cpp_env: Any, raw: dict[str, Any]) -> dict[str, Any]:
         "p2_arsenal": zone_cards("p2", "arsenal"),
         "p1_pitch": zone_cards("p1", "pitch"),
         "p2_pitch": zone_cards("p2", "pitch"),
-        "p1_banish": [],
-        "p2_banish": [],
+        "p1_banish": zone_cards("p1", "banish"),
+        "p2_banish": zone_cards("p2", "banish"),
         "combat_chain": combat_chain,
         "pending_attack_power": _safe_int(getattr(gs, "pending_attack_power", 0)),
         "pending_block_value": _safe_int(getattr(gs, "pending_block_value", 0)),
@@ -620,6 +621,10 @@ def compare_game_states(
                         zone=zone_name,
                     )
                 )
+                continue
+
+            # Talishar HTTP often omits freshly banished tokens until the next poll.
+            if zone_name == "banish" and not tal_ids and cpp_ids:
                 continue
 
             disc = _compare_zone_multisets(tal_ids, cpp_ids, zone_name=zone_name)
@@ -923,8 +928,29 @@ def build_initial_sync_payload(tal_state: dict[str, Any]) -> dict[str, Any]:
             p2_state,
             acting_player_id=acting,
         )
+        resource_pools = {
+            1: _safe_int(p1_state.get("playerPitchCount", 0)),
+            2: _safe_int(p2_state.get("playerPitchCount", 0)),
+        }
+        action_points = {
+            1: _safe_int(p1_state.get("playerAP", 0)),
+            2: _safe_int(p2_state.get("playerAP", 0)),
+        }
+        if action_points[1] == 0:
+            action_points[1] = _safe_int(p2_state.get("opponentAP", 0))
+        if action_points[2] == 0:
+            action_points[2] = _safe_int(p1_state.get("opponentAP", 0))
     else:
         normalized = _normalize_talishar_player_state(tal_state, acting)
+        resource_pools = {
+            1: _safe_int(normalized.get("p1_pitch_count", 0)),
+            2: _safe_int(normalized.get("p2_pitch_count", 0)),
+        }
+        action_points = {1: 0, 2: 0}
+    if not any(int(v or 0) > 0 for v in action_points.values()):
+        ap = _safe_int(tal_state.get("playerAP", 0))
+        if ap > 0 and acting in (1, 2):
+            action_points[acting] = ap
     opening_hands = {
         1: normalized.get("p1_hand", []),
         2: normalized.get("p2_hand", []),
@@ -939,6 +965,8 @@ def build_initial_sync_payload(tal_state: dict[str, Any]) -> dict[str, Any]:
             1: normalized.get("p1_equipment", []),
             2: normalized.get("p2_equipment", []),
         },
+        "resources": resource_pools,
+        "action_points": action_points,
         "acting_player_id": acting,
         "turn_no": normalized.get("turn_no", 0),
         "phase": normalized.get("phase", ""),

@@ -86,6 +86,19 @@ def test_build_initial_sync_payload_extracts_hands() -> None:
     assert payload["opening_hands"][2] == ["WTR003"]
 
 
+def test_build_initial_sync_payload_cross_view_action_points() -> None:
+    state = {
+        "actingPlayerID": 1,
+        "_fetch_both": lambda: (
+            {"playerAP": 1, "opponentAP": 0, "playerPitchCount": 0, "opponentPitchCount": 0},
+            {"playerAP": 0, "opponentAP": 0, "playerPitchCount": 0, "opponentPitchCount": 0},
+        ),
+    }
+    payload = build_initial_sync_payload(state)
+    assert payload["action_points"][1] == 1
+    assert payload["action_points"][2] == 0
+
+
 def test_cardback_filtered_from_sync_payload() -> None:
     from flesh_and_blood_rlbridge.game_state_parity import (
         build_initial_sync_payload,

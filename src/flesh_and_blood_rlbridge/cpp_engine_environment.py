@@ -72,7 +72,11 @@ from .player_observation import (
     player_observation_payload,
     player_observation_vector,
 )
-from .legal_action_filter import align_filtered_actions, filter_legal_actions
+from .legal_action_filter import (
+    filter_legal_actions,
+    materialize_filtered_actions,
+    normalize_action_descriptor,
+)
 from .game_state_parity import is_syncable_card_id
 from .obs_alignment import (
     align_observation_for_cpp_training,
@@ -344,8 +348,8 @@ class CppEngineEnvironment(rlbridgeEnvironment):
 
     def _episode_context_for_acting_player(self) -> Optional[EpisodeContext]:
         if self._acting_player == 1:
-            return self._p1_episode_context
-        return self._p2_episode_context
+            return getattr(self, "_p1_episode_context", None)
+        return getattr(self, "_p2_episode_context", None)
 
     def _card_dict_from_cpp(self, card: Any) -> dict[str, Any]:
         return {
@@ -382,10 +386,10 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         acting = int(self._acting_player)
         opp = 2 if acting == 1 else 1
         self_pitch = int(
-            getattr(gs, "p1_pitch_size" if acting == 1 else "p2_pitch_size", 0) or 0
+            getattr(gs, "p1_resources" if acting == 1 else "p2_resources", 0) or 0
         )
         opp_pitch = int(
-            getattr(gs, "p1_pitch_size" if opp == 1 else "p2_pitch_size", 0) or 0
+            getattr(gs, "p1_resources" if opp == 1 else "p2_resources", 0) or 0
         )
 
         return merge_talishar_raw_state(
@@ -408,7 +412,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             "opponentItems": [],
             "opponentPitchCount": opp_pitch,
             "playerPitchCount": self_pitch,
-            "playerAP": 0,
+            "playerAP": self._action_points_for_obs(),
             "opponentAP": 0,
             "canPassPhase": True,
             "amIActivePlayer": True,
@@ -440,7 +444,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
     def _absolute_health_for_obs(self, obs: dict[str, Any]) -> tuple[int, int]:
         """P1/P2 health for scalar encoding (absolute seats, not acting-player perspective)."""
         acting = int(obs.get("actingPlayerID", self._acting_player) or self._acting_player)
-        if self._talishar_overlay or self._talishar_parity_extra:
+        if self._talishar_overlay or getattr(self, "_talishar_parity_extra", None):
             player_hp, opp_hp = self._contract_player_hp()
             if acting == 1:
                 return int(player_hp), int(opp_hp)
@@ -463,7 +467,8 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         winner = int(getattr(self._gs, "winner", -1) or -1) if self._gs is not None else -1
         actions = legal_dicts if legal_dicts is not None else self._legal_to_dicts(legal)
         p1_hp, p2_hp = self._absolute_health_for_obs(obs)
-        raw = self._talishar_raw_state if isinstance(self._talishar_raw_state, dict) else None
+        raw = getattr(self, "_talishar_raw_state", None)
+        raw = raw if isinstance(raw, dict) else None
         game_over = bool(raw.get("gameOver")) if raw and raw.get("gameOver") is not None else (
             p1_hp <= 0 or p2_hp <= 0 or (self._gs is not None and self._is_game_over())
         )
@@ -682,6 +687,8 @@ class CppEngineEnvironment(rlbridgeEnvironment):
 
         p1_pool = int(getattr(snap, "p1_resources", 0) or 0)
         p2_pool = int(getattr(snap, "p2_resources", 0) or 0)
+        p1_ap = int(getattr(snap, "p1_action_points", 0) or 0)
+        p2_ap = int(getattr(snap, "p2_action_points", 0) or 0)
         combat_chain = []
         for link in list(getattr(snap, "combat_chain", []) or []):
             combat_chain.append(
@@ -701,10 +708,10 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             "p2_hand_size": len(list(getattr(snap, "p2_hand", []) or [])),
             "p1_deck_count": len(list(getattr(snap, "p1_deck", []) or [])),
             "p2_deck_count": len(list(getattr(snap, "p2_deck", []) or [])),
-            "p1_pitch_count": len(list(getattr(snap, "p1_pitch", []) or [])),
-            "p2_pitch_count": len(list(getattr(snap, "p2_pitch", []) or [])),
-            "p1_resources": _talishar_action_points(phase_code, p1_pool),
-            "p2_resources": _talishar_action_points(phase_code, p2_pool),
+            "p1_pitch_count": p1_pool,
+            "p2_pitch_count": p2_pool,
+            "p1_resources": _talishar_action_points(phase_code, p1_ap),
+            "p2_resources": _talishar_action_points(phase_code, p2_ap),
             "priority_player": int(self._gs.priority) + 1 if self._gs is not None else 1,
             "p1_hand": list(getattr(snap, "p1_hand", []) or []),
             "p2_hand": list(getattr(snap, "p2_hand", []) or []),
@@ -718,8 +725,8 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             "p2_arsenal": list(getattr(snap, "p2_arsenal", []) or []),
             "p1_pitch": list(getattr(snap, "p1_pitch", []) or []),
             "p2_pitch": list(getattr(snap, "p2_pitch", []) or []),
-            "p1_banish": [],
-            "p2_banish": [],
+            "p1_banish": list(getattr(snap, "p1_banish", []) or []),
+            "p2_banish": list(getattr(snap, "p2_banish", []) or []),
             "combat_chain": combat_chain,
             "pending_attack_power": int(getattr(snap, "pending_attack_power", 0) or 0),
             "pending_block_value": int(getattr(snap, "pending_block_value", 0) or 0),
@@ -736,7 +743,15 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         snapshot_fn = getattr(gs, "snapshot_state", None)
         if callable(snapshot_fn):
             snap_dict = self._snapshot_to_absolute_dict(snapshot_fn())
-            if bool(getattr(self._gs, "instant_window", False)):
+            phase = str(snap_dict.get("phase", "") or "").upper()
+            if bool(getattr(self._gs, "instant_window", False)) and phase not in {
+                "B",
+                "BLOCK",
+                "A",
+                "ATTACK",
+                "D",
+                "DAMAGE",
+            }:
                 snap_dict["phase"] = "INSTANT"
             return snap_dict
         from .game_state_parity import _cpp_raw_to_absolute
@@ -767,6 +782,24 @@ class CppEngineEnvironment(rlbridgeEnvironment):
                 player_idx = int(player_key) - 1
                 if player_idx in (0, 1):
                     gs.sync_equipment(player_idx, [str(cid) for cid in card_ids])
+        resources = payload.get("resources") or {}
+        if isinstance(resources, dict) and hasattr(gs, "set_player_resources"):
+            for player_key, pool in resources.items():
+                try:
+                    player_idx = int(player_key) - 1
+                except (TypeError, ValueError):
+                    continue
+                if player_idx in (0, 1):
+                    gs.set_player_resources(player_idx, int(pool))
+        action_points = payload.get("action_points") or {}
+        if isinstance(action_points, dict) and hasattr(gs, "set_player_action_points"):
+            for player_key, ap in action_points.items():
+                try:
+                    player_idx = int(player_key) - 1
+                except (TypeError, ValueError):
+                    continue
+                if player_idx in (0, 1):
+                    gs.set_player_action_points(player_idx, int(ap))
         acting = payload.get("acting_player_id")
         if acting is not None and hasattr(gs, "set_priority"):
             player_id = int(acting)
@@ -945,7 +978,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
     def _effective_turn_phase(self) -> str:
         if self._talishar_overlay:
             return str(self._talishar_overlay.get("turn_phase", "") or "M")
-        if self._strict_simulation:
+        if getattr(self, "_strict_simulation", False):
             return self._phase_code_from_cpp()
         if self._flow_phase:
             return self._flow_phase
@@ -1443,7 +1476,6 @@ class CppEngineEnvironment(rlbridgeEnvironment):
     def _board_state_for_loop_guard(self) -> dict[str, Any]:
         """Talishar-shaped snapshot with enough zones for board-revert detection."""
         state: dict[str, Any] = dict(self._raw_state_from_gs())
-        state.update(self._synthetic_talishar_state())
         gs = self._gs
         if gs is None:
             return state
@@ -1451,6 +1483,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         acting = int(self._acting_player)
         opp = 2 if acting == 1 else 1
         state["turnNo"] = self._obs_turn_no()
+        state["turnPhase"] = {"turnPhase": self._phase_code()}
         state["playerHealth"] = int(gs.p1_health if acting == 1 else gs.p2_health)
         state["opponentHealth"] = int(gs.p2_health if acting == 1 else gs.p1_health)
         state["playerDeckCount"] = int(
@@ -1468,8 +1501,8 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         state["opponentHand"] = self._hand_zone_cards_for_player(opp)
         return state
 
-    def _synthetic_talishar_state(self) -> dict[str, Any]:
-        """Build a Talishar-shaped state dict for shared affordability helpers."""
+    def _hand_entries_for_filter_state(self) -> list[dict[str, Any]]:
+        """Talishar-shaped playerHand entries for shared legal-action filtering."""
         hand_entries: list[dict[str, Any]] = []
         for index, card in enumerate(self._hand_cards()):
             entry: dict[str, Any] = {
@@ -1496,15 +1529,87 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             if label:
                 entry["label"] = label
             hand_entries.append(entry)
-        pitch_count = 0
-        if self._gs is not None:
-            pitch_count = int(
-                getattr(self._gs, f"p{self._acting_player}_pitch_size", 0) or 0
-            )
+        return hand_entries
+
+    def _equipment_entries_for_filter_state(self) -> list[dict[str, Any]]:
+        acting = int(self._acting_player)
+        entries: list[dict[str, Any]] = []
+        for index, card in enumerate(self._cpp_zone_cards(acting, "equipment")):
+            entry = dict(card)
+            entry.setdefault("action", 3)
+            entry.setdefault("actionDataOverride", str(index))
+            entries.append(entry)
+        return entries
+
+    def _arsenal_entries_for_filter_state(self) -> list[dict[str, Any]]:
+        acting = int(self._acting_player)
+        entries: list[dict[str, Any]] = []
+        for index, card in enumerate(self._cpp_zone_cards(acting, "arsenal")):
+            entry = dict(card)
+            entry.setdefault("action", 5)
+            entry.setdefault("actionDataOverride", str(index))
+            entries.append(entry)
+        return entries
+
+    def _filter_state(self) -> dict[str, Any]:
+        """Build the Talishar-shaped state dict consumed by ``filter_legal_actions``."""
+        raw_state = getattr(self, "_talishar_raw_state", None)
+        if isinstance(raw_state, dict) and raw_state:
+            state = dict(raw_state)
+            phase = self._phase_code()
+            if "turnPhase" not in state:
+                state["turnPhase"] = {"turnPhase": phase}
+            if "turnNo" not in state:
+                state["turnNo"] = self._obs_turn_no()
+            return state
+
+        state: dict[str, Any] = dict(self._raw_state_from_gs())
+        state.update(self._board_state_for_loop_guard())
+        phase = self._phase_code()
+        state["turnPhase"] = {"turnPhase": phase}
+        state["turnNo"] = self._obs_turn_no()
+        state["playerHand"] = self._hand_entries_for_filter_state()
+        state["playerEquipment"] = self._equipment_entries_for_filter_state()
+        state["playerArse"] = self._arsenal_entries_for_filter_state()
+        state["playerPitchCount"] = self._pitch_count()
+        state["havePriority"] = not self._is_game_over()
+        gs = self._gs
+        if gs is not None and bool(getattr(gs, "instant_window", False)):
+            state["turnPhase"] = {"turnPhase": "INSTANT"}
+        if phase.upper() == "P":
+            state["canPassPhase"] = False
+        return state
+
+    def _augment_legal_before_filter(self, legal: list[Any]) -> list[Any]:
+        """Add Talishar-shaped actions the C++ stub omits but the shared filter expects."""
+        phase = self._effective_turn_phase().upper()
+        if phase != "P":
+            return legal
+        has_cancel = any(
+            int(getattr(action, "action_code", 0) or 0) == 10000 for action in legal
+        )
+        if has_cancel:
+            return legal
+        return list(legal) + [
+            type(
+                "_Cancel",
+                (),
+                {
+                    "action_code": 10000,
+                    "button_input": "",
+                    "card_id": "",
+                    "zone": "button",
+                    "label": "Cancel",
+                },
+            )()
+        ]
+
+    def _synthetic_talishar_state(self) -> dict[str, Any]:
+        """Build a Talishar-shaped state dict for shared affordability helpers."""
         return {
             "turnPhase": {"turnPhase": self._phase_code()},
-            "playerPitchCount": pitch_count,
-            "playerHand": hand_entries,
+            "playerPitchCount": self._pitch_count(),
+            "playerHand": self._hand_entries_for_filter_state(),
             "pendingAttackPower": int(getattr(self._gs, "pending_attack_power", 0) or 0)
             if self._gs is not None
             else 0,
@@ -1564,12 +1669,9 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         return other + additions + pass_actions
 
     def _filter_legal_actions(self, legal: list[Any]) -> list[Any]:
-        """Filter legal actions using the shared Talishar/C++ filter."""
+        """Filter legal actions via the shared Talishar ``filter_legal_actions``."""
+        working = self._augment_legal_before_filter(list(legal))
         phase = self._effective_turn_phase().upper()
-        if phase == "OPENING_MAIN":
-            return legal
-
-        working = list(legal)
         if phase == "M":
             playable = self._playable_hand_indices()
             if playable is not None:
@@ -1581,12 +1683,15 @@ class CppEngineEnvironment(rlbridgeEnvironment):
                     or str(getattr(action, "button_input", "") or "") in playable
                 ]
 
-        state = self._synthetic_talishar_state()
-        filtered_dicts = filter_legal_actions(
-            state,
-            [self._action_to_dict(action) for action in working],
+        state = self._filter_state()
+        legal_dicts = [self._action_to_dict(action) for action in working]
+        filtered_dicts = filter_legal_actions(state, legal_dicts)
+        return materialize_filtered_actions(
+            working,
+            filtered_dicts,
+            to_descriptor=self._action_to_dict,
+            make_action=self._make_action_from_descriptor,
         )
-        return align_filtered_actions(working, filtered_dicts, to_descriptor=self._action_to_dict)
 
     def _loop_guard_for_step(self, legal: list[Any]) -> LoopGuardResult:
         state = self._board_state_for_loop_guard()
@@ -1610,8 +1715,9 @@ class CppEngineEnvironment(rlbridgeEnvironment):
     def _obs_turn_no(self) -> int:
         if self._talishar_overlay and self._talishar_overlay.get("turn_no") is not None:
             return int(self._talishar_overlay["turn_no"])
-        if self._turn_no_override is not None:
-            return int(self._turn_no_override)
+        turn_no_override = getattr(self, "_turn_no_override", None)
+        if turn_no_override is not None:
+            return int(turn_no_override)
         return int(getattr(self._gs, "turn_no", 0) or 0)
 
     def _acting_idx(self) -> int:
@@ -1623,9 +1729,28 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         return list(cards) if isinstance(cards, list) else []
 
     def _pitch_count(self) -> int:
-        attr = "p1_pitch_size" if self._acting_idx() == 0 else "p2_pitch_size"
+        """Talishar ``playerPitchCount`` = floating resource pool, not pitch-zone size."""
+        gs = self._gs
+        if gs is None:
+            return 0
+        attr = "p1_resources" if self._acting_idx() == 0 else "p2_resources"
         try:
-            return int(getattr(self._gs, attr, 0) or 0)
+            return int(getattr(gs, attr, 0) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _action_points_for_obs(self) -> int:
+        """Talishar ``playerAP`` — action points for the active player in main."""
+        phase = self._effective_turn_phase().upper()
+        if phase not in {"M", "MAIN", "STARTTURN"}:
+            return 0
+        gs = self._gs
+        if gs is None:
+            return 0
+        acting_idx = self._acting_idx()
+        attr = "p1_action_points" if acting_idx == 0 else "p2_action_points"
+        try:
+            return int(getattr(gs, attr, 0) or 0)
         except (TypeError, ValueError):
             return 0
 
@@ -1923,9 +2048,12 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             for candidate in raw_legal:
                 if self._is_pass_like(candidate):
                     return candidate
-            if int(getattr(self._gs, "phase", -1)) == 2:  # TurnPhase::PITCH
-                return self._make_pass_action()
             return None
+        if int(chosen_dict.get("action_code", 0) or 0) == 10000:
+            for candidate in raw_legal:
+                if int(getattr(candidate, "action_code", 0) or 0) == 10000:
+                    return candidate
+            return self._make_action_from_descriptor(chosen_dict)
         return None
 
     def _repeat_penalty(self, action_code: int, button_input: str) -> float:

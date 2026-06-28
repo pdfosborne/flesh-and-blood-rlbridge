@@ -968,6 +968,41 @@ def _is_pass_label(label: str) -> bool:
     return str(label or "").strip().lower() in {"pass", "skip", "done"}
 
 
+def _cpp_progress_fingerprint(state: dict[str, Any]) -> str:
+    return "|".join(
+        [
+            str(state.get("turn_no", state.get("turnNo", ""))),
+            str(state.get("phase", "")),
+            str(state.get("acting_player_id", state.get("actingPlayerID", ""))),
+            str(state.get("priority_player", "")),
+            str(state.get("p1_health", "")),
+            str(state.get("p2_health", "")),
+            str(state.get("p1_hand_size", "")),
+            str(state.get("p2_hand_size", "")),
+            str(state.get("p1_pitch_count", "")),
+            str(state.get("p2_pitch_count", "")),
+        ]
+    )
+
+
+def _check_simulation_pass_liveness(
+    pre_cpp: dict[str, Any],
+    post_cpp: dict[str, Any],
+    *,
+    action_label: str,
+) -> tuple[bool, str]:
+    """Flag C++ pass actions that leave the independent engine in a stall."""
+    if not _is_pass_label(action_label):
+        return True, ""
+    if _cpp_progress_fingerprint(pre_cpp) != _cpp_progress_fingerprint(post_cpp):
+        return True, ""
+    return (
+        False,
+        "C++ state unchanged after Pass — engine pass logic did not advance "
+        "(turn/phase/HP/hand/pitch fingerprint identical)",
+    )
+
+
 def _choose_action(
     env_tal: Any,
     observation: Any,
@@ -1066,11 +1101,31 @@ def _compare_simulation_step(
     action_index: int,
     action_label: str,
     align_obs: bool,
+    pre_cpp_state: dict[str, Any] | None = None,
 ) -> bool:
     context = f"after action[{action_index}] {action_label!r}"
     tal_state = extract_talishar_state(env_tal)
     cpp_state = extract_cpp_state(_cpp_inner_env(env_cpp) or env_cpp)
-    ok = _record_state_discrepancies(
+    ok = True
+    if pre_cpp_state is not None:
+        ok_live, live_msg = _check_simulation_pass_liveness(
+            pre_cpp_state,
+            cpp_state,
+            action_label=action_label,
+        )
+        if not ok_live:
+            ok = False
+            _record_discrepancy(
+                report,
+                episode=episode,
+                step=step,
+                category="state",
+                description=f"{context}: {live_msg}",
+                talishar_value="progress expected",
+                cpp_value="stalled",
+                taxonomy="pass_no_progress",
+            )
+    ok = ok and _record_state_discrepancies(
         report,
         episode=episode,
         step=step,
@@ -1259,6 +1314,7 @@ def run_parity_episode(
                 action_index=action_index,
                 action_label=action_label,
                 align_obs=align_obs,
+                pre_cpp_state=pre_cpp_state,
             )
         else:
             step_ok = _compare_step(

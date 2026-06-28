@@ -100,6 +100,36 @@ def _scan_play_ability_card_ids(talishar_src: Path) -> set[str]:
     return ids
 
 
+def _cpp_card_lookup_fn(metas: dict[str, CardMeta]) -> str:
+    """Emit card_from_id() for token creation effects."""
+    entries: list[str] = []
+    for cid in sorted(metas.keys()):
+        m = metas[cid]
+        safe_name = (m.name or cid).replace('"', '\\"')
+        safe_type = _infer_card_type(m).replace('"', '\\"')
+        entries.append(
+            f'        {{"{cid}", Card{{"{cid}", "{safe_name}", {m.cost}, '
+            f"{m.pitch}, {m.power}, {m.defense}, "
+            f'"{safe_type}", "deck", 27}}}},'
+        )
+    body = "\n".join(entries) if entries else ""
+    return f"""
+#include <unordered_map>
+
+inline Card card_from_id(const std::string& card_id) {{
+    static const std::unordered_map<std::string, Card> kCardById = {{
+{body}
+    }};
+    auto it = kCardById.find(card_id);
+    if (it != kCardById.end()) {{
+        return it->second;
+    }}
+    return Card{{card_id, card_id, 0, 0, 0, 0, "unknown", "deck", 0}};
+}}
+
+"""
+
+
 def _cpp_instant_equipment_set(card_ids: list[str]) -> str:
     if not card_ids:
         return "static const std::unordered_set<std::string> kInstantEquipment = {};"
@@ -424,6 +454,23 @@ def _extract_block_for_card(php_text: str, card_id: str, window: int = 60) -> st
     return ""
 
 
+def _snippet_is_substantive(snippet: str, card_id: str) -> bool:
+    """True when a PHP block contains translatable effect logic (not a bare case label)."""
+    if not snippet or card_id not in snippet:
+        return False
+    compact = re.sub(r"\s+", "", snippet.lower())
+    markers = (
+        "banishcardforplayer",
+        "addplayerhand",
+        "draw(",
+        "gainresource",
+        "addresource",
+        "dealdamage",
+        "addcurrentturn",
+    )
+    return any(marker in compact for marker in markers)
+
+
 def _parse_card_array(php_text: str, card_id: str) -> CardMeta:
     meta = CardMeta(card_id=card_id)
     idx = php_text.find(f'"{card_id}"')
@@ -485,6 +532,16 @@ def scan_php_sources(
             m = _parse_card_array(text, cid)
             ex = metas[cid]
             ex.name = m.name or ex.name
+            # Prefer PlayAbilities/CharacterAbilities snippets for activation effects.
+            rel_path = str(php_file.relative_to(talishar_src)).replace("\\", "/")
+            if rel_path == "CardDictionaries/PlayAbilities.php":
+                ex.php_snippet = _extract_block_for_card(text, cid) or ex.php_snippet
+            elif rel_path == "CharacterAbilities.php":
+                candidate = _extract_block_for_card(text, cid) or ""
+                if _snippet_is_substantive(candidate, cid):
+                    ex.php_snippet = candidate
+            elif not ex.php_snippet:
+                ex.php_snippet = _extract_block_for_card(text, cid)
             # Only override stats from PHP if they look richer (non-zero)
             if m.cost and not ex.cost:    ex.cost    = m.cost
             if m.pitch and not ex.pitch:  ex.pitch   = m.pitch
@@ -494,7 +551,10 @@ def scan_php_sources(
             ex.php_source_file = ex.php_source_file or str(
                 php_file.relative_to(talishar_src)
             )
-            if not ex.php_snippet:
+            if not ex.php_snippet and rel_path not in {
+                "CardDictionaries/PlayAbilities.php",
+                "CharacterAbilities.php",
+            }:
                 ex.php_snippet = _extract_block_for_card(text, cid)
 
     found = sum(1 for m in metas.values() if m.php_source_file)
@@ -757,12 +817,14 @@ struct PlayerState {{
     int health    = 20;
     int intellect = 4;
     int resources = 0;
+    int action_points = 0;
     std::vector<Card> hand;
     std::vector<Card> deck;
     std::vector<Card> discard;
     std::vector<Card> equipment;
     std::vector<Card> arsenal;
     std::vector<Card> pitch_zone;
+    std::vector<Card> banish;
     std::string hero_card_id;
 }};
 
@@ -812,6 +874,8 @@ struct GameSnapshot {{
     int phase = 0;
     int p1_resources = 0;
     int p2_resources = 0;
+    int p1_action_points = 0;
+    int p2_action_points = 0;
     int pending_attack_power = 0;
     int pending_block_value = 0;
     bool game_over = false;
@@ -828,6 +892,8 @@ struct GameSnapshot {{
     std::vector<std::string> p2_arsenal;
     std::vector<std::string> p1_pitch;
     std::vector<std::string> p2_pitch;
+    std::vector<std::string> p1_banish;
+    std::vector<std::string> p2_banish;
     std::vector<CombatChainLink> combat_chain;
 }};
 
@@ -855,6 +921,7 @@ struct GameState {{
     bool        pending_play_is_attack = false;
     bool        pending_from_equipment = false;
     bool        instant_window = false;
+    int         instant_pass_count = 0;
     bool        attack_pitch_satisfied = false;
     std::vector<CombatChainLink> combat_chain;
     std::array<double, 80> deck_indices_p1{{}};
@@ -881,6 +948,8 @@ struct GameState {{
     GameSnapshot snapshot_state() const;
     int observation_acting_player() const;
     void set_priority(int player_idx);
+    void set_player_resources(int player_idx, int amount);
+    void set_player_action_points(int player_idx, int amount);
     void draw_cards(int player_idx, int n);
 
 private:
@@ -903,6 +972,9 @@ private:
     void _try_complete_pitch();
     void _begin_block_phase();
     void _complete_pending_play();
+    void _abort_pending_play();
+    void _finalize_turn_for_player(int player_idx);
+    void _pass_turn();
     void _apply_hand_index(size_t idx);
     void _apply_pass();
     void _check_game_over();
@@ -966,7 +1038,7 @@ int GameState::_available_resources(int player_idx) const {{
         return 0;
     }}
     const auto& p = players[player_idx];
-    int avail = p.resources;
+    int avail = p.resources + p.action_points;
     for (const auto& card : p.hand) {{
         avail += card.pitch;
     }}
@@ -1017,19 +1089,24 @@ void GameState::_append_equipment_legal_actions(
 
 void GameState::_open_instant_window() {{
     instant_window = true;
+    instant_pass_count = 0;
     phase = TurnPhase::MAIN;
     priority = active_player;
 }}
 
 void GameState::_close_instant_window() {{
     instant_window = false;
+    instant_pass_count = 0;
 }}
 
 int GameState::observation_acting_player() const {{
     if (phase == TurnPhase::BLOCK) {{
         return priority + 1;
     }}
-    if (phase == TurnPhase::PITCH || instant_window) {{
+    if (instant_window) {{
+        return priority + 1;
+    }}
+    if (phase == TurnPhase::PITCH) {{
         return active_player + 1;
     }}
     return priority + 1;
@@ -1080,17 +1157,22 @@ std::vector<LegalAction> GameState::get_legal_actions() const {{
     }}
 
     if (phase == TurnPhase::PITCH) {{
-        _append_equipment_legal_actions(actions, priority, true);
-        for (size_t i = 0; i < p.hand.size(); ++i) {{
+        const int pitcher = active_player;
+        const auto& pitch_hand = players[pitcher].hand;
+        for (size_t i = 0; i < pitch_hand.size(); ++i) {{
             actions.push_back(LegalAction{{
                 27,
                 std::to_string(i),
-                p.hand[i].card_id,
+                pitch_hand[i].card_id,
                 "hand",
-                p.hand[i].name,
+                pitch_hand[i].name,
             }});
         }}
-        if (pending_card_cost > 0 && p.resources >= pending_card_cost) {{
+        if (pending_play_active) {{
+            actions.push_back(LegalAction{{10000, "", "", "button", "Cancel"}});
+        }}
+        if (pending_play_active
+            && players[pitcher].resources >= pending_card_cost) {{
             actions.push_back(LegalAction{{99, "", "", "button", "Pass"}});
         }}
         return actions;
@@ -1155,18 +1237,14 @@ int GameState::fast_legal_count() const {{
     }}
 
     if (phase == TurnPhase::PITCH) {{
-        count = static_cast<int>(p.hand.size());
-        for (size_t i = 0; i < p.equipment.size(); ++i) {{
-            if (_is_hero_equipment(p.equipment[i], priority)) {{
-                continue;
-            }}
-            if (_equipment_activation_cost(p.equipment[i]) == 0
-                && !_is_weapon(p.equipment[i])
-                && kInstantEquipment.find(p.equipment[i].card_id) != kInstantEquipment.end()) {{
-                ++count;
-            }}
+        count = static_cast<int>(players[active_player].hand.size());
+        if (pending_play_active) {{
+            ++count;
         }}
-        if (pending_card_cost > 0 && p.resources >= pending_card_cost) ++count;
+        if (pending_play_active
+            && players[active_player].resources >= pending_card_cost) {{
+            ++count;
+        }}
         return count;
     }}
 
@@ -1208,6 +1286,9 @@ void GameState::_resolve_combat() {{
 void GameState::_begin_block_phase() {{
     if (!pending_play_active || !pending_play_is_attack) {{
         return;
+    }}
+    if (instant_window) {{
+        _close_instant_window();
     }}
     if (pending_card_cost > 0) {{
         const int from_pool = std::min(
@@ -1260,6 +1341,31 @@ void GameState::_complete_pending_play() {{
     _check_game_over();
 }}
 
+void GameState::_abort_pending_play() {{
+    if (!pending_play_active) {{
+        if (phase == TurnPhase::PITCH) {{
+            phase = TurnPhase::MAIN;
+            priority = active_player;
+        }}
+        consecutive_passes = 0;
+        return;
+    }}
+    if (!pending_from_equipment) {{
+        players[active_player].hand.push_back(pending_play_card);
+    }}
+    pending_play_active = false;
+    pending_play_is_attack = false;
+    pending_from_equipment = false;
+    pending_card_cost = 0;
+    pending_attack_power = 0;
+    pending_block_value = 0;
+    attack_pitch_satisfied = false;
+    instant_window = false;
+    phase = TurnPhase::MAIN;
+    priority = active_player;
+    consecutive_passes = 0;
+}}
+
 void GameState::_apply_equipment_index(size_t idx) {{
     consecutive_passes = 0;
     auto& eq = players[priority].equipment;
@@ -1271,33 +1377,28 @@ void GameState::_apply_equipment_index(size_t idx) {{
 
     const bool weapon = _is_weapon(card);
     const int act_cost = _equipment_activation_cost(card);
-    const int from_pool = std::min(act_cost, players[priority].resources);
-    players[priority].resources -= from_pool;
-    const int owed = act_cost - from_pool;
 
     if (weapon) {{
         pending_play_card = card;
         pending_from_equipment = true;
         pending_play_is_attack = true;
         pending_play_active = true;
-        pending_card_cost = owed;
+        pending_card_cost = act_cost;
         pending_attack_power = 0;
         pending_block_value = 0;
         combat_chain.clear();
-        phase = TurnPhase::PITCH;
         active_player = priority;
-        if (instant_window) {{
-            _close_instant_window();
-        }}
+        attack_pitch_satisfied = false;
+        phase = TurnPhase::PITCH;
         return;
     }}
 
-    if (owed > 0) {{
+    if (act_cost > 0) {{
         pending_play_card = card;
         pending_play_active = true;
         pending_play_is_attack = false;
         pending_from_equipment = true;
-        pending_card_cost = owed;
+        pending_card_cost = act_cost;
         phase = TurnPhase::PITCH;
         active_player = priority;
         return;
@@ -1310,6 +1411,9 @@ void GameState::_apply_equipment_index(size_t idx) {{
     if (!weapon && act_cost <= 0) {{
         eq.erase(eq.begin() + static_cast<std::ptrdiff_t>(idx));
         players[priority].discard.push_back(card);
+    }}
+    if (instant_window) {{
+        instant_pass_count = 0;
     }}
     _check_game_over();
 }}
@@ -1326,16 +1430,20 @@ void GameState::_apply_arsenal_index(size_t idx) {{
     pending_play_active = true;
     pending_play_is_attack = _is_attack_card(card);
     pending_from_equipment = false;
-    const int owed = std::max(0, card.cost);
-    const int from_pool = std::min(owed, players[priority].resources);
-    players[priority].resources -= from_pool;
-    pending_card_cost = owed - from_pool;
+    pending_card_cost = std::max(0, card.cost);
     active_player = priority;
-    if (pending_card_cost > 0) {{
+    attack_pitch_satisfied = false;
+    if (card.cost > 0) {{
         phase = TurnPhase::PITCH;
         return;
     }}
-    _complete_pending_play();
+    if (pending_play_is_attack) {{
+        phase = TurnPhase::MAIN;
+        _open_instant_window();
+        return;
+    }}
+    phase = TurnPhase::MAIN;
+    _open_instant_window();
 }}
 
 void GameState::_try_complete_pitch() {{
@@ -1346,6 +1454,8 @@ void GameState::_try_complete_pitch() {{
         return;
     }}
     if (pending_play_is_attack) {{
+        players[active_player].resources -= pending_card_cost;
+        pending_card_cost = 0;
         attack_pitch_satisfied = true;
         phase = TurnPhase::MAIN;
         _open_instant_window();
@@ -1369,24 +1479,34 @@ void GameState::_apply_pitch_index(size_t idx) {{
 void GameState::_apply_pass() {{
     consecutive_passes += 1;
     if (instant_window) {{
+        instant_pass_count += 1;
+        if (instant_pass_count < 2) {{
+            priority = 1 - priority;
+            consecutive_passes = 0;
+            return;
+        }}
         _close_instant_window();
         if (pending_play_active && pending_play_is_attack) {{
-            if (attack_pitch_satisfied) {{
-                _begin_block_phase();
-            }} else {{
-                phase = TurnPhase::PITCH;
-            }}
+            _begin_block_phase();
         }} else if (pending_play_active) {{
-            phase = TurnPhase::PITCH;
+            _complete_pending_play();
         }}
         consecutive_passes = 0;
         return;
     }}
     if (phase == TurnPhase::PITCH) {{
+        // Talishar ignores pass in pitch until floated cost is fully paid (confirm).
         if (pending_play_active
-            && (pending_card_cost == 0
-                || players[active_player].resources >= pending_card_cost)) {{
-            _complete_pending_play();
+            && players[active_player].resources >= pending_card_cost) {{
+            if (pending_play_is_attack) {{
+                players[active_player].resources -= pending_card_cost;
+                pending_card_cost = 0;
+                attack_pitch_satisfied = true;
+                phase = TurnPhase::MAIN;
+                _open_instant_window();
+            }} else {{
+                _complete_pending_play();
+            }}
             consecutive_passes = 0;
         }}
         return;
@@ -1396,7 +1516,56 @@ void GameState::_apply_pass() {{
         consecutive_passes = 0;
         return;
     }}
+    if (phase == TurnPhase::MAIN || phase == TurnPhase::END) {{
+        _pass_turn();
+        return;
+    }}
+    if (phase == TurnPhase::START) {{
+        phase = TurnPhase::MAIN;
+        consecutive_passes = 0;
+        return;
+    }}
     _advance_phase();
+}}
+
+void GameState::_finalize_turn_for_player(int player_idx) {{
+    if (player_idx < 0 || player_idx > 1) {{
+        return;
+    }}
+    auto& p = players[static_cast<size_t>(player_idx)];
+    p.resources = 0;
+    p.action_points = 0;
+    for (auto& card : p.pitch_zone) {{
+        p.deck.push_back(card);
+    }}
+    p.pitch_zone.clear();
+    for (auto& card : p.hand) {{
+        p.discard.push_back(card);
+    }}
+    p.hand.clear();
+}}
+
+void GameState::_pass_turn() {{
+    const int ending = active_player;
+    _finalize_turn_for_player(ending);
+    active_player = 1 - ending;
+    priority = active_player;
+    phase = TurnPhase::MAIN;
+    turn_no += 1;
+    instant_window = false;
+    pending_play_active = false;
+    pending_play_is_attack = false;
+    pending_from_equipment = false;
+    pending_card_cost = 0;
+    pending_attack_power = 0;
+    pending_block_value = 0;
+    attack_pitch_satisfied = false;
+    combat_chain.clear();
+    consecutive_passes = 0;
+    players[active_player].action_points = 1;
+    players[active_player].resources = 0;
+    _draw_cards(active_player, players[active_player].intellect);
+    _check_game_over();
 }}
 
 void GameState::_apply_hand_play_main(size_t idx) {{
@@ -1413,19 +1582,19 @@ void GameState::_apply_hand_play_main(size_t idx) {{
         pending_play_is_attack = true;
         pending_from_equipment = false;
         const int owed = std::max(0, card.cost);
-        const int from_pool = std::min(owed, players[priority].resources);
-        players[priority].resources -= from_pool;
-        pending_card_cost = owed - from_pool;
+        const int from_ap = std::min(owed, players[priority].action_points);
+        players[priority].action_points -= from_ap;
+        pending_card_cost = owed - from_ap;
         pending_attack_power = 0;
         pending_block_value = 0;
         combat_chain.clear();
         active_player = priority;
         attack_pitch_satisfied = false;
-        if (pending_card_cost == 0) {{
+        if (card.cost > 0) {{
+            phase = TurnPhase::PITCH;
+        }} else {{
             phase = TurnPhase::MAIN;
             _open_instant_window();
-        }} else {{
-            phase = TurnPhase::PITCH;
         }}
         return;
     }}
@@ -1435,15 +1604,16 @@ void GameState::_apply_hand_play_main(size_t idx) {{
     pending_play_is_attack = false;
     pending_from_equipment = false;
     const int owed = std::max(0, card.cost);
-    const int from_pool = std::min(owed, players[priority].resources);
-    players[priority].resources -= from_pool;
-    pending_card_cost = owed - from_pool;
+    const int from_ap = std::min(owed, players[priority].action_points);
+    players[priority].action_points -= from_ap;
+    pending_card_cost = owed - from_ap;
     active_player = priority;
-    if (pending_card_cost > 0) {{
+    if (card.cost > 0) {{
         phase = TurnPhase::PITCH;
         return;
     }}
-    _complete_pending_play();
+    phase = TurnPhase::MAIN;
+    _open_instant_window();
 }}
 
 void GameState::_apply_block_index(size_t idx) {{
@@ -1492,6 +1662,12 @@ void GameState::_check_game_over() {{
 }}
 
 void GameState::apply_action(const LegalAction& action) {{
+    if (action.action_code == 10000) {{
+        if (phase == TurnPhase::PITCH) {{
+            _abort_pending_play();
+        }}
+        return;
+    }}
     if (action.action_code == 99) {{
         _apply_pass();
         return;
@@ -1609,6 +1785,9 @@ void GameState::sync_deck_order(int player_idx, const std::vector<std::string>& 
     if (player_idx < 0 || player_idx >= 2) {{
         throw std::runtime_error("player_idx must be 0 or 1");
     }}
+    if (card_ids.empty()) {{
+        return;
+    }}
     auto& p = players[player_idx];
     std::vector<Card> available;
     available.reserve(p.hand.size() + p.deck.size());
@@ -1626,7 +1805,19 @@ void GameState::sync_deck_order(int player_idx, const std::vector<std::string>& 
         available.erase(it);
     }}
     available.insert(available.end(), ordered_deck.begin(), ordered_deck.end());
-    p.deck = available;
+    std::unordered_set<std::string> hand_ids;
+    for (const auto& card : p.hand) {{
+        hand_ids.insert(card.card_id);
+    }}
+    std::vector<Card> new_deck;
+    new_deck.reserve(available.size());
+    for (const auto& card : available) {{
+        if (hand_ids.find(card.card_id) != hand_ids.end()) {{
+            continue;
+        }}
+        new_deck.push_back(card);
+    }}
+    p.deck = new_deck;
 }}
 
 void GameState::sync_equipment(int player_idx, const std::vector<std::string>& card_ids) {{
@@ -1666,6 +1857,8 @@ GameSnapshot GameState::snapshot_state() const {{
     snap.phase = static_cast<int>(phase);
     snap.p1_resources = players[0].resources;
     snap.p2_resources = players[1].resources;
+    snap.p1_action_points = players[0].action_points;
+    snap.p2_action_points = players[1].action_points;
     snap.pending_attack_power = pending_attack_power;
     snap.pending_block_value = pending_block_value;
     snap.game_over = game_over;
@@ -1682,6 +1875,8 @@ GameSnapshot GameState::snapshot_state() const {{
     snap.p2_arsenal = _card_ids_from_zone(players[1].arsenal);
     snap.p1_pitch = _card_ids_from_zone(players[0].pitch_zone);
     snap.p2_pitch = _card_ids_from_zone(players[1].pitch_zone);
+    snap.p1_banish = _card_ids_from_zone(players[0].banish);
+    snap.p2_banish = _card_ids_from_zone(players[1].banish);
     snap.combat_chain = combat_chain;
     return snap;
 }}
@@ -1700,24 +1895,31 @@ void GameState::set_priority(int player_idx) {{
     }}
 }}
 
+void GameState::set_player_resources(int player_idx, int amount) {{
+    if (player_idx < 0 || player_idx >= 2) {{
+        throw std::runtime_error("player_idx must be 0 or 1");
+    }}
+    players[static_cast<size_t>(player_idx)].resources = amount;
+}}
+
+void GameState::set_player_action_points(int player_idx, int amount) {{
+    if (player_idx < 0 || player_idx >= 2) {{
+        throw std::runtime_error("player_idx must be 0 or 1");
+    }}
+    players[static_cast<size_t>(player_idx)].action_points = amount;
+}}
+
 void GameState::_advance_phase() {{
     switch (phase) {{
-        case TurnPhase::START:  phase = TurnPhase::MAIN;   break;
-        case TurnPhase::MAIN:   phase = TurnPhase::END;    break;
-        case TurnPhase::END: {{
-            auto& active = players[active_player];
-            for (auto& c : active.hand) active.discard.push_back(c);
-            active.hand.clear();
-            active_player = 1 - active_player;
-            priority = active_player;
+        case TurnPhase::START:
             phase = TurnPhase::MAIN;
-            turn_no += 1;
-            _draw_cards(active_player, players[active_player].intellect);
-            pending_attack_power = 0;
-            pending_block_value = 0;
             break;
-        }}
-        default: break;
+        case TurnPhase::MAIN:
+        case TurnPhase::END:
+            _pass_turn();
+            break;
+        default:
+            break;
     }}
     _check_game_over();
 }}
@@ -1769,6 +1971,30 @@ def _render_card_effect_body(meta: CardMeta) -> tuple[str, str]:
     if "attack" in meta.card_type:
         return (
             "    // attack — damage resolved via combat chain",
+            "auto",
+        )
+
+    token_match = re.search(
+        r'BanishCardForPlayer\(\s*"([\w_]+)"',
+        snippet,
+        re.I,
+    )
+    if token_match:
+        token = token_match.group(1)
+        return (
+            f'    gs.players[player_idx].banish.push_back(card_from_id("{token}"));',
+            "auto",
+        )
+
+    hand_match = re.search(
+        r'AddPlayerHand\(\s*"([\w_]+)"',
+        snippet,
+        re.I,
+    )
+    if hand_match:
+        token = hand_match.group(1)
+        return (
+            f'    gs.players[player_idx].hand.push_back(card_from_id("{token}"));',
             "auto",
         )
 
@@ -1874,6 +2100,7 @@ void GameState::init_standard_decks() {{
     pending_from_equipment = false;
     attack_pitch_satisfied = false;
     instant_window = false;
+    instant_pass_count = 0;
     combat_chain.clear();
     game_over = false;
     winner = -1;
@@ -1882,6 +2109,7 @@ void GameState::init_standard_decks() {{
     players[0].health = {p1_health};
     players[0].intellect = {p1_intellect};
     players[0].resources = 0;
+    players[0].action_points = 0;
     players[0].hero_card_id = "{p1_hero}";
     players[0].deck.clear();
     players[0].hand.clear();
@@ -1889,10 +2117,12 @@ void GameState::init_standard_decks() {{
     players[0].equipment.clear();
     players[0].arsenal.clear();
     players[0].pitch_zone.clear();
+    players[0].banish.clear();
 
     players[1].health = {p2_health};
     players[1].intellect = {p2_intellect};
     players[1].resources = 0;
+    players[1].action_points = 0;
     players[1].hero_card_id = "{p2_hero}";
     players[1].deck.clear();
     players[1].hand.clear();
@@ -1900,6 +2130,7 @@ void GameState::init_standard_decks() {{
     players[1].equipment.clear();
     players[1].arsenal.clear();
     players[1].pitch_zone.clear();
+    players[1].banish.clear();
 
     // ── P1 setup ({deck1}) ───────────────────────────────────────────────
 {p1_setup}
@@ -1921,8 +2152,10 @@ void GameState::init_standard_decks() {{
     _draw_cards(0, players[0].intellect);
     _draw_cards(1, players[1].intellect);
 
-    // Talishar grants 1 resource to the player with priority at turn start.
-    players[priority].resources = 1;
+    // Talishar grants the first action point when the first main phase begins.
+    players[0].resources = 0;
+    players[0].action_points = 0;
+    players[1].resources = 0;
 
     format_idx = {format_idx};
     first_player = 1;
@@ -1978,6 +2211,8 @@ PYBIND11_MODULE(fab_engine, m) {{
         .def_readonly("phase", &GameSnapshot::phase)
         .def_readonly("p1_resources", &GameSnapshot::p1_resources)
         .def_readonly("p2_resources", &GameSnapshot::p2_resources)
+        .def_readonly("p1_action_points", &GameSnapshot::p1_action_points)
+        .def_readonly("p2_action_points", &GameSnapshot::p2_action_points)
         .def_readonly("pending_attack_power", &GameSnapshot::pending_attack_power)
         .def_readonly("pending_block_value", &GameSnapshot::pending_block_value)
         .def_readonly("game_over", &GameSnapshot::game_over)
@@ -1994,6 +2229,8 @@ PYBIND11_MODULE(fab_engine, m) {{
         .def_readonly("p2_arsenal", &GameSnapshot::p2_arsenal)
         .def_readonly("p1_pitch", &GameSnapshot::p1_pitch)
         .def_readonly("p2_pitch", &GameSnapshot::p2_pitch)
+        .def_readonly("p1_banish", &GameSnapshot::p1_banish)
+        .def_readonly("p2_banish", &GameSnapshot::p2_banish)
         .def_readonly("combat_chain", &GameSnapshot::combat_chain);
 
     py::class_<FastStepResult>(m, "FastStepResult")
@@ -2026,6 +2263,8 @@ PYBIND11_MODULE(fab_engine, m) {{
         .def("observation_acting_player", &GameState::observation_acting_player)
         .def("draw_cards", &GameState::draw_cards)
         .def("set_priority", &GameState::set_priority)
+        .def("set_player_resources", &GameState::set_player_resources)
+        .def("set_player_action_points", &GameState::set_player_action_points)
         .def("seed_rng", &GameState::seed_rng)
         .def("get_legal_actions",  &GameState::get_legal_actions,
              py::call_guard<py::gil_scoped_release>())
@@ -2081,6 +2320,14 @@ PYBIND11_MODULE(fab_engine, m) {{
             [](const GameState& g) {{ return (int)g.players[0].pitch_zone.size(); }})
         .def_property_readonly("p2_pitch_size",
             [](const GameState& g) {{ return (int)g.players[1].pitch_zone.size(); }})
+        .def_property_readonly("p1_action_points",
+            [](const GameState& g) {{ return g.players[0].action_points; }})
+        .def_property_readonly("p2_action_points",
+            [](const GameState& g) {{ return g.players[1].action_points; }})
+        .def_property_readonly("p1_banish",
+            [](const GameState& g) {{ return g.players[0].banish; }})
+        .def_property_readonly("p2_banish",
+            [](const GameState& g) {{ return g.players[1].banish; }})
         .def_property_readonly("p1_equipment",
             [](const GameState& g) {{ return g.players[0].equipment; }})
         .def_property_readonly("p2_equipment",
@@ -2283,6 +2530,7 @@ def generate(
     cards_h = _CARDS_H_HEADER.format(
         deck1=deck1, deck2=deck2, n_cards=len(all_ids)
     )
+    cards_h += _cpp_card_lookup_fn(metas)
     for cid in all_ids:
         m = metas[cid]
         php_lines = m.php_snippet.splitlines() if m.php_snippet else ["(no PHP source found)"]
