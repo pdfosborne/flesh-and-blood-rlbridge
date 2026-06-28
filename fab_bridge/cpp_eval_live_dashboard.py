@@ -41,6 +41,57 @@ def _resolve_trace_env(env: Any) -> Any:
     return inner if inner is not None else env
 
 
+def eval_engine_from_env(env: Any) -> tuple[str, str]:
+    """Return ``(engine_key, display_label)`` for a training/eval environment."""
+    if bool(getattr(env, "_using_cpp", False)):
+        return "cpp", "C++ engine"
+    if bool(getattr(env, "_using_fast_talishar", False)):
+        backend = str(getattr(env, "talishar_backend", "fast") or "fast")
+        return "talishar_fast", f"Talishar {backend}"
+    if getattr(env, "_cpp_env", None) is not None:
+        return "cpp", "C++ engine"
+    return "talishar", "Talishar"
+
+
+def checkpoint_eval_replay_display_label(
+    source: Optional[dict[str, Any] | str] = None,
+) -> str:
+    """Human-readable engine label for checkpoint eval replay links."""
+    if isinstance(source, str):
+        token = source.strip().lower()
+        if "talishar" in token and "fast" in token:
+            return "Talishar fast"
+        if "cpp" in token or "c++" in token:
+            return "C++ engine"
+        if "talishar" in token:
+            return "Talishar"
+        return ""
+    if not isinstance(source, dict):
+        return ""
+    display = str(source.get("engine_display") or "").strip()
+    if display:
+        return display
+    engine = str(source.get("engine") or "").strip().lower()
+    if engine == "cpp":
+        return "C++ engine"
+    if engine in {"talishar_fast", "fast"}:
+        return "Talishar fast"
+    if engine == "talishar":
+        return "Talishar"
+    runtime = str(source.get("runtime_backend") or "").strip()
+    if runtime:
+        return checkpoint_eval_replay_display_label(runtime)
+    return ""
+
+
+def format_checkpoint_eval_replay_heading(engine_label: str = "") -> str:
+    """Build the replay section heading for unified training dashboards."""
+    label = checkpoint_eval_replay_display_label(engine_label)
+    if label:
+        return f"{label} checkpoint eval replay"
+    return "Checkpoint eval replay"
+
+
 def _read_json(path: Path) -> dict[str, Any]:
     if not path.is_file():
         return {}
@@ -97,9 +148,11 @@ def collect_cpp_eval_live_state(
     complete = bool(
         episode_done and int(agg.get("episodes_completed", 0) or 0) >= episodes_total
     )
+    engine_key, engine_display = eval_engine_from_env(env)
 
     return {
-        "engine": "cpp",
+        "engine": engine_key,
+        "engine_display": engine_display,
         "eval_label": eval_label,
         "episode": int(episode),
         "episodes_total": int(episodes_total),
@@ -248,6 +301,9 @@ def render_cpp_eval_live_html(
     eval_label = html.escape(str(state.get("eval_label", "Eval") or "Eval"))
     p1_policy = html.escape(str(state.get("p1_policy", "agent") or "agent"))
     p2_policy = html.escape(str(state.get("p2_policy", "agent") or "agent"))
+    engine_display = html.escape(
+        checkpoint_eval_replay_display_label(state) or "Eval"
+    )
 
     wins = int(agg.get("wins", 0) or 0)
     losses = int(agg.get("losses", 0) or 0)
@@ -285,7 +341,7 @@ def render_cpp_eval_live_html(
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>C++ eval live — {eval_label}</title>
+  <title>{engine_display} eval live — {eval_label}</title>
   {refresh_tag}
   <style>
     :root {{
@@ -343,7 +399,7 @@ def render_cpp_eval_live_html(
 </head>
 <body>
   <div class="wrap">
-    <h1>C++ engine eval — live replay</h1>
+    <h1>{engine_display} eval — live replay</h1>
     <p class="sub">{eval_label} · episode {episode}/{episodes_total} · step {step}
       · <span class="badge {'complete' if complete else 'running'}">{status_label}</span></p>
 

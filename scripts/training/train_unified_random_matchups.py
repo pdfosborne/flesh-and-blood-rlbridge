@@ -45,6 +45,8 @@ from runtime_defaults import (  # noqa: E402
     DEFAULT_UNIFIED_WARMUP_EPISODES,
     DEFAULT_UNIFIED_WORKERS,
     DEFAULT_WARMUP_BASELINE_EVAL_EPISODES,
+    DEFAULT_ROLLOUT_MODE,
+    DEFAULT_ROLLOUT_PROCESSES,
     RUNTIME,
 )
 
@@ -148,6 +150,18 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help=argparse.SUPPRESS,
     )
+    parser.add_argument(
+        "--rollout-mode",
+        default=DEFAULT_ROLLOUT_MODE,
+        choices=sorted({"batched", "threaded_episodes", "batched_concurrent"}),
+        help="Fast rollout collection strategy for parallel training",
+    )
+    parser.add_argument(
+        "--rollout-processes",
+        type=int,
+        default=DEFAULT_ROLLOUT_PROCESSES,
+        help="Subprocess rollout workers (1 = in-process only)",
+    )
     return parser.parse_args()
 
 
@@ -201,6 +215,7 @@ def main() -> None:
 
     print(f"Talishar URL : {base_url}")
     print(f"Backend      : Talishar fast (fast_reset / fast_step_index)")
+    print(f"Rollout mode : {args.rollout_mode} ({args.rollout_processes} process(es))")
     print(f"Format       : {format_name}")
     print(f"Deck pool    : {len(decks)} fabrary decks")
     print(f"Matchups     : {len(selected)} random pairs")
@@ -257,6 +272,8 @@ def main() -> None:
             skip_converged=bool(args.skip_converged),
             build_cpp_engine=build_cpp_engine,
             require_cpp_engine=require_cpp_engine,
+            rollout_mode=str(args.rollout_mode),
+            rollout_processes=int(args.rollout_processes),
         )
     finally:
         if dashboard_proc is not None:

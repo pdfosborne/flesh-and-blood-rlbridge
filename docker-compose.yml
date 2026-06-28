@@ -26,6 +26,13 @@ services:
         if [ -d /fab-bridge-stubs/rl-bridge/APIs ]; then
           cp -f /fab-bridge-stubs/rl-bridge/APIs/*.php /var/www/html/game/APIs/
         fi
+        if [ -d /fab-bridge-stubs/rl-bridge ]; then
+          for f in /fab-bridge-stubs/rl-bridge/*.php; do
+            if [ -f "$f" ]; then
+              cp -f "$f" /var/www/html/game/
+            fi
+          done
+        fi
         exec apache2-foreground
 
   # Clone Talishar-FE into the repo checkout on first compose up

@@ -2,7 +2,7 @@
 /**
  * RLStep.php (rl-bridge overlay)
  *
- * Combined ProcessInput + dual-player gamestate JSON for RL training.
+ * Combined ProcessInput + gamestate JSON for RL training.
  * Installed by docker-compose entrypoint — do not edit Talishar/ upstream.
  */
 
@@ -11,10 +11,44 @@ error_reporting(E_ALL);
 @ini_set('max_execution_time', '5');
 
 $fabRoot = dirname(__DIR__);
+$fabBridgeStubs = "/fab-bridge-stubs/rl-bridge";
 chdir($fabRoot);
 
+$rawBody = file_get_contents('php://input');
+$payload = json_decode($rawBody, true);
+if (!is_array($payload)) {
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode(["success" => false, "error" => "Invalid JSON body"]);
+    exit;
+}
+
+$trainingMode = !empty($payload["trainingMode"]);
+$slimResponse = !empty($payload["slimResponse"]);
+$profileTimings = !empty($payload["profileTimings"]);
+$useRlGameState = !array_key_exists("useRlGameState", $payload) || !empty($payload["useRlGameState"]);
+$compareGameStateBuild = !empty($payload["compareGameStateBuild"]);
+
+$FAB_RL_TRAINING_MODE = $trainingMode;
+$FAB_RL_PROFILE = $profileTimings;
+$timingsMs = [];
+
+function _rlStepMarkTiming($label, $start)
+{
+    global $timingsMs, $FAB_RL_PROFILE;
+    if (empty($FAB_RL_PROFILE)) {
+        return;
+    }
+    $timingsMs[$label] = round((microtime(true) - $start) * 1000, 2);
+}
+
 include $fabRoot . "/HostFiles/Redirector.php";
-include $fabRoot . "/WriteLog.php";
+
+if ($trainingMode && file_exists($fabBridgeStubs . "/WriteLog.php")) {
+    include $fabBridgeStubs . "/WriteLog.php";
+} else {
+    include $fabRoot . "/WriteLog.php";
+}
+
 include $fabRoot . "/GameLogic.php";
 include $fabRoot . "/GameTerms.php";
 include_once $fabRoot . "/Libraries/SHMOPLibraries.php";
@@ -26,25 +60,36 @@ include $fabRoot . "/Libraries/CacheLibraries.php";
 include $fabRoot . "/AI/CombatDummy.php";
 include $fabRoot . "/Libraries/HTTPLibraries.php";
 require_once $fabRoot . "/Libraries/CoreLibraries.php";
-include_once $fabRoot . "/includes/dbh.inc.php";
-include_once $fabRoot . "/includes/functions.inc.php";
-include_once $fabRoot . "/includes/MetafyHelper.php";
-include_once $fabRoot . "/APIKeys/APIKeys.php";
-include_once $fabRoot . "/Assets/patreon-php-master/src/PatreonDictionary.php";
-include_once $fabRoot . "/Assets/MetafyDictionary.php";
-include_once $fabRoot . "/AccountFiles/AccountSessionAPI.php";
-include_once $fabRoot . "/Libraries/ValidationLibraries.php";
+
+if ($trainingMode) {
+    if (file_exists($fabBridgeStubs . "/RLValidation.php")) {
+        include_once $fabBridgeStubs . "/RLValidation.php";
+    } else {
+        include_once $fabRoot . "/RLValidation.php";
+    }
+} else {
+    include_once $fabRoot . "/includes/dbh.inc.php";
+    include_once $fabRoot . "/includes/functions.inc.php";
+    include_once $fabRoot . "/includes/MetafyHelper.php";
+    include_once $fabRoot . "/APIKeys/APIKeys.php";
+    include_once $fabRoot . "/Assets/patreon-php-master/src/PatreonDictionary.php";
+    include_once $fabRoot . "/Assets/MetafyDictionary.php";
+    include_once $fabRoot . "/AccountFiles/AccountSessionAPI.php";
+    include_once $fabRoot . "/Libraries/ValidationLibraries.php";
+}
+
 include_once $fabRoot . "/BuildGameState.php";
 include_once $fabRoot . "/BuildPlayerInputPopup.php";
+if ($trainingMode) {
+    if (file_exists($fabRoot . "/BuildRLGameState.php")) {
+        include_once $fabRoot . "/BuildRLGameState.php";
+    } elseif (file_exists($fabBridgeStubs . "/BuildRLGameState.php")) {
+        include_once $fabBridgeStubs . "/BuildRLGameState.php";
+    }
+}
 
 SetHeaders();
 header('Content-Type: application/json; charset=utf-8');
-
-$payload = json_decode(file_get_contents('php://input'), true);
-if (!is_array($payload)) {
-    echo json_encode(["success" => false, "error" => "Invalid JSON body"]);
-    exit;
-}
 
 $gameName = $payload["gameName"] ?? "";
 if (!IsGameNameValid($gameName)) {
@@ -62,7 +107,6 @@ $authKey = strval($payload["authKey"] ?? "");
 $mode = intval($payload["mode"] ?? 0);
 $buttonInput = isset($payload["buttonInput"]) ? sanitizeString(strval($payload["buttonInput"])) : "";
 $cardID = isset($payload["cardID"]) ? sanitizeString(strval($payload["cardID"])) : "";
-$numMode = intval($payload["numMode"] ?? 0);
 $chkCount = intval($payload["chkCount"] ?? 0);
 $inputText = isset($payload["inputText"]) ? sanitizeString(strval($payload["inputText"])) : "";
 
@@ -117,7 +161,6 @@ if (!IsModeAsync($mode) && $currentPlayer != $playerID) {
     exit;
 }
 
-$otherPlayer = $currentPlayer == 1 ? 2 : 1;
 $skipWriteGamestate = false;
 $mainPlayerGamestateStillBuilt = 0;
 $makeCheckpoint = 0;
@@ -136,6 +179,7 @@ if ($mode == 27) {
     $buttonInput = $hand[$index] ?? "";
 }
 
+$tProcess = microtime(true);
 ProcessInput($playerID, $mode, $buttonInput, $cardID, $chkCount, $chkInput, false, $inputText);
 ProcessMacros();
 
@@ -144,9 +188,11 @@ if ($p2IsAI == "1") {
     EncounterAI();
 }
 CacheCombatResult();
+_rlStepMarkTiming("processInput", $tProcess);
 
+$tWrite = microtime(true);
 if (!$skipWriteGamestate) {
-    if (!IsModeAsync($mode)) {
+    if (!$trainingMode && !IsModeAsync($mode)) {
         $currentTime = round(microtime(true) * 1000);
         SetCachePiece($gameName, 12, "0");
         SetCachePiece($gameName, 2, $currentTime);
@@ -155,32 +201,70 @@ if (!$skipWriteGamestate) {
     DoGamestateUpdate();
     include $fabRoot . "/WriteGamestate.php";
 }
+_rlStepMarkTiming("writeState", $tWrite);
 
-if ($makeCheckpoint) {
-    MakeGamestateBackup();
-}
-if ($makeBlockBackup) {
-    MakeGamestateBackup("preBlockBackup.txt");
-}
-if ($MakeStartTurnBackup) {
-    MakeStartTurnBackup();
-}
-if ($MakeStartGameBackup) {
-    MakeGamestateBackup("origGamestate.txt");
+if (!$trainingMode) {
+    if ($makeCheckpoint) {
+        MakeGamestateBackup();
+    }
+    if ($makeBlockBackup) {
+        MakeGamestateBackup("preBlockBackup.txt");
+    }
+    if ($MakeStartTurnBackup) {
+        MakeStartTurnBackup();
+    }
+    if ($MakeStartGameBackup) {
+        MakeGamestateBackup("origGamestate.txt");
+    }
 }
 
-InvalidateGamestateCache($gameName);
-GamestateUpdated($gameName);
+if (!$trainingMode) {
+    InvalidateGamestateCache($gameName);
+    GamestateUpdated($gameName);
+}
 
 $sessionData = [];
 $states = [];
-$states["1"] = BuildGameStateResponse($gameName, 1, $p1Key, $sessionData, true);
-$states["2"] = BuildGameStateResponse($gameName, 2, $p2Key, $sessionData, true);
+$responseCompare = null;
+$tBuild = microtime(true);
 
-echo json_encode([
+$buildRlState = $trainingMode && $useRlGameState && function_exists("BuildRLGameStateResponse");
+
+if ($buildRlState) {
+    $priorityPlayer = intval($currentPlayer);
+    $priorityKey = strval($priorityPlayer);
+    $states[$priorityKey] = BuildRLGameStateResponse($gameName, $priorityPlayer);
+    if ($compareGameStateBuild) {
+        $priorityAuth = ($priorityPlayer == 1 ? $p1Key : $p2Key);
+        $responseCompare = [
+            "rl" => $states[$priorityKey],
+            "full" => BuildGameStateResponse($gameName, $priorityPlayer, $priorityAuth, $sessionData, true),
+        ];
+    }
+} elseif ($slimResponse) {
+    $priorityPlayer = intval($currentPlayer);
+    $priorityKey = strval($priorityPlayer);
+    $priorityAuth = ($priorityPlayer == 1 ? $p1Key : $p2Key);
+    $states[$priorityKey] = BuildGameStateResponse($gameName, $priorityPlayer, $priorityAuth, $sessionData, true);
+} else {
+    $states["1"] = BuildGameStateResponse($gameName, 1, $p1Key, $sessionData, true);
+    $states["2"] = BuildGameStateResponse($gameName, 2, $p2Key, $sessionData, true);
+}
+_rlStepMarkTiming("buildState", $tBuild);
+
+$tEncode = microtime(true);
+$response = [
     "success" => true,
     "notYourTurn" => false,
     "currentPlayer" => intval($currentPlayer),
     "lastUpdate" => intval(GetCachePiece($gameName, 1)),
     "states" => $states,
-]);
+];
+if (!empty($FAB_RL_PROFILE) && !empty($timingsMs)) {
+    $response["timingsMs"] = $timingsMs;
+}
+if (!empty($compareGameStateBuild) && isset($responseCompare)) {
+    $response["compareStates"] = $responseCompare;
+}
+_rlStepMarkTiming("jsonEncode", $tEncode);
+echo json_encode($response);

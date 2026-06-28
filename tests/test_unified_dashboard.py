@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from fab_bridge.unified_dashboard import (
+    LOGIC_VS_LOGIC_BASELINE_NAME,
     UNIFIED_DASHBOARD_NAME,
     UNIFIED_LIVE_STATE,
     collect_unified_run_state,
@@ -44,6 +45,10 @@ def test_collect_and_render_dashboard(tmp_path: Path) -> None:
     )
     (run_dir / "checkpoint_eval_scope.json").write_text(
         json.dumps({"matchup": "a-vs-b", "matchup_dir": "match_a"}),
+        encoding="utf-8",
+    )
+    (matchup_dir / LOGIC_VS_LOGIC_BASELINE_NAME).write_text(
+        json.dumps({"p1_win_rate": 0.48}),
         encoding="utf-8",
     )
     (run_dir / UNIFIED_LIVE_STATE).write_text(
@@ -164,20 +169,23 @@ def test_collect_and_render_dashboard(tmp_path: Path) -> None:
     latest = state["checkpoint_points"][-1]
     assert latest["vs_logic_agent_p1"] == 0.65
     assert latest["vs_logic_win_rate"] == pytest.approx(0.63)
-    assert latest["logic_vs_logic_win_rate"] == 0.52
     assert latest["logic_vs_agent_win_rate"] == pytest.approx(0.37)
     assert latest["agent_vs_agent_win_rate"] == 0.51
     assert latest["timeout_rate"] == 0.01
+    assert state["matchup_logic_vs_logic_win_rate"] == 0.48
 
     html = render_unified_random_matchups_html(state, auto_refresh_seconds=5.0)
     assert "Training AI agents with random matchups" in html
     assert html.count("<th>Matchup</th>") == 1
     assert "Agent win% vs logic" in html
-    assert "Logic win% vs logic" in html
+    assert "Logic win% vs logic" not in html
     assert "Logic vs agent win%" in html
     assert "Agent win% vs agent" in html
     assert "Timeout %" in html
-    assert "Vs logic avg%" not in html
+    assert "Vs logic (avg)" not in html
+    assert "Logic vs logic" in html
+    assert "C++ checkpoint eval replay" not in html
+    assert "Talishar fast checkpoint eval replay" in html
     assert "Self-play P1%" not in html
     assert "First self-play ckpt" in html
     assert "Train P1 win%" not in html
@@ -191,13 +199,22 @@ def test_collect_and_render_dashboard(tmp_path: Path) -> None:
     assert "1/3" in html
     assert "250/1000" in html
 
-    from fab_bridge.cpp_eval_live_dashboard import CPP_EVAL_LIVE_DASHBOARD
+    from fab_bridge.cpp_eval_live_dashboard import (
+        CPP_EVAL_LIVE_DASHBOARD,
+        CPP_EVAL_LIVE_STATE,
+    )
 
     (run_dir / CPP_EVAL_LIVE_DASHBOARD).write_text("<html></html>", encoding="utf-8")
+    (run_dir / CPP_EVAL_LIVE_STATE).write_text(
+        json.dumps({"engine": "talishar_fast", "engine_display": "Talishar fast"}),
+        encoding="utf-8",
+    )
     state_with_live = collect_unified_run_state(run_dir)
     assert state_with_live["cpp_eval_live_dashboard_path"]
+    assert state_with_live["checkpoint_eval_replay_label"] == "Talishar fast"
     html_with_live = render_unified_random_matchups_html(state_with_live)
     assert CPP_EVAL_LIVE_DASHBOARD in html_with_live
+    assert "Talishar fast checkpoint eval replay" in html_with_live
 
     html_path = write_unified_random_matchups_dashboard(run_dir, auto_refresh_seconds=5.0)
     assert html_path == run_dir / UNIFIED_DASHBOARD_NAME

@@ -9,7 +9,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from fab_bridge.cpp_eval_live_dashboard import CPP_EVAL_LIVE_DASHBOARD
+from fab_bridge.cpp_eval_live_dashboard import (
+    CPP_EVAL_LIVE_DASHBOARD,
+    CPP_EVAL_LIVE_STATE,
+    checkpoint_eval_replay_display_label,
+    format_checkpoint_eval_replay_heading,
+)
 from fab_bridge.unified_results import (
     RUN_MANIFEST,
     iter_unified_matchup_dirs,
@@ -19,6 +24,7 @@ from fab_bridge.unified_results import (
 
 UNIFIED_DASHBOARD_NAME = "unified_random_matchups_dashboard.html"
 UNIFIED_LIVE_STATE = "unified_training_live.json"
+LOGIC_VS_LOGIC_BASELINE_NAME = "logic_vs_logic_baseline.json"
 
 _last_dashboard_write: dict[str, float] = {}
 
@@ -73,6 +79,14 @@ def _logic_vs_logic_win_rate(row: dict[str, Any]) -> Optional[float]:
     return None
 
 
+def _read_matchup_logic_vs_logic_baseline(matchup_dir: Path) -> Optional[float]:
+    """Read once-per-matchup logic-vs-logic baseline from the matchup directory."""
+    raw = _read_json(matchup_dir / LOGIC_VS_LOGIC_BASELINE_NAME)
+    if isinstance(raw, dict) and raw.get("p1_win_rate") is not None:
+        return float(raw["p1_win_rate"])
+    return None
+
+
 def _logic_vs_agent_win_rate(row: dict[str, Any]) -> Optional[float]:
     """Average logic-policy win rate vs the trained agent (both seats)."""
     vs_logic = row.get("vs_logic")
@@ -115,6 +129,30 @@ def _apply_checkpoint_history_to_row(
         row["checkpoint_vs_logic_win_rate"] = last_vs_logic
     if last.get("episodes_completed") is not None:
         row["episodes_completed"] = int(last["episodes_completed"])
+
+
+def _resolve_checkpoint_eval_replay_label(
+    run_dir: Path,
+    *,
+    ckpt_history: list[Any],
+    live: dict[str, Any],
+) -> str:
+    """Infer the eval replay engine label for unified training runs."""
+    live_state = _read_json(run_dir / CPP_EVAL_LIVE_STATE)
+    if isinstance(live_state, dict):
+        label = checkpoint_eval_replay_display_label(live_state)
+        if label:
+            return label
+    for row in reversed(ckpt_history):
+        if isinstance(row, dict) and row.get("runtime_backend"):
+            label = checkpoint_eval_replay_display_label(str(row["runtime_backend"]))
+            if label:
+                return label
+    if isinstance(live, dict) and live.get("runtime_backend"):
+        label = checkpoint_eval_replay_display_label(str(live["runtime_backend"]))
+        if label:
+            return label
+    return "Talishar fast"
 
 
 def _matchup_label(matchup_dir: Path) -> str:
@@ -290,7 +328,6 @@ def collect_unified_run_state(run_dir: Path) -> dict[str, Any]:
                 "vs_logic_agent_p2": vs_p2,
                 "vs_logic_win_rate": vs_avg,
                 "logic_vs_agent_win_rate": _logic_vs_agent_win_rate(row),
-                "logic_vs_logic_win_rate": _logic_vs_logic_win_rate(row),
                 "agent_vs_agent_win_rate": float(row.get("p1_win_rate") or 0.0),
                 "timeout_rate": timeout_rate,
             }
@@ -299,10 +336,22 @@ def collect_unified_run_state(run_dir: Path) -> dict[str, Any]:
     latest_vs_logic_p1: Optional[float] = None
     latest_vs_logic_p2: Optional[float] = None
     latest_vs_logic_avg: Optional[float] = None
+    matchup_logic_vs_logic: Optional[float] = None
     if checkpoint_points:
         latest_vs_logic_p1 = checkpoint_points[-1].get("vs_logic_agent_p1")
         latest_vs_logic_p2 = checkpoint_points[-1].get("vs_logic_agent_p2")
         latest_vs_logic_avg = checkpoint_points[-1].get("vs_logic_win_rate")
+    if current_subdir:
+        matchup_logic_vs_logic = _read_matchup_logic_vs_logic_baseline(
+            run_dir / current_subdir
+        )
+    if matchup_logic_vs_logic is None and ckpt_history:
+        first_ckpt = next(
+            (row for row in ckpt_history if isinstance(row, dict)),
+            None,
+        )
+        if isinstance(first_ckpt, dict):
+            matchup_logic_vs_logic = _logic_vs_logic_win_rate(first_ckpt)
 
     completed_rows = [
         _matchup_summary_row(matchup_dir, target_episodes)
@@ -322,6 +371,11 @@ def collect_unified_run_state(run_dir: Path) -> dict[str, Any]:
     cpp_eval_live_dashboard = run_dir / CPP_EVAL_LIVE_DASHBOARD
     cpp_eval_live_dashboard_path = (
         str(cpp_eval_live_dashboard) if cpp_eval_live_dashboard.is_file() else ""
+    )
+    checkpoint_eval_replay_label = _resolve_checkpoint_eval_replay_label(
+        run_dir,
+        ckpt_history=ckpt_history,
+        live=live,
     )
 
     return {
@@ -345,10 +399,12 @@ def collect_unified_run_state(run_dir: Path) -> dict[str, Any]:
         "latest_vs_logic_win_rate": latest_vs_logic_avg,
         "latest_vs_logic_p1_seat": latest_vs_logic_p1,
         "latest_vs_logic_p2_seat": latest_vs_logic_p2,
+        "matchup_logic_vs_logic_win_rate": matchup_logic_vs_logic,
         "completed_matchups": completed_rows,
         "overall_pct": overall_pct,
         "complete": status == "complete",
         "cpp_eval_live_dashboard_path": cpp_eval_live_dashboard_path,
+        "checkpoint_eval_replay_label": checkpoint_eval_replay_label,
     }
 
 
@@ -427,15 +483,18 @@ def render_unified_random_matchups_html(
     }.get(status, status.title())
 
     cpp_live_path = str(state.get("cpp_eval_live_dashboard_path") or "").strip()
+    replay_heading = format_checkpoint_eval_replay_heading(
+        str(state.get("checkpoint_eval_replay_label") or "")
+    )
     if cpp_live_path:
         cpp_live_link = (
-            f'<p class="muted">C++ checkpoint eval replay: '
+            f'<p class="muted">{html.escape(replay_heading)}: '
             f'<a href="{html.escape(CPP_EVAL_LIVE_DASHBOARD)}">'
             f"{html.escape(CPP_EVAL_LIVE_DASHBOARD)}</a></p>"
         )
     else:
         cpp_live_link = (
-            '<p class="muted">C++ checkpoint eval replay appears here during checkpoint eval '
+            f'<p class="muted">{html.escape(replay_heading)} appears here during checkpoint eval '
             f"({html.escape(CPP_EVAL_LIVE_DASHBOARD)}).</p>"
         )
 
@@ -467,7 +526,6 @@ def render_unified_random_matchups_html(
     for row in reversed(state.get("checkpoint_points") or []):
         ckpt_rows += (
             f"<tr><td>{int(row.get('episode', 0))}</td>"
-            f"<td>{_pct(row.get('logic_vs_logic_win_rate'))}</td>"
             f"<td>{_pct(row.get('vs_logic_win_rate'))}</td>"
             f"<td>{_pct(row.get('logic_vs_agent_win_rate'))}</td>"
             f"<td>{_pct(row.get('agent_vs_agent_win_rate'))}</td>"
@@ -476,12 +534,11 @@ def render_unified_random_matchups_html(
     ckpt_table = (
         f'<table class="history"><thead><tr>'
         f"<th>Episode</th>"
-        f"<th>Logic win% vs logic</th>"
         f"<th>Agent win% vs logic</th>"
         f"<th>Logic vs agent win%</th>"
         f"<th>Agent win% vs agent</th>"
         f"<th>Timeout %</th>"
-        f"</tr></thead><tbody>{ckpt_rows or '<tr><td colspan=\"6\" class=\"muted\">No checkpoint eval yet</td></tr>'}</tbody></table>"
+        f"</tr></thead><tbody>{ckpt_rows or '<tr><td colspan=\"5\" class=\"muted\">No checkpoint eval yet</td></tr>'}</tbody></table>"
     )
 
     return f"""<!DOCTYPE html>
@@ -554,7 +611,7 @@ def render_unified_random_matchups_html(
         <div><span class="metric-label">P1 seat win%</span><span class="metric-value">{_pct(state.get('train_p1_win_rate'))}</span></div>
         <div><span class="metric-label">P2 seat win%</span><span class="metric-value">{_pct(state.get('train_p2_win_rate'))}</span></div>
         <div><span class="metric-label">Latest self-play ckpt</span><span class="metric-value">{_pct(state.get('latest_checkpoint_win_rate'))}</span></div>
-        <div><span class="metric-label">Vs logic (avg)</span><span class="metric-value">{_pct(state.get('latest_vs_logic_win_rate'))}</span></div>
+        <div><span class="metric-label">Logic vs logic</span><span class="metric-value">{_pct(state.get('matchup_logic_vs_logic_win_rate'))}</span></div>
         <div><span class="metric-label">Vs logic P1 / P2 seat</span><span class="metric-value">{_pct(state.get('latest_vs_logic_p1_seat'))} / {_pct(state.get('latest_vs_logic_p2_seat'))}</span></div>
       </div>
     </div>

@@ -302,6 +302,9 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         # Keep card hover previews in the Talishar FE (human play).  Disabled by
         # default for rgb_array capture / spectator live view.
         enable_frontend_card_hover: bool = False,
+        # RL training optimizations for RLStep overlay (skip backups, slim JSON).
+        rl_training_mode: bool = False,
+        rl_slim_response: bool = True,
     ) -> None:
         self._base_url = (
             base_url or os.environ.get("TALISHAR_URL", DEFAULT_TALISHAR_URL)
@@ -355,6 +358,10 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         self._resolved_talishar_backend = "http"
         self._fast_client: Optional[TalisharFastClient] = None
         self._rlstep_available = False
+        self._rl_training_mode = bool(rl_training_mode)
+        self._rl_slim_response = bool(rl_slim_response)
+        self._rl_use_min_gamestate = True
+        self._rl_parity_checked = False
         alignment_default = cpp_obs_alignment_enabled() if cpp_obs_alignment is None else bool(cpp_obs_alignment)
         self._cpp_obs_alignment = alignment_default
 
@@ -481,10 +488,18 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         if requested == "http":
             self._resolved_talishar_backend = "http"
         elif requested in ("fast", "auto", "cpp"):
+            pool_size = None
+            pool_env = os.environ.get("FAB_TALISHAR_HTTP_POOL_SIZE", "").strip()
+            if pool_env:
+                try:
+                    pool_size = max(4, int(pool_env))
+                except ValueError:
+                    pool_size = None
             self._fast_client = TalisharFastClient(
                 self._base_url,
                 request_timeout=self._request_timeout,
                 keep_alive=True,
+                pool_size=pool_size,
             )
             self._session = self._fast_client.session
             self._resolved_talishar_backend = "fast"
@@ -571,6 +586,69 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             return self._adopt_player_state(normalized[inferred], inferred)
         return self._adopt_player_state(normalized.get(1, {}), 1)
 
+    def _rlstep_payload_extras(self) -> dict[str, Any]:
+        extras: dict[str, Any] = {}
+        if os.environ.get("FAB_RLSTEP_PROFILE", "").strip().lower() in {"1", "true", "yes"}:
+            extras["profileTimings"] = True
+        return extras
+
+    def _legal_action_fingerprint(self, actions: list[dict[str, Any]]) -> set[tuple[Any, ...]]:
+        out: set[tuple[Any, ...]] = set()
+        for action in actions:
+            out.add(
+                (
+                    int(action.get("action_code", 0) or 0),
+                    str(action.get("button_input", "")),
+                    str(action.get("zone", "")),
+                    str(action.get("label", "")),
+                )
+            )
+        return out
+
+    def _maybe_check_rlstep_parity(self, resp: dict[str, Any]) -> None:
+        if not self._rl_training_mode or self._rl_parity_checked:
+            return
+        if os.environ.get("FAB_RLSTEP_PARITY_CHECK", "").strip().lower() not in {
+            "1",
+            "true",
+            "yes",
+        }:
+            return
+        compare = resp.get("compareStates")
+        if not isinstance(compare, dict):
+            return
+        rl_state = compare.get("rl")
+        full_state = compare.get("full")
+        if not isinstance(rl_state, dict) or not isinstance(full_state, dict):
+            return
+        rl_legal = self._filter_legal_actions(
+            rl_state, self._extract_legal_actions(rl_state)
+        )
+        full_legal = self._filter_legal_actions(
+            full_state, self._extract_legal_actions(full_state)
+        )
+        if self._legal_action_fingerprint(rl_legal) != self._legal_action_fingerprint(
+            full_legal
+        ):
+            raise RuntimeError(
+                f"RLStep parity mismatch: legal actions differ "
+                f"(rl={len(rl_legal)} full={len(full_legal)})"
+            )
+
+        saved_vec = self._last_observation_vec
+        self._encode_observation(rl_state, rl_legal)
+        rl_vec = np.asarray(self._last_observation_vec, dtype=np.float64)
+        self._encode_observation(full_state, full_legal)
+        full_vec = np.asarray(self._last_observation_vec, dtype=np.float64)
+        self._last_observation_vec = saved_vec
+        if rl_vec.shape != full_vec.shape:
+            raise RuntimeError(
+                f"RLStep parity mismatch: obs shape {rl_vec.shape} vs {full_vec.shape}"
+            )
+        if float(np.max(np.abs(rl_vec - full_vec))) > 0.05:
+            raise RuntimeError("RLStep parity mismatch: observation vector diverged")
+        self._rl_parity_checked = True
+
     def _submit_action_and_sync(
         self,
         mode: int,
@@ -589,8 +667,22 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             if button_input:
                 payload["buttonInput"] = button_input
                 payload["cardID"] = button_input
+            if self._rl_training_mode:
+                payload["trainingMode"] = True
+                if self._rl_slim_response:
+                    payload["slimResponse"] = True
+                if not self._rl_use_min_gamestate:
+                    payload["useRlGameState"] = False
+                if (
+                    not self._rl_parity_checked
+                    and os.environ.get("FAB_RLSTEP_PARITY_CHECK", "").strip().lower()
+                    in {"1", "true", "yes"}
+                ):
+                    payload["compareGameStateBuild"] = True
+            payload.update(self._rlstep_payload_extras())
             resp = self._fast_client.post_rlstep(payload)
             if resp.get("success"):
+                self._maybe_check_rlstep_parity(resp)
                 state = self._apply_rlstep_states(resp)
                 try:
                     self._last_update = int(resp.get("lastUpdate", self._last_update))
@@ -696,6 +788,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         _ = seed  # Talishar shuffles server-side; seed not wired yet.
         self._session.cookies.clear()
         self._last_update = 0
+        self._rl_parity_checked = False
         self._game_name, self._p1_auth_key, self._p2_auth_key = self._create_game()
         self._acting_player_id = 2 if int(starting_player_id) == 2 else 1
         started_key = self._start_game(self._game_name)

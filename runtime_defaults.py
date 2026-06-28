@@ -7,6 +7,7 @@ and game-control settings. Workflow sections under ``RUNTIME`` are derived from
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field, replace
 
 @dataclass
@@ -48,6 +49,17 @@ class MetaEngineControls:
     # ── Parallel training episode wall-clock limits ─────────────────────────
     episode_timeout_seconds_per_step: float = 3.0
     episode_timeout_floor_seconds: float = 180.0
+
+
+@dataclass
+class MetaRolloutControls:
+    """Fast Talishar rollout parallelism (``train_dual_agent_common``)."""
+
+    # batched | threaded_episodes | batched_concurrent
+    mode: str = "batched_concurrent"
+    # Subprocess rollout collectors; 1 = single-process only
+    processes: int = 1
+    http_pool_size: int = 32
 
 
 @dataclass
@@ -115,6 +127,9 @@ class MetaRuntime:
     eval_poll_seconds: int = 30
     gif_fps: float = 3.0
     gif_fps_matchup_sim: float = 2.0
+
+    # ── Fast rollout parallelism ─────────────────────────────────────────────
+    rollout: MetaRolloutControls = field(default_factory=MetaRolloutControls)
 
     # ── Unified random fabrary matchups ───────────────────────────────────────
     unified_random_matchups: MetaUnifiedRandomMatchups = field(
@@ -273,6 +288,15 @@ class TuiDefaults:
 
 
 @dataclass(frozen=True)
+class RolloutDefaults:
+    """Fast Talishar rollout collection settings."""
+
+    mode: str
+    processes: int
+    http_pool_size: int
+
+
+@dataclass(frozen=True)
 class UnifiedRandomMatchupsDefaults:
     """``train_unified_random_matchups.py`` / fab_tui unified matchup wizard."""
 
@@ -309,6 +333,7 @@ class RuntimeDefaults:
     dual_matchup: DualMatchupDefaults
     ppo: PpoDefaults
     tui: TuiDefaults
+    rollout: RolloutDefaults
     unified_random_matchups: UnifiedRandomMatchupsDefaults
 
 def _engine_controls(meta: MetaRuntime) -> EngineDefaults:
@@ -355,6 +380,49 @@ def engine_env_kwargs(engine: EngineDefaults | MetaEngineControls) -> dict[str, 
         "max_consecutive_passes": engine.max_consecutive_passes,
         "request_timeout": engine.talishar_request_timeout,
     }
+
+
+VALID_ROLLOUT_MODES = frozenset({"batched", "threaded_episodes", "batched_concurrent"})
+
+
+def normalize_rollout_mode(mode: str | None) -> str:
+    """Return a supported rollout mode string."""
+    value = str(mode or "batched_concurrent").strip().lower()
+    if value not in VALID_ROLLOUT_MODES:
+        raise ValueError(
+            f"Unsupported rollout mode {mode!r}; expected one of "
+            f"{sorted(VALID_ROLLOUT_MODES)}"
+        )
+    return value
+
+
+def resolve_rollout_processes(
+    processes: int | None = None,
+    *,
+    env_override: str | None = None,
+    default: int = 1,
+) -> int:
+    """Resolve rollout subprocess count from explicit value, env, or runtime default."""
+    if env_override is None:
+        env_override = os.environ.get("FAB_ROLLOUT_PROCESSES")
+    if env_override:
+        try:
+            return max(1, int(env_override))
+        except ValueError:
+            pass
+    if processes is not None:
+        return max(1, int(processes))
+    return max(1, int(default))
+
+
+def envs_per_rollout_process(
+    total_workers: int,
+    rollout_processes: int,
+) -> int:
+    """Divide env slots across rollout subprocesses."""
+    total = max(1, int(total_workers))
+    processes = max(1, int(rollout_processes))
+    return max(1, total // processes)
 
 
 def episode_timeout_seconds(
@@ -460,6 +528,11 @@ def build_runtime(meta: MetaRuntime) -> RuntimeDefaults:
             eval_max_steps=meta.eval_max_steps,
             eval_poll_seconds=meta.eval_poll_seconds,
         ),
+        rollout=RolloutDefaults(
+            mode=normalize_rollout_mode(meta.rollout.mode),
+            processes=max(1, int(meta.rollout.processes)),
+            http_pool_size=max(4, int(meta.rollout.http_pool_size)),
+        ),
         unified_random_matchups=UnifiedRandomMatchupsDefaults(
             matchups=urm.matchups,
             episodes=urm.episodes,
@@ -528,6 +601,9 @@ DEFAULT_UNIFIED_WARMUP_EPISODES = _UR.warmup_episodes
 DEFAULT_UNIFIED_CHECKPOINT_INTERVAL_PCT = _UR.checkpoint_interval_pct
 DEFAULT_UNIFIED_CHECKPOINT_EVAL_EPISODES = _UR.checkpoint_eval_episodes
 DEFAULT_UNIFIED_WORKERS = _UR.workers
+DEFAULT_ROLLOUT_MODE = RUNTIME.rollout.mode
+DEFAULT_ROLLOUT_PROCESSES = RUNTIME.rollout.processes
+DEFAULT_ROLLOUT_HTTP_POOL_SIZE = RUNTIME.rollout.http_pool_size
 
 
 def apply_meta(**overrides: object) -> RuntimeDefaults:
@@ -551,6 +627,7 @@ def apply_meta(**overrides: object) -> RuntimeDefaults:
     global DEFAULT_UNIFIED_MAX_STEPS, DEFAULT_UNIFIED_WARMUP_EPISODES  # noqa: PLW0603
     global DEFAULT_UNIFIED_CHECKPOINT_INTERVAL_PCT  # noqa: PLW0603
     global DEFAULT_UNIFIED_CHECKPOINT_EVAL_EPISODES, DEFAULT_UNIFIED_WORKERS  # noqa: PLW0603
+    global DEFAULT_ROLLOUT_MODE, DEFAULT_ROLLOUT_PROCESSES, DEFAULT_ROLLOUT_HTTP_POOL_SIZE  # noqa: PLW0603
 
     META = replace(META, **overrides)
     RUNTIME = build_runtime(META)
@@ -595,4 +672,7 @@ def apply_meta(**overrides: object) -> RuntimeDefaults:
     DEFAULT_UNIFIED_CHECKPOINT_INTERVAL_PCT = _ur.checkpoint_interval_pct
     DEFAULT_UNIFIED_CHECKPOINT_EVAL_EPISODES = _ur.checkpoint_eval_episodes
     DEFAULT_UNIFIED_WORKERS = _ur.workers
+    DEFAULT_ROLLOUT_MODE = RUNTIME.rollout.mode
+    DEFAULT_ROLLOUT_PROCESSES = RUNTIME.rollout.processes
+    DEFAULT_ROLLOUT_HTTP_POOL_SIZE = RUNTIME.rollout.http_pool_size
     return RUNTIME

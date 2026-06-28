@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -149,9 +150,13 @@ def test_checkpoint_eval_tracker_records_vs_logic(monkeypatch, tmp_path: Path) -
         cpp_engine_dir="/tmp/engine",
     )
 
+    logic_calls = 0
+
     def _fake_self_play(*_args: object, **kwargs: object) -> dict:
         label = str(kwargs.get("eval_label", ""))
         if "logic vs logic" in label.lower():
+            nonlocal logic_calls
+            logic_calls += 1
             return _sample_metrics(p1_wr=0.54, p2_wr=0.46)
         assert kwargs.get("live_progress_path") is not None
         return _sample_metrics(p1_wr=0.5, p2_wr=0.5)
@@ -170,6 +175,10 @@ def test_checkpoint_eval_tracker_records_vs_logic(monkeypatch, tmp_path: Path) -
     monkeypatch.setattr(
         "train_play.evaluate_agent_vs_logic_both_seats",
         _fake_vs_logic,
+    )
+    monkeypatch.setattr(
+        "train_play.evaluate_logic_vs_logic",
+        _fake_self_play,
     )
     monkeypatch.setattr(
         "train_dual_agent_common._save_unified_selfplay_checkpoint",
@@ -198,13 +207,21 @@ def test_checkpoint_eval_tracker_records_vs_logic(monkeypatch, tmp_path: Path) -
         out_dir=tmp_path,
     )
     tracker.on_parallel_progress(10)
+    tracker.on_parallel_progress(20)
 
-    assert len(tracker.log) == 1
+    assert len(tracker.log) == 2
     record = tracker.log[0]
     assert record["p1_win_rate"] == 0.5
     assert record["vs_logic"]["agent_p1_seat"]["agent_win_rate"] == 0.6
     assert record["vs_logic"]["agent_p2_seat"]["agent_win_rate"] == 0.7
-    assert record["logic_vs_logic"]["p1_win_rate"] == pytest.approx(0.54, abs=0.06)
+    assert "logic_vs_logic" not in record
+    assert logic_calls == 1
+    from fab_bridge.unified_dashboard import LOGIC_VS_LOGIC_BASELINE_NAME
+
+    baseline_path = tmp_path / matchup.name / LOGIC_VS_LOGIC_BASELINE_NAME
+    assert baseline_path.is_file()
+    baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+    assert baseline["p1_win_rate"] == pytest.approx(0.54, abs=0.06)
     ckpt_json = (
         tmp_path
         / matchup.name

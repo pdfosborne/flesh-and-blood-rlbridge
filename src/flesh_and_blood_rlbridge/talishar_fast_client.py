@@ -7,6 +7,7 @@ and tight priority polling without the legacy 350ms post-ProcessInput sleep.
 from __future__ import annotations
 
 import json
+import os
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Optional
 
@@ -34,7 +35,17 @@ def _parse_json_body(body_text: str, *, allow_empty: bool = False) -> dict[str, 
     return data if isinstance(data, dict) else {"_raw": data}
 
 
-def make_talishar_session(*, keep_alive: bool = True) -> requests.Session:
+def make_talishar_session(*, keep_alive: bool = True, pool_size: int | None = None) -> requests.Session:
+    if pool_size is None:
+        pool_env = os.environ.get("FAB_TALISHAR_HTTP_POOL_SIZE", "").strip()
+        if pool_env:
+            try:
+                pool_size = max(4, int(pool_env))
+            except ValueError:
+                pool_size = 32
+        else:
+            pool_size = 32
+    pool_size = max(4, int(pool_size))
     session = requests.Session()
     retry = Retry(
         total=2,
@@ -46,8 +57,8 @@ def make_talishar_session(*, keep_alive: bool = True) -> requests.Session:
         raise_on_status=False,
     )
     adapter = HTTPAdapter(
-        pool_connections=4,
-        pool_maxsize=8,
+        pool_connections=min(8, pool_size),
+        pool_maxsize=pool_size,
         max_retries=retry,
     )
     session.mount("http://", adapter)
@@ -72,10 +83,11 @@ class TalisharFastClient:
         *,
         request_timeout: float = 30.0,
         keep_alive: bool = True,
+        pool_size: int | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.request_timeout = float(request_timeout)
-        self.session = make_talishar_session(keep_alive=keep_alive)
+        self.session = make_talishar_session(keep_alive=keep_alive, pool_size=pool_size)
         self._rlstep_available: Optional[bool] = None
 
     def probe_rlstep(self, *, force: bool = False) -> bool:

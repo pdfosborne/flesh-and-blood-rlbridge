@@ -90,6 +90,8 @@ from play_outcome_stats import (  # noqa: E402
 from runtime_defaults import (  # noqa: E402
     DEFAULT_CHECKPOINT_EVAL_EPISODES,
     DEFAULT_CHECKPOINT_INTERVAL_PCT,
+    DEFAULT_ROLLOUT_MODE,
+    DEFAULT_ROLLOUT_PROCESSES,
     DEFAULT_TALISHAR_BACKEND,
     RUNTIME,
 )
@@ -920,6 +922,8 @@ def run_phase3_play(
     _force_train: bool = False,
     _suppress_train_progress: bool = False,
     _parallel_seed_sync_dir: Optional[Path] = None,
+    rollout_mode: Optional[str] = None,
+    rollout_processes: Optional[int] = None,
 ) -> tuple[float, float]:
     """Co-evolution play using train_dual_agent_common warmup + episode-cache infrastructure.
 
@@ -1447,6 +1451,8 @@ def run_phase3_play(
                 episode_cache=episode_cache,
                 on_episodes_progress=_on_episodes_progress,
                 suppress_train_progress=_suppress_train_progress,
+                rollout_mode=rollout_mode,
+                rollout_processes=rollout_processes,
             )
             p1_outcomes = list(train_stats.get("p1_outcomes") or p1_outcomes)
             if (
@@ -4331,7 +4337,19 @@ def main() -> None:
     parser.add_argument("--warmup-baseline-eval-episodes", type=int,
         default=DEFAULT_WARMUP_BASELINE_EVAL_EPISODES)
     parser.add_argument("--workers", type=int, default=None,
-        help="Parallel C++ game sessions for play training (auto-detected when omitted)")
+        help="Parallel Talishar game sessions for play training (auto-detected when omitted)")
+    parser.add_argument(
+        "--rollout-mode",
+        default=DEFAULT_ROLLOUT_MODE,
+        choices=["batched", "threaded_episodes", "batched_concurrent"],
+        help="Fast rollout collection strategy",
+    )
+    parser.add_argument(
+        "--rollout-processes",
+        type=int,
+        default=DEFAULT_ROLLOUT_PROCESSES,
+        help="Subprocess rollout workers (1 = in-process only)",
+    )
     parser.add_argument(
         "--cache-dir",
         default=str(DEFAULT_AGENT_CACHE_DIR),
@@ -4499,6 +4517,8 @@ def main() -> None:
             checkpoint_eval_episodes=args.checkpoint_eval_episodes,
             parallel_seeds=args.parallel_seeds,
             parallel_seeds_until_first_checkpoint=args.parallel_seeds_until_first_checkpoint,
+            rollout_mode=str(args.rollout_mode),
+            rollout_processes=int(args.rollout_processes),
         )
         p1.last_play_win_rate = p1_wr
         if p2 is not None:

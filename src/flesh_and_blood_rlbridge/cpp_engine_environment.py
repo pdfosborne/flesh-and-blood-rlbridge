@@ -2575,6 +2575,69 @@ class CppEngineEnvironment(rlbridgeEnvironment):
 _DEFAULT_CACHE_DIR = Path(__file__).resolve().parent.parent.parent / "results" / "cpp_engines"
 
 
+def explain_cpp_engine_unavailable(
+    deck1: str,
+    deck2: str,
+    cache_dir: str | Path | None = None,
+) -> str:
+    """Return a human-readable reason when no loadable C++ engine exists."""
+    base = Path(cache_dir) if cache_dir else _DEFAULT_CACHE_DIR
+    key = _matchup_key(deck1, deck2)
+    expected = expected_fab_engine_module_name()
+    py_ver = f"{sys.version_info.major}.{sys.version_info.minor}"
+
+    matchup_dirs: list[Path] = []
+    if base.is_dir():
+        key_lower = key.lower()
+        for path in base.iterdir():
+            if not path.is_dir():
+                continue
+            name_lower = path.name.lower()
+            if name_lower == key_lower or name_lower.startswith(f"{key_lower}-"):
+                matchup_dirs.append(path)
+
+    for engine_dir in sorted(
+        matchup_dirs,
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    ):
+        if is_cpp_engine_available(engine_dir):
+            return "engine is available (unexpected)"
+        stale = sorted(
+            {
+                p.name
+                for p in _iter_engine_module_candidates(engine_dir)
+                if p.is_file() and not _module_matches_current_python(p)
+            }
+        )
+        if stale:
+            return (
+                f"found fab_engine for a different Python ABI in {engine_dir.name} "
+                f"({', '.join(stale)}); rebuild for Python {py_ver} with "
+                f"python scripts/cpp/build_cpp_engine_for_matchup.py "
+                f"--deck1 {deck1} --deck2 {deck2}"
+            )
+        return (
+            f"engine directory {engine_dir.name} exists but no compatible "
+            f"{expected}; run: python scripts/cpp/build_cpp_engine_for_matchup.py "
+            f"--deck1 {deck1} --deck2 {deck2}"
+        )
+
+    if not base.is_dir():
+        return (
+            f"no engine cache at {base}; run: "
+            f"python scripts/cpp/build_cpp_engine_for_matchup.py "
+            f"--deck1 {deck1} --deck2 {deck2}"
+        )
+
+    return (
+        f"no compiled engine for {deck1} vs {deck2} under {base} "
+        f"(expected {key} or {key}-<hash>/{expected}); run: "
+        f"python scripts/cpp/build_cpp_engine_for_matchup.py "
+        f"--deck1 {deck1} --deck2 {deck2}"
+    )
+
+
 def get_engine_dir(
     deck1: str,
     deck2: str,

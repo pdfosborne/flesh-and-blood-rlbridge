@@ -6,9 +6,12 @@ import hashlib
 import json
 import math
 import os
+import queue
 import re
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 import urllib.parse
 import uuid
@@ -32,6 +35,7 @@ TALISHAR_ID_RE = re.compile(r"^[a-z][a-z0-9_]+$")
 
 from fab_tui.deck_cards import assign_pitch_variants  # noqa: E402
 from fab_bridge.unified_dashboard import (  # noqa: E402
+    LOGIC_VS_LOGIC_BASELINE_NAME,
     maybe_refresh_unified_dashboard,
     update_unified_training_live,
     write_unified_random_matchups_dashboard,
@@ -89,6 +93,8 @@ from runtime_defaults import (  # noqa: E402
     DEFAULT_PARALLEL_SEEDS,
     DEFAULT_PPO_EPOCHS,
     DEFAULT_PPO_ROLLOUT_BATCH,
+    DEFAULT_ROLLOUT_MODE,
+    DEFAULT_ROLLOUT_PROCESSES,
     DEFAULT_WARMUP_BASELINE_EVAL_EPISODES,
     DEFAULT_WARMUP_EPISODES,
     DEFAULT_CHECKPOINT_INTERVAL_PCT,
@@ -97,6 +103,9 @@ from runtime_defaults import (  # noqa: E402
     RUNTIME,
     engine_env_kwargs,
     episode_timeout_seconds,
+    envs_per_rollout_process,
+    normalize_rollout_mode,
+    resolve_rollout_processes,
 )
 from parallel_seed_training import (  # noqa: E402
     run_parallel_seed_jobs,
@@ -230,6 +239,7 @@ def make_env(
     cpp_engine_cache_dir: Optional[str] = None,
     enable_combat_tracker: bool = False,
     require_fast_training: Optional[bool] = None,
+    rl_training_mode: bool = True,
 ) -> TalisharEngineEnvironment:
     """Create a :class:`TalisharEngineEnvironment` for *matchup*.
 
@@ -274,6 +284,8 @@ def make_env(
         cpp_engine_dir=matchup.cpp_engine_dir,
         enable_combat_tracker=enable_combat_tracker,
         cpp_obs_alignment=False,
+        rl_training_mode=rl_training_mode,
+        rl_slim_response=rl_training_mode,
         **engine_kw,
     )
     if require_fast_training is None:
@@ -948,6 +960,78 @@ class _FastRolloutSlot:
     final_turn_no: int = 0
 
 
+class _EnvRolloutWorker:
+    """Dedicated thread for one env slot so ``requests.Session`` stays thread-safe."""
+
+    def __init__(self, slot: _FastRolloutSlot) -> None:
+        self._slot = slot
+        self._queue: queue.Queue[Any] = queue.Queue()
+        self._thread = threading.Thread(
+            target=self._loop,
+            name=f"env-rollout-{id(slot)}",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def submit_step(
+        self,
+        *,
+        action: int,
+        value: float,
+        log_prob: float,
+        acting: int,
+        max_steps: int,
+    ) -> None:
+        done = threading.Event()
+        errors: list[BaseException] = []
+        self._queue.put(
+            (action, value, log_prob, acting, max_steps, done, errors)
+        )
+        done.wait()
+        if errors:
+            raise errors[0]
+
+    def _loop(self) -> None:
+        while True:
+            item = self._queue.get()
+            if item is None:
+                break
+            action, value, log_prob, acting, max_steps, done, errors = item
+            try:
+                _apply_fast_rollout_action(
+                    self._slot,
+                    action=action,
+                    value=value,
+                    log_prob=log_prob,
+                    acting=acting,
+                    max_steps=max_steps,
+                )
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                done.set()
+
+    def shutdown(self) -> None:
+        self._queue.put(None)
+        self._thread.join(timeout=60.0)
+
+
+def _announce_rollout_config(
+    *,
+    rollout_mode: str,
+    rollout_processes: int,
+    n_workers: int,
+    base_url: str,
+) -> None:
+    envs_per_proc = envs_per_rollout_process(n_workers, rollout_processes)
+    print(
+        f"  [rollout] mode={rollout_mode}  "
+        f"processes={rollout_processes} × envs={envs_per_proc} "
+        f"(budget={n_workers})  Talishar={base_url}",
+        flush=True,
+    )
+
+
 def _reset_fast_rollout_slot(
     slot: _FastRolloutSlot,
     *,
@@ -1078,6 +1162,127 @@ def _batched_fast_rollout_step(
         )
 
 
+def _batched_fast_rollout_step_concurrent(
+    slots: list[_FastRolloutSlot],
+    env_workers: list[_EnvRolloutWorker],
+    p1_policy: PPOAgent,
+    p2_policy: PPOAgent,
+    *,
+    warmup: bool,
+    max_steps: int,
+) -> None:
+    """Batched policy inference, then concurrent RLStep calls (one thread per env slot)."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    active_indices = [index for index, slot in enumerate(slots) if slot.active]
+    if not active_indices:
+        return
+
+    if warmup:
+        with ThreadPoolExecutor(max_workers=len(active_indices)) as pool:
+            futures = []
+            for index in active_indices:
+                slot = slots[index]
+                state = slot.state
+                n_legal = max(
+                    1,
+                    int(state.get("legal_count", p1_policy.n_actions) or 1),
+                )
+                acting = int(state["acting_player_id"])
+                rng = slot.p1_rng if acting == 1 else slot.p2_rng
+                action = int(rng.integers(n_legal))
+                futures.append(
+                    pool.submit(
+                        env_workers[index].submit_step,
+                        action=action,
+                        value=0.0,
+                        log_prob=0.0,
+                        acting=acting,
+                        max_steps=max_steps,
+                    )
+                )
+            for fut in futures:
+                fut.result()
+        return
+
+    p1_indices: list[int] = []
+    p2_indices: list[int] = []
+    for index in active_indices:
+        acting = int(slots[index].state["acting_player_id"])
+        if acting == 1:
+            p1_indices.append(index)
+        else:
+            p2_indices.append(index)
+
+    p1_actions = p1_log_probs = p1_values = None
+    p2_actions = p2_log_probs = p2_values = None
+    if p1_indices:
+        p1_obs = np.stack([
+            np.asarray(slots[index].state["obs_vec"], dtype=np.float64)
+            for index in p1_indices
+        ])
+        p1_logits, p1_values = p1_policy.predict_batch(p1_obs)
+        p1_nlegal = np.array([
+            max(1, int(slots[index].state.get("legal_count", p1_policy.n_actions) or 1))
+            for index in p1_indices
+        ], dtype=np.int64)
+        p1_actions, p1_log_probs = _sample_actions_from_logits_batch(
+            np.asarray(p1_logits, dtype=np.float64),
+            p1_nlegal,
+            [slots[index].p1_rng for index in p1_indices],
+            p1_policy.n_actions,
+        )
+    if p2_indices:
+        p2_obs = np.stack([
+            np.asarray(slots[index].state["obs_vec"], dtype=np.float64)
+            for index in p2_indices
+        ])
+        p2_logits, p2_values = p2_policy.predict_batch(p2_obs)
+        p2_nlegal = np.array([
+            max(1, int(slots[index].state.get("legal_count", p2_policy.n_actions) or 1))
+            for index in p2_indices
+        ], dtype=np.int64)
+        p2_actions, p2_log_probs = _sample_actions_from_logits_batch(
+            np.asarray(p2_logits, dtype=np.float64),
+            p2_nlegal,
+            [slots[index].p2_rng for index in p2_indices],
+            p2_policy.n_actions,
+        )
+
+    p1_cursor = 0
+    p2_cursor = 0
+    step_jobs: list[tuple[int, int, float, float, int]] = []
+    for index in active_indices:
+        slot = slots[index]
+        acting = int(slot.state["acting_player_id"])
+        if acting == 1:
+            action = int(p1_actions[p1_cursor])  # type: ignore[index]
+            log_prob = float(p1_log_probs[p1_cursor])  # type: ignore[index]
+            value = float(p1_values[p1_cursor])  # type: ignore[index]
+            p1_cursor += 1
+        else:
+            action = int(p2_actions[p2_cursor])  # type: ignore[index]
+            log_prob = float(p2_log_probs[p2_cursor])  # type: ignore[index]
+            value = float(p2_values[p2_cursor])  # type: ignore[index]
+            p2_cursor += 1
+        step_jobs.append((index, action, value, log_prob, acting))
+
+    with ThreadPoolExecutor(max_workers=len(step_jobs)) as pool:
+        futures = [
+            pool.submit(
+                env_workers[index].submit_step,
+                action=action,
+                value=value,
+                log_prob=log_prob,
+                acting=acting,
+                max_steps=max_steps,
+            )
+            for index, action, value, log_prob, acting in step_jobs
+        ]
+        for fut in futures:
+            fut.result()
+
+
 def _apply_fast_rollout_action(
     slot: _FastRolloutSlot,
     *,
@@ -1140,8 +1345,10 @@ def _run_parallel_batched_fast_episodes(
     episode_indices: list[int],
     seed_base: Optional[int],
     swap_envs: Optional[list[TalisharEngineEnvironment]] = None,
+    rollout_mode: str = DEFAULT_ROLLOUT_MODE,
 ) -> list[dict[str, Any]]:
     """Run one episode per env slot with batched PPO inference across active slots."""
+    mode = normalize_rollout_mode(rollout_mode)
     slots: list[_FastRolloutSlot] = []
     for worker, env in enumerate(envs):
         ep_index = episode_indices[worker]
@@ -1162,21 +1369,78 @@ def _run_parallel_batched_fast_episodes(
         )
         slots.append(slot)
 
-    for _ in range(max_steps):
-        if not any(slot.active for slot in slots):
-            break
-        _batched_fast_rollout_step(
-            slots,
-            p1_policy,
-            p2_policy,
-            warmup=warmup,
-            max_steps=max_steps,
-        )
+    env_workers: list[_EnvRolloutWorker] = []
+    if mode == "batched_concurrent":
+        env_workers = [_EnvRolloutWorker(slot) for slot in slots]
+
+    try:
+        for _ in range(max_steps):
+            if not any(slot.active for slot in slots):
+                break
+            if mode == "batched_concurrent":
+                _batched_fast_rollout_step_concurrent(
+                    slots,
+                    env_workers,
+                    p1_policy,
+                    p2_policy,
+                    warmup=warmup,
+                    max_steps=max_steps,
+                )
+            else:
+                _batched_fast_rollout_step(
+                    slots,
+                    p1_policy,
+                    p2_policy,
+                    warmup=warmup,
+                    max_steps=max_steps,
+                )
+    finally:
+        for worker in env_workers:
+            worker.shutdown()
 
     return [
         _fast_episode_result_from_slot(slot, warmup=warmup, max_steps=max_steps)
         for slot in slots
     ]
+
+
+def _run_parallel_fast_episode_batch(
+    envs: list[TalisharEngineEnvironment],
+    p1_policy: PPOAgent,
+    p2_policy: PPOAgent,
+    *,
+    max_steps: int,
+    warmup: bool,
+    episode_indices: list[int],
+    seed_base: Optional[int],
+    swap_envs: Optional[list[TalisharEngineEnvironment]] = None,
+    rollout_mode: str = DEFAULT_ROLLOUT_MODE,
+    max_workers: int = 1,
+) -> list[dict[str, Any]]:
+    """Dispatch one rollout batch using the configured fast rollout mode."""
+    mode = normalize_rollout_mode(rollout_mode)
+    if mode == "threaded_episodes":
+        return _run_parallel_fast_episodes_threaded(
+            envs,
+            p1_policy,
+            p2_policy,
+            max_steps=max_steps,
+            warmup=warmup,
+            episode_indices=episode_indices,
+            seed_base=seed_base,
+            max_workers=max(1, max_workers),
+        )
+    return _run_parallel_batched_fast_episodes(
+        envs,
+        p1_policy,
+        p2_policy,
+        max_steps=max_steps,
+        warmup=warmup,
+        episode_indices=episode_indices,
+        seed_base=seed_base,
+        swap_envs=swap_envs,
+        rollout_mode=mode,
+    )
 
 
 def _run_parallel_fast_episodes_threaded(
@@ -1923,6 +2187,8 @@ def train_agents_from_both_perspectives_parallel(
         Callable[..., None]
     ] = None,
     suppress_train_progress: bool = False,
+    rollout_mode: Optional[str] = None,
+    rollout_processes: Optional[int] = None,
 ) -> tuple[list[float], list[float], dict[str, Any]]:
     """Parallel rollout version of ``train_agents_from_both_perspectives``.
 
@@ -1942,6 +2208,26 @@ def train_agents_from_both_perspectives_parallel(
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     batch_parallelism = max(1, n_workers)
+    resolved_rollout_mode = normalize_rollout_mode(
+        rollout_mode or DEFAULT_ROLLOUT_MODE
+    )
+    resolved_rollout_processes = resolve_rollout_processes(
+        rollout_processes,
+        default=DEFAULT_ROLLOUT_PROCESSES,
+    )
+    _announce_rollout_config(
+        rollout_mode=resolved_rollout_mode,
+        rollout_processes=resolved_rollout_processes,
+        n_workers=batch_parallelism,
+        base_url=base_url,
+    )
+    use_process_rollouts = resolved_rollout_processes > 1
+    if use_process_rollouts:
+        from rollout_worker_pool import collect_rollout_batch  # noqa: PLC0415
+
+        rollout_staging = Path(tempfile.mkdtemp(prefix="fab_rollout_"))
+    else:
+        rollout_staging = None
 
     p1_policy = p1_tiers[0]
     p2_policy = p2_tiers[0]
@@ -2000,7 +2286,7 @@ def train_agents_from_both_perspectives_parallel(
                 )
                 print(f"  [cache] replayed {replayed} cached episode(s) as partial warm-start")
 
-    # ── create worker envs ────────────────────────────────────────────────────
+    # ── create worker envs (single-process rollouts only) ───────────────────
     print(
         f"  [parallel] spawning {batch_parallelism} worker game session(s) "
         f"({n_episodes} episodes, batch={batch_parallelism})…"
@@ -2008,29 +2294,40 @@ def train_agents_from_both_perspectives_parallel(
     envs: list[TalisharEngineEnvironment] = []
     swap_envs: list[TalisharEngineEnvironment] = []
     swap_matchup = swapped_matchup(matchup)
-    for w in range(batch_parallelism):
-        envs.append(
-            make_env(matchup, base_url=base_url, game_format=game_format, max_turns=max_steps)
-        )
-        swap_envs.append(
-            make_env(
-                swap_matchup,
-                base_url=base_url,
-                game_format=game_format,
-                max_turns=max_steps,
+    if not use_process_rollouts:
+        for w in range(batch_parallelism):
+            envs.append(
+                make_env(matchup, base_url=base_url, game_format=game_format, max_turns=max_steps)
             )
+            swap_envs.append(
+                make_env(
+                    swap_matchup,
+                    base_url=base_url,
+                    game_format=game_format,
+                    max_turns=max_steps,
+                )
+            )
+        print(f"  [parallel] {batch_parallelism} sessions ready", flush=True)
+    else:
+        print(
+            f"  [parallel] subprocess rollout pool "
+            f"({resolved_rollout_processes} process(es)) — envs spawn in workers",
+            flush=True,
         )
-    print(f"  [parallel] {batch_parallelism} sessions ready", flush=True)
     print(
         "  [parallel] unified self-play: one policy for both seats; "
         "alternating deck sides each episode",
         flush=True,
     )
-    use_batched_fast_rollout = _env_supports_fast_training(envs[0])
-    if use_batched_fast_rollout:
+    use_fast_rollout = (
+        not use_process_rollouts
+        and bool(envs)
+        and _env_supports_fast_training(envs[0])
+    )
+    if use_fast_rollout or use_process_rollouts:
         print(
-            f"  [parallel] batched PPO inference enabled across "
-            f"{batch_parallelism} rollout slot(s)",
+            f"  [parallel] fast rollout mode={resolved_rollout_mode} across "
+            f"{batch_parallelism} slot(s)",
             flush=True,
         )
 
@@ -2073,8 +2370,25 @@ def train_agents_from_both_perspectives_parallel(
                 # Submit one episode per worker in this batch.
                 seed_base = (seed + completed) if seed is not None else None
                 batch_results: list[dict[str, Any]] = []
-                if use_batched_fast_rollout:
-                    batch_results = _run_parallel_batched_fast_episodes(
+                if use_process_rollouts:
+                    assert rollout_staging is not None
+                    batch_results = collect_rollout_batch(
+                        p1_policy=p1_policy,
+                        p2_policy=p2_policy,
+                        matchup=matchup,
+                        n_episodes=batch_size,
+                        n_workers=batch_size,
+                        max_steps=max_steps,
+                        base_url=base_url,
+                        game_format=game_format,
+                        rollout_mode=resolved_rollout_mode,
+                        rollout_processes=resolved_rollout_processes,
+                        seed_base=seed_base,
+                        warmup=in_warmup,
+                        staging_dir=rollout_staging,
+                    )
+                elif use_fast_rollout:
+                    batch_results = _run_parallel_fast_episode_batch(
                         envs[:batch_size],
                         p1_policy,
                         p2_policy,
@@ -2083,6 +2397,8 @@ def train_agents_from_both_perspectives_parallel(
                         episode_indices=[completed + w for w in range(batch_size)],
                         seed_base=seed_base,
                         swap_envs=swap_envs[:batch_size],
+                        rollout_mode=resolved_rollout_mode,
+                        max_workers=batch_size,
                     )
                 else:
                     futures = {}
@@ -2114,7 +2430,7 @@ def train_agents_from_both_perspectives_parallel(
                 batch_unified_trans: list[dict[str, Any]] = []
                 from concurrent.futures import TimeoutError as FutureTimeoutError
                 result_iter: list[dict[str, Any]]
-                if use_batched_fast_rollout:
+                if use_process_rollouts or use_fast_rollout:
                     result_iter = batch_results
                 else:
                     result_iter = []
@@ -2944,6 +3260,29 @@ class _CheckpointEvalTracker:
         self.first_win_rate: Optional[float] = None
         self.final_win_rate: Optional[float] = None
         self._episodes_done = 0
+        self._logic_vs_logic_baseline = self._load_logic_vs_logic_baseline()
+
+    def _logic_vs_logic_baseline_path(self) -> Path:
+        return (
+            matchup_out_dir(self.out_dir, self.matchup)
+            / LOGIC_VS_LOGIC_BASELINE_NAME
+        )
+
+    def _load_logic_vs_logic_baseline(self) -> Optional[dict[str, Any]]:
+        path = self._logic_vs_logic_baseline_path()
+        if not path.is_file():
+            return None
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError, TypeError):
+            return None
+        return raw if isinstance(raw, dict) else None
+
+    def _save_logic_vs_logic_baseline(self, baseline: dict[str, Any]) -> None:
+        path = self._logic_vs_logic_baseline_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(baseline, indent=2), encoding="utf-8")
+        self._logic_vs_logic_baseline = baseline
 
     def on_episode(self, _local_completed: int = 0) -> None:
         self._episodes_done += 1
@@ -3012,17 +3351,19 @@ class _CheckpointEvalTracker:
                 eval_label_prefix="Checkpoint eval vs logic",
                 live_progress_path=live_progress_path,
             )
-            logic_vs_logic = evaluate_logic_vs_logic(
-                self.matchup,
-                base_url=self.base_url,
-                game_format=self.game_format,
-                max_steps=self.max_steps,
-                episodes=self.checkpoint_eval_episodes,
-                seed=(self.seed + completed + 100_000) if self.seed is not None else None,
-                backend=DEFAULT_TALISHAR_BACKEND,
-                eval_label="Checkpoint eval logic vs logic",
-                live_progress_path=live_progress_path,
-            )
+            if self._logic_vs_logic_baseline is None:
+                logic_vs_logic = evaluate_logic_vs_logic(
+                    self.matchup,
+                    base_url=self.base_url,
+                    game_format=self.game_format,
+                    max_steps=self.max_steps,
+                    episodes=self.checkpoint_eval_episodes,
+                    seed=(self.seed + 100_000) if self.seed is not None else None,
+                    backend=DEFAULT_TALISHAR_BACKEND,
+                    eval_label="Checkpoint eval logic vs logic",
+                    live_progress_path=live_progress_path,
+                )
+                self._save_logic_vs_logic_baseline(logic_vs_logic)
         record = {
             "matchup": self.matchup.name,
             "matchup_dir": _resolve_matchup_subdir(self.out_dir, self.matchup),
@@ -3032,7 +3373,6 @@ class _CheckpointEvalTracker:
             "eval_mode": "self_play",
             **metrics,
             "vs_logic": vs_logic,
-            "logic_vs_logic": logic_vs_logic,
         }
         self.log.append(record)
         wr = float(metrics["p1_win_rate"])
@@ -3085,7 +3425,7 @@ class _CheckpointEvalTracker:
         if logic_vs_logic is not None:
             logic_p1_wr = float(logic_vs_logic.get("p1_win_rate", 0.0) or 0.0)
             print(
-                f"  Checkpoint eval logic vs logic @ ep {completed}: "
+                f"  Checkpoint eval logic vs logic (matchup baseline): "
                 f"P1 win%={logic_p1_wr:.1%} "
                 f"({self.checkpoint_eval_episodes} games)"
             )
@@ -3396,6 +3736,8 @@ def train_matchup(
     checkpoint_eval_episodes: int = DEFAULT_CHECKPOINT_EVAL_EPISODES,
     build_cpp_engine: bool = False,
     require_cpp_engine: bool = False,
+    rollout_mode: Optional[str] = None,
+    rollout_processes: Optional[int] = None,
     _seed_run_capture: Optional[dict[str, Any]] = None,
     _skip_cache_converge: bool = False,
     _force_train: bool = False,
@@ -3661,7 +4003,7 @@ def train_matchup(
         print(
             f"  Checkpoint eval: every {effective_ckpt_interval} episode(s), "
             f"{checkpoint_eval_episodes} eval game(s) per checkpoint "
-            f"(self-play + vs logic on P1/P2 seats)"
+            f"(self-play + vs logic on P1/P2 seats; logic vs logic once per matchup)"
         )
         _write_unified_checkpoint_eval_scope(out_dir, matchup)
 
@@ -3686,6 +4028,8 @@ def train_matchup(
                 ckpt_tracker,
                 dash_cb,
             ),
+            rollout_mode=rollout_mode,
+            rollout_processes=rollout_processes,
         )
         p1_rewards.extend(rem_p1)
         p2_rewards.extend(rem_p2)
@@ -4000,6 +4344,8 @@ def run_matchup_training(
     skip_converged: bool = True,
     build_cpp_engine: bool = False,
     require_cpp_engine: bool = False,
+    rollout_mode: Optional[str] = None,
+    rollout_processes: Optional[int] = None,
 ) -> tuple[list[dict], list[str]]:
     from agent_cache import AgentCacheStore
 
@@ -4057,6 +4403,8 @@ def run_matchup_training(
                 checkpoint_eval_episodes=checkpoint_eval_episodes,
                 build_cpp_engine=build_cpp_engine,
                 require_cpp_engine=require_cpp_engine,
+                rollout_mode=rollout_mode,
+                rollout_processes=rollout_processes,
                 **train_kwargs,
             )
             summary.append(meta)

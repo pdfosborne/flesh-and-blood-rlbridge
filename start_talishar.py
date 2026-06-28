@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Start the Talishar backend (Docker Compose) and Talishar-FE Vite dev server.
 
+Uses the repo-root ``docker-compose.yml`` (RLStep rl-bridge overlay). For training,
+also applies ``docker-compose.training.yml`` (tmpfs Games, Apache/OPcache tuning).
+
 Usage:
     python start_talishar.py              # start everything
     python start_talishar.py --backend-only
     python start_talishar.py --fe-only
     python start_talishar.py --down
+    python start_talishar.py --backend-only --no-training   # dev profile without training overlay
 """
 
 from __future__ import annotations
@@ -27,7 +31,10 @@ REPO_ROOT = repo_root()
 TALISHAR_DIR = REPO_ROOT / "Talishar"
 FE_DIR = REPO_ROOT / "Talishar-FE"
 FE_LOCAL_ENV = REPO_ROOT / "docker" / "talishar-fe" / "talishar-fe.local.env"
+COMPOSE_FILE = REPO_ROOT / "docker-compose.yml"
+TRAINING_COMPOSE_FILE = REPO_ROOT / "docker-compose.training.yml"
 BACKEND_URL = "http://localhost:8080"
+GAME_URL = "http://localhost:8080/game"
 FE_URL = "http://localhost:5173"
 PHPMYADMIN_URL = "http://localhost:5001"
 
@@ -58,6 +65,41 @@ def _wait_for(url: str, seconds: int, label: str) -> bool:
 
 def _run(cmd: list[str], *, cwd: Path) -> None:
     subprocess.run(cmd, cwd=cwd, check=True)  # noqa: S603
+
+
+def _compose_file_args(*, training: bool) -> list[str]:
+    args = ["-f", str(COMPOSE_FILE)]
+    if training and TRAINING_COMPOSE_FILE.is_file():
+        args.extend(["-f", str(TRAINING_COMPOSE_FILE)])
+    return args
+
+
+def _compose_cmd(*compose_args: str, training: bool) -> list[str]:
+    return [
+        "docker",
+        "compose",
+        *_compose_file_args(training=training),
+        *compose_args,
+    ]
+
+
+def _install_rl_bridge_overlay_on_host(talishar_dir: Path) -> None:
+    """Copy rl-bridge PHP overlays onto the host tree (mirrors container entrypoint)."""
+    rl_bridge = REPO_ROOT / "docker" / "talishar" / "rl-bridge"
+    if not rl_bridge.is_dir():
+        return
+    dest_apis = talishar_dir / "APIs"
+    dest_apis.mkdir(parents=True, exist_ok=True)
+    src_apis = rl_bridge / "APIs"
+    if src_apis.is_dir():
+        for src in src_apis.glob("*.php"):
+            dest = dest_apis / src.name
+            if not dest.exists() or src.read_bytes() != dest.read_bytes():
+                dest.write_bytes(src.read_bytes())
+    for src in rl_bridge.glob("*.php"):
+        dest = talishar_dir / src.name
+        if not dest.exists() or src.read_bytes() != dest.read_bytes():
+            dest.write_bytes(src.read_bytes())
 
 
 def _npm_executable() -> str:
@@ -164,10 +206,14 @@ def run(
     backend_only: bool = False,
     fe_only: bool = False,
     down: bool = False,
+    training: bool = True,
 ) -> int:
     if down:
         _header("Stopping Talishar backend containers")
-        _run(["docker", "compose", "down"], cwd=TALISHAR_DIR)
+        if not COMPOSE_FILE.is_file():
+            print(f"ERROR: compose file not found: {COMPOSE_FILE}", file=sys.stderr)
+            return 1
+        _run(_compose_cmd("down", training=training), cwd=REPO_ROOT)
         print("Backend stopped.")
         return 0
 
@@ -176,21 +222,37 @@ def run(
         if not TALISHAR_DIR.is_dir():
             print(f"ERROR: Talishar directory not found: {TALISHAR_DIR}", file=sys.stderr)
             return 1
+        if not COMPOSE_FILE.is_file():
+            print(f"ERROR: compose file not found: {COMPOSE_FILE}", file=sys.stderr)
+            return 1
 
         _prepare_talishar_runtime_files(TALISHAR_DIR)
+        _install_rl_bridge_overlay_on_host(TALISHAR_DIR)
+
+        compose_up = _compose_cmd("up", "-d", "--build", "web-server", training=training)
+        if training and TRAINING_COMPOSE_FILE.is_file():
+            print("  Training overlay: docker-compose.training.yml (tmpfs Games, Apache/OPcache)")
+        else:
+            print("  Training overlay: off")
 
         try:
-            _run(["docker", "compose", "up", "-d", "--build"], cwd=TALISHAR_DIR)
+            _run(compose_up, cwd=REPO_ROOT)
         except subprocess.CalledProcessError as exc:
             print(f"ERROR: docker compose up failed (exit {exc.returncode})", file=sys.stderr)
             return exc.returncode or 1
 
         print("Backend containers started.")
-        print(f"  API / game engine : {BACKEND_URL}")
+        print(f"  API / game engine : {GAME_URL}")
         print(f"  phpMyAdmin        : {PHPMYADMIN_URL}")
 
         if _wait_for(BACKEND_URL + "/", 30, "backend to become reachable"):
             print("  Backend is up.")
+            if _reachable(GAME_URL + "/APIs/RLStep.php", timeout=3):
+                print("  RLStep overlay  : available")
+            else:
+                print(
+                    "  RLStep overlay  : not detected (restart web-server after rl-bridge update)"
+                )
         else:
             print("  Backend did not respond within 30s - containers may still be initialising.")
 
@@ -234,8 +296,8 @@ def run(
 
     print()
     print("Set these env vars before training:")
-    print('  export TALISHAR_URL="http://localhost:8080"')
-    print('  export TALISHAR_FE_URL="http://localhost:5173"')
+    print(f'  export TALISHAR_URL="{GAME_URL}"')
+    print(f'  export TALISHAR_FE_URL="{FE_URL}"')
     print()
     print("To stop the backend containers:  python start_talishar.py --down")
     return 0
@@ -258,12 +320,26 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="stop backend containers",
     )
+    parser.add_argument(
+        "--training",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "apply docker-compose.training.yml (tmpfs Games, high Apache concurrency, "
+            "OPcache training profile); default on"
+        ),
+    )
     args = parser.parse_args(argv)
 
     if sum([args.backend_only, args.fe_only, args.down]) > 1:
         parser.error("use at most one of --backend-only, --fe-only, or --down")
 
-    return run(backend_only=args.backend_only, fe_only=args.fe_only, down=args.down)
+    return run(
+        backend_only=args.backend_only,
+        fe_only=args.fe_only,
+        down=args.down,
+        training=bool(args.training),
+    )
 
 
 if __name__ == "__main__":

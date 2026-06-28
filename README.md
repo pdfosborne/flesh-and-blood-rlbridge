@@ -230,18 +230,13 @@ Benchmark backends:
 
 ```bash
 python scripts/benchmark_talishar_backends.py --base-url http://localhost:8080/game
+python scripts/benchmark_talishar_backends.py --profile-rlstep --steps 30
 ```
+
+After updating `docker/talishar/rl-bridge/` overlays, restart the backend so copies land in the container: `python start_talishar.py --backend-only`. Training RLStep requests set `trainingMode` automatically and use the minimal `BuildRLGameState.php` response builder.
 
 Set `TALISHAR_URL=http://localhost:8080/game` (Docker compose default).
 
-## C++ Engine (optional)
-
-`scripts/cpp/generate_cpp_engine.py` scans Talishar PHP and auto-generates a self-contained C++ stub engine. Pass `use_cpp_engine=True` to prefer it when a compiled module exists under `results/cpp_engines/{matchup}-{hash}/`.
-
-| | Fast Talishar | C++ engine |
-|--|--|--|
-| Typical speed | ~0.1–0.2 games/s | 5–10 games/s |
-| Rules fidelity | Full Talishar | Approximate stubs |
 
 ---
 

@@ -1,0 +1,10 @@
+# Training-optimized Talishar stack overlay.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.training.yml up -d web-server
+
+services:
+  web-server:
+    volumes:
+      - ./docker/talishar/apache-rl-training.conf:/etc/apache2/conf-enabled/zzz-rl-training.conf:ro
+      - ./docker/talishar/docker-php-ext-opcache-training.ini:/usr/local/etc/php/conf.d/docker-php-ext-opcache.ini:ro
+    tmpfs:
+      - /var/www/html/game/Games:size=512m,mode=1777

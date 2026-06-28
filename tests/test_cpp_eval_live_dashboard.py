@@ -11,6 +11,7 @@ from fab_bridge.cpp_eval_live_dashboard import (
     UNIFIED_CHECKPOINT_EVAL_LIVE,
     collect_cpp_eval_live_state,
     cpp_eval_live_paths,
+    eval_engine_from_env,
     render_cpp_eval_live_html,
     unified_checkpoint_eval_live_path,
     update_cpp_eval_live_replay,
@@ -110,6 +111,20 @@ class _FakeEnv:
         return self._cpp_env.get_combat_tracker_snapshot(**kwargs)
 
 
+class _FakeTalisharFastEnv:
+    def __init__(self) -> None:
+        self._using_fast_talishar = True
+        self._using_cpp = False
+        self.talishar_backend = "fast"
+        self._inner = _FakeCppEnv()
+
+    def live_display_snapshot(self) -> dict:
+        return self._inner.live_display_snapshot()
+
+    def get_combat_tracker_snapshot(self, **kwargs) -> dict:
+        return self._inner.get_combat_tracker_snapshot(**kwargs)
+
+
 def test_cpp_eval_live_paths(tmp_path: Path) -> None:
     progress = tmp_path / "eval_live.json"
     state_path, html_path = cpp_eval_live_paths(progress)
@@ -138,12 +153,31 @@ def test_collect_and_render_dashboard() -> None:
     assert state["episode"] == 2
     assert state["board"]["p1_health"] == 18
     assert state["chosen_action"]["label"] == "Attack A"
+    assert state["engine"] == "cpp"
+    assert state["engine_display"] == "C++ engine"
 
     html = render_cpp_eval_live_html(state, auto_refresh_seconds=2.0)
     assert "C++ engine eval" in html
     assert "Attack A" in html
     assert 'http-equiv="refresh" content="2"' in html
     assert "agent_vs_agent" in html
+
+
+def test_collect_and_render_talishar_fast_dashboard() -> None:
+    env = _FakeTalisharFastEnv()
+    assert eval_engine_from_env(env) == ("talishar_fast", "Talishar fast")
+    state = collect_cpp_eval_live_state(
+        env,
+        episode=1,
+        episodes_total=5,
+        step=2,
+        eval_label="checkpoint_eval",
+        aggregate={"wins": 0, "losses": 0, "draws": 0, "timeouts": 0, "episodes_completed": 0},
+    )
+    assert state["engine"] == "talishar_fast"
+    html = render_cpp_eval_live_html(state, auto_refresh_seconds=None)
+    assert "Talishar fast eval" in html
+    assert "C++ engine eval" not in html
 
 
 def test_write_and_update_roundtrip(tmp_path: Path) -> None:
