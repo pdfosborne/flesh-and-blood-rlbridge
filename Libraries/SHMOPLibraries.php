@@ -23,8 +23,10 @@
 function WriteCache($name, $data)
 {
   if ($name == 0) return;
-  $serData = trim(serialize(trim($data)));
-  $id = @shmop_open($name, "c", 0644, 128);
+  $serData = serialize(trim($data));
+  // 0666: segments must stay writable even if first created by a root CLI
+  // script — 0644 left Apache unable to update the cache (game stuck forever).
+  $id = @shmop_open($name, "c", 0666, 128);
   if ($id == false) {
     exit;
   } else {
@@ -36,20 +38,63 @@ function WriteCache($name, $data)
 function WriteGamestateCache($name, $data)
 {
   if ($name == 0) return;
-  $serData = trim(serialize(trim($data)));
-  $gsID = shmop_open(GamestateID($name), "c", 0644, 32768);
+  $serData = serialize(trim($data));
+  $needed = strlen($serData) + 16; // payload + seqlock header
+  $key = GamestateID($name);
+
+  $size = 32768;
+  $seq = 0;
+  $existing = @shmop_open($key, "a", 0, 0);
+  if ($existing !== false) {
+    $size = shmop_size($existing);
+    $head = shmop_read($existing, 0, 16);
+    if (strlen($head) === 16 && ctype_digit($head)) $seq = (int)$head;
+    if ($size < $needed) {
+      shmop_delete($existing);
+      $size = max(32768, 1 << (int)ceil(log($needed + 1, 2)));
+      $seq = 0;
+    }
+  } else if ($needed >= $size) {
+    $size = 1 << (int)ceil(log($needed + 1, 2));
+  }
+
+  $gsID = @shmop_open($key, "c", 0666, $size);
   if ($gsID == false) {
     exit;
-  } else {
-    $serData = str_pad($serData, 32768, "\0");
-    $rv = shmop_write($gsID, $serData, 0);
   }
+  $writeSeq = $seq + ($seq % 2 === 0 ? 1 : 2); // next odd: write in progress
+  shmop_write($gsID, sprintf("%016d", $writeSeq), 0);
+  shmop_write($gsID, str_pad($serData, $size - 16, "\0"), 16);
+  shmop_write($gsID, sprintf("%016d", $writeSeq + 1), 0); // even: stable
+}
+
+function ReadGamestateCache($name)
+{
+  $key = GamestateID($name);
+  for ($try = 0; $try < 10; $try++) {
+    $id = @shmop_open($key, "a", 0, 0);
+    if ($id === false) return "";
+    $size = shmop_size($id);
+    $head = shmop_read($id, 0, 16);
+    if (strlen($head) !== 16 || !ctype_digit($head)) {
+      $raw = trim(shmop_read($id, 0, $size));
+      $un = @unserialize($raw);
+      return $un === false ? "" : $un;
+    }
+    $s1 = (int)$head;
+    if ($s1 % 2 === 1) { usleep(1000); continue; } // write in progress
+    $raw = trim(shmop_read($id, 16, $size - 16));
+    $s2 = (int)shmop_read($id, 0, 16);
+    if ($s1 !== $s2) { usleep(1000); continue; } // torn — retry
+    $un = @unserialize($raw);
+    return $un === false ? "" : $un;
+  }
+  return "";
 }
 
 function ReadCache($name)
 {
   if ($name == 0) return "";
-  $data = "";
   $data = ShmopReadCache($name);
   if (empty($data)) return "";
   $unserialized = @unserialize($data);
@@ -71,11 +116,11 @@ function ShmopReadCache($name)
 function DeleteCache($name)
 {
   //Always try to delete shmop
-  $id = @shmop_open($name, "w", 0644, 128);
+  $id = @shmop_open($name, "w", 0666, 128);
   if($id) {
     shmop_delete($id);
   }
-  $gsID = @shmop_open(GamestateID($name), "c", 0644, 32768);
+  $gsID = @shmop_open(GamestateID($name), "c", 0666, 32768);
   if($gsID) {
     shmop_delete($gsID);
   }
@@ -120,20 +165,25 @@ function ReadCacheArray($name)
 
 function IncrementCachePiece($gameName, $piece)
 {
-  $oldVal = GetCachePiece($gameName, $piece);
-  $intVal = (int)$oldVal; // Cast to int to handle empty strings
-  SetCachePiece($gameName, $piece, $intVal + 1);
-  return $intVal + 1;
+  $idx = $piece - 1;
+  $cacheVal = ReadCache($gameName);
+  if ($cacheVal == "") return 0;
+  $cacheArray = explode("!", $cacheVal);
+  $newVal = (int)($cacheArray[$idx] ?? 0) + 1;
+  $cacheArray[$idx] = $newVal;
+  WriteCache($gameName, implode("!", $cacheArray));
+  return $newVal;
 }
 
 function GamestateUpdated($gameName, $resetTimer = true)
 {
+  if (function_exists('FlushLogBuffer')) FlushLogBuffer();
   $cache = ReadCache($gameName);
-  $cacheArr = explode(SHMOPDelimiter(), $cache);
-  $cacheArr[0]++;
+  $cacheArr = explode("!", $cache);
+  $cacheArr[0] = (int)$cacheArr[0] + 1;
   if ($resetTimer) {
     $currentTime = round(microtime(true) * 1000);
     $cacheArr[5] = $currentTime;
   }
-  WriteCache($gameName, implode(SHMOPDelimiter(), $cacheArr));
+  WriteCache($gameName, implode("!", $cacheArr));
 }

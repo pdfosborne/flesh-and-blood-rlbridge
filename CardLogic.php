@@ -67,9 +67,7 @@ function BottomDeckMultizone($player, $zone1, $zone2, $isMandatory = false, $con
 function AddCurrentTurnEffectNextAttack($cardID, $player, $from = "", $uniqueID = -1)
 {
   global $combatChain, $layers;
-  if (IsLayerStep()) {
-    AddCurrentTurnEffectFromCombat($cardID, $player, $uniqueID);
-  } else if (count($combatChain) > 0) AddCurrentTurnEffectFromCombat($cardID, $player, $uniqueID);
+  if (IsLayerStep() || count($combatChain) > 0) AddCurrentTurnEffectFromCombat($cardID, $player, $uniqueID);
   else AddCurrentTurnEffect($cardID, $player, $from, $uniqueID);
 }
 
@@ -82,7 +80,8 @@ function AddCurrentTurnEffect($cardID, $player, $from = "", $uniqueID = -1)
       return;
     }
   }
-  $card = explode("-", $cardID)[0];
+  $dashPos = strpos($cardID, "-");
+  $card = $dashPos !== false ? substr($cardID, 0, $dashPos) : $cardID;
   if (CardType($card) == "A" && !CanPlayAsInstant($cardID, -1, $from) && count($combatChain) > 0 && IsCombatEffectActive($cardID) && !IsCombatEffectPersistent($cardID) && $from != "PLAY") {
     AddCurrentTurnEffectFromCombat($cardID, $player, $uniqueID);
     return;
@@ -108,7 +107,8 @@ function AddEffectToPastAttack($index, $cardID) {
 function AddAfterResolveEffect($cardID, $player, $from = "", $uniqueID = -1)
 {
   global $afterResolveEffects, $combatChain;
-  $card = explode("-", $cardID)[0];
+  $dashPos = strpos($cardID, "-");
+  $card = $dashPos !== false ? substr($cardID, 0, $dashPos) : $cardID;
   if (CardType($card) == "A" && count($combatChain) > 0 && !IsCombatEffectPersistent($cardID) && $from != "PLAY") {
     AddCurrentTurnEffectFromCombat($cardID, $player, $uniqueID);
     return;
@@ -122,14 +122,10 @@ function AddAfterResolveEffect($cardID, $player, $from = "", $uniqueID = -1)
 function CopyCurrentTurnEffectsFromAfterResolveEffects()
 {
   global $currentTurnEffects, $afterResolveEffects;
-  $afterResolveEffectsCount = count($afterResolveEffects);
-  for ($i = 0; $i < $afterResolveEffectsCount; $i += CurrentTurnEffectPieces()) {
-    $currentTurnEffects[] = $afterResolveEffects[$i];
-    $currentTurnEffects[] = $afterResolveEffects[$i + 1];
-    $currentTurnEffects[] = $afterResolveEffects[$i + 2];
-    $currentTurnEffects[] = $afterResolveEffects[$i + 3];
+  if ($afterResolveEffects) {
+    array_push($currentTurnEffects, ...$afterResolveEffects);
+    $afterResolveEffects = [];
   }
-  $afterResolveEffects = [];
 }
 
 //This is needed because if you add a current turn effect from combat, it could get deleted as part of the combat resolution
@@ -145,24 +141,16 @@ function AddCurrentTurnEffectFromCombat($cardID, $player, $uniqueID = -1)
 function CopyCurrentTurnEffectsFromCombat()
 {
   global $currentTurnEffects, $currentTurnEffectsFromCombat;
-  $currentTurnEffectsFromCombatCount = count($currentTurnEffectsFromCombat);
-  for ($i = 0; $i < $currentTurnEffectsFromCombatCount; $i += CurrentTurnEffectPieces()) {
-    $currentTurnEffects[] = $currentTurnEffectsFromCombat[$i];
-    $currentTurnEffects[] = $currentTurnEffectsFromCombat[$i + 1];
-    $currentTurnEffects[] = $currentTurnEffectsFromCombat[$i + 2];
-    $currentTurnEffects[] = $currentTurnEffectsFromCombat[$i + 3];
+  if ($currentTurnEffectsFromCombat) {
+    array_push($currentTurnEffects, ...$currentTurnEffectsFromCombat);
+    $currentTurnEffectsFromCombat = [];
   }
-  $currentTurnEffectsFromCombat = [];
 }
 
 function RemoveCurrentTurnEffect($index)
 {
   global $currentTurnEffects;
-  unset($currentTurnEffects[$index + 3]);
-  unset($currentTurnEffects[$index + 2]);
-  unset($currentTurnEffects[$index + 1]);
-  unset($currentTurnEffects[$index]);
-  $currentTurnEffects = array_values($currentTurnEffects);
+  array_splice($currentTurnEffects, $index, CurrentTurnEffectPieces());
 }
 
 function CurrentTurnEffectPieces()
@@ -246,9 +234,7 @@ function PrependLayer($cardID, $player, $parameter, $target = "-", $additionalCo
 function PopLayer()
 {
   global $layers;
-  for ($i=0; $i < LayerPieces(); $i++) { 
-    array_pop($layers);
-  }
+  array_splice($layers, -LayerPieces());
   return count($layers);//How far it is from the end
 }
 
@@ -262,24 +248,22 @@ function AddAttackQueue($cardID, $player, $targets, $parameter="-", $uniqueID="-
   $attackQueue[] = $additionalCosts;
   $attackQueue[] = $uniqueID;
   $attackQueue[] = $layerUID;
+  $attackQueue[] = "-"; // buffs
 }
 
 function ResolveAttackQueue() {
   global $attackQueue, $combatChainState, $CCS_AttackTargetUID, $CCS_AttackTarget, $turn;
   if (count($attackQueue) > 0) {
-    $cardID = array_shift($attackQueue);
-    $player = array_shift($attackQueue);
-    $parameter = array_shift($attackQueue);
-    $target = array_shift($attackQueue);
-    $additionalCosts = array_shift($attackQueue);
-    $uniqueID = array_shift($attackQueue);
-    $layerUniqueID = array_shift($attackQueue);
-
-    $combatChainState[$CCS_AttackTargetUID] = explode("-", $target)[1] ?? "-";
+    [$cardID, $player, $parameter, $target, $additionalCosts, $uniqueID, $layerUID, $buffs] = array_splice($attackQueue, 0, AttackQueuePieces());
+    $combatChainState[$CCS_AttackTargetUID] = explode("-", $target, 2)[1] ?? "-";
     $MZIndex = CleanTargetToIndex($player, $target);
     $combatChainState[$CCS_AttackTarget] = $MZIndex;
     $params = explode("|", $parameter);
     $turn[0] = "M";
+    if ($buffs != "-") {
+      foreach(explode(",", $buffs) as $buff)
+        AddCurrentTurnEffect($buff, $player);
+    }
     PlayCardEffect($cardID, $params[0], $params[1] ?? 0, $target, $additionalCosts, $params[3] ?? "-1", $params[2] ?? -1);
   }
 }
@@ -288,26 +272,14 @@ function AddLayer($cardID, $player, $parameter, $target = "-", $additionalCosts 
 {
   global $layers, $CombatChain;
   $layerUID = $layerUID == "-" ? GetUniqueId($cardID, $player) : $layerUID;
-  $skipOrdering = in_array($parameter, ["runechant", "seismic_surge"]) || $skipOrdering;
+  static $skipOrderingIDs = ["runechant" => true, "seismic_surge" => true];
+  $skipOrdering = isset($skipOrderingIDs[$parameter]) || $skipOrdering;
   if (($additionalCosts == "ONHITEFFECT" || $additionalCosts == "ATTACKTRIGGER") && $uniqueID == "-") $uniqueID = $CombatChain->AttackCard()->UniqueID();
   if ($cardID == "TRIGGER" && !$skipOrdering) { // put triggers into "pre-layers" where they can be ordered
-    array_unshift($layers, $layerUID);
-    array_unshift($layers, $uniqueID);
-    array_unshift($layers, $additionalCosts);
-    array_unshift($layers, $target);
-    array_unshift($layers, $parameter);
-    array_unshift($layers, $player);
-    array_unshift($layers, "PRETRIGGER");
+    array_unshift($layers, "PRETRIGGER", $player, $parameter, $target, $additionalCosts, $uniqueID, $layerUID);
   }
   else {
-    //Layers are on a stack, so you need to push things on in reverse order
-    array_unshift($layers, $layerUID);
-    array_unshift($layers, $uniqueID);
-    array_unshift($layers, $additionalCosts);
-    array_unshift($layers, $target);
-    array_unshift($layers, $parameter);
-    array_unshift($layers, $player);
-    array_unshift($layers, $cardID);
+    array_unshift($layers, $cardID, $player, $parameter, $target, $additionalCosts, $uniqueID, $layerUID);
   }
 
   return count($layers);//How far it is from the end
@@ -316,24 +288,42 @@ function AddLayer($cardID, $player, $parameter, $target = "-", $additionalCosts 
 function AddDecisionQueue($phase, $player, $parameter, $subsequent = 0, $makeCheckpoint = 0)
 {
   global $decisionQueue;
-  if (count($decisionQueue) == 0) $insertIndex = 0;
+  $dqCount = count($decisionQueue);
+  if ($dqCount == 0) $insertIndex = 0;
   else {
-    $insertIndex = count($decisionQueue) - DecisionQueuePieces();
+    $insertIndex = $dqCount - DecisionQueuePieces();
     if (!IsGamePhase($decisionQueue[$insertIndex])) //Stack must be clear before you can continue with the step
     {
-      $insertIndex = count($decisionQueue);
+      $insertIndex = $dqCount;
     }
   }
 
-  $parameter = str_replace(" ", "_", $parameter ?? "");
-  array_splice($decisionQueue, $insertIndex, 0, [$phase, $player, $parameter, $subsequent, $makeCheckpoint]);
+  if ($parameter === null) {
+    $parameter = "";
+  } elseif (str_contains($parameter, ' ')) {
+    $parameter = str_replace(' ', '_', $parameter);
+  }
+
+  if ($insertIndex === $dqCount) {
+    $decisionQueue[] = $phase;
+    $decisionQueue[] = $player;
+    $decisionQueue[] = $parameter;
+    $decisionQueue[] = $subsequent;
+    $decisionQueue[] = $makeCheckpoint;
+  } else {
+    array_splice($decisionQueue, $insertIndex, 0, [$phase, $player, $parameter, $subsequent, $makeCheckpoint]);
+  }
 }
 
 function PrependDecisionQueue($phase, $player, $parameter, $subsequent = 0, $makeCheckpoint = 0)
 {
   global $decisionQueue;
-  $parameter = str_replace(" ", "_", $parameter ?? "");
-  $decisionQueue = array_merge([$phase, $player, $parameter, $subsequent, $makeCheckpoint], $decisionQueue);
+  if ($parameter === null) {
+    $parameter = "";
+  } elseif (str_contains($parameter, ' ')) {
+    $parameter = str_replace(' ', '_', $parameter);
+  }
+  array_unshift($decisionQueue, $phase, $player, $parameter, $subsequent, $makeCheckpoint);
 }
 
 function IsDecisionQueueActive()
@@ -382,8 +372,9 @@ function ShouldHoldPriorityNow($player)
 {
   global $layerPriority, $Stack, $AttackQueue;
   if ($layerPriority[$player - 1] != "1") return false;
-  $noPriorityPhases = ["ENDPHASE", "STARTTURN", "CLOSESTEP"];
-  if (in_array($Stack->BottomLayer()->ID(), $noPriorityPhases)) return false;
+  if (match($Stack->BottomLayer()->ID()) {
+    "ENDPHASE", "STARTTURN", "CLOSESTEP" => true, default => false
+  }) return false;
   // if the stack is empty and something is in the attack queue, do the attack
   if (IsResolutionStep() && $Stack->NumLayers() == 1 && $AttackQueue->NumAttacks() > 0) return false;
   $currentLayer = $Stack->TopLayer()->ID();
@@ -394,32 +385,29 @@ function ShouldHoldPriorityNow($player)
 
 function IsGamePhase($phase)
 {
-  switch ($phase) {
-    case "RESUMEPAYING":
-    case "RESUMEPLAY":
-    case "RESOLVECHAINLINK":
-    case "RESOLVECOMBATDAMAGE":
-    case "PASSTURN":
-      return true;
-    default:
-      return false;
-  }
+  static $gamePhases = [
+    "RESUMEPAYING" => true, "RESUMEPLAY" => true, "RESOLVECHAINLINK" => true,
+    "RESOLVECOMBATDAMAGE" => true, "PASSTURN" => true,
+  ];
+  return isset($gamePhases[$phase]);
 }
 
-function AddTriggersToStack()
+function AddTriggersToStack($preLayers = null)
 {
-  global $layers, $mainPlayer, $defPlayer;
-  $preLayers = GetPreLayers();
-  if (count($preLayers) > 0) {
+  global $mainPlayer;
+  if ($preLayers === null) $preLayers = GetPreLayers();
+  $preLayersCount = count($preLayers);
+  if ($preLayersCount > 0) {
     $mainPreLayers = 0;
     $defPreLayers = 0;
-    for ($i = 0; $i < count($preLayers); $i += LayerPieces()) {
+    $layerPieces = LayerPieces();
+    for ($i = 0; $i < $preLayersCount; $i += $layerPieces) {
       if ($preLayers[$i+1] == $mainPlayer) ++$mainPreLayers;
       else ++$defPreLayers;
     }
     if ($mainPreLayers > 0 && $defPreLayers > 0 && HoldPrioritySetting($mainPlayer) != 4 && !IsPlayerAI($mainPlayer)) {
       AddDecisionQueue("SETDQCONTEXT", $mainPlayer, "Whose triggers do you want to resolve first?");
-      AddDecisionQueue("BUTTONINPUT", $mainPlayer, "Mine,Theirs", 1);
+      AddDecisionQueue("CHOOSETRIGGERS", $mainPlayer, "Mine,Theirs", 1);
     }
     else AddDecisionQueue("PASSPARAMETER", $mainPlayer, "Theirs");
     AddDecisionQueue("TRIGGERORDERING", $mainPlayer, "-", 1);
@@ -432,8 +420,10 @@ function ContinueDecisionQueue($lastResult = "")
   global $decisionQueue, $turn, $currentPlayer, $makeCheckpoint, $otherPlayer, $combatChainState;
   global $layers, $layerPriority, $dqVars, $dqState, $CS_AbilityIndex, $CS_AdditionalCosts, $mainPlayer, $CS_LayerPlayIndex;
   global $CS_ResolvingLayerUniqueID, $makeBlockBackup, $defPlayer, $Stack, $attackQueue, $CCS_AttackTargetUID, $CCS_AttackTarget;
+  global $CCS_CachedPreBlockValue, $CS_LayerResolved;
 
-  if (count($decisionQueue) == 0 || IsGamePhase($decisionQueue[0])) {
+  $dqCount = count($decisionQueue);
+  if ($dqCount == 0 || IsGamePhase($decisionQueue[0])) {
     $p1Health = GetHealth(1);
     $p2Health = GetHealth(2);
     if ($p1Health <= 0 && $p2Health > 0)
@@ -443,17 +433,20 @@ function ContinueDecisionQueue($lastResult = "")
     elseif ($p2Health <= 0 && $p1Health <= 0)
       PlayerWon(0);
     if (IsGameOver()) return; // Prevent multiple winner logs
-    if (count($decisionQueue) > 0 && $currentPlayer != $decisionQueue[1]) {
-    }
     $preLayers = GetPreLayers();
-    if (count($decisionQueue) == 0 && count($preLayers) > 0) {
-      AddTriggersToStack();
+    if ($dqCount == 0 && count($preLayers) > 0) {
+      AddTriggersToStack($preLayers);
       ProcessDecisionQueue();
       return;
     }
-    if (count($decisionQueue) == 0 && count($layers) > 0) {
+    if ($dqCount == 0 && count($layers) > 0) {
       $priorityHeld = 0;
-      $prioPlayer = $Stack->CountPlayedLayers() > 0 ? $currentPlayer : $mainPlayer;
+      if (GetClassState($mainPlayer, $CS_LayerResolved) > 0) {
+        SetClassState($mainPlayer, $CS_LayerResolved, 0);
+        $prioPlayer = $mainPlayer;
+      }
+      else
+        $prioPlayer = $Stack->CountPlayedLayers() > 0 ? $currentPlayer : $mainPlayer;
       if ($prioPlayer == 1) {
         if (ShouldHoldPriorityNow(1)) {
           AddDecisionQueue("INSTANT", 1, "-");
@@ -480,35 +473,28 @@ function ContinueDecisionQueue($lastResult = "")
       if ($priorityHeld) {
         ContinueDecisionQueue("");
       } else {
-        if (RequiresDieRoll($layers[0], explode("|", $layers[2])[0], $layers[1])) {
+        if (RequiresDieRoll($layers[0], explode("|", $layers[2], 2)[0], $layers[1])) {
           RollDie($layers[1]);
           ContinueDecisionQueue("");
           return;
         }
         CloseDecisionQueue();
         if (IsResolutionStep() && count($layers) == LayerPieces() && count($attackQueue) > 0) {
-          $cardID = array_shift($attackQueue);
-          $player = array_shift($attackQueue);
-          $parameter = array_shift($attackQueue);
-          $target = array_shift($attackQueue);
-          $additionalCosts = array_shift($attackQueue);
-          $uniqueID = array_shift($attackQueue);
-          $layerUniqueID = array_shift($attackQueue);
-          $combatChainState[$CCS_AttackTargetUID] = explode("-", $target)[1] ?? "-";
+          [$cardID, $player, $parameter, $target, $additionalCosts, $uniqueID, $layerUniqueID, $buffs] = array_splice($attackQueue, 0, AttackQueuePieces());
+          if ($buffs != "-") {
+            foreach(explode(",", $buffs) as $buff)
+              AddCurrentTurnEffectNextAttack($buff, $player);
+          }
+          $combatChainState[$CCS_AttackTargetUID] = explode("-", $target, 2)[1] ?? "-";
           $MZIndex = CleanTargetToIndex($currentPlayer, $target);
           $combatChainState[$CCS_AttackTarget] = $MZIndex;
           EndResolutionStep();
         }
         else {
-          $cardID = array_shift($layers);
-          $player = array_shift($layers);
-          $parameter = array_shift($layers);
-          $target = array_shift($layers);
-          $additionalCosts = array_shift($layers);
-          $uniqueID = array_shift($layers);
-          $layerUniqueID = array_shift($layers);
+          [$cardID, $player, $parameter, $target, $additionalCosts, $uniqueID, $layerUniqueID] = array_splice($layers, 0, LayerPieces());
         }
-        $from = explode("|", $parameter)[0];
+        $params = explode("|", $parameter);
+        $from = $params[0];
         if ($cardID == "TRIGGER" || IsStaticType(CardType($cardID), $from)) {
           SetClassState(1, $CS_ResolvingLayerUniqueID, $uniqueID);
           SetClassState(2, $CS_ResolvingLayerUniqueID, $uniqueID);
@@ -517,74 +503,101 @@ function ContinueDecisionQueue($lastResult = "")
           SetClassState(1, $CS_ResolvingLayerUniqueID, $layerUniqueID);
           SetClassState(2, $CS_ResolvingLayerUniqueID, $layerUniqueID);
         }
-        $params = explode("|", $parameter);
         if ($currentPlayer != $player) {
           $currentPlayer = $player;
-          $otherPlayer = $currentPlayer == 1 ? 2 : 1;
+          $otherPlayer = 3 - $currentPlayer;
           BuildMyGamestate($currentPlayer);
         }
         $layerPriority[0] = ShouldHoldPriority(1);
         $layerPriority[1] = ShouldHoldPriority(2);
 
-        if ($cardID == "ENDTURN") EndStep();
-        else if ($cardID == "ENDPHASE") FinishTurnPass();
-        else if ($cardID == "RESUMETURN") $turn[0] = "M";
-        else if ($cardID == "LAYER") ProcessLayer($player, $parameter, $target, $additionalCosts);
-        else if ($cardID == "FINALIZECHAINLINK") FinalizeChainLink($parameter);
-        else if ($cardID == "CLOSESTEP") FinalizeChainLink($parameter);
-        else if ($cardID == "RESOLUTIONSTEP") {
-          ResetCombatChainState();
-          ProcessDecisionQueue();
-        }
-        else if ($cardID == "CLOSINGCHAIN") {
-          WriteLog("I didn't think this code was reachable, please submit a bug report");
-          ResetCombatChainState();
-          ProcessDecisionQueue();
-        }
-        else if ($cardID == "ATTACKSTEP") {
-          $turn[0] = "B";
-          $currentPlayer = $defPlayer;
-          $makeBlockBackup = 1;
-        } else if ($cardID == "DEFENDSTEP") {
-          $turn[0] = "A";
-          $currentPlayer = $mainPlayer;
-          BeginningReactionStepEffects();
-          ProcessDecisionQueue();
-        } else if ($cardID == "TRIGGER") {
-          ProcessTrigger($player, $parameter, $uniqueID, $target, $additionalCosts, $params[0]);
-          ProcessDecisionQueue();
-        }
-        else if ($cardID == "PRETRIGGER") {
-          WriteLog("This block should not have been reached, please submit a bug report");
-          ProcessTrigger($player, $parameter, $uniqueID, $target, $additionalCosts, $params[0]);
-          ProcessDecisionQueue();
-        }
-        else if ($cardID == "MELD") {
-          ProcessMeld($player, $parameter, $cardID, target:$target, from:$uniqueID);
-          ProcessDecisionQueue();
-        }
-        else if ($cardID == "ABILITY") {
-          ProcessAbility($player, $parameter, $uniqueID, $target, $additionalCosts, $params[0]);
-          ProcessDecisionQueue();
-        }
-        else if ($cardID == "STARTTURN") {
-          StartActionPhaseAbilities();
-          ProcessDecisionQueue();
-        }
-        else {
+        static $keywordCardIDs = [
+          "ENDTURN" => true, "ENDPHASE" => true, "RESUMETURN" => true, "LAYER" => true,
+          "FINALIZECHAINLINK" => true, "CLOSESTEP" => true, "RESOLUTIONSTEP" => true,
+          "CLOSINGCHAIN" => true, "ATTACKSTEP" => true, "DEFENDSTEP" => true,
+          "TRIGGER" => true, "PRETRIGGER" => true, "MELD" => true, "ABILITY" => true,
+          "STARTTURN" => true,
+        ];
+        if (!isset($keywordCardIDs[$cardID])) {
           global $EffectContextUID;
           SetClassState($player, $CS_AbilityIndex, isset($params[2]) ? $params[2] : "-"); //This is like a parameter to PlayCardEffect and other functions
           $EffectContextUID = $layerUniqueID;
+          SetClassState($mainPlayer, $CS_LayerResolved, 1); // lets the game know to give priority back to mainPlayer
           PlayCardEffect($cardID, $params[0], $params[1] ?? 0, $target, $additionalCosts, $params[3] ?? "-1", $params[2] ?? -1);
           ClearDieRoll($player);
+        } else {
+          switch ($cardID) {
+            case "ENDTURN":
+              EndStep();
+              break;
+            case "ENDPHASE":
+              FinishTurnPass();
+              break;
+            case "RESUMETURN":
+              $turn[0] = "M";
+              break;
+            case "LAYER":
+              ProcessLayer($player, $parameter, $target, $additionalCosts);
+              break;
+            case "FINALIZECHAINLINK":
+            case "CLOSESTEP":
+              FinalizeChainLink($parameter);
+              break;
+            case "RESOLUTIONSTEP":
+              ResetCombatChainState();
+              ProcessDecisionQueue();
+              break;
+            case "CLOSINGCHAIN":
+              WriteLog("I didn't think this code was reachable, please submit a bug report", highlight:true);
+              ResetCombatChainState();
+              ProcessDecisionQueue();
+              break;
+            case "ATTACKSTEP":
+              $turn[0] = "B";
+              $currentPlayer = $defPlayer;
+              $makeBlockBackup = 1;
+              $totalPower = 0;
+              $totalDefense = 0;
+              $chainPowerModifiers = [];
+              EvaluateCombatChain($totalPower, $totalDefense, $chainPowerModifiers);
+              $combatChainState[$CCS_CachedPreBlockValue] = $totalPower;
+              break;
+            case "DEFENDSTEP":
+              $turn[0] = "A";
+              $currentPlayer = $mainPlayer;
+              BeginningReactionStepEffects();
+              ProcessDecisionQueue();
+              break;
+            case "TRIGGER":
+              ProcessTrigger($player, $parameter, $uniqueID, $target, $additionalCosts, $params[0]);
+              ProcessDecisionQueue();
+              break;
+            case "PRETRIGGER":
+              WriteLog("This block should not have been reached, please submit a bug report", highlight:true);
+              ProcessTrigger($player, $parameter, $uniqueID, $target, $additionalCosts, $params[0]);
+              ProcessDecisionQueue();
+              break;
+            case "MELD":
+              ProcessMeld($player, $parameter, $cardID, target:$target, from:$uniqueID);
+              ProcessDecisionQueue();
+              break;
+            case "ABILITY":
+              ProcessAbility($player, $parameter, $uniqueID, $target, $additionalCosts, $params[0]);
+              ProcessDecisionQueue();
+              break;
+            case "STARTTURN":
+              StartActionPhaseAbilities();
+              ProcessDecisionQueue();
+              break;
+          }
         }
         //main player should hold priority in resolution step always
         if (count($layers) == LayerPieces() && $layers[0] == "RESOLUTIONSTEP") $layerPriority[$mainPlayer - 1] = "1";
       }
-    } else if (count($decisionQueue) > 0 && $decisionQueue[0] == "RESUMEPLAY") {
+    } else if ($dqCount > 0 && $decisionQueue[0] == "RESUMEPLAY") {
       if ($currentPlayer != $decisionQueue[1]) {
         $currentPlayer = $decisionQueue[1];
-        $otherPlayer = $currentPlayer == 1 ? 2 : 1;
+        $otherPlayer = 3 - $currentPlayer;
         BuildMyGamestate($currentPlayer);
       }
       $params = explode("|", $decisionQueue[2]);
@@ -603,7 +616,7 @@ function ContinueDecisionQueue($lastResult = "")
         ProcessDecisionQueue();
         return;
       }
-    } else if (count($decisionQueue) > 0 && $decisionQueue[0] == "RESUMEPAYING") {
+    } else if ($dqCount > 0 && $decisionQueue[0] == "RESUMEPAYING") {
       $player = $decisionQueue[1];
       $params = explode("-", $decisionQueue[2]); //Parameter
       if ($lastResult == "") $lastResult = 0;
@@ -617,7 +630,7 @@ function ContinueDecisionQueue($lastResult = "")
         CloseDecisionQueue(); // restores $turn[0] to the pre-play phase
         if ($currentPlayer != $player) {
           $currentPlayer = $player;
-          $otherPlayer = $currentPlayer == 1 ? 2 : 1;
+          $otherPlayer = 3 - $currentPlayer;
           BuildMyGamestate($currentPlayer);
         }
         $layerPriority[$player - 1] = "0";
@@ -627,20 +640,20 @@ function ContinueDecisionQueue($lastResult = "")
       CloseDecisionQueue();
       if ($currentPlayer != $player) {
         $currentPlayer = $player;
-        $otherPlayer = $currentPlayer == 1 ? 2 : 1;
+        $otherPlayer = 3 - $currentPlayer;
         BuildMyGamestate($currentPlayer);
       }
       PlayCard($params[0], $params[1], $lastResult, $params[2], isset($params[3]) ? $params[3] : -1, isset($params[4]) ? $params[4] : -1);
-    } else if (count($decisionQueue) > 0 && $decisionQueue[0] == "RESOLVECHAINLINK") {
+    } else if ($dqCount > 0 && $decisionQueue[0] == "RESOLVECHAINLINK") {
       CloseDecisionQueue();
       ResolveChainLink();
-    } else if (count($decisionQueue) > 0 && $decisionQueue[0] == "RESOLVECOMBATDAMAGE") {
+    } else if ($dqCount > 0 && $decisionQueue[0] == "RESOLVECOMBATDAMAGE") {
       $parameters = explode(",", $decisionQueue[2]);
       if ($parameters[0] != "-") $damageDone = $parameters[0];
       else $damageDone = $dqState[6];
       CloseDecisionQueue();
       if(!IsGameOver()) ResolveCombatDamage($damageDone, $parameters[1]);
-    } else if (count($decisionQueue) > 0 && $decisionQueue[0] == "PASSTURN") {
+    } else if ($dqCount > 0 && $decisionQueue[0] == "PASSTURN") {
       CloseDecisionQueue();
       PassTurn();
     } else {
@@ -649,26 +662,26 @@ function ContinueDecisionQueue($lastResult = "")
     }
     return;
   }
-  $phase = array_shift($decisionQueue); 
-  $player = array_shift($decisionQueue);
-  $parameter = array_shift($decisionQueue);
+  [$phase, $player, $parameter, $subsequent, $makeCheckpoint] = array_splice($decisionQueue, 0, 5);
   // foreach($dqVars as $key => $value) WriteLog("$key => $value"); // Uncomment this to visualize decision queue variables execution
   // WriteLog($dqVars[0] . " " . $dqVars[1] . " " . $dqVars[2]); // Uncomment this to visualize decision queue variables execution
   // WriteLog($phase . " " . $player . " " . $parameter . " " . $lastResult); // Uncomment this to visualize decision queue execution
-  if (count($dqVars) > 0) {
-    if (str_contains($parameter, "{0}") && isset($dqVars[0])) $parameter = str_replace("{0}", $dqVars[0], $parameter);
-    if (str_contains($parameter, "<0>") && isset($dqVars[0])) $parameter = str_replace("<0>", CardLink($dqVars[0], $dqVars[0]), $parameter);
-    if (count($dqVars) > 1 && str_contains($parameter, "{1}") && isset($dqVars[1])) $parameter = str_replace("{1}", $dqVars[1], $parameter);
-    if (count($dqVars) > 2 && str_contains($parameter, "{2}") && isset($dqVars[2])) $parameter = str_replace("{2}", $dqVars[2], $parameter);
+  $dqVarsCount = count($dqVars);
+  // Guard: skip all substitution when $parameter has no template markers (the common case)
+  if ($dqVarsCount > 0 && (str_contains($parameter, '{') || str_contains($parameter, '<'))) {
+    if (isset($dqVars[0])) {
+      if (str_contains($parameter, "{0}")) $parameter = str_replace("{0}", $dqVars[0], $parameter);
+      if (str_contains($parameter, "<0>")) $parameter = str_replace("<0>", CardLink($dqVars[0], $dqVars[0]), $parameter);
+    }
+    if ($dqVarsCount > 1 && isset($dqVars[1])) {
+      if (str_contains($parameter, "{1}")) $parameter = str_replace("{1}", $dqVars[1], $parameter);
+      if (str_contains($parameter, "<1>")) $parameter = str_replace("<1>", CardLink($dqVars[1], $dqVars[1]), $parameter);
+    }
+    if ($dqVarsCount > 2 && isset($dqVars[2])) {
+      if (str_contains($parameter, "{2}")) $parameter = str_replace("{2}", $dqVars[2], $parameter);
+      if (str_contains($parameter, "<2>")) $parameter = str_replace("<2>", CardLink($dqVars[2], $dqVars[2]), $parameter);
+    }
   }
-  if (count($dqVars) > 1 && isset($dqVars[1])) {
-    $parameter = str_replace("<1>", CardLink($dqVars[1], $dqVars[1]), $parameter);
-  }  
-  if (count($dqVars) > 2 && isset($dqVars[2])) {
-    $parameter = str_replace("<2>", CardLink($dqVars[2], $dqVars[2]), $parameter);
-  }  
-  $subsequent = array_shift($decisionQueue);
-  $makeCheckpoint = array_shift($decisionQueue);
   if (count($layers) > 0 && $layers[0] == "RESOLUTIONSTEP" && $player == $mainPlayer && $phase == "INSTANT") {
     $phase = "M";
   }
@@ -752,289 +765,172 @@ function AddOnHitTrigger($cardID, $uniqueID = -1, $source = "-", $targetPlayer =
   if (CardType($cardID) == "AA" && SearchCurrentTurnEffects("gallow_end_of_the_line_yellow", $mainPlayer)) return false;
   $card = GetClass($cardID, $mainPlayer);
   if ($card != "-") return $card->AddOnHitTrigger($uniqueID, $source, $targetPlayer, $check);
+  static $directAnyHitCards = [
+    "snatch_red"=>true,"snatch_yellow"=>true,"snatch_blue"=>true,
+    "pedal_to_the_metal_red"=>true,"pedal_to_the_metal_yellow"=>true,"pedal_to_the_metal_blue"=>true,
+    "over_loop_red"=>true,"over_loop_yellow"=>true,"over_loop_blue"=>true,
+    "red_in_the_ledger_red"=>true,"endless_arrow_red"=>true,
+    "hamstring_shot_red"=>true,"hamstring_shot_yellow"=>true,"hamstring_shot_blue"=>true,
+    "salvage_shot_red"=>true,"salvage_shot_yellow"=>true,"salvage_shot_blue"=>true,
+    "nebula_blade"=>true,"arknight_ascendancy_red"=>true,
+    "life_for_a_life_red"=>true,"life_for_a_life_yellow"=>true,"life_for_a_life_blue"=>true,
+    "pursuit_of_knowledge_blue"=>true,
+    "cadaverous_contraband_red"=>true,"cadaverous_contraband_yellow"=>true,"cadaverous_contraband_blue"=>true,
+    "fervent_forerunner_red"=>true,"fervent_forerunner_yellow"=>true,"fervent_forerunner_blue"=>true,
+    "moon_wish_red"=>true,"moon_wish_yellow"=>true,"moon_wish_blue"=>true,
+    "rifting_red"=>true,"rifting_yellow"=>true,"rifting_blue"=>true,
+    "soulbead_strike_red"=>true,"soulbead_strike_yellow"=>true,"soulbead_strike_blue"=>true,
+    "torrent_of_tempo_red"=>true,"torrent_of_tempo_yellow"=>true,"torrent_of_tempo_blue"=>true,
+    "bittering_thorns_yellow"=>true,"whirling_mist_blossom_yellow"=>true,
+    "high_speed_impact_red"=>true,"high_speed_impact_yellow"=>true,"high_speed_impact_blue"=>true,
+    "combustible_courier_red"=>true,"combustible_courier_yellow"=>true,"combustible_courier_blue"=>true,
+    "remorseless_red"=>true,
+    "pathing_helix_red"=>true,"pathing_helix_yellow"=>true,"pathing_helix_blue"=>true,
+    "sleep_dart_red"=>true,"sleep_dart_yellow"=>true,"sleep_dart_blue"=>true,
+    "dread_triptych_blue"=>true,
+    "consuming_volition_red"=>true,"consuming_volition_yellow"=>true,"consuming_volition_blue"=>true,
+    "meat_and_greet_red"=>true,"meat_and_greet_yellow"=>true,"meat_and_greet_blue"=>true,
+    "coax_a_commotion_red"=>true,
+    "promise_of_plenty_red"=>true,"promise_of_plenty_yellow"=>true,"promise_of_plenty_blue"=>true,
+    "herald_of_erudition_yellow"=>true,"herald_of_judgment_yellow"=>true,
+    "herald_of_triumph_red"=>true,"herald_of_triumph_yellow"=>true,"herald_of_triumph_blue"=>true,
+    "herald_of_protection_red"=>true,"herald_of_protection_yellow"=>true,"herald_of_protection_blue"=>true,
+    "herald_of_ravages_red"=>true,"herald_of_ravages_yellow"=>true,"herald_of_ravages_blue"=>true,
+    "herald_of_rebirth_red"=>true,"herald_of_rebirth_yellow"=>true,"herald_of_rebirth_blue"=>true,
+    "herald_of_tenacity_red"=>true,"herald_of_tenacity_yellow"=>true,"herald_of_tenacity_blue"=>true,
+    "wartune_herald_red"=>true,"wartune_herald_yellow"=>true,"wartune_herald_blue"=>true,
+    "galaxxi_black"=>true,
+    "brandish_red"=>true,"brandish_yellow"=>true,"brandish_blue"=>true,
+    "overload_red"=>true,"overload_yellow"=>true,"overload_blue"=>true,
+    "illuminate_red"=>true,"illuminate_yellow"=>true,"illuminate_blue"=>true,
+    "rising_solartide_red"=>true,"rising_solartide_yellow"=>true,"rising_solartide_blue"=>true,
+    "soul_harvest_blue"=>true,
+    "lunartide_plunderer_red"=>true,"lunartide_plunderer_yellow"=>true,"lunartide_plunderer_blue"=>true,
+    "oldhim_grandfather_of_eternity"=>true,"oldhim"=>true,"endless_winter_red"=>true,
+    "awakening_blue"=>true,"tear_asunder_blue"=>true,
+    "embolden_red"=>true,"embolden_yellow"=>true,"embolden_blue"=>true,
+    "light_it_up_yellow"=>true,
+    "frost_fang_red"=>true,"frost_fang_yellow"=>true,"frost_fang_blue"=>true,
+    "icy_encounter_red"=>true,"icy_encounter_yellow"=>true,"icy_encounter_blue"=>true,
+    "pulverize_red"=>true,"spring_tidings_yellow"=>true,
+    "ride_the_tailwind_red"=>true,"ride_the_tailwind_yellow"=>true,"ride_the_tailwind_blue"=>true,
+    "battering_bolt_red"=>true,
+    "fatigue_shot_red"=>true,"fatigue_shot_yellow"=>true,"fatigue_shot_blue"=>true,
+    "timidity_point_red"=>true,"timidity_point_yellow"=>true,"timidity_point_blue"=>true,
+    "drowning_dire_red"=>true,"drowning_dire_yellow"=>true,"drowning_dire_blue"=>true,
+    "reek_of_corruption_red"=>true,"reek_of_corruption_yellow"=>true,"reek_of_corruption_blue"=>true,
+    "bingo_red"=>true,
+    "dustup_red"=>true,"dustup_yellow"=>true,"dustup_blue"=>true,
+    "kyloria"=>true,"nekria"=>true,"vynserakai"=>true,
+    "engulfing_flamewave_red"=>true,"engulfing_flamewave_yellow"=>true,"engulfing_flamewave_blue"=>true,
+    "mounting_anger_red"=>true,"mounting_anger_yellow"=>true,"mounting_anger_blue"=>true,
+    "rising_resentment_red"=>true,"rising_resentment_yellow"=>true,"rising_resentment_blue"=>true,
+    "soaring_strike_red"=>true,"soaring_strike_yellow"=>true,"soaring_strike_blue"=>true,
+    "take_the_tempo_red"=>true,"stoke_the_flames_red"=>true,"erase_face_red"=>true,"vipox_red"=>true,
+    "flex_claws_red"=>true,"flex_claws_yellow"=>true,"flex_claws_blue"=>true,
+    "jubeel_spellbane"=>true,
+    "urgent_delivery_red"=>true,"urgent_delivery_yellow"=>true,"urgent_delivery_blue"=>true,
+    "heat_seeker_red"=>true,"immobilizing_shot_red"=>true,
+    "drill_shot_red"=>true,"drill_shot_yellow"=>true,"drill_shot_blue"=>true,
+    "hemorrhage_bore_red"=>true,"hemorrhage_bore_yellow"=>true,"hemorrhage_bore_blue"=>true,
+    "infiltrate_red"=>true,
+    "infect_red"=>true,"infect_yellow"=>true,"infect_blue"=>true,
+    "sedate_red"=>true,"sedate_yellow"=>true,"sedate_blue"=>true,
+    "wither_red"=>true,"wither_yellow"=>true,"wither_blue"=>true,
+    "wander_with_purpose_yellow"=>true,
+    "be_like_water_red"=>true,"be_like_water_yellow"=>true,"be_like_water_blue"=>true,
+    "deadly_duo_red"=>true,"deadly_duo_yellow"=>true,"deadly_duo_blue"=>true,
+    "barbed_undertow_red"=>true,
+    "infecting_shot_red"=>true,"infecting_shot_yellow"=>true,"infecting_shot_blue"=>true,
+    "sedation_shot_red"=>true,"sedation_shot_yellow"=>true,"sedation_shot_blue"=>true,
+    "withering_shot_red"=>true,"withering_shot_yellow"=>true,"withering_shot_blue"=>true,
+    "plunge_red"=>true,"plunge_yellow"=>true,"plunge_blue"=>true,
+    "death_touch_red"=>true,"death_touch_yellow"=>true,"death_touch_blue"=>true,
+    "amnesia_red"=>true,
+    "humble_red"=>true,"humble_yellow"=>true,"humble_blue"=>true,
+    "cut_down_to_size_red"=>true,"cut_down_to_size_yellow"=>true,"cut_down_to_size_blue"=>true,
+    "destructive_deliberation_red"=>true,"destructive_deliberation_yellow"=>true,"destructive_deliberation_blue"=>true,
+    "lay_to_rest_red"=>true,"lay_to_rest_yellow"=>true,"lay_to_rest_blue"=>true,
+    "flail_of_agony"=>true,
+    "hungering_demigon_red"=>true,"hungering_demigon_yellow"=>true,"hungering_demigon_blue"=>true,
+    "nasreth_the_soul_harrower"=>true,"censor_red"=>true,"mischievous_meeps_red"=>true,
+    "under_loop_red"=>true,"jinglewood_smash_hit"=>true,"bittering_thorns_red"=>true,
+    "banksy"=>true,"heist_red"=>true,
+    "spring_a_leak_red"=>true,"spring_a_leak_yellow"=>true,"spring_a_leak_blue"=>true,
+    "data_link_red"=>true,"data_link_yellow"=>true,"data_link_blue"=>true,
+    "dive_through_data_red"=>true,"dive_through_data_yellow"=>true,"dive_through_data_blue"=>true,
+    "expedite_red"=>true,"expedite_yellow"=>true,"expedite_blue"=>true,
+    "metex_red"=>true,"metex_yellow"=>true,"metex_blue"=>true,
+    "under_loop_yellow"=>true,"under_loop_blue"=>true,
+    "already_dead_red"=>true,"intoxicating_shot_blue"=>true,"millers_grindstone"=>true,
+    "pay_up_red"=>true,
+    "performance_bonus_red"=>true,"performance_bonus_yellow"=>true,"performance_bonus_blue"=>true,
+    "judge_jury_executioner_red"=>true,"strength_rules_all_red"=>true,"beckoning_mistblade"=>true,
+    "biting_breeze_red"=>true,"biting_breeze_yellow"=>true,"biting_breeze_blue"=>true,
+    "murky_water_red"=>true,
+    "earth_form_red"=>true,"earth_form_yellow"=>true,"earth_form_blue"=>true,
+    "lightning_form_red"=>true,"lightning_form_yellow"=>true,"lightning_form_blue"=>true,
+    "splintering_deadwood_red"=>true,"splintering_deadwood_yellow"=>true,"splintering_deadwood_blue"=>true,
+    "summit_the_unforgiving"=>true,"devotion_never_dies_red"=>true,
+    "strike_gold_red"=>true,"strike_gold_yellow"=>true,"strike_gold_blue"=>true,
+    "blow_for_a_blow_red"=>true,"bittering_thorns_blue"=>true,
+  ];
+  if (isset($directAnyHitCards[$cardID])) return AnyHitTrigger($mainPlayer, $cardID, $check);
+  static $heroHitCards = [
+    "command_and_conquer_red"=>true,
+    "searing_shot_red"=>true,"searing_shot_yellow"=>true,"searing_shot_blue"=>true,
+    "persuasive_prognosis_blue"=>true,
+    "art_of_desire_body_red"=>true,"art_of_desire_soul_yellow"=>true,"art_of_desire_mind_blue"=>true,
+    "bonds_of_attraction_red"=>true,"bonds_of_attraction_yellow"=>true,"bonds_of_attraction_blue"=>true,
+    "bonds_of_memory_red"=>true,"bonds_of_memory_yellow"=>true,"bonds_of_memory_blue"=>true,
+    "desires_of_flesh_red"=>true,"desires_of_flesh_yellow"=>true,"desires_of_flesh_blue"=>true,
+    "impulsive_desire_red"=>true,"impulsive_desire_yellow"=>true,"impulsive_desire_blue"=>true,
+    "minds_desire_red"=>true,"minds_desire_yellow"=>true,"minds_desire_blue"=>true,
+    "rowdy_locals_blue"=>true,"the_weakest_link_red"=>true,
+    "blanch_red"=>true,"blanch_yellow"=>true,"blanch_blue"=>true,
+    "factfinding_mission_red"=>true,"factfinding_mission_yellow"=>true,"factfinding_mission_blue"=>true,
+    "static_shock_red"=>true,"static_shock_yellow"=>true,
+    "snuff_out_red"=>true,"cut_through_the_facade_red"=>true,"hand_behind_the_pen_red"=>true,
+    "smash_up_red"=>true,"tongue_tied_red"=>true,"splatter_skull_red"=>true,
+    "mark_the_prey_red"=>true,"mark_the_prey_yellow"=>true,"mark_the_prey_blue"=>true,
+    "tag_the_target_red"=>true,"tag_the_target_yellow"=>true,"tag_the_target_blue"=>true,
+    "trap_and_release_red"=>true,"trap_and_release_yellow"=>true,"trap_and_release_blue"=>true,
+    "pursue_to_the_edge_of_oblivion_red"=>true,"pursue_to_the_pits_of_despair_red"=>true,
+    "conqueror_of_the_high_seas_red"=>true,"cogwerx_dovetail_red"=>true,
+    "cloud_city_steamboat_red"=>true,"cloud_city_steamboat_yellow"=>true,"cloud_city_steamboat_blue"=>true,
+    "cogwerx_zeppelin_red"=>true,"cogwerx_zeppelin_yellow"=>true,"cogwerx_zeppelin_blue"=>true,
+    "hms_barracuda_yellow"=>true,"hms_kraken_yellow"=>true,"hms_marlin_yellow"=>true,
+    "pilfer_the_wreck_red"=>true,"pilfer_the_wreck_yellow"=>true,"pilfer_the_wreck_blue"=>true,
+    "crash_down_the_gates_red"=>true,"crash_down_the_gates_yellow"=>true,"crash_down_the_gates_blue"=>true,
+    "undercover_acquisition_red"=>true,"jack_be_nimble_red"=>true,"jack_be_quick_red"=>true,
+    "money_or_your_life_red"=>true,"money_or_your_life_yellow"=>true,"money_or_your_life_blue"=>true,
+    "bam_bam_yellow"=>true,
+    "wreck_havoc_red"=>true,"wreck_havoc_yellow"=>true,"wreck_havoc_blue"=>true,
+    "send_packing_yellow"=>true,"stab_wound_blue"=>true,"old_leather_and_vim_red"=>true,
+    "uplifting_performance_blue"=>true,"offensive_behavior_blue"=>true,
+    "spew_obscenities_yellow"=>true,"eradicate_yellow"=>true,"regicide_blue"=>true,
+    "leave_no_witnesses_red"=>true,"surgical_extraction_blue"=>true,
+    "plunder_the_poor_red"=>true,"plunder_the_poor_yellow"=>true,"plunder_the_poor_blue"=>true,
+    "rob_the_rich_red"=>true,"rob_the_rich_yellow"=>true,"rob_the_rich_blue"=>true,
+    "annihilate_the_armed_red"=>true,"annihilate_the_armed_yellow"=>true,"annihilate_the_armed_blue"=>true,
+    "fleece_the_frail_red"=>true,"fleece_the_frail_yellow"=>true,"fleece_the_frail_blue"=>true,
+    "nix_the_nimble_red"=>true,"nix_the_nimble_yellow"=>true,"nix_the_nimble_blue"=>true,
+    "sack_the_shifty_red"=>true,"sack_the_shifty_yellow"=>true,"sack_the_shifty_blue"=>true,
+    "slay_the_scholars_red"=>true,"slay_the_scholars_yellow"=>true,"slay_the_scholars_blue"=>true,
+  ];
+  if (isset($heroHitCards[$cardID])) {
+    if (IsHeroAttackTarget()) {
+      if (!$check) AddLayer("TRIGGER", $mainPlayer, $cardID, $cardID, "ONHITEFFECT");
+      return true;
+    }
+    return false;
+  }
   switch ($cardID) {
-    case "snatch_red":
-    case "snatch_yellow":
-    case "snatch_blue":
-    case "pedal_to_the_metal_red":
-    case "pedal_to_the_metal_yellow":
-    case "pedal_to_the_metal_blue":
-    case "over_loop_red":
-    case "over_loop_yellow":
-    case "over_loop_blue":
-    case "red_in_the_ledger_red":
-    case "endless_arrow_red":
-    case "hamstring_shot_red":
-    case "hamstring_shot_yellow":
-    case "hamstring_shot_blue":
-    case "salvage_shot_red":
-    case "salvage_shot_yellow":
-    case "salvage_shot_blue":
-    case "nebula_blade":
-    case "arknight_ascendancy_red":
-    case "life_for_a_life_red":
-    case "life_for_a_life_yellow":
-    case "life_for_a_life_blue":
-    case "pursuit_of_knowledge_blue":
-    case "cadaverous_contraband_red":
-    case "cadaverous_contraband_yellow":
-    case "cadaverous_contraband_blue":
-    case "fervent_forerunner_red":
-    case "fervent_forerunner_yellow":
-    case "fervent_forerunner_blue":
-    case "moon_wish_red":
-    case "moon_wish_yellow":
-    case "moon_wish_blue":
-    case "rifting_red":
-    case "rifting_yellow":
-    case "rifting_blue":
-    case "soulbead_strike_red":
-    case "soulbead_strike_yellow":
-    case "soulbead_strike_blue":
-    case "torrent_of_tempo_red":
-    case "torrent_of_tempo_yellow":
-    case "torrent_of_tempo_blue":
-    case "bittering_thorns_yellow":
-    case "whirling_mist_blossom_yellow":
-    case "high_speed_impact_red":
-    case "high_speed_impact_yellow":
-    case "high_speed_impact_blue":
-    case "combustible_courier_red":
-    case "combustible_courier_yellow":
-    case "combustible_courier_blue":
-    case "remorseless_red":
-    case "pathing_helix_red":
-    case "pathing_helix_yellow":
-    case "pathing_helix_blue":
-    case "sleep_dart_red":
-    case "sleep_dart_yellow":
-    case "sleep_dart_blue":
-    case "dread_triptych_blue":
-    case "consuming_volition_red":
-    case "consuming_volition_yellow":
-    case "consuming_volition_blue":
-    case "meat_and_greet_red":
-    case "meat_and_greet_yellow":
-    case "meat_and_greet_blue":
-    case "coax_a_commotion_red":
-    case "promise_of_plenty_red":
-    case "promise_of_plenty_yellow":
-    case "promise_of_plenty_blue":
-    case "herald_of_erudition_yellow":
-    case "herald_of_judgment_yellow":
-    case "herald_of_triumph_red":
-    case "herald_of_triumph_yellow":
-    case "herald_of_triumph_blue":
-    case "herald_of_protection_red":
-    case "herald_of_protection_yellow":
-    case "herald_of_protection_blue":
-    case "herald_of_ravages_red":
-    case "herald_of_ravages_yellow":
-    case "herald_of_ravages_blue":
-    case "herald_of_rebirth_red":
-    case "herald_of_rebirth_yellow":
-    case "herald_of_rebirth_blue":
-    case "herald_of_tenacity_red":
-    case "herald_of_tenacity_yellow":
-    case "herald_of_tenacity_blue":
-    case "wartune_herald_red":
-    case "wartune_herald_yellow":
-    case "wartune_herald_blue":
-    case "galaxxi_black":
     case "nourishing_emptiness_red":
-    case "brandish_red":
-    case "brandish_yellow":
-    case "brandish_blue":
-    case "overload_red":
-    case "overload_yellow":
-    case "overload_blue":
-    case "illuminate_red":
-    case "illuminate_yellow":
-    case "illuminate_blue":
-    case "rising_solartide_red":
-    case "rising_solartide_yellow":
-    case "rising_solartide_blue":
-    case "soul_harvest_blue":
-    case "lunartide_plunderer_red":
-    case "lunartide_plunderer_yellow":
-    case "lunartide_plunderer_blue":
-    case "oldhim_grandfather_of_eternity":
-    case "oldhim":
-    case "endless_winter_red":
-    case "awakening_blue":
-    case "tear_asunder_blue":
-    case "embolden_red":
-    case "embolden_yellow":
-    case "embolden_blue":
-    case "light_it_up_yellow":
-    case "frost_fang_red":
-    case "frost_fang_yellow":
-    case "frost_fang_blue":
-    case "icy_encounter_red":
-    case "icy_encounter_yellow":
-    case "icy_encounter_blue":
-    case "pulverize_red":
-    case "spring_tidings_yellow":
-    case "ride_the_tailwind_red":
-    case "ride_the_tailwind_yellow":
-    case "ride_the_tailwind_blue":
-    case "battering_bolt_red":
-    case "fatigue_shot_red":
-    case "fatigue_shot_yellow":
-    case "fatigue_shot_blue":
-    case "timidity_point_red":
-    case "timidity_point_yellow":
-    case "timidity_point_blue":
-    case "drowning_dire_red":
-    case "drowning_dire_yellow":
-    case "drowning_dire_blue":
-    case "reek_of_corruption_red":
-    case "reek_of_corruption_yellow":
-    case "reek_of_corruption_blue":
-    case "bingo_red":
-    case "dustup_red":
-    case "dustup_yellow":
-    case "dustup_blue":
-    case "kyloria":
-    case "nekria":
-    case "vynserakai":
-    case "engulfing_flamewave_red":
-    case "engulfing_flamewave_yellow":
-    case "engulfing_flamewave_blue":
-    case "mounting_anger_red":
-    case "mounting_anger_yellow":
-    case "mounting_anger_blue":
-    case "rising_resentment_red":
-    case "rising_resentment_yellow":
-    case "rising_resentment_blue":
-    case "soaring_strike_red":
-    case "soaring_strike_yellow":
-    case "soaring_strike_blue":
-    case "take_the_tempo_red":
-    case "stoke_the_flames_red":
-    case "erase_face_red":
-    case "vipox_red":
-    case "flex_claws_red":
-    case "flex_claws_yellow":
-    case "flex_claws_blue":
-    case "jubeel_spellbane":
-    case "urgent_delivery_red":
-    case "urgent_delivery_yellow":
-    case "urgent_delivery_blue":
-    case "heat_seeker_red":
-    case "immobilizing_shot_red":
-    case "drill_shot_red":
-    case "drill_shot_yellow":
-    case "drill_shot_blue":
-    case "hemorrhage_bore_red":
-    case "hemorrhage_bore_yellow":
-    case "hemorrhage_bore_blue":
-    case "infiltrate_red":
-    case "infect_red":
-    case "infect_yellow":
-    case "infect_blue":
-    case "sedate_red":
-    case "sedate_yellow":
-    case "sedate_blue":
-    case "wither_red":
-    case "wither_yellow":
-    case "wither_blue":
-    case "wander_with_purpose_yellow":
-    case "be_like_water_red":
-    case "be_like_water_yellow":
-    case "be_like_water_blue":
-    case "deadly_duo_red":
-    case "deadly_duo_yellow":
-    case "deadly_duo_blue":
-    case "barbed_undertow_red":
-    case "infecting_shot_red":
-    case "infecting_shot_yellow":
-    case "infecting_shot_blue":
-    case "sedation_shot_red":
-    case "sedation_shot_yellow":
-    case "sedation_shot_blue":
-    case "withering_shot_red":
-    case "withering_shot_yellow":
-    case "withering_shot_blue":
-    case "plunge_red":
-    case "plunge_yellow":
-    case "plunge_blue":
-    case "death_touch_red":
-    case "death_touch_yellow":
-    case "death_touch_blue":
-    case "amnesia_red":
-    case "humble_red":
-    case "humble_yellow":
-    case "humble_blue":
-    case "cut_down_to_size_red":
-    case "cut_down_to_size_yellow":
-    case "cut_down_to_size_blue":
-    case "destructive_deliberation_red":
-    case "destructive_deliberation_yellow":
-    case "destructive_deliberation_blue":
-    case "lay_to_rest_red":
-    case "lay_to_rest_yellow":
-    case "lay_to_rest_blue":
-    case "flail_of_agony":
-    case "hungering_demigon_red":
-    case "hungering_demigon_yellow":
-    case "hungering_demigon_blue":
-    case "nasreth_the_soul_harrower":
-    case "censor_red":
-    case "mischievous_meeps_red":
-    case "under_loop_red":
-    case "jinglewood_smash_hit":
-    case "bittering_thorns_red":
-    case "banksy":
-    case "heist_red":
-    case "spring_a_leak_red":
-    case "spring_a_leak_yellow":
-    case "spring_a_leak_blue":
-    case "data_link_red":
-    case "data_link_yellow":
-    case "data_link_blue":
-    case "dive_through_data_red":
-    case "dive_through_data_yellow":
-    case "dive_through_data_blue":
-    case "expedite_red":
-    case "expedite_yellow":
-    case "expedite_blue":
-    case "metex_red":
-    case "metex_yellow":
-    case "metex_blue":
-    case "under_loop_yellow":
-    case "under_loop_blue":
-    case "already_dead_red":
-    case "intoxicating_shot_blue":
-    case "millers_grindstone":
-    case "pay_up_red":
-    case "performance_bonus_red":
-    case "performance_bonus_yellow":
-    case "performance_bonus_blue":
-    case "judge_jury_executioner_red":
-    case "strength_rules_all_red":
-    case "beckoning_mistblade":
-    case "biting_breeze_red":
-    case "biting_breeze_yellow":
-    case "biting_breeze_blue":
-    case "murky_water_red":
-    case "earth_form_red":
-    case "earth_form_yellow":
-    case "earth_form_blue":
-    case "lightning_form_red":
-    case "lightning_form_yellow":
-    case "lightning_form_blue":
-    case "splintering_deadwood_red":
-    case "splintering_deadwood_yellow":
-    case "splintering_deadwood_blue":
-    case "summit_the_unforgiving":
-    case "devotion_never_dies_red":
-    case "strike_gold_red":
-    case "strike_gold_yellow":
-    case "strike_gold_blue":
-    case "blow_for_a_blow_red":
-    case "bittering_thorns_blue":
-      return AnyHitTrigger($mainPlayer, $cardID, $check);
+      if (SearchDiscard($mainPlayer, "AA") == "") {
+        return AnyHitTrigger($mainPlayer, $cardID, $check);
+      }
+      return false;
     case "entangle_red":
     case "entangle_yellow":
     case "entangle_blue":
@@ -1059,119 +955,6 @@ function AddOnHitTrigger($cardID, $uniqueID = -1, $source = "-", $targetPlayer =
       else return false;
     case "breaking_point_red":
       if(IsHeroAttackTarget() && RuptureActive()) {
-        if (!$check) AddLayer("TRIGGER", $mainPlayer, $cardID, $cardID, "ONHITEFFECT");
-        return true;
-      }
-      break;
-    case "command_and_conquer_red":
-    case "searing_shot_red":
-    case "searing_shot_yellow":
-    case "searing_shot_blue":
-    case "persuasive_prognosis_blue":
-    case "art_of_desire_body_red":
-    case "art_of_desire_soul_yellow":
-    case "art_of_desire_mind_blue":
-    case "bonds_of_attraction_red":
-    case "bonds_of_attraction_yellow":
-    case "bonds_of_attraction_blue":
-    case "bonds_of_memory_red":
-    case "bonds_of_memory_yellow":
-    case "bonds_of_memory_blue":
-    case "desires_of_flesh_red":
-    case "desires_of_flesh_yellow":
-    case "desires_of_flesh_blue":
-    case "impulsive_desire_red":
-    case "impulsive_desire_yellow":
-    case "impulsive_desire_blue":
-    case "minds_desire_red":
-    case "minds_desire_yellow":
-    case "minds_desire_blue":
-    case "rowdy_locals_blue":
-    case "the_weakest_link_red":
-    case "blanch_red":
-    case "blanch_yellow":
-    case "blanch_blue":
-    case "factfinding_mission_red":
-    case "factfinding_mission_yellow":
-    case "factfinding_mission_blue":
-    case "static_shock_red":
-    case "static_shock_yellow":
-    case "snuff_out_red":
-    case "cut_through_the_facade_red":
-    case "hand_behind_the_pen_red":
-    case "smash_up_red":
-    case "tongue_tied_red":
-    case "splatter_skull_red":
-    case "mark_the_prey_red":
-    case "mark_the_prey_yellow":
-    case "mark_the_prey_blue":
-    case "tag_the_target_red":
-    case "tag_the_target_yellow":
-    case "tag_the_target_blue":
-    case "trap_and_release_red":
-    case "trap_and_release_yellow":
-    case "trap_and_release_blue":
-    case "pursue_to_the_edge_of_oblivion_red":
-    case "pursue_to_the_pits_of_despair_red":
-    case "conqueror_of_the_high_seas_red":
-    case "cogwerx_dovetail_red":
-    case "cloud_city_steamboat_red":
-    case "cloud_city_steamboat_yellow":
-    case 'cloud_city_steamboat_blue':
-    case "cogwerx_zeppelin_red":
-    case "cogwerx_zeppelin_yellow":
-    case "cogwerx_zeppelin_blue":
-    case "hms_barracuda_yellow":
-    case "hms_kraken_yellow":
-    case "hms_marlin_yellow":
-    case "pilfer_the_wreck_red":
-    case "pilfer_the_wreck_yellow":
-    case "pilfer_the_wreck_blue":
-    case "crash_down_the_gates_red":
-    case "crash_down_the_gates_yellow":
-    case "crash_down_the_gates_blue":
-    case "undercover_acquisition_red":
-    case "jack_be_nimble_red":
-    case "jack_be_quick_red":
-    case "money_or_your_life_red":
-    case "money_or_your_life_yellow":
-    case "money_or_your_life_blue":
-    case "bam_bam_yellow":
-    case "wreck_havoc_red":
-    case "wreck_havoc_yellow":
-    case "wreck_havoc_blue":
-    case "send_packing_yellow":
-    case "stab_wound_blue":
-    case "old_leather_and_vim_red":
-    case "uplifting_performance_blue":
-    case "offensive_behavior_blue":
-    case "spew_obscenities_yellow":
-    case "eradicate_yellow":
-    case "regicide_blue":
-    case "leave_no_witnesses_red":
-    case "surgical_extraction_blue":
-    case "plunder_the_poor_red":
-    case "plunder_the_poor_yellow":
-    case "plunder_the_poor_blue":
-    case "rob_the_rich_red":
-    case "rob_the_rich_yellow":
-    case "rob_the_rich_blue":
-    case "annihilate_the_armed_red":
-    case "annihilate_the_armed_yellow":
-    case "annihilate_the_armed_blue":
-    case "fleece_the_frail_red":
-    case "fleece_the_frail_yellow":
-    case "fleece_the_frail_blue":
-    case "nix_the_nimble_red":
-    case "nix_the_nimble_yellow":
-    case "nix_the_nimble_blue":
-    case "sack_the_shifty_red":
-    case "sack_the_shifty_yellow":
-    case "sack_the_shifty_blue":
-    case "slay_the_scholars_red":
-    case "slay_the_scholars_yellow":
-    case "slay_the_scholars_blue":
-      if (IsHeroAttackTarget()) {
         if (!$check) AddLayer("TRIGGER", $mainPlayer, $cardID, $cardID, "ONHITEFFECT");
         return true;
       }
@@ -1420,48 +1203,30 @@ function AddCrushEffectTrigger($cardID)
   }
   $card = GetClass($cardID, $mainPlayer);
   if ($card != "-") return $card->AddCrushEffectTrigger();
+  static $directCrushCards = [
+    "crippling_crush_red"=>true,"spinal_crush_red"=>true,"cranial_crush_blue"=>true,
+    "disable_red"=>true,"disable_yellow"=>true,"disable_blue"=>true,
+    "buckling_blow_red"=>true,"buckling_blow_yellow"=>true,"buckling_blow_blue"=>true,
+    "cartilage_crush_red"=>true,"cartilage_crush_yellow"=>true,"cartilage_crush_blue"=>true,
+    "crush_confidence_red"=>true,"crush_confidence_yellow"=>true,"crush_confidence_blue"=>true,
+    "debilitate_red"=>true,"debilitate_yellow"=>true,"debilitate_blue"=>true,
+    "righteous_cleansing_yellow"=>true,
+    "crush_the_weak_red"=>true,"crush_the_weak_yellow"=>true,"crush_the_weak_blue"=>true,
+    "chokeslam_red"=>true,"chokeslam_yellow"=>true,"chokeslam_blue"=>true,
+    "star_struck_yellow"=>true,
+    "boulder_drop_yellow"=>true,"boulder_drop_blue"=>true,"boulder_drop_red"=>true,
+    "put_em_in_their_place_red"=>true,"batter_to_a_pulp_red"=>true,
+    "grind_them_down_red"=>true,"grind_them_down_yellow"=>true,"grind_them_down_blue"=>true,
+    "flatten_the_field_red"=>true,"flatten_the_field_yellow"=>true,"flatten_the_field_blue"=>true,
+    "knock_em_off_their_feet_red"=>true,"break_stature_yellow"=>true,
+    "headbutt_blue"=>true,"fault_line_red"=>true,"hostile_encroachment_red"=>true,
+    "renounce_grandeur_red"=>true,
+  ];
+  if (isset($directCrushCards[$cardID])) {
+    AddLayer("TRIGGER", $mainPlayer, $cardID, $cardID, "CRUSHEFFECT");
+    return false;
+  }
   switch ($cardID) {
-    case "crippling_crush_red":
-    case "spinal_crush_red":
-    case "cranial_crush_blue":
-    case "disable_red":
-    case "disable_yellow":
-    case "disable_blue":
-    case "buckling_blow_red":
-    case "buckling_blow_yellow":
-    case "buckling_blow_blue":
-    case "cartilage_crush_red":
-    case "cartilage_crush_yellow":
-    case "cartilage_crush_blue":
-    case "crush_confidence_red":
-    case "crush_confidence_yellow":
-    case "crush_confidence_blue":
-    case "debilitate_red":
-    case "debilitate_yellow":
-    case "debilitate_blue":
-    case "righteous_cleansing_yellow":
-    case "crush_the_weak_red":
-    case "crush_the_weak_yellow":
-    case "crush_the_weak_blue":
-    case "chokeslam_red":
-    case "chokeslam_yellow":
-    case "chokeslam_blue":
-    case "star_struck_yellow":
-    case "boulder_drop_yellow":
-    case "boulder_drop_blue":
-    case "boulder_drop_red":
-    case "put_em_in_their_place_red":
-    case "batter_to_a_pulp_red":
-    case "grind_them_down_red": case "grind_them_down_yellow": case "grind_them_down_blue":
-    case "flatten_the_field_red": case "flatten_the_field_yellow": case "flatten_the_field_blue":
-    case "knock_em_off_their_feet_red":
-    case "break_stature_yellow":
-    case "headbutt_blue":
-    case "fault_line_red":
-    case "hostile_encroachment_red":
-    case "renounce_grandeur_red":
-      AddLayer("TRIGGER", $mainPlayer, $cardID, $cardID, "CRUSHEFFECT");
-      break;
     case "mangle_red":
       AddDecisionQueue("MULTIZONEINDICES", $mainPlayer, "THEIRCHAR:type=E;hasNegCounters=true");
       AddDecisionQueue("SETDQCONTEXT", $mainPlayer, "Choose_an_equipment_to_destroy", 1);
@@ -1509,8 +1274,9 @@ function AddCardEffectHitTrigger($cardID, $sourceID = "-", $targetPlayer = "-") 
   $source = $sourceID != "-" ? $sourceID : $CombatChain->AttackCard()->ID();
   if (SearchCurrentTurnEffects("dense_blue_mist_blue-HITPREVENTION", $defPlayer)) return false;
   $effects = explode(',', $cardID);
-  $parameter = explode("-", $effects[0])[0];
-  $mode = explode("-", $effects[0])[1] ?? "-";
+  $effectParts = explode("-", $effects[0]);
+  $parameter = $effectParts[0];
+  $mode = $effectParts[1] ?? "-";
   $card = GetClass($parameter, $mainPlayer);
   if ($card != "-") $card->AddCardEffectHitTrigger($source, $targetPlayer, $mode);
   switch ($effects[0]) {
@@ -1565,7 +1331,8 @@ function AddCardEffectHitTrigger($cardID, $sourceID = "-", $targetPlayer = "-") 
       AddLayer("TRIGGER", $mainPlayer, "force_of_nature_blue", "force_of_nature_blue-TRIGGER", "EFFECTHITEFFECT", $source);
       break;
     case "succumb_to_temptation_yellow":
-      if (CardType($CombatChain->AttackCard()->ID()) == "AA" && ClassContains($CombatChain->AttackCard()->ID(), "RUNEBLADE", $mainPlayer) && IsHeroAttackTarget()) {
+      $attackID = $CombatChain->AttackCard()->ID();
+      if (CardType($attackID) == "AA" && ClassContains($attackID, "RUNEBLADE", $mainPlayer) && IsHeroAttackTarget()) {
         AddLayer("TRIGGER", $mainPlayer, $parameter, $cardID, "EFFECTHITEFFECT", $source);
       }
       break;
@@ -1583,7 +1350,7 @@ function AddEffectHitTrigger($cardID, $source="-", $fromCombat=true, $target="-"
 {
   global $mainPlayer, $Card_LifeBanner, $Card_ResourceBanner, $layers, $defPlayer, $combatChain;
   $effects = explode(',', $cardID);
-  $parameter = explode("-", $effects[0])[0];
+  $parameter = explode("-", $effects[0], 2)[0];
   if (CardType($source) == "AA" && (SearchAuras("stamp_authority_blue", 1) || SearchAuras("stamp_authority_blue", 2))) return false;
   if (CardType($source) == "AA" && SearchCurrentTurnEffects("gallow_end_of_the_line_yellow", $mainPlayer)) return false;
   $effectID = ExtractCardID($cardID);
@@ -1807,10 +1574,11 @@ function AddEffectHitTrigger($cardID, $source="-", $fromCombat=true, $target="-"
 function AddCharacterPlayCardTrigger($cardID, $playType, $from)
 {
   global $mainPlayer;
-  $otherPlayer = $mainPlayer == 1 ? 2 : 1;
+  $otherPlayer = 3 - $mainPlayer ;
+  $charPieces = CharacterPieces();
   $mainChar = GetPlayerCharacter($mainPlayer);
   $mainCharCount = count($mainChar);
-  for ($i = 0; $i < $mainCharCount; $i += CharacterPieces()) {
+  for ($i = 0; $i < $mainCharCount; $i += $charPieces) {
     switch ($mainChar[$i]) {
       default:
         break;
@@ -1818,7 +1586,7 @@ function AddCharacterPlayCardTrigger($cardID, $playType, $from)
   }
   $otherChar = GetPlayerCharacter($otherPlayer);
   $otherCharCount = count($otherChar);
-  for ($i = 0; $i < $otherCharCount; $i += CharacterPieces()) {
+  for ($i = 0; $i < $otherCharCount; $i += $charPieces) {
     switch ($otherChar[$i]) {
       case "leap_frog_vocal_sac":
       case "leap_frog_slime_skin":
@@ -1899,6 +1667,7 @@ function ProcessMainCharacterHitEffect($cardID, $player, $target)
         AddDecisionQueue("WRITELOG", $player, CardLink($cardID, $cardID) . " created a " . CardLink("vigor", "vigor") . " token ", 1);
         AddDecisionQueue("PASSPARAMETER", $player, "vigor", 1);
         AddDecisionQueue("PUTPLAY", $player, "-", 1);
+        AddDecisionQueue("LOGSTATS", $player, $cardID.",EQUIP,PASSIVE", 1);
       }
       break;
     case "aether_crackers":
@@ -1932,7 +1701,9 @@ function ProcessMainCharacterHitEffect($cardID, $player, $target)
     case "okana_scar_wraps":
       $openHands = true;
       $char = GetPlayerCharacter($player);
-      for ($i = CharacterPieces(); $i < count($char); $i += CharacterPieces()) {
+      $charPieces = CharacterPieces();
+      $charCount = count($char);
+      for ($i = $charPieces; $i < $charCount; $i += $charPieces) {
         if (TypeContains($char[$i], "W", $player) || SubtypeContains($char[$i], "Off-Hand")) {
           if ($char[$i + 1] != 0) $openHands = false;
         }
@@ -1963,7 +1734,7 @@ function ProcessMainCharacterHitEffect($cardID, $player, $target)
 function ProcessItemsEffect($cardID, $player, $target, $uniqueID)
 {
   global $layers, $combatChainState, $CCS_GoesWhereAfterLinkResolves;
-  $otherPlayer = $player == 1 ? 2 : 1;
+  $otherPlayer = 3 - $player;
   if (CardType($target) == "AA" && SearchCurrentTurnEffects("tarpit_trap_yellow", $player, count($layers) <= LayerPieces())) {
     WriteLog("Hit effect prevented by " . CardLink("tarpit_trap_yellow", "tarpit_trap_yellow"));
     return false;
@@ -2011,7 +1782,7 @@ function ProcessItemsEffect($cardID, $player, $target, $uniqueID)
 function ProcessAbility($player, $parameter, $uniqueID, $target = "-", $additionalCosts = "-", $from = "-")
 {
   global $combatChain, $mainPlayer;
-  $otherPlayer = $player == 1 ? 2 : 1;
+  $otherPlayer = 3 - $player;
   $card = GetClass($parameter, $player);
   if ($card != "-") return $card->ProcessAbility($uniqueID, $target, $additionalCosts, $from);
   switch ($parameter) {
@@ -2100,7 +1871,7 @@ function ProcessAbility($player, $parameter, $uniqueID, $target = "-", $addition
         $choices = [];
         foreach ($inventory as $cardID) {
           if (TalentContains($cardID, "REVILED", $player) && TypeContains($cardID, "AA")) {
-            array_push($choices, $cardID);
+            $choices[] = $cardID;
           };
         }
         if (count($choices) == 0) {
@@ -2146,7 +1917,7 @@ function ProcessTrigger($player, $parameter, $uniqueID, $target = "-", $addition
   $parameter = ShiyanaCharacter($parameter);
   $EffectContext = $parameter;
   // $EffectContextUID = $uniqueID;
-  $otherPlayer = $player == 1 ? 2 : 1;
+  $otherPlayer = 3 - $player;
   if ($additionalCosts == "ONHITEFFECT") {
     ProcessHitEffect($parameter, $combatChain[2] ?? "-", $uniqueID, target:$target);
     return;
@@ -2166,11 +1937,13 @@ function ProcessTrigger($player, $parameter, $uniqueID, $target = "-", $addition
       $cardID = str_contains($target, $parameter) ? $target : $parameter;
       $index = FindCurrentTurnEffectIndex($player, $cardID);
       if ($index != -1) {
-        // Remove "-string" and "string-" suffixes from the effect ID
-        $effectID = preg_replace('/-[^-]*$/', '', $currentTurnEffects[$index]);
+        // Remove trailing "-suffix" from the effect ID (e.g. "foo_red-HIT" → "foo_red")
+        $lastDash = strrpos($currentTurnEffects[$index], '-');
+        $effectID = $lastDash !== false ? substr($currentTurnEffects[$index], 0, $lastDash) : $currentTurnEffects[$index];
         LogPlayCardStats($player, $effectID, "CC", "HIT");
       }
       if (EffectHitEffect($cardID, $combatChain[2], $uniqueID, effectSource:$combatChain[0], target:$target)) {
+        $index = FindCurrentTurnEffectIndex($player, $cardID); //recheck index, it could have changed
         if ($index != -1) RemoveCurrentTurnEffect($index);
       }
     }
@@ -2203,6 +1976,15 @@ function ProcessTrigger($player, $parameter, $uniqueID, $target = "-", $addition
       return $card->ProcessTrigger($uniqueID, $target, $additionalCosts, $from);
     }
     switch ($parameter) {
+      case "staff_of_verdant_shoots":
+        PlayAura("embodiment_of_earth", $player, 1);
+        break;
+      case "cintari_saber":
+      case "cintari_saber_r":
+        $attackID = $CombatChain->AttackCard()->ID();
+        AddCharacterEffect($player, $combatChainState[$CCS_WeaponIndex], $attackID);
+        WriteLog(CardLink($attackID) . " got +1 for the rest of the turn.");
+        break;
       case "evo_steel_soul_memory_blue":
         AddCurrentTurnEffect($parameter, $player);
         WriteLog("🧠" . CardLink("$parameter") . " gained +1 intellect");
@@ -2404,7 +2186,9 @@ function ProcessTrigger($player, $parameter, $uniqueID, $target = "-", $addition
       case "zephyr_needle":
       case "zephyr_needle_r":
         EvaluateCombatChain($totalPower, $totalBlock, secondNeedleCheck: true);
-        for ($i = CombatChainPieces(); $i < count($combatChain); $i += CombatChainPieces()) {
+        $combatChainPieces = CombatChainPieces();
+        $combatChainCount = count($combatChain);
+        for ($i = $combatChainPieces; $i < $combatChainCount; $i += $combatChainPieces) {
           $uid = $combatChain[$i + 2] == "EQUIP" ? $combatChain[$i + 8] : $combatChain[$i + 7];
           $blockVal = intval(ModifiedBlockValue($combatChain[$i], $defPlayer, "CC", "", $uid)) + BlockModifier($combatChain[$i], "CC", 0, $i) + $combatChain[$i + 6];
           if ($totalBlock > 0 && $blockVal > $totalPower && $combatChain[$i + 1] == $defPlayer) {
@@ -2888,7 +2672,7 @@ function ProcessTrigger($player, $parameter, $uniqueID, $target = "-", $addition
         if ($deck->Reveal(3)) {
           $cards = explode(",", $deck->Top(amount: 3));
           $numRed = 0;
-          for ($j = 0; $j < count($cards); ++$j) if (PitchValue($cards[$j]) == 1) ++$numRed;
+          foreach ($cards as $card) if (PitchValue($card) == 1) ++$numRed;
           if ($numRed > 0) DealArcane($numRed * 2, 2, "ABILITY", $combatChain[0], false, $player);
         }
         break;
@@ -2897,9 +2681,9 @@ function ProcessTrigger($player, $parameter, $uniqueID, $target = "-", $addition
         if ($deck->Reveal(2)) {
           $cards = explode(",", $deck->Top(amount: 2));
           $numRed = 0;
-          for ($j = 0; $j < count($cards); ++$j) if (PitchValue($cards[$j]) == 1) ++$numRed;
+          foreach ($cards as $card) if (PitchValue($card) == 1) ++$numRed;
           if ($numRed > 0) {
-            $otherPlayer = $player == 1 ? 2 : 1;
+            $otherPlayer = 3 - $player;
             AddDecisionQueue("FINDINDICES", $otherPlayer, "EQUIP");
             AddDecisionQueue("CHOOSETHEIRCHARACTER", $player, "<-", 1);
             AddDecisionQueue("MODDEFCOUNTER", $otherPlayer, -1 * $numRed, 1);
@@ -2911,7 +2695,7 @@ function ProcessTrigger($player, $parameter, $uniqueID, $target = "-", $addition
         $deck = new Deck($player);
         if ($deck->Reveal(1)) {
           if (PitchValue($deck->Top()) == 1) {
-            $otherPlayer = $player == 1 ? 2 : 1;
+            $otherPlayer = 3 - $player;
             AddDecisionQueue("SHOWHANDWRITELOG", $otherPlayer, "<-", 1);
             AddDecisionQueue("FINDINDICES", $otherPlayer, "HAND");
             AddDecisionQueue("CHOOSETHEIRHAND", $player, "<-", 1);
@@ -3333,7 +3117,8 @@ function ProcessTrigger($player, $parameter, $uniqueID, $target = "-", $addition
       case $CID_Inertia:
         $deck = new Deck($player);
         WriteLog("Processing the end of turn effect of " . CardLink("inertia", "inertia") . ".");
-        for ($i = 0; $i < count(GetArsenal($player)) + count(GetHand($player)); $i++) {
+        $numToBottom = count(GetArsenal($player)) + count(GetHand($player));
+        for ($i = 0; $i < $numToBottom; $i++) {
           BottomDeckMultizone($player, "MYHAND", "MYARS", true, "Choose a card from your hand or arsenal to add on the bottom of your deck");
         }
         AddDecisionQueue("WRITELOG", $player, "⬇️ The cards and arsenal of Player " . $player . " was put on the bottom of their deck.");
@@ -3349,7 +3134,8 @@ function ProcessTrigger($player, $parameter, $uniqueID, $target = "-", $addition
         break;
       case "blasmophet_levia_consumed":
         $banish = &GetBanish($player);
-        for ($i = count($banish) - BanishPieces(); $i >= 0; $i -= BanishPieces()) {
+        $banishPieces = BanishPieces();
+        for ($i = count($banish) - $banishPieces; $i >= 0; $i -= $banishPieces) {
           if ($banish[$i + 1] == "blasmophet_levia_consumed") {
             TurnBanishFaceDown($player, $i);
             break;
@@ -3420,22 +3206,29 @@ function ProcessTrigger($player, $parameter, $uniqueID, $target = "-", $addition
       case "infuse_titanium_yellow":
       case "infuse_titanium_blue":
       case "steel_street_hoons_blue": //Galvanize
-        MZChooseAndDestroy($player, "MYITEMS", may: true, context: "Choose an item to galvanize for " . CardLink($parameter, $parameter) . " effect");
-        AddDecisionQueue("PASSPARAMETER", $player, $target, 1);
-        AddDecisionQueue("COMBATCHAINDEFENSEMODIFIER", $player, "2", 1);
+        $index = $CombatChain->FindCardUID($uniqueID)->Index();
+        if ($index != -1) {
+          MZChooseAndDestroy($player, "MYITEMS", may: true, context: "Choose an item to galvanize for " . CardLink($parameter, $parameter) . " effect");
+          AddDecisionQueue("PASSPARAMETER", $player, $index, 1);
+          AddDecisionQueue("COMBATCHAINDEFENSEMODIFIER", $player, "2", 1);
+        }
         break;
       case "golden_skywarden_yellow":
         $myItems = GetItems($player);
         $maxRepeats = count($myItems);
         // check to make sure it's still there before giving it a buff
         $foundSkywarden = false;
-        for ($i = CombatChainPieces(); $i < count($combatChain); $i += CombatChainPieces()) {
+        $combatChainPieces = CombatChainPieces();
+        $combatChainCount = count($combatChain);
+        for ($i = $combatChainPieces; $i < $combatChainCount; $i += $combatChainPieces) {
           if ($combatChain[$i] == "golden_skywarden_yellow") $foundSkywarden = true;
         }
-        for ($i = 0; $i < count($myItems); $i += ItemPieces()) {
-          if ($myItems[$i] == "golden_cog") ++$maxRepeats; // you can galvanize the gold made by glavanizing a cog
+        $itemPieces = ItemPieces();
+        $myItemsCount = count($myItems);
+        for ($i = 0; $i < $myItemsCount; $i += $itemPieces) {
+          if ($myItems[$i] == "golden_cog") ++$maxRepeats; // you can galvanize the gold made by galvanizing a cog
         }
-        for ($i = 0; $i < $maxRepeats; $i += itemPieces()) {
+        for ($i = 0; $i < $maxRepeats; $i += $itemPieces) {
           AddDecisionQueue("MULTIZONEINDICES", $player, "MYITEMS", 1);
           AddDecisionQueue("SETDQCONTEXT", $player, "Choose an item to galvanize for " . CardLink($parameter, $parameter) . " effect", 1);
           AddDecisionQueue("MAYCHOOSEMULTIZONE", $player, "<-", 1);
@@ -3548,7 +3341,9 @@ function ProcessTrigger($player, $parameter, $uniqueID, $target = "-", $addition
         break;
       case "golden_glare":
         $yellowPitchCards = 0;
-        for ($i = CombatChainPieces(); $i < count($combatChain); $i += CombatChainPieces()) {
+        $combatChainPieces = CombatChainPieces();
+        $combatChainCount = count($combatChain);
+        for ($i = $combatChainPieces; $i < $combatChainCount; $i += $combatChainPieces) {
           if (PitchValue($combatChain[$i]) == 2) ++$yellowPitchCards;
         }
         if ($yellowPitchCards >= 2) {
@@ -3589,9 +3384,10 @@ function ProcessTrigger($player, $parameter, $uniqueID, $target = "-", $addition
       case "no_fear_red":
         $banish = &GetBanish($player);
         $hand = &GetHand($player);
-        for ($i = count($banish) - BanishPieces(); $i >= 0; $i -= BanishPieces()) {
+        $banishPieces = BanishPieces();
+        for ($i = count($banish) - $banishPieces; $i >= 0; $i -= $banishPieces) {
           if ($banish[$i + 1] == "NOFEAR") {
-            array_push($hand, $banish[$i]);
+            $hand[] = $banish[$i];
             RemoveBanish($player, $i);
           }
         }
@@ -3718,12 +3514,13 @@ function ProcessTrigger($player, $parameter, $uniqueID, $target = "-", $addition
         AddCurrentTurnEffect($parameter, $player, "CC");
         break;
       case "stone_rain_red":
-        $otherPlayer = $player == 1 ? 2 : 1;
+        $otherPlayer = 3 - $player;
         $banish = &GetBanish($otherPlayer);
         $hand = &GetHand($otherPlayer);
-        for ($i = count($banish) - BanishPieces(); $i >= 0; $i -= BanishPieces()) {
+        $banishPieces = BanishPieces();
+        for ($i = count($banish) - $banishPieces; $i >= 0; $i -= $banishPieces) {
           if ($banish[$i + 1] == "STONERAIN") {
-            array_push($hand, $banish[$i]);
+            $hand[] = $banish[$i];
             RemoveBanish($otherPlayer, $i);
           }
         }
@@ -3743,9 +3540,6 @@ function ProcessTrigger($player, $parameter, $uniqueID, $target = "-", $addition
         AddDecisionQueue("ALLCARDPITCHORPASS", $player, "2", 1);
         AddDecisionQueue("PLAYAURA", $player, "quicken-1", 1); 
         break;
-      case "arc_lightning_yellow":
-        DealArcane(1, 2, "PLAYCARD", "arc_lightning_yellow");
-        break;
       case "verdance_thorn_of_the_rose": 
       case "verdance":
         if(GetCharacterGemState($player, $parameter) != 0) {
@@ -3753,10 +3547,10 @@ function ProcessTrigger($player, $parameter, $uniqueID, $target = "-", $addition
           AddDecisionQueue("NOPASS", $player, "-");
         }
         if (str_contains($target, "THEIRCHAR")) {
-          $target = "THEIRCHARUID-" . explode("-", $target)[1];
+          $target = "THEIRCHARUID-" . explode("-", $target, 2)[1];
         }
         if (str_contains($target, "MYCHAR")) {
-          $target = "MYCHARUID-" . explode("-", $target)[1];
+          $target = "MYCHARUID-" . explode("-", $target, 2)[1];
         }
         AddDecisionQueue("VERDANCE", $player, "$parameter,$target", 1);
         break;
@@ -3823,7 +3617,7 @@ function ProcessTrigger($player, $parameter, $uniqueID, $target = "-", $addition
         break;
       case "flash_of_brilliance":
         $hand = SearchHand($player, talent: "LIGHTNING");
-        if (count(explode(",", $hand)) > 0) {
+        if ($hand !== "") {
           AddDecisionQueue("FINDINDICES", $player, "HAND", 1);
           AddDecisionQueue("SETDQCONTEXT", $player, "Choose a lightning card from your hand to discard.", 1);
           MZMoveCard($player, "MYHAND:talent=LIGHTNING", "MYDISCARD", may:true, logText:"Card discarded: <0>", isSubsequent:true);
@@ -3864,12 +3658,14 @@ function ProcessTrigger($player, $parameter, $uniqueID, $target = "-", $addition
       case "aether_bindings_of_the_third_age":
         WriteLog(CardLink("aether_bindings_of_the_third_age", "aether_bindings_of_the_third_age") . " Amp 1");
         $index = -1;
-        for ($i = 0; $i < count($currentTurnEffects); $i += CurrentTurnEffectPieces()) {
-          if (explode(",", $currentTurnEffects[$i])[0] == "aether_bindings_of_the_third_age" && $currentTurnEffects[$i + 1] == $player) $index = $i;
+        $cteCount = count($currentTurnEffects);
+        for ($i = 0; $i < $cteCount; $i += 4) {
+          $cteParts = explode(",", $currentTurnEffects[$i], 2);
+          if ($cteParts[0] == "aether_bindings_of_the_third_age" && $currentTurnEffects[$i + 1] == $player) $index = $i;
         }
         if ($index == -1) AddCurrentTurnEffect("aether_bindings_of_the_third_age,1", $player);
         else {
-          $num = explode(",", $currentTurnEffects[$index])[1];
+          $num = explode(",", $currentTurnEffects[$index], 2)[1];
           $num = is_numeric($num) ? intval($num) + 1 : 1;
           $currentTurnEffects[$index] = "aether_bindings_of_the_third_age,$num";
         }
@@ -3928,9 +3724,6 @@ function ProcessTrigger($player, $parameter, $uniqueID, $target = "-", $addition
         AddDecisionQueue("SETDQCONTEXT", $player, "Choose which hero win the clash", 1);
         AddDecisionQueue("CHOOSEMULTIZONE", $player, "<-", 1);
         AddDecisionQueue("BRUTUS", $player, $target, 1);
-        break;
-      case "jarl_vetreidi":
-        FrostBiteExposed($otherPlayer, $player);
         break;
       case "unforgetting_unforgiving_red":
         if(SearchCharacter($otherPlayer, hasNegCounters: true) != "") {
@@ -4019,7 +3812,9 @@ function ProcessTrigger($player, $parameter, $uniqueID, $target = "-", $addition
         break;
       case "chain_reaction_yellow":
         $arsenal = &GetArsenal($player);
-        for ($i = 0; $i < count($arsenal); $i += ArsenalPieces()) {
+        $arsenalPieces = ArsenalPieces();
+        $arsenalCount = count($arsenal);
+        for ($i = 0; $i < $arsenalCount; $i += $arsenalPieces) {
           if (CardType($arsenal[$i]) == "A" && $arsenal[$i + 1] == "DOWN"){
             AddDecisionQueue("YESNO", $player, "if_you_want_to_turn_your_arsenal_face_up");
             AddDecisionQueue("NOPASS", $player, "-");
@@ -4213,7 +4008,7 @@ function ProcessTrigger($player, $parameter, $uniqueID, $target = "-", $addition
         LoseHealth($additionalCosts, $player);
         if($additionalCosts >= 3) {
           $controller = str_contains($uniqueID, "MYAURAS") ? $player : $otherPlayer;
-          $uniqueID = str_contains($uniqueID, "-") ? explode("-", $uniqueID)[1] : "-";
+          $uniqueID = str_contains($uniqueID, "-") ? explode("-", $uniqueID, 2)[1] : "-";
           DestroyAuraUniqueID($controller, $uniqueID);
         }
         break;
@@ -4273,9 +4068,10 @@ function ProcessTrigger($player, $parameter, $uniqueID, $target = "-", $addition
       case "entangling_shot_red":
       case "nettling_shot_red":
       case "quickening_sand_blue":
-        $zone = explode("-", $target)[0];
-        $uid = explode("-", $target)[1];
-        $otherPlayer = $player == 1 ? 2 : 1;
+        $targetParts = explode("-", $target);
+        $zone = $targetParts[0];
+        $uid = $targetParts[1];
+        $otherPlayer = 3 - $player;
         switch ($zone) {
           case "THEIRALLY":
             $MZIndex = "$zone-" . SearchAlliesForUniqueID($uid, $otherPlayer);
@@ -4339,6 +4135,9 @@ function ProcessTrigger($player, $parameter, $uniqueID, $target = "-", $addition
           AddDecisionQueue("MZOP", $player, "GAINCONTROL", 1);
         }
         break;
+      case "oysten_heart_of_gold_yellow":
+        PutItemIntoPlayForPlayer("gold", $player, isToken:true, from:$parameter, effectSource:$parameter);
+        break;
       case "valda_brightaxe":
       case "valda_seismic_impact":
         if ($additionalCosts == "STARTTURN") {
@@ -4379,7 +4178,7 @@ function ProcessTrigger($player, $parameter, $uniqueID, $target = "-", $addition
         $fromMod = "Hand,MOUNTAIN";
         $choices = SearchMultizone($player, $search);
         if ($choices != "") {
-          $numChoices = count(explode(",", $choices));
+          $numChoices = substr_count($choices, ",") + 1;
           for ($i = 0; $i < $numChoices; ++$i) {
             AddDecisionQueue("MULTIZONEINDICES", $player, $search, 1);
             AddDecisionQueue("SETDQCONTEXT", $player, "Banish an action from hand. (Cards will be added as blocking in the order you banish them)", 1);
@@ -4400,7 +4199,7 @@ function ProcessTrigger($player, $parameter, $uniqueID, $target = "-", $addition
         break;
       case "ley_line_of_the_old_ones_blue":
         if ($uniqueID == "-") PlayAura("seismic_surge", $player, isToken:true, effectController:$player, effectSource:$parameter);
-        else if (CountAura("seismic_surge", $player) == 0) DestroyAuraUniqueID($player, explode("-", $uniqueID)[1]);
+        else if (CountAura("seismic_surge", $player) == 0) DestroyAuraUniqueID($player, explode("-", $uniqueID, 2)[1]);
         break;
       case "sunkwater_lookout":
       case "sunkwater_exoshell":
@@ -4408,8 +4207,10 @@ function ProcessTrigger($player, $parameter, $uniqueID, $target = "-", $addition
       case "sunkwater_scalers":
         $arsenal = GetArsenal($player);
         $inds = [];
-        for ($i = 0; $i < count($arsenal); $i += ArsenalPieces()) {
-          if ($arsenal[$i + 1] == "UP") array_push($inds, "MYARS-$i");
+        $arsenalPieces = ArsenalPieces();
+        $arsenalCount = count($arsenal);
+        for ($i = 0; $i < $arsenalCount; $i += $arsenalPieces) {
+          if ($arsenal[$i + 1] == "UP") $inds[] = "MYARS-$i";
         }
         if (count($inds) > 0) {
           $context = "Choose a face up card in your arsenal to sink";
@@ -4424,14 +4225,16 @@ function ProcessTrigger($player, $parameter, $uniqueID, $target = "-", $addition
         break;
       case "call_for_backup_red":
         $names = [];
+        $namesSet = [];
         $discard = GetDiscard($player);
-        for ($i = 0; $i < count($discard); $i += DiscardPieces()) {
+        $discardPieces = DiscardPieces();
+        $discardCount = count($discard);
+        for ($i = 0; $i < $discardCount; $i += $discardPieces) {
           if (!isFaceDownMod($discard[$i + 2])) {
             $cardName = NameOverride($discard[$i], $player);
-            if (TypeContains($discard[$i], "AA") && $cardName != "") {
-              if (!in_array($cardName, $names)) {
-                array_push($names, $cardName);
-              }
+            if (TypeContains($discard[$i], "AA") && $cardName != "" && !isset($namesSet[$cardName])) {
+              $names[] = $cardName;
+              $namesSet[$cardName] = true;
             }
           }
         }
@@ -4452,8 +4255,7 @@ function ProcessTrigger($player, $parameter, $uniqueID, $target = "-", $addition
         PlayAura("might", $player, isToken:true, effectController:$player, effectSource: $parameter);
         break;
       case "decimator_great_axe":
-        $zone = explode("-", $target)[0];
-        $uid = explode("-", $target)[1];
+        [$zone, $uid] = explode("-", $target, 2);
         AddCurrentTurnEffect($parameter, $player, '', $uid);
         break;
       case "halo_of_lumina_light":
@@ -4561,10 +4363,11 @@ function ProcessAttackTrigger($cardID, $player, $target="-", $uniqueID = -1)
     case "second_strike_red":
     case "second_strike_yellow":
     case "second_strike_blue":
-      if (GetClassState($player, $CS_DamageDealt) + GetClassState($player, $CS_ArcaneDamageDealt) > 0) {
+      $totalDamage = GetClassState($player, $CS_DamageDealt) + GetClassState($player, $CS_ArcaneDamageDealt);
+      if ($totalDamage > 0) {
         AddCurrentTurnEffect($cardID, $player);
       }
-      if (GetClassState($player, $CS_DamageDealt) + GetClassState($player, $CS_ArcaneDamageDealt) > 0) GiveAttackGoAgain();
+      if ($totalDamage > 0) GiveAttackGoAgain();
       break;
     case "unsheathed_red":
       CacheCombatResult();
@@ -4587,32 +4390,42 @@ function ProcessAttackTrigger($cardID, $player, $target="-", $uniqueID = -1)
       break;
     case "overcrowded_blue":
       $uniqueAuras = [];
+      $uniqueAurasSet = [];
+      $auraPieces = AuraPieces();
+      $charPieces = CharacterPieces();
       for($player = 1; $player < 3; ++$player) {
         $auras = GetAuras($player);
-        for($i = 0; $i < count($auras); $i += AuraPieces()) {
+        $auraCount = count($auras);
+        for($i = 0; $i < $auraCount; $i += $auraPieces) {
           $name = NameOverride($auras[$i], $player);
-          if (TypeContains($auras[$i], "T") && !in_array($name, $uniqueAuras)) {
-            array_push($uniqueAuras, $name);
+          if ((TypeContains($auras[$i], "T") || $auras[$i + 4] == 1) && !isset($uniqueAurasSet[$name])) {
+            $uniqueAuras[] = $name;
+            $uniqueAurasSet[$name] = true;
           }
         }
         $character = GetPlayerCharacter($player);
-        for($i = 0; $i < count($character); $i += CharacterPieces()) {
+        $charCount = count($character);
+        for($i = 0; $i < $charCount; $i += $charPieces) {
           $name = NameOverride($character[$i], $player);
-          if (TypeContains($character[$i], "T") && !in_array($name, $uniqueAuras) && SubtypeContains($character[$i], "Aura", $player)) {
-            array_push($uniqueAuras, $name);
+          if (TypeContains($character[$i], "T") && !isset($uniqueAurasSet[$name]) && SubtypeContains($character[$i], "Aura", $player)) {
+            $uniqueAuras[] = $name;
+            $uniqueAurasSet[$name] = true;
           }
         }
       }
       $index = -1;
       if ($target == "-") $index = 0;
       else {
-        for ($i = 0; $i < count($combatChain); $i += CombatChainPieces()) {
+        $combatChainPieces = CombatChainPieces();
+        $combatChainCount = count($combatChain);
+        for ($i = 0; $i < $combatChainCount; $i += $combatChainPieces) {
           if ($combatChain[$i+7] == $target) $index = $i;
         }
       }
       if ($index != -1) {
-        $combatChain[$index + 5] += count($uniqueAuras);
-        $combatChain[$index + 6] += count($uniqueAuras);
+        $uniqueAuraCount = count($uniqueAuras);
+        $combatChain[$index + 5] += $uniqueAuraCount;
+        $combatChain[$index + 6] += $uniqueAuraCount;
       }
       break;
     case "hostile_encroachment_red":
@@ -4715,7 +4528,8 @@ function TopDeckToArsenal($player)
 function DiscardHand($player, $mainPhase = true)
 {
   $hand = &GetHand($player);
-  for ($i = count($hand) - HandPieces(); $i >= 0; $i -= HandPieces()) {
+  $handPieces = HandPieces();
+  for ($i = count($hand) - $handPieces; $i >= 0; $i -= $handPieces) {
     DiscardCard($player, $i, mainPhase: $mainPhase);
   }
 }
@@ -4744,8 +4558,9 @@ function BanishRandom($player, $source, $playerSource="-")
 {
   $playerSource = $playerSource == "-" ? $player : $playerSource;
   $hand = &GetHand($player);
-  if (count($hand) == 0) return "";
-  $index = GetRandom() % count($hand);
+  $handCount = count($hand);
+  if ($handCount == 0) return "";
+  $index = GetRandom() % $handCount;
   $banished = $hand[$index];
   unset($hand[$index]);
   $hand = array_values($hand);
@@ -4759,9 +4574,9 @@ function DiscardRandom($player = "", $source = "", $effectController = "")
   if ($player == "") $player = $currentPlayer;
   if ($effectController == "") $effectController = $currentPlayer;
   $hand = &GetHand($player);
-  if (count($hand) == 0) return "";
-  if (count($hand) > 1) $index = GetRandom(0, count($hand) - 1);
-  else $index = 0;
+  $handCount = count($hand);
+  if ($handCount == 0) return "";
+  $index = ($handCount > 1) ? GetRandom(0, $handCount - 1) : 0;
   $discarded = $hand[$index];
   unset($hand[$index]);
   $hand = array_values($hand);
@@ -4774,8 +4589,9 @@ function DiscardRandom($player = "", $source = "", $effectController = "")
 function PitchRandom($player)
 {
   $hand = &GetHand($player);
-  if (count($hand) == 0) return "";
-  $index = (count($hand) > 1) ? GetRandom(0, count($hand) - 1) : 0;
+  $handCount = count($hand);
+  if ($handCount == 0) return "";
+  $index = ($handCount > 1) ? GetRandom(0, $handCount - 1) : 0;
   $pitched = $hand[$index];
   unset($hand[$index]);
   $hand = array_values($hand);
@@ -4793,13 +4609,15 @@ function DiscardedAtRandomEffects($player, $discarded, $source)
     AddLayer("TRIGGER", $player, "berserk_yellow");
   }
   $character = GetPlayerCharacter($player);
-  $index = FindCharacterIndex($player, "beaten_trackers");
-  if ($index >= 0 && IsCharacterAbilityActive($player, $index, checkGem: true) && $player == $mainPlayer && ModifiedPowerValue($discarded, $player, "GY", "HAND") >= 6) {
-    AddLayer("TRIGGER", $player, $character[$index]);
-  }
-  $index = FindCharacterIndex($player, "hide_tanner");
-  if ($index >= 0 && IsCharacterAbilityActive($player, $index, checkGem: true) && $player == $mainPlayer && ModifiedPowerValue($discarded, $player, "GY", "HAND") >= 6) {
-    AddLayer("TRIGGER", $player, $character[$index]);
+  if ($player == $mainPlayer) {
+    $index = FindCharacterIndex($player, "beaten_trackers");
+    if ($index >= 0 && IsCharacterAbilityActive($player, $index, checkGem: true) && ModifiedPowerValue($discarded, $player, "GY", "HAND") >= 6) {
+      AddLayer("TRIGGER", $player, $character[$index]);
+    }
+    $index = FindCharacterIndex($player, "hide_tanner");
+    if ($index >= 0 && IsCharacterAbilityActive($player, $index, checkGem: true) && ModifiedPowerValue($discarded, $player, "GY", "HAND") >= 6) {
+      AddLayer("TRIGGER", $player, $character[$index]);
+    }
   }
   switch ($discarded) {
     case "skull_crack_red":
@@ -4832,7 +4650,7 @@ function CardDiscarded($player, $discarded, $source = "", $mainPhase = true)
   if ($modifiedAttack >= 6) {
     $character = &GetPlayerCharacter($player);
     $characterID = ShiyanaCharacter($character[0]);
-    if (($characterID == "rhinar_reckless_rampage" || $characterID == "rhinar" || $characterID == "rhinar") && $character[1] == 2 && $player == $mainPlayer && $mainPhase) {
+    if (($characterID == "rhinar_reckless_rampage" || $characterID == "rhinar") && $character[1] == 2 && $player == $mainPlayer && $mainPhase) {
       AddLayer("TRIGGER", $mainPlayer, $character[0]);
     } else if (($characterID == "kayo_armed_and_dangerous" || $characterID == "kayo") && $character[1] == 2 && $player == $mainPlayer && $mainPhase) {
       AddLayer("TRIGGER", $mainPlayer, $character[0]);
@@ -4873,7 +4691,8 @@ function ModifiedPowerValue($cardID, $player, $from, $source = "", $index=-1)
   else if ($cardID == "rockyard_rodeo_blue") $power = GetHighestBaseWeaponPower($player);
   
   if ($index != -1) {
-    for ($i = 0; $i < count($currentTurnEffects); $i += CurrentTurnEffectPieces()) {
+    $cteCount = count($currentTurnEffects);
+    for ($i = 0; $i < $cteCount; $i += 4) {
       if ($currentTurnEffects[$i] == "kayo_underhanded_cheat" || $currentTurnEffects[$i] == "kayo_strong_arm") {
         if ($currentTurnEffects[$i + 2] == $CombatChain->Card($index)->UniqueID()) {
           $power = 6;
@@ -4933,7 +4752,8 @@ function ModifiedBlockValue($cardID, $player, $from, $source="", $uniqueID=-1)
     }
   }
   if ($uniqueID != -1) {
-    for ($i = 0; $i < count($currentTurnEffects); $i += CurrentTurnEffectPieces()) {
+    $cteCount = count($currentTurnEffects);
+    for ($i = 0; $i < $cteCount; $i += 4) {
       if ($currentTurnEffects[$i + 2] == $uniqueID) {
         switch ($currentTurnEffects[$i]) {
           case "decimator_great_axe":
@@ -4976,8 +4796,10 @@ function GamblersGlovesReroll($player, $target){
 function DestroyFrozenArsenal($player)
 {
   $arsenal = &GetArsenal($player);
-  $otherPlayer = $player == 1 ? 2 : 1;
-  for ($i = 0; $i < count($arsenal); $i += ArsenalPieces()) {
+  $otherPlayer = 3 - $player;
+  $arsenalCount = count($arsenal);
+  $arsenalPieces = ArsenalPieces();
+  for ($i = 0; $i < $arsenalCount; $i += $arsenalPieces) {
     if ($arsenal[$i + 4] == "1") {
       DestroyArsenal($player, effectController: $otherPlayer);
     }
@@ -5005,24 +4827,20 @@ function IsWeaponGreaterThanTwiceBasePower()
   if (count($combatChain) == 0) return false;
   if (TypeContains($combatChain[0], "W", $mainPlayer) && CachedTotalPower() > PowerValue($combatChain[0], $mainPlayer, "CC") * 2) return true;
   $char = &GetPlayerCharacter($mainPlayer);
-  if (isset($char[CharacterPieces()]) && $char[CharacterPieces()] == "raydn_duskbane" && GetClassState($mainPlayer, $CS_NumCharged) > 0) return true;
-  if (isset($char[CharacterPieces()]) && $char[CharacterPieces()] == "beaming_blade" && GetClassState($mainPlayer, $CS_NumYellowPutSoul) > 0) return true;
+  $characterPieces = CharacterPieces();
+  if (isset($char[$characterPieces]) && $char[$characterPieces] == "raydn_duskbane" && GetClassState($mainPlayer, $CS_NumCharged) > 0) return true;
+  if (isset($char[$characterPieces]) && $char[$characterPieces] == "beaming_blade" && GetClassState($mainPlayer, $CS_NumYellowPutSoul) > 0) return true;
   return false;
 }
 
 function HasEnergyCounters($array, $index)
 {
-  switch ($array[$index]) {
-    case "fyendals_spring_tunic":
-    case "alluvion_constellas":
-    case "blaze_firemind":
-    case "geyser_of_seismic_stirrings_red":
-    case "geyser_of_seismic_stirrings_yellow":
-    case "geyser_of_seismic_stirrings_blue":
-      return $array[$index + 2] > 0;
-    default:
-      return false;
-  }
+  static $energyCards = [
+    "fyendals_spring_tunic" => true, "alluvion_constellas" => true, "blaze_firemind" => true,
+    "geyser_of_seismic_stirrings_red" => true, "geyser_of_seismic_stirrings_yellow" => true,
+    "geyser_of_seismic_stirrings_blue" => true,
+  ];
+  return isset($energyCards[$array[$index]]) && $array[$index + 2] > 0;
 }
 
 function HasPowerCounters($zone, $array, $index)
@@ -5037,152 +4855,82 @@ function HasPowerCounters($zone, $array, $index)
 
 function IsEnergyCounters($cardID)
 {
-  switch ($cardID) {
-    case "fyendals_spring_tunic":
-    case "alluvion_constellas":
-    case "blaze_firemind":
-      return true;
-    default:
-      return false;
-  }
+  static $cards = ["fyendals_spring_tunic" => true, "alluvion_constellas" => true, "blaze_firemind" => true];
+  return isset($cards[$cardID]);
 }
 
 function HasHauntCounters($cardID)
 {
-  switch ($cardID) {
-    case "ghostly_touch":
-      return true;
-    default:
-      return false;
-  }
+  return $cardID === "ghostly_touch";
 }
 
 function HasVerseCounters($cardID)
 {
-  switch ($cardID) {
-    case "runeblood_incantation_red":
-    case "runeblood_incantation_yellow":
-    case "runeblood_incantation_blue":
-    case "malefic_incantation_red":
-    case "malefic_incantation_yellow":
-    case "malefic_incantation_blue":
-      return true;
-    default:
-      return false;
-  }
+  static $cards = [
+    "runeblood_incantation_red" => true, "runeblood_incantation_yellow" => true, "runeblood_incantation_blue" => true,
+    "malefic_incantation_red" => true, "malefic_incantation_yellow" => true, "malefic_incantation_blue" => true,
+  ];
+  return isset($cards[$cardID]);
 }
 
 function HasDoomCounters($cardID)
 {
-  switch ($cardID) {
-    case "looming_doom_blue":
-    case "chains_of_mephetis_blue":
-    case "doomsaying_red":
-      return true;
-    default:
-      return false;
-  }
+  static $cards = ["looming_doom_blue" => true, "chains_of_mephetis_blue" => true, "doomsaying_red" => true];
+  return isset($cards[$cardID]);
 }
 
 function HasRustCounters($cardID)
 {
-  switch ($cardID) {
-    case "talishar_the_lost_prince":
-      return true;
-    default:
-      return false;
-  }
+  return $cardID === "talishar_the_lost_prince";
 }
 
 function HasFlowCounters($cardID)
 {
-  switch ($cardID) {
-    case "channel_mount_heroic_red":
-    case "channel_lake_frigid_blue":
-    case "channel_thunder_steppe_yellow":
-    case "channel_the_bleak_expanse_blue":
-    case "channel_the_millennium_tree_red":
-    case "channel_lightning_valley_yellow":
-    case "channel_mount_isen_blue":
-    case "channel_the_tranquil_domain_yellow":
-    case "channel_the_skybreaker_yellow":
-    case "channel_iceloch_glaze_blue":
-    case "channel_galcias_cradle_blue":
-      return true;
-    default:
-      return false;
-  }
+  static $cards = [
+    "channel_mount_heroic_red" => true, "channel_lake_frigid_blue" => true,
+    "channel_thunder_steppe_yellow" => true, "channel_the_bleak_expanse_blue" => true,
+    "channel_the_millennium_tree_red" => true, "channel_lightning_valley_yellow" => true,
+    "channel_mount_isen_blue" => true, "channel_the_tranquil_domain_yellow" => true,
+    "channel_the_skybreaker_yellow" => true, "channel_iceloch_glaze_blue" => true,
+    "channel_galcias_cradle_blue" => true,
+  ];
+  return isset($cards[$cardID]);
 }
 
 function HasFrostCounters($cardID)
 {
-  switch ($cardID) {
-    case "insidious_chill_blue":
-      return true;
-    default:
-      return false;
-  }
+  return $cardID === "insidious_chill_blue";
 }
 
 function HasBalanceCounters($cardID)
 {
-  switch ($cardID) {
-    case "zen_state":
-    case "preach_modesty_red":
-      return true;
-    default:
-      return false;
-  }
+  static $cards = ["zen_state" => true, "preach_modesty_red" => true];
+  return isset($cards[$cardID]);
 }
 
 function HasBindCounters($cardID)
 {
-  switch ($cardID) {
-    case "spellbound_creepers":
-      return true;
-    default:
-      return false;
-  }
+  return $cardID === "spellbound_creepers";
 }
 
 function HasStainCounters($cardID)
 {
-  switch ($cardID) {
-    case "blood_splattered_vest":
-      return true;
-    default:
-      return false;
-  }
+  return $cardID === "blood_splattered_vest";
 }
 
 function HasStormCounters($cardID)
 {
-  switch ($cardID) {
-    case "haboob_red":
-      return true;
-    default:
-      return false;
-  }
+  return $cardID === "haboob_red";
 }
 
 function HasGoldCounters($cardID)
 {
-  switch ($cardID) {
-    case "treasure_island":
-      return true;
-    default:
-      return false;
-  }
+  return $cardID === "treasure_island";
 }
 
 function HasSandCounters($cardID)
 {
-  switch ($cardID) {
-    case "parched_terrain_red":
-      return true;
-    default:
-      return false;
-  }
+  return $cardID === "parched_terrain_red";
 }
 
 function HasFancyCounters($cardID)
@@ -5209,7 +4957,7 @@ function ProcessMeld($player, $parameter, $additionalCosts="", $target="-", $fro
 {
   // handles running the left side of meld cards
   global $CS_ArcaneDamageDealt, $CS_HealthGained, $CS_AdditionalCosts, $CS_ArcaneDamageTaken, $Stack;
-  $otherPlayer = $player == 1 ? 2 : 1;
+  $otherPlayer = 3 - $player;
   $cardID = $parameter;
   switch ($cardID) {
     case "thistle_bloom__life_yellow":
@@ -5246,15 +4994,15 @@ function ProcessMeld($player, $parameter, $additionalCosts="", $target="-", $fro
       break;
     case "null__shock_yellow":
       if (GetClassState($player, $CS_ArcaneDamageDealt) > 0) {
-        $nullTarget = str_contains($target, ",") ? explode(",", $target)[0] : $target;
-        $targetLayer = $Stack->FindCardUID(explode("-", $nullTarget)[1] ?? "-");
+        $nullTarget = str_contains($target, ",") ? explode(",", $target, 2)[0] : $target;
+        $targetLayer = $Stack->FindCardUID(explode("-", $nullTarget, 2)[1] ?? "-");
         if ($targetLayer != "" && CardCost($targetLayer->ID(), "LAYERS") < GetClassState($player, $CS_ArcaneDamageDealt)) {
           $Stack->Negate($targetLayer->Index());
         }
       }
       break;
     case "comet_storm__shock_red":
-      $stormTarget = str_contains($target, ",") ? explode(",", $target)[0] : $target;
+      $stormTarget = str_contains($target, ",") ? explode(",", $target, 2)[0] : $target;
       $meldState = (GetClassState($player, $CS_AdditionalCosts) == "Both") ? "I,A" : "A";
       DealArcane(5, 2, "PLAYCARD", $parameter, player:$player, meldState: $meldState, resolvedTarget:$stormTarget);
       break;

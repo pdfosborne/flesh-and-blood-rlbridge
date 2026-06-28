@@ -26,17 +26,16 @@ class Deck {
   function Remove($indices) {
     if ($indices == "") return "";
     $indexArr = explode(",", $indices);
-    $cardIDs = "";
+    $cardIDs = [];
     for($i=count($indexArr)-1; $i>= 0; --$i) {
       if (isset($this->deck[$indexArr[$i]])) {
-        if($cardIDs != "") $cardIDs .= ",";
-        $cardIDs .= $this->deck[$indexArr[$i]];
+        $cardIDs[] = $this->deck[$indexArr[$i]];
         unset($this->deck[$indexArr[$i]]);
-        $this->deck = array_values($this->deck);
       }
       else WriteLog("Something went wrong with removing a card from deck, please submit a bug report");
     }
-    return $cardIDs;
+    $this->deck = array_values($this->deck);
+    return implode(",", $cardIDs);
   }
 
   function Reveal($revealCount=1, $switched=false, $isClash=false) {
@@ -66,13 +65,18 @@ class Deck {
 
   function Top($remove = false, $amount = 1)
   {
-    $rv = "";
-    for($i=0; $i<$amount && count($this->deck) > ($remove ? 0 : $i); ++$i)
-    {
-      if($rv != "") $rv .= ",";
-      $rv .= ($remove ? array_shift($this->deck) : $this->deck[$i]);
+    $cards = [];
+    if ($remove) {
+      for ($i = 0; $i < $amount && !empty($this->deck); ++$i) {
+        $cards[] = array_shift($this->deck);
+      }
+    } else {
+      $deckCount = count($this->deck);
+      for ($i = 0; $i < $amount && $i < $deckCount; ++$i) {
+        $cards[] = $this->deck[$i];
+      }
     }
-    return $rv;
+    return implode(",", $cards);
   }
 
   function BanishTop($modifier = "-", $banishedBy = "", $amount=1, $banisher="-") {
@@ -117,7 +121,7 @@ class Deck {
 
   function AddBottom($cardID, $from="GY")
   {
-    array_push($this->deck, $cardID);
+    $this->deck[] = $cardID;
     return $cardID;
   }
 
@@ -144,18 +148,18 @@ class Deck {
   }
 
   function Shuffle($parameter) {
-    $destArr = [];
     if ($parameter == "SKIPSEED") {
       global $randomSeeded;
       $randomSeeded = true;
     }
-    while (count($this->deck) > 0) {
-      $index = GetRandom(0, count($this->deck) - 1);
-      array_push($destArr, $this->deck[$index]);
-      unset($this->deck[$index]);
-      $this->deck = array_values($this->deck);
+    // Fisher-Yates in-place: O(n) vs the previous O(n²) build-and-replace
+    $n = count($this->deck);
+    for ($i = $n - 1; $i > 0; --$i) {
+      $j = GetRandom(0, $i);
+      $temp = $this->deck[$i];
+      $this->deck[$i] = $this->deck[$j];
+      $this->deck[$j] = $temp;
     }
-    $this->deck = $destArr;
     if ($parameter != "SKIPSEED") {
       $player = $this->playerID;
       WriteLog("🔄Player $player deck was shuffled");

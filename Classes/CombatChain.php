@@ -22,7 +22,9 @@ class CombatChain {
 
   function FindCardUID($uid) {
     if (!$this->HasCurrentLink()) return new ChainCard(-1);
-    for ($i = 0; $i < count($this->chain); $i += CombatChainPieces()) {
+    $count = count($this->chain);
+    $combatChainPieces = CombatChainPieces();
+    for ($i = 0; $i < $count; $i += $combatChainPieces) {
       if ($this->chain[$i + 7] == $uid) return new ChainCard($i);
     }
     return new ChainCard(-1);
@@ -30,7 +32,9 @@ class CombatChain {
 
   function FindCardOriginUID($uid) {
     if (!$this->HasCurrentLink()) return new ChainCard(-1);
-    for ($i = 0; $i < count($this->chain); $i += CombatChainPieces()) {
+    $count = count($this->chain);
+    $combatChainPieces = CombatChainPieces();
+    for ($i = 0; $i < $count; $i += $combatChainPieces) {
       if ($this->chain[$i + 8] == $uid) return new ChainCard($i);
     }
     return new ChainCard(-1);
@@ -38,7 +42,9 @@ class CombatChain {
 
   function FindCardID($id) {
     if (!$this->HasCurrentLink()) return new ChainCard(-1);
-    for ($i = 0; $i < count($this->chain); $i += CombatChainPieces()) {
+    $count = count($this->chain);
+    $combatChainPieces = CombatChainPieces();
+    for ($i = 0; $i < $count; $i += $combatChainPieces) {
       if ($this->chain[$i] == $id) return new ChainCard($i);
     }
     return new ChainCard(-1);
@@ -54,17 +60,18 @@ class CombatChain {
   }
 
   function Remove($index, $cardNumber=false) {
-    if($cardNumber) $index = $index * CombatChainPieces();
+    $combatChainPieces = CombatChainPieces();
+    if($cardNumber) $index = $index * $combatChainPieces;
     if($index < 0 || $index >= count($this->chain)) return "";
     $cardID = $this->chain[$index];
-    RemoveEffectsFromCombatChain($cardID);
-    for($i = CombatChainPieces() - 1; $i >= 0; --$i) unset($this->chain[$index+$i]);
+    // RemoveEffectsFromCombatChain($cardID); I think this function call is no longer necessary
+    for($i = $combatChainPieces - 1; $i >= 0; --$i) unset($this->chain[$index+$i]);
     $this->chain = array_values($this->chain);
     return $cardID;
   }
 
   function NumCardsActiveLink() {
-    return count($this->chain) / CombatChainPieces();
+    return intdiv(count($this->chain), CombatChainPieces());
   }
 
   function HasCurrentLink() {

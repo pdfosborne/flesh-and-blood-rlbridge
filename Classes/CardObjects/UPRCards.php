@@ -1457,7 +1457,7 @@ class inflame_red extends Card {
 
   function ProcessAttackTrigger($target, $uniqueID) {
     global $CS_NumRedPlayed;
-    if(GetClassState($this->controller, $CS_NumRedPlayed) > 1) MZMoveCard($this->controller, "MYDISCARD:isSameName=phoenix_flame_red", "MYHAND");
+    if(GetClassState($this->controller, $CS_NumRedPlayed) > 1) MZMoveCard($this->controller, "MYDISCARD:isSameName=phoenix_flame_red", "MYHAND", true);
   }
 }
 
@@ -1879,7 +1879,7 @@ class oasis_respite extends BaseCard {
     AddDecisionQueue("SETDQCONTEXT", $this->controller, "Choose a damage source for " . CardLink($this->cardID));
     AddDecisionQueue("CHOOSEMULTIZONE", $this->controller, "<-", 1);
     AddDecisionQueue("SHOWSELECTEDTARGET", $this->controller, "-", 1);
-    Await($this->controller, $this->cardID, final:true);
+    Await($this->controller, $this->cardID, targetHero:$targetHero, final:true);
     if(PlayerHasLessHealth($targetHero)) GainHealth(1, $targetHero);
     return "";
   }
@@ -1887,13 +1887,14 @@ class oasis_respite extends BaseCard {
   function SpecificLogic() {
     global $dqVars;
     $choice = $dqVars["LASTRESULT"];
+    $targetHero = $dqVars["targetHero"];
     $object = MZIndexToObject($this->controller, $choice);
     if ($object == "") {
       WriteLog("Something odd happened with oasis respite, please submit a bug report", highlight:true);
       return;
     }
     if (is_a($object, "Layer")) {
-      $from = explode("|", $object->Parameter())[0];
+      $from = explode("|", $object->Parameter(), 2)[0];
       $cardType = CardType($object->ID());
       if ($object->ID() == "TRIGGER" || IsStaticType($cardType, $from))
         $uid = $object->UniqueID();
@@ -1904,7 +1905,7 @@ class oasis_respite extends BaseCard {
       $uid = $object->OriginUniqueID();
     else
       $uid = $object->UniqueID();
-    AddCurrentTurnEffect($this->cardID, $this->controller, uniqueID:$uid);
+    AddCurrentTurnEffect($this->cardID, $targetHero, uniqueID:$uid);
   }
 
   function PayAdditionalCosts() {

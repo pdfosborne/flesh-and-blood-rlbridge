@@ -81,9 +81,11 @@
 
   function EVREffectPowerModifier($cardID)
   {
-    $params = explode(",", $cardID);
-    $cardID = $params[0];
-    if(count($params) > 1) $parameter = $params[1];
+    $parameter = '';
+    if (($pos = strpos($cardID, ",")) !== false) {
+      $parameter = substr($cardID, $pos + 1);
+      $cardID = substr($cardID, 0, $pos);
+    }
     switch($cardID)
     {
       case "skull_crushers": return 1;
@@ -134,8 +136,7 @@
   function EVRCombatEffectActive($cardID, $attackID)
   {
     global $CS_AttacksWithWeapon, $mainPlayer;
-    $params = explode(",", $cardID);
-    $cardID = $params[0];
+    if (($pos = strpos($cardID, ",")) !== false) $cardID = substr($cardID, 0, $pos);
     switch($cardID)
     {
       case "skull_crushers": return ClassContains($attackID, "BRUTE", $mainPlayer);
@@ -205,9 +206,7 @@
       case "high_roller_red": case "high_roller_yellow": case "high_roller_blue":
         $rv = "Intimidates";
         Intimidate();
-        if($cardID == "high_roller_red") $targetHigh = 4;
-        else if($cardID == "high_roller_yellow") $targetHigh = 5;
-        else if($cardID == "high_roller_blue") $targetHigh = 6;
+        $targetHigh = match($cardID) { "high_roller_red" => 4, "high_roller_yellow" => 5, default => 6 };
         if(GetClassState($currentPlayer, $CS_HighestRoll) >= $targetHigh) Intimidate();
         return "";
       case "bare_fangs_red": case "bare_fangs_yellow": case "bare_fangs_blue":
@@ -369,22 +368,28 @@
         $auras = &GetAuras($targetPlayer);
         $allTargets = explode(",", $target);
         $numDestroyed = 0;
-        for ($i = 1; $i < count($allTargets); $i++) {
-          if (substr($allTargets[$i], 0, 5) == "LAYER") {
+        $allTargetsCount = count($allTargets);
+        $layerPieces = LayerPieces();
+        $auraPieces = AuraPieces();
+        for ($i = 1; $i < $allTargetsCount; $i++) {
+          if (str_starts_with($allTargets[$i], "LAYER")) {
             $index = -1;
             $uid = substr($allTargets[$i], 5);
-            for ($j = 0; $j < count($layers); $j += LayerPieces()) {
+            $layersCount = count($layers);
+            for ($j = 0; $j < $layersCount; $j += $layerPieces) {
               if ($layers[$j + 6] == $uid) $index = $j;
             }
             if ($index != -1) {
-              WriteLog(CardLink($cardID, $cardID) . " destroyed " . CardLink($layers[$index], $layers[$index]) . " while it was on the stack!");
+              $destroyedLayer = $layers[$index];
+              WriteLog(CardLink($cardID, $cardID) . " destroyed " . CardLink($destroyedLayer, $destroyedLayer) . " while it was on the stack!");
               NegateLayer("LAYER-$index");
               ++$numDestroyed;
             }
           }
           else {
             $index = -1;
-            for ($j = 0; $j < count($auras); $j += AuraPieces()) {
+            $aurasCount = count($auras);
+            for ($j = 0; $j < $aurasCount; $j += $auraPieces) {
               if ($auras[$j + 6] == $allTargets[$i]) $index = $j;
             }
             if ($index != -1) {
@@ -397,15 +402,16 @@
         return "";
       case "emeritus_scolding_red": case "emeritus_scolding_yellow": case "emeritus_scolding_blue":
         $oppTurn = $currentPlayer != $mainPlayer;
-        if($cardID == "emeritus_scolding_red") $damage = ($oppTurn ? 6 : 4);
-        if($cardID == "emeritus_scolding_yellow") $damage = ($oppTurn ? 5 : 3);
-        if($cardID == "emeritus_scolding_blue") $damage = ($oppTurn ? 4 : 2);
+        $damage = match($cardID) {
+          "emeritus_scolding_red" => $oppTurn ? 6 : 4,
+          "emeritus_scolding_yellow" => $oppTurn ? 5 : 3,
+          default => $oppTurn ? 4 : 2,
+        };
         DealArcane($damage, 0, "PLAYCARD", $cardID, resolvedTarget: $target);
         return "";
       case "pry_red": case "pry_yellow": case "pry_blue":
         if($mainPlayer != $currentPlayer) $numReveal = count(GetHand($otherPlayer));
-        else if($cardID == "pry_red") $numReveal = 3;
-        else $numReveal = ($cardID == "pry_yellow") ? 2 : 1;
+        else $numReveal = match($cardID) { "pry_red" => 3, "pry_yellow" => 2, default => 1 };
         AddDecisionQueue("PASSPARAMETER", $mainPlayer, $numReveal);
         AddDecisionQueue("SETDQVAR", $currentPlayer, "0");
         AddDecisionQueue("SETDQCONTEXT", $currentPlayer, "Choose target hero");
@@ -466,9 +472,7 @@
         AddCurrentTurnEffect($cardID, $currentPlayer);
         return "";
       case "pick_a_card_any_card_red": case "pick_a_card_any_card_yellow": case "pick_a_card_any_card_blue":
-        if($cardID == "pick_a_card_any_card_red") $times = 4;
-        else if($cardID == "pick_a_card_any_card_yellow") $times = 3;
-        else if($cardID == "pick_a_card_any_card_blue") $times = 2;
+        $times = match($cardID) { "pick_a_card_any_card_red" => 4, "pick_a_card_any_card_yellow" => 3, default => 2 };
         AddDecisionQueue("MULTIZONEINDICES", $currentPlayer, "THEIRHAND");
         AddDecisionQueue("CHOOSEMULTIZONE", $currentPlayer, "<-", 1);
         AddDecisionQueue("SETDQVAR", $currentPlayer, "0", 1);
@@ -483,9 +487,7 @@
         if($from == "ARS") AddCurrentTurnEffect($cardID . "-2", $currentPlayer);
         return "";
       case "even_bigger_than_that_red": case "even_bigger_than_that_yellow": case "even_bigger_than_that_blue":
-        if($cardID == "even_bigger_than_that_red") $opt = 3;
-        else if($cardID == "even_bigger_than_that_yellow") $opt = 2;
-        else if($cardID == "even_bigger_than_that_blue") $opt = 1;
+        $opt = match($cardID) { "even_bigger_than_that_red" => 3, "even_bigger_than_that_yellow" => 2, default => 1 };
         global $CS_DamageDealt;
         PlayerOpt($currentPlayer, $opt, DQContext:"Choose a card to add to the deck top or bottom. Damage Dealt: " . GetClassState($currentPlayer, piece: $CS_DamageDealt));
         AddDecisionQueue("SPECIFICCARD", $currentPlayer, "EVENBIGGERTHANTHAT-".$cardID);
@@ -597,9 +599,11 @@
         if(ComboActive())
         {
           $deck = new Deck($mainPlayer);
-          for($i=0; $i<count($chainLinks); ++$i)
+          $chainLinksCount = count($chainLinks);
+          $chainLinkSummaryPieces = ChainLinkSummaryPieces();
+          for($i=0; $i<$chainLinksCount; ++$i)
           {
-            $listOfNames = $chainLinkSummary[$i*ChainLinkSummaryPieces()+4];
+            $listOfNames = $chainLinkSummary[$i*$chainLinkSummaryPieces+4];
             foreach (explode(",", $listOfNames) as $name) {
               if($chainLinks[$i][2] == "1" && GamestateUnsanitize($name) == "Hundred Winds")
               {
@@ -618,9 +622,10 @@
         if(IsHeroAttackTarget() && CanRevealCards($mainPlayer))
         {
           $hand = &GetHand($defPlayer);
-          $cards = "";
+          $cardsArr = [];
           $numDiscarded = 0;
-          for($i=count($hand)-HandPieces(); $i>=0; $i-=HandPieces())
+          $handPieces = HandPieces();
+          for($i=count($hand)-$handPieces; $i>=0; $i-=$handPieces)
           {
             $id = $hand[$i];
             $cardType = CardType($id);
@@ -630,11 +635,10 @@
               unset($hand[$i]);
               ++$numDiscarded;
             }
-            if($cards != "") $cards .= ",";
-            $cards .= $id;
+            $cardsArr[] = $id;
           }
           LoseHealth($numDiscarded, $defPlayer);
-          RevealCards($cards, $defPlayer);//CanReveal checked earlier
+          RevealCards(implode(",", $cardsArr), $defPlayer);//CanReveal checked earlier
           if($numDiscarded > 0)WriteLog(CardLink("battering_bolt_red", "battering_bolt_red") . " discarded " . $numDiscarded . " and caused the defending player to lose that much life.");
           $hand = array_values($hand);
         }
@@ -691,24 +695,29 @@
     global $mainPlayer;
     if(ArsenalFull($mainPlayer)) return "";
     $hand = &GetHand($mainPlayer);
-    $heaveIndices = "";
+    $heaveIndicesArr = [];
     $totalResources = GetResources($mainPlayer)[0];
-    for($i=0; $i<count($hand); $i+=HandPieces()) {
-      if (is_numeric(PitchValue($hand[$i]))) $totalResources += PitchValue($hand[$i]);
+    $handCount = count($hand);
+    $handPieces = HandPieces();
+    $auraPieces = AuraPieces();
+    for($i=0; $i<$handCount; $i+= $handPieces) {
+      $pv = PitchValue($hand[$i]);
+      if (is_numeric($pv)) $totalResources += $pv;
     }
     $auras = GetAuras($mainPlayer);
-    for($i = 0; $i < count($auras); $i += AuraPieces()) {
+    $aurasCount = count($auras);
+    for($i = 0; $i < $aurasCount; $i += $auraPieces) {
       if ($auras[$i] == "ponder") $totalResources += 3;
     }
-    for($i=0; $i<count($hand); $i+=HandPieces()) {
-      $availableResources = (is_numeric(PitchValue($hand[$i]))) ? $totalResources - PitchValue($hand[$i]) : $totalResources;
+    for($i=0; $i<$handCount; $i+= $handPieces) {
+      $pv = PitchValue($hand[$i]);
+      $availableResources = is_numeric($pv) ? $totalResources - $pv : $totalResources;
       $heaveVal = HeaveValue($hand[$i]);
       if($heaveVal > 0 && ($availableResources >= $heaveVal || !$resourceCounting)) {
-        if($heaveIndices != "") $heaveIndices .= ",";
-        $heaveIndices .= $i;
+        $heaveIndicesArr[] = $i;
       }
     }
-    return $heaveIndices;
+    return implode(",", $heaveIndicesArr);
   }
 
   function Heave()
@@ -761,13 +770,16 @@
     $handCards = SearchMultizoneFormat(SearchHandForCard($currentPlayer, "crazy_brew_blue"), "MYHAND");
     $attackCards = [];
     $attacks = GetCombatChainAttacks();
-    for ($i = 0; $i < count($chainLinkSummary); $i += ChainLinkSummaryPieces()) {
-      $ind = intdiv($i, ChainLinkSummaryPieces()) * ChainLinksPieces();
+    $chainLinkSummaryPieces = ChainLinkSummaryPieces();
+    $chainLinksPieces = ChainLinksPieces();
+    $chainLinkSummaryCount = count($chainLinkSummary);
+    for ($i = 0; $i < $chainLinkSummaryCount; $i += $chainLinkSummaryPieces) {
+      $ind = intdiv($i, $chainLinkSummaryPieces) * $chainLinksPieces;
       if ($attacks[$ind+2] == 0 || $attacks[$ind] == "-") continue;
       $attackID = $attacks[$ind];
       $names = GamestateUnsanitize($chainLinkSummary[$i+4]);
       if (!DelimStringContains(CardType($attackID), "W") && DelimStringContains($names, "Crazy Brew")) {
-        array_push($attackCards, "COMBATCHAINATTACKS-$ind");
+        $attackCards[] = "COMBATCHAINATTACKS-$ind";
       }
     }
     return CombineSearches(CombineSearches($items, $handCards), implode(",", $attackCards));
@@ -776,10 +788,11 @@
   function CoalescentMirageDestroyed()
   {
     global $mainPlayer;
-    AddDecisionQueue("FINDINDICES", $mainPlayer, "COALESCENTMIRAGE");
-    AddDecisionQueue("MAYCHOOSEHAND", $mainPlayer, "<-", 1);
-    AddDecisionQueue("MULTIREMOVEHAND", $mainPlayer, "-", 1);
-    AddDecisionQueue("PLAYAURA", $mainPlayer, "<-", 1);
+    $context = "Choose a 0 cost aura to put into play";
+    Await($mainPlayer, "MultiZoneIndices", "indices", search:"MYHAND:class=ILLUSIONIST;subtype=Aura;maxCost=0", subsequent:0);
+    Await($mainPlayer, "ChooseMultiZone", "MZIndex", context:$context, may:true);
+    Await($mainPlayer, "MZRemove", "cardID");
+    Await($mainPlayer, "PlayAura", final:true);
   }
 
   function MirragingMetamorphDestroyed($may=false)
@@ -795,10 +808,13 @@
   {
     global $chainLinks, $combatChain, $CombatChain;
     $character = &GetPlayerCharacter($player);
-    $indices = "";
+    $indicesArr = [];
     //past chain links
+    $chainLinksPieces = ChainLinksPieces();
+    $combatChainPieces = CombatChainPieces();
     foreach($chainLinks as $link) {
-      for ($i = 0; $i < count($link); $i += ChainLinksPieces()) {
+      $linkCount = count($link);
+      for ($i = 0; $i < $linkCount; $i += $chainLinksPieces) {
         $characterIndex = SearchCharacterForUniqueID($link[$i+8], $player);
         if ($characterIndex != -1) {
           if($character[$characterIndex+6] == 1 
@@ -807,44 +823,44 @@
           && (CardType($character[$characterIndex]) == "E" || DelimStringContains(CardSubType($character[$characterIndex]), "Evo")) 
           && BlockValue($character[$characterIndex]) - $character[$characterIndex+4] + $link[$i+5] < $pendingDamage)
           {
-            if($indices != "") $indices .= ",";
-            $indices .= $characterIndex;
+            $indicesArr[] = $characterIndex;
           }
         }
       }
     }
     // Current link
-    for ($i = CombatChainPieces(); $i < count($combatChain); $i += CombatChainPieces()) {
+    $combatChainCount = count($combatChain);
+    for ($i = $combatChainPieces; $i < $combatChainCount; $i += $combatChainPieces) {
       $characterIndex = SearchCharacterForUniqueID($CombatChain->Card($i)->OriginUniqueID(), $player);
       if ($characterIndex != -1 && $character[$characterIndex] == $CombatChain->Card($i)->ID()) {
-        if($character[$characterIndex+6] == 1 
-        && $character[$characterIndex+1] != 0 
+        if($character[$characterIndex+6] == 1
+        && $character[$characterIndex+1] != 0
         && $character[$characterIndex+12] != "DOWN"
-        && (CardType($character[$characterIndex]) == "E" || DelimStringContains(CardSubType($character[$characterIndex]), "Evo")) 
+        && (CardType($character[$characterIndex]) == "E" || DelimStringContains(CardSubType($character[$characterIndex]), "Evo"))
         && ($CombatChain->Card($i)->CardBlockValue()) < $pendingDamage)
         {
-          if($indices != "") $indices .= ",";
-          $indices .= $characterIndex;
+          $indicesArr[] = $characterIndex;
         }
       }
     }
-    return $indices;
+    return implode(",", $indicesArr);
   }
 
   function KnickKnackIndices($player)
   {
     $deck = &GetDeck($player);
-    $indices = "";
-    for($i=0; $i<count($deck); $i+=DeckPieces()) {
+    $indicesArr = [];
+    $deckCount = count($deck);
+    $deckPieces = DeckPieces();
+    for($i=0; $i<$deckCount; $i+= $deckPieces) {
       if(SubtypeContains($deck[$i], "Item", $player)) {
         $name = CardName($deck[$i]);
         if(str_contains($name, "Potion") || str_contains($name, "Talisman") || str_contains($name, "Amulet")) {
-          if($indices != "") $indices .= ",";
-          $indices .= $i;
+          $indicesArr[] = $i;
         }
       }
     }
-    return $indices;
+    return implode(",", $indicesArr);
   }
 
   function CashOutIndices($player)

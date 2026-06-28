@@ -1,20 +1,23 @@
 <?php
 
 if(!isset($filename) || !str_contains($filename, "gamestate.txt")) $filename = "./Games/" . $gameName . "/gamestate.txt";
-$handler = fopen($filename, "w");
+$dir = dirname($filename);
+if (!is_dir($dir)) mkdir($dir, 0700, true);
+$handler = fopen($filename, "c");
 
 if ($handler === false) {
   error_log("ERROR: Failed to open gamestate file: " . $filename . " (from game: " . $gameName . ")");
   exit;
 }
 
-$lockTries = 0;
-while (!flock($handler, LOCK_EX | LOCK_NB) && $lockTries < 5) {
-  usleep(10000); // 10ms
-  ++$lockTries;
+if (!flock($handler, LOCK_EX)) {
+  fclose($handler);
+  error_log("ERROR: WriteGamestate could not lock " . $filename . " — action not persisted (game: " . $gameName . ")");
+  exit;
 }
 
-if ($lockTries == 5) { fclose($handler); exit; }
+ftruncate($handler, 0);
+rewind($handler);
 
 $gamestateLines = [
   implode(" ", $playerHealths),
@@ -84,10 +87,13 @@ $gamestateLines = [
 // Add chain links
 $chainLinksCount = count($chainLinks);
 for ($i = 0; $i < $chainLinksCount; ++$i) {
-  $gamestateLines[] = implode(" ", $chainLinks[$i]);
+  if (isset($chainLinks[$i]) && is_array($chainLinks[$i]))
+    $gamestateLines[] = implode(" ", $chainLinks[$i]);
+  else
+    $gamestateLines[] = "";
 }
 
-$gamestateLines = array_merge($gamestateLines, [
+array_push($gamestateLines,
   implode(" ", $chainLinkSummary),
   $p1Key,
   $p2Key,
@@ -110,14 +116,17 @@ $gamestateLines = array_merge($gamestateLines, [
   $AIHasInfiniteHP == "1" ? "1" : "0",
   json_encode($p1CardTurnLog),
   json_encode($p2CardTurnLog),
-  implode(" ", is_array($attackQueue ?? null) ? $attackQueue : [])
-]);
+  implode(" ", is_array($attackQueue ?? null) ? $attackQueue : []),
+  json_encode($p1LifeHistory ?? []),
+  json_encode($p2LifeHistory ?? [])
+);
 
 $gamestateContent = implode("\r\n", $gamestateLines) . "\r\n";
 
 fwrite($handler, $gamestateContent);
-
 flock($handler, LOCK_UN);
 fclose($handler);
 
 WriteGamestateCache($gameName, $gamestateContent);
+
+$lastWrittenGamestate = $gamestateContent;

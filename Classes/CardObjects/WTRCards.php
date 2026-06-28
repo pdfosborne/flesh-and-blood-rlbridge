@@ -1061,17 +1061,49 @@ class breaking_scales extends Card {
 // }
 
 
-// class glint_the_quicksilver_blue extends Card {
+class glint_the_quicksilver_blue extends Card {
 
-//   function __construct($controller) {
-//     $this->cardID = "glint_the_quicksilver_blue";
-//     $this->controller = $controller;
-//     }
+  function __construct($controller) {
+    $this->cardID = "glint_the_quicksilver_blue";
+    $this->controller = $controller;
+  }
 
-//   function PlayAbility($from, $resourcesPaid, $target = '-', $additionalCosts = '-', $uniqueID = '-1', $layerIndex = -1) {
-//     return "";
-//   }
-// }
+  function PlayAbility($from, $resourcesPaid, $target = '-', $additionalCosts = '-', $uniqueID = '-1', $layerIndex = -1) {
+    AddEffectToAttack($this->controller, $this->cardID, $target);
+    if(RepriseActive()) Draw($this->controller);
+    return "";
+  }
+
+  private
+  function GetTargets() {
+    $attacks = TargetAttack($this->controller);
+		$targets = [];
+		foreach($attacks as $attack) {
+			$Card = MZIndexToObject($this->controller, $attack);
+			if (is_object($Card) && TypeContains($Card->ID(), "W"))
+				$targets[] = $attack;
+		}
+		return implode(",", $targets);
+  }
+
+  function IsPlayRestricted(&$restriction, $from = '', $index = -1, $resolutionCheck = false) {
+    return $this->GetTargets() == "";
+  }
+
+  function GetLayerTarget($from) {
+    $targets = $this->GetTargets();
+    Await($this->controller, "ChooseMultiZone", "index", indices:$targets, context:"Target an attack to give go again", subsequent:0);
+		Await($this->controller, "SetLayerTarget", layerID:$this->cardID, final:true);
+  }
+
+  function CombatEffectActive($parameter = '-', $defendingCard = '', $flicked = false) {
+    return true;
+  }
+
+  function CurrentEffectGrantsGoAgain($param) {
+    return true;
+  }
+}
 
 
 // class goliath_gauntlet extends Card {

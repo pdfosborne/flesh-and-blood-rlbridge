@@ -58,8 +58,11 @@
 
   function WTREffectPowerModifier($cardID)
   {
-    $idArr = explode("-", $cardID);
-    $cardID = $idArr[0];
+    $suffix = '';
+    if (($pos = strpos($cardID, "-")) !== false) {
+      $suffix = substr($cardID, $pos + 1);
+      $cardID = substr($cardID, 0, $pos);
+    }
     switch($cardID)
     {
       case "bloodrush_bellow_yellow": return 2;
@@ -76,7 +79,7 @@
       case "emerging_power_red": return 3;
       case "emerging_power_yellow": return 2;
       case "emerging_power_blue": return 1;
-      case "lord_of_wind_blue": return isset($idArr[1]) ? $idArr[1] : 0;
+      case "lord_of_wind_blue": return $suffix !== '' ? $suffix : 0;
       case "braveforge_bracers": return 1;
       case "warriors_valor_red": return 3;
       case "warriors_valor_yellow": return 2;
@@ -111,9 +114,9 @@
       case "sloggism_blue": return 4;
       case "rout_red": return 3;
       case "singing_steelblade_yellow": return 1;
-      case "overpower_red": return isset($idArr[1]) ? 6 : 4;
-      case "overpower_yellow": return isset($idArr[1]) ? 5 : 3;
-      case "overpower_blue": return isset($idArr[1]) ? 4 : 2;
+      case "overpower_red": return $suffix !== '' ? 6 : 4;
+      case "overpower_yellow": return $suffix !== '' ? 5 : 3;
+      case "overpower_blue": return $suffix !== '' ? 4 : 2;
       case "ironsong_response_red": return 3;
       case "ironsong_response_yellow": return 2;
       case "ironsong_response_blue": return 1;
@@ -131,8 +134,7 @@
   function WTRCombatEffectActive($cardID, $attackID)
   {
     global $mainPlayer, $CS_LastDynCost;
-    $idArr = explode("-", $cardID);
-    $cardID = $idArr[0];
+    if (($pos = strpos($cardID, "-")) !== false) $cardID = substr($cardID, 0, $pos);
     switch($cardID)
     {
       case "bloodrush_bellow_yellow": return ClassContains($attackID, "BRUTE", $mainPlayer);
@@ -269,13 +271,9 @@
       case "braveforge_bracers":
         AddCurrentTurnEffect($cardID, $currentPlayer);
         return "";
-      case "glint_the_quicksilver_blue":
-        if (TypeContains($CombatChain->AttackCard()->ID(), "W")) GiveAttackGoAgain();
-        if(RepriseActive()) Draw($currentPlayer);
-        return "";
       case "steelblade_supremacy_red": case "ironsong_determination_yellow":
         AddCurrentTurnEffect($cardID, $currentPlayer);
-        $targetMZInd = SearchCharacterForUniqueID(explode("-", $target)[1], $currentPlayer);
+        $targetMZInd = SearchCharacterForUniqueID(explode("-", $target, 2)[1], $currentPlayer);
         if ($targetMZInd != -1) {
           AddDecisionQueue("PASSPARAMETER", $currentPlayer, "MYCHAR-$targetMZInd");
           AddDecisionQueue("ADDMZBUFF", $currentPlayer, $cardID, 1);
@@ -491,8 +489,9 @@
     $cards = "";
     for($i=0; $i<$amount && $i<$deckCount; ++$i)
     {
-      $cards .= $deck[$i] . ($i < 2 ? "," : "");
-      if(CardCost($deck[$i]) >= 3) ++$lifegain;
+      $deckCard = $deck[$i];
+      $cards .= $deckCard . ($i < 2 ? "," : "");
+      if(CardCost($deckCard) >= 3) ++$lifegain;
     }
     RevealCards($cards, $mainPlayer);
     GainHealth($lifegain, $mainPlayer);
@@ -736,3 +735,12 @@
       default: return;
     }
   }
+
+function AddEffectToAttack($player, $effectID, $target) {
+  if ($target == "COMBATCHAINLINK-0") AddCurrentTurnEffect($effectID, $player);
+  elseif (explode("-", $target)[0] == "ATTACKQUEUE") {
+    $ind = intval(explode("-", $target)[1] ?? 0);
+    $QueueCard = new AttackLayer($ind);
+    $QueueCard->AddBuff($effectID);
+  }
+}

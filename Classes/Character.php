@@ -19,16 +19,20 @@ class PlayerCharacter {
   }
 
   function FindCardUID($uid) {
-    if (count($this->char) == 0) return new CharacterCard(-1, $this->player);
-    for ($i = 0; $i < count($this->char); $i += CharacterPieces()) {
+    $count = count($this->char);
+    if ($count == 0) return new CharacterCard(-1, $this->player);
+    $characterPieces = CharacterPieces();
+    for ($i = 0; $i < $count; $i += $characterPieces) {
       if ($this->char[$i + 11] == $uid) return new CharacterCard($i, $this->player);
     }
     return new CharacterCard(-1, $this->player);
   }
 
   function FindCardID($id) {
-    if (count($this->char) == 0) return "";
-    for ($i = 0; $i < count($this->char); $i += CharacterPieces()) {
+    $count = count($this->char);
+    if ($count == 0) return "";
+    $characterPieces = CharacterPieces();
+    for ($i = 0; $i < $count; $i += $characterPieces) {
       if ($this->char[$i] == $id) return new CharacterCard($i, $this->player);
     }
     return "";
@@ -61,6 +65,10 @@ class CharacterCard {
 
   function CardID() {
     return $this->pieces[$this->index] ?? "-";
+  }
+
+  function ID() {
+    return $this->CardID();
   }
 
   function Become($cardID) {
@@ -104,7 +112,7 @@ class CharacterCard {
       $this->pieces[$this->index + 3] += $num;
   }
 
-  function NumDefenseCounters() {
+  function NumDefenseCounters() { //also tracks damage dealt to perched allies
     return $this->pieces[$this->index+4] ?? 0;
   }
 

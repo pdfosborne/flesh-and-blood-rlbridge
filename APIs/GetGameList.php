@@ -47,6 +47,8 @@ $bannedPlayers = GetBannedPlayers();
 // Get blocked users list for filtering
 $blockedUserNames = [];
 $friendUserNames = [];
+$friendUserSet = []; 
+$blockedUserSet = []; 
 if(IsUserLoggedIn()) {
   $userId = LoggedInUser();
   $now = time();
@@ -55,20 +57,28 @@ if(IsUserLoggedIn()) {
   // Blocked users — refresh at most every 60 seconds per session
   if (!isset($_SESSION['_blockedCache']) || ($now - ($_SESSION['_blockedCacheAt'] ?? 0)) > $cacheTTL) {
     if ($conn) {
+      if (!$conn->ping()) {
+        $conn = GetDBConnection(DBL_GET_GAME_LIST);
+      }
       $query = "SELECT u.usersUid FROM blocked_users b
                 JOIN users u ON b.blockedUserId = u.usersId WHERE b.userId = ?
                 UNION
                 SELECT u.usersUid FROM blocked_users b
                 JOIN users u ON b.userId = u.usersId WHERE b.blockedUserId = ?";
-      $stmt = $conn->prepare($query);
-      if ($stmt) {
-        $stmt->bind_param("ii", $userId, $userId);
-        $stmt->execute();
-        $result = $stmt->get_result();
-        while ($row = $result->fetch_assoc()) {
-          $blockedUserNames[] = $row['usersUid'];
+      try {
+        $stmt = $conn->prepare($query);
+        if ($stmt) {
+          $stmt->bind_param("ii", $userId, $userId);
+          $stmt->execute();
+          $result = $stmt->get_result();
+          while ($row = $result->fetch_assoc()) {
+            $blockedUserNames[] = $row['usersUid'];
+          }
+          $stmt->close();
         }
-        $stmt->close();
+      } catch (\Exception $e) {
+        error_log("GetGameList: blocked users query failed: " . $e->getMessage());
+        $conn = GetDBConnection(DBL_GET_GAME_LIST);
       }
     }
     $_SESSION['_blockedCache'] = $blockedUserNames;
@@ -80,12 +90,15 @@ if(IsUserLoggedIn()) {
   // Friends list — refresh at most every 60 seconds per session
   if (!isset($_SESSION['_friendNamesCache']) || ($now - ($_SESSION['_friendNamesCacheAt'] ?? 0)) > $cacheTTL) {
     $friends = GetUserFriends($userId);
-    $friendUserNames = array_map(function($friend) { return $friend['username']; }, $friends);
+    $friendUserNames = array_column($friends, 'username');
     $_SESSION['_friendNamesCache'] = $friendUserNames;
     $_SESSION['_friendNamesCacheAt'] = $now;
   } else {
     $friendUserNames = $_SESSION['_friendNamesCache'];
   }
+
+  $blockedUserSet = array_flip($blockedUserNames);
+  $friendUserSet = array_flip($friendUserNames);
 }
 // Release the session file lock before the filesystem loop
 session_write_close();
@@ -110,13 +123,13 @@ if(IsUserLoggedIn()) {
 $gameInProgressCount = 0;
 if ($handle = opendir($path)) {
   $checkFileCreationTime = random_int(1, 1000) == 42;
+  $currentTime = round(microtime(true) * 1000);
   while (false !== ($folder = readdir($handle))) {
     if ('.' === $folder) continue;
     if ('..' === $folder) continue;
     $gameToken = $folder;
     $folder = $path . "/" . $folder . "/";
     $gs = $folder . "gamestate.txt";
-    $currentTime = round(microtime(true) * 1000);
     if($autoDeleteGames && $checkFileCreationTime) {
       $dirPath = realpath(rtrim($folder, "/"));
       if ($dirPath && is_dir($dirPath)) {
@@ -162,24 +175,24 @@ if ($handle = opendir($path)) {
           $showGame = true;
         } else if($visibility == "2") {
           // Friends-only game - show if user is a friend of either player
-          $showGame = IsUserLoggedIn() && (in_array($gameCreator, $friendUserNames) || in_array($p2Username, $friendUserNames));
+          $showGame = IsUserLoggedIn() && (isset($friendUserSet[$gameCreator]) || isset($friendUserSet[$p2Username]));
         }
-        
+
         // Don't show if not visible
         if(!$showGame) {
           continue;
         }
-        
+
         // Don't show games from banned users
         if(isset($bannedPlayers[strtolower($gameCreator)]) || isset($bannedPlayers[strtolower($p2Username)])) {
           continue;
         }
-        
+
         // Don't show games from blocked users
-        if(in_array($gameCreator, $blockedUserNames) || in_array($p2Username, $blockedUserNames)) {
+        if(isset($blockedUserSet[$gameCreator]) || isset($blockedUserSet[$p2Username])) {
           continue;
         }
-        
+
         $gameInProgress = new stdClass();
         $gameInProgress->p1Hero = $cacheArr[6] ?? "";   // piece 7
         $gameInProgress->p2Hero = $cacheArr[7] ?? "";   // piece 8
@@ -190,7 +203,7 @@ if ($handle = opendir($path)) {
         $gameInProgress->p2Username = $p2Username;
         $gameInProgress->visibility = $visibility;
         
-        if($gameInProgress->p2Hero != "DUMMY" && $gameInProgress->p2Hero != "") array_push($response->gamesInProgress, $gameInProgress);
+        if($gameInProgress->p1Hero != "" && $gameInProgress->p2Hero != "DUMMY" && $gameInProgress->p2Hero != "") $response->gamesInProgress[] = $gameInProgress;
       }
       else if ($currentTime - $lastGamestateUpdate > 300000) //~5 minutes?
       {
@@ -208,19 +221,20 @@ if ($handle = opendir($path)) {
     $lineCount = 0;
     $status = -1;
     if (file_exists($gf)) {
-      $lastRefresh = intval(GetCachePiece($gameName, 2)); //Player 1 last connection time
+      $openCacheArr = ReadCacheArray($gameName);
+      $lastRefresh = ($openCacheArr !== null) ? intval($openCacheArr[1] ?? "") : 0; //Player 1 last connection time
       if ($lastRefresh != "" && $currentTime - $lastRefresh < 500) {
         include 'APIParseGamefile.php';
         $status = $gameStatus;
         UnlockGamefile();
-      } else if ($lastRefresh == "" || $currentTime - $lastRefresh > 900000) //1 hour
+      } else if ($lastRefresh == "" || $currentTime - $lastRefresh > 900000) // 15 minutes
       {
         deleteDirectory($folder);
         DeleteCache($gameToken);
       }
-      if($status == 0 && intval(GetCachePiece($gameName, 11)) < 3) {
-        $visibility = GetCachePiece($gameName, 9);
-        
+      if($status == 0 && intval($openCacheArr[10] ?? "") < 3) {
+        $visibility = $openCacheArr[8] ?? "";
+
         // Determine if this game should be shown
         $showGame = false;
         if($visibility == "1") {
@@ -228,26 +242,26 @@ if ($handle = opendir($path)) {
           $showGame = true;
         } else if($visibility == "2") {
           // Friends-only game - show if user is a friend of the creator
-          $showGame = IsUserLoggedIn() && in_array($p1uid, $friendUserNames);
+          $showGame = IsUserLoggedIn() && isset($friendUserSet[$p1uid]);
         }
-        
+
         // Don't show if not visible
         if(!$showGame) {
           continue;
         }
-        
+
         // Don't show open games from banned users
         if(isset($bannedPlayers[strtolower($p1uid)])) {
           continue;
         }
-        
+
         // Don't show open games from blocked users
-        if(in_array($p1uid, $blockedUserNames)) {
+        if(isset($blockedUserSet[$p1uid])) {
           continue;
         }
-        
+
         $openGame = new stdClass();
-        if($format != "compcc" && $format != "compblitz" && $format != "compllcc" && $format != "compsage") $openGame->p1Hero = GetCachePiece($gameName, 7);
+        if($format != "compcc" && $format != "compblitz" && $format != "compllcc" && $format != "compsage") $openGame->p1Hero = $openCacheArr[6] ?? "";
         $formatName = "";
         if($format == "commoner") $formatName = "Commoner";
         else if($format == "futurecc") $formatName = "Future CC";
@@ -272,9 +286,9 @@ if ($handle = opendir($path)) {
         $openGame->gameCreator = $p1uid;
         $openGame->visibility = $visibility;
         if($isShadowBanned) {
-          if($format == "shadowblitz" || $format == "shadowcc") array_push($response->openGames, $openGame);
+          if($format == "shadowblitz" || $format == "shadowcc") $response->openGames[] = $openGame;
         } else {
-          if($format != "shadowblitz" && $format != "shadowcc") array_push($response->openGames, $openGame);
+          if($format != "shadowblitz" && $format != "shadowcc") $response->openGames[] = $openGame;
         }
       }
     }
@@ -290,7 +304,7 @@ function deleteDirectory($dir) {
     }
 
     if (!is_dir($dir)) {
-        return unlink($dir);
+        return @unlink($dir) || !file_exists($dir);
     }
 
     $dirContents = scandir($dir);

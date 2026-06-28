@@ -82,9 +82,10 @@ class rage_baiters extends Card {
 		global $CombatChain, $chainLinks;
 		Tap("MYCHAR-$index", $this->controller);
 		$options = [];
-		if (HasStealth($CombatChain->AttackCard()->ID())) array_push($options, "COMBATCHAINLINK-0");
-		for ($i = 0; $i < count($chainLinks); ++$i) {
-			if (HasStealth($chainLinks[$i][0])) array_push($options, "PASTCHAINLINK-0-$i");
+		if (HasStealth($CombatChain->AttackCard()->ID())) $options[] = "COMBATCHAINLINK-0";
+		$chainLinksCount = count($chainLinks);
+			for ($i = 0; $i < $chainLinksCount; ++$i) {
+			if (HasStealth($chainLinks[$i][0])) $options[] = "PASTCHAINLINK-0-$i";
 		}
 		$options = implode(",", $options);
 		AddDecisionQueue("SETDQCONTEXT", $this->controller, "Choose a card with stealth to give on-hit mark", 1);
@@ -106,7 +107,7 @@ class rage_baiters extends Card {
 	function PlayAbility($from, $resourcesPaid, $target = '-', $additionalCosts = '-', $uniqueID = '-1', $layerIndex = -1) {
 		if ($target == "COMBATCHAINLINK-0") AddEffectToCurrentAttack($this->cardID);
 		else {
-			$index = intval(explode("-", $target)[1]);
+			$index = intval(explode("-", $target, 2)[1]);
 			AddEffectToPastAttack($index, $this->cardID);
 		}
 	}
@@ -191,7 +192,7 @@ class horrors_of_the_past_yellow extends Card {
 	}
 
 	function AddEffectHitTrigger($source = '-', $fromCombat = true, $target = '-', $parameter = '-', $check = false) {
-		$copiedText = explode("-", $parameter)[1] ?? "-";
+		$copiedText = explode("-", $parameter, 2)[1] ?? "-";
 		if ($copiedText != "-") {
 			if (!$check) AddOnHitTrigger($copiedText, $this->cardID, $target);
 			return true;

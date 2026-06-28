@@ -153,7 +153,7 @@ function ARCWizardHitEffect($cardID)
 }
 
 function GetArcaneTargetFromUID($player, $target) {
-  $otherPlayer = $player == 1 ? 2 : 1;
+  $otherPlayer = 3 - $player;
   $targetArr = explode("-", $target);
   $indexTarget = "-";
   if (!isset($targetArr[1])) return "-";
@@ -187,7 +187,7 @@ function SetArcaneTarget($player, $source, $targetType = 0, $isPassable = 0, $ma
     "my_hero" => 4,
     default => $targetType
   };
-  $otherPlayer = $player == 1 ? 2 : 1;
+  $otherPlayer = 3 - $player;
   $context = $context == "" ? "Choose a target for <0>" : $context;
   AddDecisionQueue("PASSPARAMETER", $player, $source, ($isPassable ? 1 : 0));
   AddDecisionQueue("SETDQVAR", $player, "0", ($isPassable ? 1 : 0));
@@ -222,7 +222,7 @@ function DealArcane($damage, $target = 0, $type = "PLAYCARD", $source = "NA", $f
 {
   global $currentPlayer, $CS_ArcaneTargetsSelected;
   if ($player == 0) $player = $currentPlayer;
-  $otherPlayer = $player == 1 ? 2 : 1;
+  $otherPlayer = 3 - $player;
   $skipHitEffect = false; //we should *never* skip hit effects
   if ($damage > 0) {
     $damage += CurrentEffectArcaneModifier($source, $player, meldState: $meldState) * $nbArcaneInstance;
@@ -459,40 +459,41 @@ function PlayRequiresTarget($cardID, $from)
 function GetArcaneTargetIndices($player, $target): string
 {
   global $CS_ArcaneTargetsSelected;
-  $otherPlayer = $player == 1 ? 2 : 1;
+  $otherPlayer = 3 - $player;
   if ($target == 4) return "MYCHAR-0";
   if ($target != 4 && $target != 5) $rv = "THEIRCHAR-0";
   else $rv = "";
   if (($target == 0 || $target == 2) && !ShouldAutotargetOpponent($player)) $rv .= ",MYCHAR-0";
   $allyPieces = AllyPieces();
   if ($target == 2) {
+    $parts = [];
     $theirAllies = &GetAllies($otherPlayer);
     $theirAlliesCount = count($theirAllies);
-    for ($i = 0; $i < $theirAlliesCount; $i += $allyPieces) $rv .= ",THEIRALLY-" . $i;
+    for ($i = 0; $i < $theirAlliesCount; $i += $allyPieces) $parts[] = "THEIRALLY-" . $i;
     $myAllies = &GetAllies($player);
     $myAlliesCount = count($myAllies);
-    for ($i = 0; $i < $myAlliesCount; $i += $allyPieces) $rv .= ",MYALLY-" . $i;
+    for ($i = 0; $i < $myAlliesCount; $i += $allyPieces) $parts[] = "MYALLY-" . $i;
     $theirPerchedStr = GetPerchedAllies($otherPlayer);
     if ($theirPerchedStr !== "") {
-      $theirPerched = explode(",", $theirPerchedStr);
-      foreach($theirPerched as $i) $rv .= ",THEIRCHAR-" . $i;
+      foreach (explode(",", $theirPerchedStr) as $idx) $parts[] = "THEIRCHAR-" . $idx;
     }
     $myPerchedStr = GetPerchedAllies($player);
     if ($myPerchedStr !== "") {
-      $myPerched = explode(",", $myPerchedStr);
-      foreach($myPerched as $i) $rv .= ",MYCHAR-" . $i;
+      foreach (explode(",", $myPerchedStr) as $idx) $parts[] = "MYCHAR-" . $idx;
     }
+    if ($parts) $rv .= "," . implode(",", $parts);
   } else if ($target == 3 || $target == 5) {
+    $parts = [];
     $theirAllies = &GetAllies($otherPlayer);
     $theirAlliesCount = count($theirAllies);
-    for ($i = 0; $i < $theirAlliesCount; $i += $allyPieces) {
-      if ($rv !== "") $rv .= ",";
-      $rv .= "THEIRALLY-" . $i;
-    }
+    for ($i = 0; $i < $theirAlliesCount; $i += $allyPieces) $parts[] = "THEIRALLY-" . $i;
     $theirPerchedStr = GetPerchedAllies($otherPlayer);
     if ($theirPerchedStr !== "") {
-      $theirPerched = explode(",", $theirPerchedStr);
-      foreach($theirPerched as $i) $rv .= ",THEIRCHAR-" . $i;
+      foreach (explode(",", $theirPerchedStr) as $idx) $parts[] = "THEIRCHAR-" . $idx;
+    }
+    if ($parts) {
+      if ($rv !== "") $rv .= ",";
+      $rv .= implode(",", $parts);
     }
   }
   $targets = explode(",", $rv);
@@ -557,7 +558,6 @@ function ArcaneModifierAmount($source, $player, $index)
         return $effectArr[1];
       case "rampant_growth__life_yellow":
         return $effectArr[1];
-      case "will_of_arcana_blue":
       case "staff_of_verdant_shoots-AMP":
       case "sigil_of_aether_blue":
       case "high_voltage_blue":
@@ -624,7 +624,6 @@ function CurrentEffectArcaneModifier($source, $player, $meldState = "-", $skipRe
         $modifier += $effectArr[1];
         $remove = true;
         break;
-      case "will_of_arcana_blue":
       case "staff_of_verdant_shoots-AMP":
       case "sigil_of_aether_blue"://sigil of aether
       case "high_voltage_blue":
@@ -658,6 +657,7 @@ function CurrentEffectArcaneModifier($source, $player, $meldState = "-", $skipRe
       case "chorus_of_the_amphitheater_red":
       case "chorus_of_the_amphitheater_yellow":
       case "chorus_of_the_amphitheater_blue":
+        if (str_contains($source, "ABILITY")) break;
         if (!TypeContains($source, "I") && !TypeContains($source, "A") && !TypeContains($source, "AA")) break;
         if ($currentTurnEffects[$i + 1] != $player) break;
         $modifier += 1;
@@ -1098,7 +1098,8 @@ function ArcaneBarrierChoices($playerID, $max, $returnBarrierArray = false)
     }
   }
   $Auras = new Auras($playerID);
-  for ($i = 0; $i < $Auras->NumAuras(); ++$i) {
+  $numAuras = $Auras->NumAuras();
+  for ($i = 0; $i < $numAuras; ++$i) {
     $AuraCard = $Auras->Card($i, true);
     $card = GetClass($AuraCard->CardID(), $playerID);
     if ($card != "-") {
@@ -1147,7 +1148,7 @@ function CheckSpellvoid($player, $damage, $source = "-")
 function ArcaneHitEffect($player, $source, $target, $damage)
 {
   global $CS_ArcaneDamageDealt, $layers;
-  $cardID = explode("|",  $source)[0] ?? $source;
+  $cardID = explode("|", $source, 2)[0] ?? $source;
   $card = GetClass($cardID, $player);
   if ($card != "-") $card->ArcaneHitEffect($source, $target, $damage);
   switch ($source) {
@@ -1313,7 +1314,7 @@ function ProcessSurge($cardID, $player, $target)
       $otherSigilFound = false;
       $aurasCount = count($auras);
       $auraPieces = AuraPieces();
-      $otherPlayer = $player == 1 ? 2 : 1;
+      $otherPlayer = 3 - $player;
       for ($i = $aurasCount - $auraPieces; $i >= 0; $i -= $auraPieces) {
         $auraName = CardName($auras[$i]);
         $AuraCard = new AuraCard($i, $player);
