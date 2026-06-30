@@ -311,6 +311,25 @@ class AntiStuckMonitor:
         else:
             self._set_active("gamestate_revert", False)
 
+        if step_info.get("macro_stall_truncated"):
+            self._set_active("macro_stall", True)
+            pending.append(
+                (
+                    "macro_stall",
+                    {
+                        "reason": str(step_info.get("macro_stall_reason", "") or ""),
+                        "turns_without_damage": int(
+                            step_info.get("turns_without_damage", 0) or 0
+                        ),
+                        "pass_only_main_streak": int(
+                            step_info.get("pass_only_main_streak", 0) or 0
+                        ),
+                    },
+                )
+            )
+        else:
+            self._set_active("macro_stall", False)
+
         for stuck_kind, extra in pending:
             self._maybe_log(
                 stuck_kind,
@@ -444,6 +463,7 @@ class AntiStuckMonitor:
                 "repeat_streak": step_info.get("repeat_streak"),
                 "loop_guard_forced_pass": step_info.get("loop_guard_forced_pass"),
                 "loop_guard_reason": step_info.get("loop_guard_reason"),
+                "loop_guard_forced_action": step_info.get("loop_guard_forced_action"),
                 "turn_steps": step_info.get("turn_steps"),
                 "decision_loop_streak": step_info.get("decision_loop_streak"),
                 "acting_player_id": obs_data.get("actingPlayerID"),

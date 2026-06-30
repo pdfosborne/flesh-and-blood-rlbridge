@@ -84,11 +84,13 @@ from .obs_alignment import (
     merge_talishar_raw_state,
 )
 from .obs_encoding import observation_fingerprint
+from .macro_stall_guard import MacroStallConfig, MacroStallGuard, MacroStallResult
 from .state_loop_guard import (
     DEFAULT_LOOP_REPEAT_THRESHOLD,
     DEFAULT_MAX_STEPS_PER_TURN,
     LoopGuardResult,
     TurnLoopGuard,
+    resolve_forced_submission,
 )
 from .talishar_default_policy import (
     RepeatActionTracker,
@@ -284,6 +286,13 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         deck2: str = "",
         enable_combat_tracker: bool = False,
         strict_simulation: bool = False,
+        macro_stall_enabled: bool = True,
+        stall_no_damage_turns: int = 6,
+        stall_pass_only_turns: int = 6,
+        stall_no_damage_requires_low_hand: bool = False,
+        stall_low_hand_turns: int = 3,
+        stall_max_single_low_hand_turns: int = 5,
+        stall_min_attack_hand: int = 2,
     ) -> None:
         self._engine_dir = Path(engine_dir).resolve()
         self._max_turns = max_turns
@@ -327,6 +336,17 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         self._loop_guard = TurnLoopGuard(
             max_steps_per_turn=max_steps_per_turn,
             loop_repeat_threshold=loop_repeat_threshold,
+        )
+        self._macro_stall_guard = MacroStallGuard(
+            MacroStallConfig(
+                enabled=macro_stall_enabled,
+                stall_no_damage_turns=stall_no_damage_turns,
+                stall_pass_only_turns=stall_pass_only_turns,
+                stall_no_damage_requires_low_hand=stall_no_damage_requires_low_hand,
+                stall_low_hand_turns=stall_low_hand_turns,
+                stall_max_single_low_hand_turns=stall_max_single_low_hand_turns,
+                stall_min_attack_hand=stall_min_attack_hand,
+            )
         )
         self._last_observation_vec: Optional[np.ndarray] = None
         self._p1_episode_context: Optional[EpisodeContext] = None
@@ -1238,6 +1258,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             acting_player_id=int(self._acting_player),
         )
         self._loop_guard.reset()
+        self._macro_stall_guard.reset()
         legal_count = len(self._filter_legal_actions(self._legal_actions()))
         obs_vec = self._obs_vec_for_fast_path()
         self._last_observation_vec = obs_vec
@@ -1316,6 +1337,9 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         self._steps += 1
         terminated = self._is_game_over()
         truncated = not terminated and self._steps >= self._max_turns
+        macro_stall = self._check_macro_stall(self._legal_actions())
+        if macro_stall.should_truncate and not terminated:
+            truncated = True
         repeat_pen = self._repeat_penalty(
             int(chosen_dict.get("action_code", 0) or 0),
             str(chosen_dict.get("button_input", "") or ""),
@@ -1323,6 +1347,8 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         reward = float(
             self._compute_reward(prev_p1, prev_p2, terminated, truncated, repeat_pen)
         )
+        if truncated and not terminated:
+            reward = float(self._truncation_penalty)
         self._p1_hp = int(self._gs.p1_health)
         self._p2_hp = int(self._gs.p2_health)
         obs_vec = self._obs_vec_for_fast_path()
@@ -1364,6 +1390,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             "p1_deck": int(getattr(self._gs, "p1_deck_size", 0) or 0),
             "p2_deck": int(getattr(self._gs, "p2_deck_size", 0) or 0),
             "turn_no": self._obs_turn_no(),
+            **self._macro_stall_info(macro_stall),
         }
 
     def fast_step_index(self, action_index: int) -> dict[str, Any]:
@@ -1381,7 +1408,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             idx = min(max(0, int(action_index)), len(legal) - 1)
             chosen = legal[idx]
         else:
-            chosen = self._pass_like_action_from_legal(legal)
+            chosen = self._chosen_from_loop_guard(legal, loop_guard)
         chosen_dict = self._action_to_dict(chosen)
 
         if self._synthetic_flow_legal_actions() is not None:
@@ -1399,6 +1426,9 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         self._steps += 1
         terminated = bool(result.terminated)
         truncated = not terminated and self._steps >= self._max_turns
+        macro_stall = self._check_macro_stall(self._legal_actions())
+        if macro_stall.should_truncate and not terminated:
+            truncated = True
         if terminated:
             reward = float(result.reward)
         elif truncated:
@@ -1440,7 +1470,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
                 combat_log_lines=self._synthetic_combat_log,
             )
         self._sync_flow_phase_from_cpp()
-        return {
+        fast_result: dict[str, Any] = {
             "obs_vec": obs_vec,
             "legal_count": len(self._filter_legal_actions(self._legal_actions())),
             "acting_player_id": self._acting_player,
@@ -1458,6 +1488,10 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             "turn_steps": loop_guard.turn_steps,
             "decision_loop_streak": loop_guard.loop_streak,
         }
+        if loop_guard.forced_action is not None:
+            fast_result["loop_guard_forced_action"] = dict(loop_guard.forced_action)
+        fast_result.update(self._macro_stall_info(macro_stall))
+        return fast_result
 
     def _is_pass_like(self, action: Any) -> bool:
         code = int(getattr(action, "action_code", 0) or 0)
@@ -1702,11 +1736,64 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             acting_player_id=self._acting_player,
         )
 
+    def _macro_stall_obs_state(self) -> dict[str, Any]:
+        gs = self._gs
+        acting = int(self._acting_player)
+        p1_hp = int(self._p1_hp)
+        p2_hp = int(self._p2_hp)
+        hand_size = 0
+        if gs is not None:
+            hand_size = int(
+                getattr(gs, "p1_hand_size", 0) if acting == 1 else getattr(gs, "p2_hand_size", 0)
+            )
+        return {
+            "turnNo": self._obs_turn_no(),
+            "turnPhase": self._phase_code(),
+            "actingPlayerID": acting,
+            "playerHealth": p1_hp if acting == 1 else p2_hp,
+            "opponentHealth": p2_hp if acting == 1 else p1_hp,
+            "playerHandSize": hand_size,
+        }
+
+    def _check_macro_stall(self, legal: list[Any]) -> MacroStallResult:
+        filtered = self._filter_legal_actions(legal)
+        filtered_dicts = [self._action_to_dict(action) for action in filtered]
+        return self._macro_stall_guard.observe(
+            self._macro_stall_obs_state(),
+            filtered_dicts,
+            p1_hp=int(self._p1_hp),
+            p2_hp=int(self._p2_hp),
+        )
+
+    def _macro_stall_info(self, result: MacroStallResult) -> dict[str, Any]:
+        return {
+            "macro_stall_truncated": bool(result.should_truncate),
+            "macro_stall_reason": result.reason,
+            "turns_without_damage": result.turns_without_damage,
+            "pass_only_main_streak": result.pass_only_main_streak,
+        }
+
     def _pass_like_action_from_legal(self, legal: list[Any]) -> Any:
         for action in legal:
             if self._is_pass_like(action):
                 return action
         return self._make_pass_action()
+
+    def _chosen_from_loop_guard(
+        self,
+        legal: list[Any],
+        loop_guard: LoopGuardResult,
+    ) -> Any:
+        legal_dicts = [self._action_to_dict(action) for action in legal]
+        mode, button_input = resolve_forced_submission(legal_dicts, loop_guard)
+        for action in legal:
+            desc = self._action_to_dict(action)
+            if (
+                int(desc.get("action_code", 0) or 0) == int(mode)
+                and str(desc.get("button_input", "") or "") == str(button_input)
+            ):
+                return action
+        return self._pass_like_action_from_legal(legal)
 
     def _phase_code(self) -> str:
         """Return the Talishar-like phase token exposed in observations."""
@@ -2297,6 +2384,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             acting_player_id=int(self._acting_player),
         )
         self._loop_guard.reset()
+        self._macro_stall_guard.reset()
 
         legal = self._filter_legal_actions(self._legal_actions())
         obs = self._encode_observation(legal)
@@ -2415,7 +2503,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
 
         idx, chosen = self._parse_action(action, legal)
         if loop_guard.force_pass:
-            chosen = self._pass_like_action_from_legal(legal)
+            chosen = self._chosen_from_loop_guard(legal, loop_guard)
             idx = 0
             for candidate_index, candidate in enumerate(legal):
                 if candidate is chosen:
@@ -2472,6 +2560,11 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             truncated = True
 
         new_legal = self._filter_legal_actions(self._legal_actions())
+        macro_stall = self._check_macro_stall(self._legal_actions())
+        if macro_stall.should_truncate and not terminated:
+            truncated = True
+            reward = float(self._truncation_penalty)
+
         obs = self._encode_observation(new_legal)
         after_snapshot = (
             self._tracker_state_snapshot(new_legal) if self._enable_combat_tracker else None
@@ -2518,6 +2611,9 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             "decision_loop_streak": loop_guard.loop_streak,
             "combat_tracker": self._tracker_stub(tracker_event),
         }
+        if loop_guard.forced_action is not None:
+            step_info["loop_guard_forced_action"] = dict(loop_guard.forced_action)
+        step_info.update(self._macro_stall_info(macro_stall))
         if self._last_observation_vec is not None:
             step_info["observation_vec"] = self._last_observation_vec
 

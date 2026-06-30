@@ -186,3 +186,109 @@ def test_finish_episode_summary_when_still_stuck(tmp_path: Path) -> None:
         json.loads(line).get("message") == "episode_stuck_summary"
         for line in lines
     )
+
+
+def test_macro_stall_detection_from_step_info(tmp_path: Path) -> None:
+    stuck.configure(run_dir=tmp_path, enabled=True)
+    monitor = stuck.AntiStuckMonitor(
+        config=stuck.AntiStuckConfig(pass_streak=99, no_progress_steps=99, repeat_streak=99),
+    )
+    monitor.begin_episode(episode=5, mode="render", p1_deck="a", p2_deck="b", base_url="http://x")
+    env = _MockEnv()
+    monitor.observe_step(
+        env,
+        obs_data=_pass_obs(),
+        step_info={
+            "macro_stall_truncated": True,
+            "macro_stall_reason": "no_damage_turns",
+            "turns_without_damage": 6,
+            "pass_only_main_streak": 0,
+        },
+        action=0,
+        truncated=True,
+    )
+    lines = (tmp_path / "anti_stuck_reports.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    macro_lines = [
+        json.loads(line)
+        for line in lines
+        if json.loads(line).get("message") == "macro_stall detected"
+    ]
+    assert len(macro_lines) == 1
+    assert macro_lines[0]["details"]["reason"] == "no_damage_turns"
+    monitor.finish_episode("stall_timeout")
+    all_lines = (tmp_path / "anti_stuck_reports.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    summaries = [
+        json.loads(line)
+        for line in all_lines
+        if json.loads(line).get("message") == "episode_stuck_summary"
+    ]
+    assert summaries
+    assert "macro_stall" in summaries[-1]["details"]["active_kinds"]
+
+
+def _choosetop_obs_filtered() -> dict:
+    """Observation after filter_legal_actions strips Pass in CHOOSETOP."""
+    return {
+        "turnNo": 2,
+        "turnPhase": "CHOOSETOP",
+        "actingPlayerID": 1,
+        "playerHealth": 12,
+        "opponentHealth": 14,
+        "legal_actions": [
+            {
+                "action_code": 8,
+                "label": "Top",
+                "zone": "popup",
+                "button_input": "widowmaker_yellow",
+            },
+        ],
+    }
+
+
+def test_choosetop_filtered_obs_does_not_trigger_pass_loop(tmp_path: Path) -> None:
+    """When Pass is filtered out, repeated Top picks must not log pass_loop."""
+    stuck.configure(run_dir=tmp_path, enabled=True)
+    monitor = stuck.AntiStuckMonitor(
+        config=stuck.AntiStuckConfig(pass_streak=3, no_progress_steps=99, repeat_streak=99),
+    )
+    monitor.begin_episode(
+        episode=5,
+        mode="render",
+        p1_deck="azalea",
+        p2_deck="dash",
+        base_url="http://x",
+    )
+    env = _MockEnv(
+        server_report={
+            "turn_no": 2,
+            "phase": "CHOOSETOP",
+            "player_health": 12,
+            "opponent_health": 14,
+            "legal_count": 1,
+            "combat_log": ["Player 1 put a card on top of the deck"],
+            "board_fingerprint": "turn2|choosetop|26|hand",
+            "game_over": False,
+            "gamestate_revert": False,
+            "legal_actions": [
+                {"action_code": 8, "label": "Top", "zone": "popup"},
+            ],
+        },
+        legal_count=1,
+    )
+    obs = _choosetop_obs_filtered()
+
+    for _ in range(4):
+        monitor.observe_step(
+            env,
+            obs_data=obs,
+            step_info={"loop_guard_forced_pass": False},
+            action=0,
+        )
+
+    lines = (tmp_path / "anti_stuck_reports.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    pass_loops = [
+        json.loads(line)
+        for line in lines
+        if json.loads(line).get("message") == "pass_loop detected"
+    ]
+    assert pass_loops == []

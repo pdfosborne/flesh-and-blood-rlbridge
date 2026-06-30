@@ -1183,3 +1183,81 @@ def test_have_priority_false_without_waiting_text_still_pass_only() -> None:
 
     assert len(filtered) == 1
     assert filtered[0]["action_code"] == 99
+
+
+def test_choosetop_strips_pass_when_top_available() -> None:
+    """CHOOSETOP Pass is a no-op when a Top action exists (Azalea stall case)."""
+    state = {
+        "turnPhase": {"turnPhase": "CHOOSETOP"},
+        "canPassPhase": True,
+        "playerHand": [],
+    }
+    legal = [
+        {
+            "action_code": 8,
+            "button_input": "widowmaker_yellow",
+            "zone": "popup",
+            "label": "Top",
+        },
+        {
+            "action_code": 99,
+            "button_input": "",
+            "zone": "button",
+            "label": "Pass",
+        },
+    ]
+
+    filtered = filter_legal_actions(state, legal)
+
+    assert len(filtered) == 1
+    assert filtered[0]["action_code"] == 8
+    assert filtered[0]["label"] == "Top"
+
+
+def test_instant_keeps_pass_with_optional_equipment() -> None:
+    """Optional INSTANT equipment windows must not force activation at filter layer."""
+    state = {
+        "turnPhase": {"turnPhase": "INSTANT"},
+        "canPassPhase": True,
+        "playerHand": [],
+        "playerEquipment": [{"cardNumber": "topsy_turvy", "action": 3}],
+    }
+    legal = [
+        {
+            "action_code": 3,
+            "button_input": "120",
+            "zone": "equipment",
+            "label": "topsy_turvy",
+        },
+        {
+            "action_code": 99,
+            "button_input": "",
+            "zone": "button",
+            "label": "Pass",
+        },
+    ]
+
+    filtered = filter_legal_actions(state, legal)
+
+    assert len(filtered) == 2
+    assert any(a["action_code"] == 3 for a in filtered)
+    assert any(a["action_code"] == 99 for a in filtered)
+
+
+def test_prefer_non_pass_index_from_legal_actions() -> None:
+    from flesh_and_blood_rlbridge.legal_action_filter import prefer_non_pass_index
+
+    obs = {
+        "legal_actions": [
+            {"index": 0, "label": "Top", "zone": "popup"},
+            {"index": 1, "label": "Pass", "zone": "button"},
+        ],
+    }
+    assert prefer_non_pass_index(obs, fallback_action=1) == 0
+
+
+def test_is_mandatory_progress_phase_choosetop() -> None:
+    from flesh_and_blood_rlbridge.legal_action_filter import is_mandatory_progress_phase
+
+    assert is_mandatory_progress_phase({"turnPhase": "CHOOSETOP"})
+    assert not is_mandatory_progress_phase({"turnPhase": "INSTANT"})

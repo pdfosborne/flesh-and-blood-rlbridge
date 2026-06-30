@@ -44,6 +44,24 @@ _PASS_FALLBACK: dict[str, Any] = {
     "label": "Pass",
 }
 
+# Chooser/popup phases where Pass is accepted by Talishar but does not advance
+# the game when a real progression action (Top, pick, etc.) is available.
+_MANDATORY_PROGRESS_PHASES: frozenset[str] = frozenset({
+    "choosetop",
+    "chooseoption",
+    "handtopbottom",
+    "choosecombatchain",
+    "choosecard",
+    "choosecardid",
+    "choosecharacter",
+    "choosefirstplayer",
+    "choosepermanent",
+    "choosemysoul",
+    "choosemyaura",
+})
+
+MANDATORY_PROGRESS_PHASES = _MANDATORY_PROGRESS_PHASES
+
 # Phases where hand/arsenal/equipment plays use different semantics (pitch,
 # block, or mandatory zone selection) and must not use main-phase affordability.
 _SKIP_PLAY_AFFORDABILITY_PHASES: frozenset[str] = (
@@ -53,6 +71,7 @@ _SKIP_PLAY_AFFORDABILITY_PHASES: frozenset[str] = (
     | _CHOOSE_HAND_PHASES
     | _POPUP_PHASES
     | _BUTTON_INPUT_PHASES
+    | _MANDATORY_PROGRESS_PHASES
 )
 
 
@@ -178,6 +197,66 @@ def is_pass_only(filtered: list[dict[str, Any]]) -> bool:
     if not filtered:
         return True
     return all(_is_pass_action(action) for action in filtered)
+
+
+def first_non_pass_action(
+    legal_actions: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Return the first non-pass action in *legal_actions*, if any."""
+    for action in legal_actions:
+        if not _is_pass_action(action):
+            return action
+    return None
+
+
+_NON_PASS_LABEL_TOKENS: tuple[str, ...] = (
+    "pass",
+    "decline",
+    "cancel",
+    "skip",
+    "no ",
+    "undo",
+)
+
+
+def _is_non_pass_obs_entry(entry: dict[str, Any]) -> bool:
+    label = str(entry.get("label", "") or "").strip().lower()
+    return not any(tok in label for tok in _NON_PASS_LABEL_TOKENS)
+
+
+def is_mandatory_progress_phase(state: dict[str, Any]) -> bool:
+    """True when Talishar is in a chooser phase where Pass does not advance."""
+    return _get_phase(state) in _MANDATORY_PROGRESS_PHASES
+
+
+def prefer_non_pass_index(obs_data: dict[str, Any], fallback_action: Any) -> Any:
+    """Choose a non-pass legal action index when available in observation JSON.
+
+    Observations may expose legal actions as ``legalActions`` or ``legal_actions``.
+    During chooser phases, greedy policies can repeatedly pick pass/confirm,
+    which stalls progression. This helper picks the first clearly non-pass
+    option when one exists.
+    """
+    legal = obs_data.get("legalActions")
+    if not isinstance(legal, list):
+        legal = obs_data.get("legal_actions")
+    if not isinstance(legal, list) or len(legal) <= 1:
+        return fallback_action
+
+    non_pass: list[int] = []
+    for entry in legal:
+        if not isinstance(entry, dict):
+            continue
+        idx = entry.get("index")
+        if not isinstance(idx, int):
+            continue
+        if not _is_non_pass_obs_entry(entry):
+            continue
+        non_pass.append(idx)
+
+    if not non_pass:
+        return fallback_action
+    return non_pass[0]
 
 
 def _has_arsenal_from_hand_actions(actions: list[dict[str, Any]]) -> bool:
@@ -306,7 +385,12 @@ def filter_legal_actions(
         no_pass = _strip_pass_actions(filtered)
         if no_pass:
             filtered = no_pass
-    elif phase in (_CHOOSE_HAND_PHASES | _BUTTON_INPUT_PHASES | _POPUP_PHASES):
+    elif phase in (
+        _CHOOSE_HAND_PHASES
+        | _BUTTON_INPUT_PHASES
+        | _POPUP_PHASES
+        | _MANDATORY_PROGRESS_PHASES
+    ):
         no_pass = _strip_pass_actions(filtered)
         if no_pass:
             filtered = no_pass

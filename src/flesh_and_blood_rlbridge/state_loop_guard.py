@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from .legal_action_filter import first_non_pass_action
 from .talishar_default_policy import _get_phase, _is_pass_action, _to_int
 
 DEFAULT_MAX_STEPS_PER_TURN = 100
@@ -160,12 +161,50 @@ def first_pass_action(
     return None
 
 
+def _action_submission(action: dict[str, Any]) -> tuple[int, str]:
+    return (
+        _to_int(action.get("action_code", 0)),
+        str(action.get("button_input", "") or ""),
+    )
+
+
+def _resolve_forced_action(
+    legal_actions: list[dict[str, Any]],
+    *,
+    reason: str,
+) -> Optional[dict[str, Any]]:
+    """Pick the action environments should submit when breaking a loop."""
+    if reason == "decision_loop":
+        non_pass = first_non_pass_action(legal_actions)
+        if non_pass is not None:
+            return non_pass
+    return first_pass_action(legal_actions) or (
+        legal_actions[0] if legal_actions else None
+    )
+
+
+def resolve_forced_submission(
+    legal_actions: list[dict[str, Any]],
+    result: "LoopGuardResult",
+) -> tuple[int, str]:
+    """Map a loop-guard result to ``(mode, button_input)`` for env submission."""
+    if not result.force_pass:
+        return 99, ""
+    forced = result.forced_action
+    if forced is None:
+        forced = _resolve_forced_action(legal_actions, reason=result.reason)
+    if forced is None:
+        return 99, ""
+    return _action_submission(forced)
+
+
 @dataclass(frozen=True)
 class LoopGuardResult:
     force_pass: bool
     turn_steps: int
     loop_streak: int
     reason: str = ""
+    forced_action: Optional[dict[str, Any]] = None
 
 
 class TurnLoopGuard:
@@ -219,11 +258,13 @@ class TurnLoopGuard:
 
         board_fp = board_state_fingerprint(state)
         if self._board_history and board_fp in self._board_history[:-1]:
+            reason = "board_revert"
             return LoopGuardResult(
                 force_pass=True,
                 turn_steps=self._steps_this_turn,
                 loop_streak=self._loop_streak,
-                reason="board_revert",
+                reason=reason,
+                forced_action=_resolve_forced_action(legal_actions, reason=reason),
             )
         if not self._board_history or board_fp != self._board_history[-1]:
             self._board_history.append(board_fp)
@@ -236,21 +277,26 @@ class TurnLoopGuard:
             self._loop_streak = 1
 
         if self._steps_this_turn > self._max_steps_per_turn:
+            reason = "turn_step_cap"
             return LoopGuardResult(
                 force_pass=True,
                 turn_steps=self._steps_this_turn,
                 loop_streak=self._loop_streak,
-                reason="turn_step_cap",
+                reason=reason,
+                forced_action=_resolve_forced_action(legal_actions, reason=reason),
             )
         if self._loop_streak >= self._loop_repeat_threshold:
+            reason = "decision_loop"
             return LoopGuardResult(
                 force_pass=True,
                 turn_steps=self._steps_this_turn,
                 loop_streak=self._loop_streak,
-                reason="decision_loop",
+                reason=reason,
+                forced_action=_resolve_forced_action(legal_actions, reason=reason),
             )
         return LoopGuardResult(
             force_pass=False,
             turn_steps=self._steps_this_turn,
             loop_streak=self._loop_streak,
+            forced_action=None,
         )

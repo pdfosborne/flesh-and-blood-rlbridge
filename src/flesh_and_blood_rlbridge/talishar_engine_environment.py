@@ -109,12 +109,14 @@ from .legal_action_filter import (
     player_choosing_in_snapshot,
     player_must_wait,
 )
+from .macro_stall_guard import MacroStallConfig, MacroStallGuard, MacroStallResult
 from .state_loop_guard import (
     DEFAULT_LOOP_REPEAT_THRESHOLD,
     DEFAULT_MAX_STEPS_PER_TURN,
     TurnLoopGuard,
     board_state_fingerprint,
     first_pass_action,
+    resolve_forced_submission,
 )
 from .talishar_default_policy import (
     choose_talishar_action_index,
@@ -342,6 +344,13 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         # RL training optimizations for RLStep overlay (skip backups, slim JSON).
         rl_training_mode: bool = False,
         rl_slim_response: bool = True,
+        macro_stall_enabled: bool = True,
+        stall_no_damage_turns: int = 6,
+        stall_pass_only_turns: int = 6,
+        stall_no_damage_requires_low_hand: bool = False,
+        stall_low_hand_turns: int = 3,
+        stall_max_single_low_hand_turns: int = 5,
+        stall_min_attack_hand: int = 2,
     ) -> None:
         self._base_url = (
             base_url or os.environ.get("TALISHAR_URL", DEFAULT_TALISHAR_URL)
@@ -423,6 +432,17 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             max_steps_per_turn=max_steps_per_turn,
             loop_repeat_threshold=loop_repeat_threshold,
         )
+        self._macro_stall_guard = MacroStallGuard(
+            MacroStallConfig(
+                enabled=macro_stall_enabled,
+                stall_no_damage_turns=stall_no_damage_turns,
+                stall_pass_only_turns=stall_pass_only_turns,
+                stall_no_damage_requires_low_hand=stall_no_damage_requires_low_hand,
+                stall_low_hand_turns=stall_low_hand_turns,
+                stall_max_single_low_hand_turns=stall_max_single_low_hand_turns,
+                stall_min_attack_hand=stall_min_attack_hand,
+            )
+        )
         # Whether playerDeckCount > 0 has ever been observed this episode.
         # Guards deck-exhaustion game-over checks so they do NOT fire during the
         # pre-game equipment-selection phase, when Talishar returns
@@ -477,6 +497,13 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                             deck1=lookup_deck1,
                             deck2=lookup_deck2,
                             enable_combat_tracker=self._enable_combat_tracker,
+                            macro_stall_enabled=macro_stall_enabled,
+                            stall_no_damage_turns=stall_no_damage_turns,
+                            stall_pass_only_turns=stall_pass_only_turns,
+                            stall_no_damage_requires_low_hand=stall_no_damage_requires_low_hand,
+                            stall_low_hand_turns=stall_low_hand_turns,
+                            stall_max_single_low_hand_turns=stall_max_single_low_hand_turns,
+                            stall_min_attack_hand=stall_min_attack_hand,
                         )
                     except Exception as exc:
                         raise RuntimeError(
@@ -753,6 +780,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         truncated: bool,
         winner: int = -1,
         loop_guard: Optional[Any] = None,
+        macro_stall: Optional[MacroStallResult] = None,
     ) -> dict[str, Any]:
         legal_raw = self._legal_actions(self._last_state)
         legal = self._filter_legal_actions(self._last_state, legal_raw)
@@ -781,6 +809,11 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             result["loop_guard_reason"] = getattr(loop_guard, "reason", "")
             result["turn_steps"] = getattr(loop_guard, "turn_steps", 0)
             result["decision_loop_streak"] = getattr(loop_guard, "loop_streak", 0)
+            forced = getattr(loop_guard, "forced_action", None)
+            if forced is not None:
+                result["loop_guard_forced_action"] = dict(forced)
+        if macro_stall is not None:
+            result.update(self._macro_stall_info(macro_stall))
         return result
 
     # ── C++ engine delegation helpers ────────────────────────────────────────
@@ -848,6 +881,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         self._steps = 0
         self._deck_nonzero_ever_seen = False
         self._loop_guard.reset()
+        self._macro_stall_guard.reset()
         self._multi_select_inputs = []
         self._pending_chk_inputs = None
         self._reset_repeat_tracking(
@@ -913,7 +947,10 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         loop_guard = self._loop_guard_for_step(state, legal_actions)
         mode, button_input = self._parse_action(str(action_index), legal_actions)
         if loop_guard.force_pass:
-            mode, button_input = self._force_pass_submission(legal_actions)
+            mode, button_input = self._force_loop_guard_submission(
+                legal_actions,
+                loop_guard,
+            )
         mode, button_input = self._sanitize_revert_submission(
             mode,
             button_input,
@@ -944,6 +981,11 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         new_opp_hp = int(new_state.get("opponentHealth", self._opp_hp))
         terminated = self._is_game_over(new_state)
         truncated = not terminated and self._steps >= self._max_turns
+
+        new_legal_raw = self._legal_actions(new_state)
+        macro_stall = self._check_macro_stall(new_state, new_legal_raw)
+        if macro_stall.should_truncate and not terminated:
+            truncated = True
 
         action_key = (mode, button_input)
         turn_no = int(new_state.get("turnNo", 0) or 0)
@@ -997,6 +1039,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             truncated=truncated,
             winner=winner,
             loop_guard=loop_guard,
+            macro_stall=macro_stall,
         )
 
     def fast_logic_policy_action_index(self) -> int:
@@ -1016,16 +1059,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
 
         loop_guard = self._loop_guard_for_step(self._last_state, legal)
         if loop_guard.force_pass:
-            pass_action = first_pass_action(legal)
-            if pass_action is not None:
-                for index, action in enumerate(legal):
-                    if action is pass_action or action == pass_action:
-                        return index
-            pass_index = next(
-                (i for i, a in enumerate(legal) if _is_pass_action(a)),
-                0,
-            )
-            return pass_index
+            return self._index_for_loop_guard_action(legal, loop_guard)
 
         idx = choose_talishar_action_index(
             legal,
@@ -2128,6 +2162,35 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             acting_player_id=self._acting_player_id,
         )
 
+    def _check_macro_stall(
+        self,
+        state: dict[str, Any],
+        legal_actions: list[dict[str, Any]],
+    ) -> MacroStallResult:
+        filtered = self._filter_legal_actions(state, legal_actions)
+        p1_hp, p2_hp = self._absolute_p1_p2_health(state)
+        return self._macro_stall_guard.observe(
+            state,
+            filtered,
+            p1_hp=p1_hp,
+            p2_hp=p2_hp,
+        )
+
+    def _macro_stall_info(self, result: MacroStallResult) -> dict[str, Any]:
+        return {
+            "macro_stall_truncated": bool(result.should_truncate),
+            "macro_stall_reason": result.reason,
+            "turns_without_damage": result.turns_without_damage,
+            "pass_only_main_streak": result.pass_only_main_streak,
+        }
+
+    def _force_loop_guard_submission(
+        self,
+        legal_actions: list[dict[str, Any]],
+        loop_guard: Any,
+    ) -> tuple[int, str]:
+        return resolve_forced_submission(legal_actions, loop_guard)
+
     def _force_pass_submission(
         self,
         legal_actions: list[dict[str, Any]],
@@ -2139,6 +2202,24 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                 str(pass_action.get("button_input", "") or ""),
             )
         return self._first_pass_action(legal_actions)
+
+    def _index_for_loop_guard_action(
+        self,
+        legal_actions: list[dict[str, Any]],
+        loop_guard: Any,
+    ) -> int:
+        mode, button_input = resolve_forced_submission(legal_actions, loop_guard)
+        for index, action in enumerate(legal_actions):
+            if (
+                _dp_to_int(action.get("action_code", 0)) == mode
+                and str(action.get("button_input", "") or "") == button_input
+            ):
+                return index
+        pass_index = next(
+            (i for i, a in enumerate(legal_actions) if _is_pass_action(a)),
+            0,
+        )
+        return pass_index
 
     def _first_pass_action(
         self,
@@ -2664,6 +2745,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         self._steps = 0
         self._deck_nonzero_ever_seen = False
         self._loop_guard.reset()
+        self._macro_stall_guard.reset()
         self._multi_select_inputs = []
         self._pending_chk_inputs = None
         self._reset_repeat_tracking(
@@ -2749,7 +2831,10 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
 
         mode, button_input = self._parse_action(action, legal_actions)
         if loop_guard.force_pass:
-            mode, button_input = self._force_pass_submission(legal_actions)
+            mode, button_input = self._force_loop_guard_submission(
+                legal_actions,
+                loop_guard,
+            )
         mode, button_input = self._sanitize_revert_submission(
             mode,
             button_input,
@@ -2796,6 +2881,11 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
 
         terminated = self._is_game_over(new_state)
         truncated = not terminated and self._steps >= self._max_turns
+
+        new_legal_raw = self._legal_actions(new_state)
+        macro_stall = self._check_macro_stall(new_state, new_legal_raw)
+        if macro_stall.should_truncate and not terminated:
+            truncated = True
 
         action_key = (mode, button_input)
         turn_no = int(new_state.get("turnNo", 0) or 0)
@@ -2878,6 +2968,9 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                 "decision_loop_streak": loop_guard.loop_streak,
                 "combat_tracker": self._tracker_stub(tracker_event),
         }
+        if loop_guard.forced_action is not None:
+            step_info["loop_guard_forced_action"] = dict(loop_guard.forced_action)
+        step_info.update(self._macro_stall_info(macro_stall))
         if self._last_observation_vec is not None:
             step_info["observation_vec"] = self._last_observation_vec
         return StepResult(
@@ -3155,16 +3248,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
 
         loop_guard = self._loop_guard_for_step(self._last_state, legal)
         if loop_guard.force_pass:
-            pass_action = first_pass_action(legal)
-            if pass_action is not None:
-                for index, action in enumerate(legal):
-                    if action is pass_action or action == pass_action:
-                        return str(index)
-            pass_index = next(
-                (i for i, a in enumerate(legal) if _is_pass_action(a)),
-                0,
-            )
-            return str(pass_index)
+            return str(self._index_for_loop_guard_action(legal, loop_guard))
 
         idx = choose_talishar_action_index(
             legal,

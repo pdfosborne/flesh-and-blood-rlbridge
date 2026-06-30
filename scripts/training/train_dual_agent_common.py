@@ -106,6 +106,7 @@ from runtime_defaults import (  # noqa: E402
     DEFAULT_TALISHAR_BACKEND,
     RUNTIME,
     engine_env_kwargs,
+    game_env_kwargs,
     episode_timeout_seconds,
     envs_per_rollout_process,
     normalize_rollout_mode,
@@ -268,6 +269,7 @@ def make_env(
         effective_cache_dir = str(REPO_ROOT / "results" / "cpp_engines")
 
     engine_kw = dict(engine_env_kwargs(RUNTIME.engine))
+    game_kw = dict(game_env_kwargs(RUNTIME.game))
     if request_timeout is not None:
         engine_kw["request_timeout"] = request_timeout
 
@@ -291,6 +293,7 @@ def make_env(
         rl_training_mode=rl_training_mode,
         rl_slim_response=rl_training_mode,
         **engine_kw,
+        **game_kw,
     )
     if require_fast_training is None:
         require_fast_training = True

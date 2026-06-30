@@ -5,6 +5,7 @@ from flesh_and_blood_rlbridge.state_loop_guard import (
     board_state_fingerprint,
     decision_point_fingerprint,
     legal_actions_fingerprint,
+    resolve_forced_submission,
 )
 
 
@@ -233,3 +234,40 @@ def test_loop_guard_detects_revert_despite_changing_legal_set() -> None:
     result = guard.check(board, legal_pass_only, turn_no=2, acting_player_id=1)
     assert result.force_pass
     assert result.reason == "board_revert"
+
+
+def test_decision_loop_forces_non_pass_when_available() -> None:
+    guard = TurnLoopGuard(max_steps_per_turn=100, loop_repeat_threshold=4)
+    state = {
+        "turnPhase": {"turnPhase": "CHOOSETOP"},
+        "turnNo": 2,
+        "playerPitchCount": 0,
+        "playerHand": [{"cardNumber": "widowmaker_yellow"}],
+    }
+    legal = [
+        {
+            "action_code": 8,
+            "button_input": "widowmaker_yellow",
+            "zone": "popup",
+            "label": "Top",
+        },
+        {
+            "action_code": 99,
+            "button_input": "",
+            "zone": "button",
+            "label": "Pass",
+        },
+    ]
+
+    result = None
+    for _ in range(4):
+        result = guard.check(state, legal, turn_no=2, acting_player_id=1)
+
+    assert result is not None
+    assert result.force_pass
+    assert result.reason == "decision_loop"
+    assert result.forced_action is not None
+    assert result.forced_action["action_code"] == 8
+    mode, button = resolve_forced_submission(legal, result)
+    assert mode == 8
+    assert button == "widowmaker_yellow"

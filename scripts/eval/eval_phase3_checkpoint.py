@@ -67,6 +67,7 @@ from runtime_defaults import (  # noqa: E402
     DEFAULT_STALL_NO_DAMAGE_TURNS,
     DEFAULT_TALISHAR_BACKEND,
     RUNTIME,
+    game_env_kwargs,
 )
 from fab_bridge.unified_results import (  # noqa: E402
     active_merged_matchup_dirs,
@@ -821,11 +822,26 @@ def _is_logic_render_policy(agent: Any) -> bool:
 
 
 def _pick_render_action(env: TalisharEngineEnvironment, agent: Any, obs: Any) -> Any:
+    from flesh_and_blood_rlbridge.legal_action_filter import (  # noqa: PLC0415
+        is_mandatory_progress_phase,
+        prefer_non_pass_index,
+    )
+
+    obs_data = json.loads(obs) if isinstance(obs, str) else (obs or {})
     if agent is not None and _is_logic_render_policy(agent):
-        return env.sample_action()
+        fallback = env.sample_action()
+        if is_mandatory_progress_phase(obs_data):
+            return prefer_non_pass_index(obs_data, fallback)
+        return fallback
     if agent is not None and hasattr(agent, "act_greedy"):
-        return agent.act_greedy(obs)
-    return env.sample_action()
+        action = agent.act_greedy(obs)
+        if is_mandatory_progress_phase(obs_data):
+            return prefer_non_pass_index(obs_data, action)
+        return action
+    fallback = env.sample_action()
+    if is_mandatory_progress_phase(obs_data):
+        return prefer_non_pass_index(obs_data, fallback)
+    return fallback
 
 
 def _write_unified_render_placeholder(path: Path, message: str) -> None:
@@ -1281,6 +1297,7 @@ def _run_render_episode(
         use_cpp_engine=False,
         talishar_backend=DEFAULT_TALISHAR_BACKEND,
         enable_combat_tracker=combat_tracker_on,
+        **game_env_kwargs(RUNTIME.game),
     )
     stuck_monitor = None
     if combat_tracker_on and anti_stuck_config is not None:
@@ -1751,37 +1768,6 @@ def _run_checkpoint_parity_check(
     return result
 
 
-def _prefer_non_pass_action(obs_data: dict[str, Any], fallback_action: Any) -> Any:
-    """Choose a non-pass legal action index when available.
-
-    The observation contains legal actions as ``[{index, label, zone}, ...]``.
-    During chooser phases, greedy policies can repeatedly pick pass/confirm,
-    which stalls progression. This helper picks the first clearly non-pass
-    option when one exists.
-    """
-    legal = obs_data.get("legalActions")
-    if not isinstance(legal, list) or len(legal) <= 1:
-        return fallback_action
-
-    non_pass: list[int] = []
-    for entry in legal:
-        if not isinstance(entry, dict):
-            continue
-        idx = entry.get("index")
-        if not isinstance(idx, int):
-            continue
-        label = str(entry.get("label", "") or "").strip().lower()
-        if any(tok in label for tok in (
-            "pass", "decline", "cancel", "skip", "no ", "undo",
-        )):
-            continue
-        non_pass.append(idx)
-
-    if not non_pass:
-        return fallback_action
-    return non_pass[0]
-
-
 def _run_eval_episode_batch(
     *,
     episode_numbers: list[int],
@@ -1820,6 +1806,10 @@ def _run_eval_episode_batch(
         is_enabled as anti_stuck_enabled,
         monitor_for_episode,
     )
+    from flesh_and_blood_rlbridge.legal_action_filter import (  # noqa: PLC0415
+        is_mandatory_progress_phase,
+        prefer_non_pass_index,
+    )
 
     combat_tracker_on = anti_stuck_config is not None and anti_stuck_enabled()
     env = TalisharEngineEnvironment(
@@ -1835,6 +1825,11 @@ def _run_eval_episode_batch(
         talishar_backend=DEFAULT_TALISHAR_BACKEND,
         verbose=verbose,
         enable_combat_tracker=combat_tracker_on,
+        **game_env_kwargs(RUNTIME.game),
+        stall_no_damage_turns=stall_no_damage_turns,
+        stall_low_hand_turns=stall_low_hand_turns,
+        stall_max_single_low_hand_turns=stall_max_single_low_hand_turns,
+        stall_min_attack_hand=stall_min_attack_hand,
     )
     logs: list[dict[str, Any]] = []
     _ANTI_STALL_STREAK = 5
@@ -1876,63 +1871,14 @@ def _run_eval_episode_batch(
             last_info: dict[str, Any] = {}
             stall_triggered = False
 
-            init_obs = json.loads(obs) if isinstance(obs, str) else (obs or {})
-            init_turn_no = int(init_obs.get("turnNo", 0) or 0)
-            init_total_hp = float(init_obs.get("playerHealth", 0) or 0) + float(
-                init_obs.get("opponentHealth", 0) or 0
-            )
-            turns_without_damage = 0
-            turn_start_total_hp = init_total_hp
-            last_seen_turn_no = init_turn_no
-            low_hand_turn_streak: dict[int, int] = {1: 0, 2: 0}
-            seen_main_phase_turns: set[tuple[int, int]] = set()
-
             while not (terminated or truncated):
                 obs_data = json.loads(obs) if isinstance(obs, str) else (obs or {})
                 acting = int(obs_data.get("actingPlayerID", 1) or 1)
                 phase = str(obs_data.get("turnPhase", "") or "")
-                phase_norm = phase.strip().lower()
-                turn_no = int(obs_data.get("turnNo", 0) or 0)
-
-                total_hp = float(obs_data.get("playerHealth", 0) or 0) + float(
-                    obs_data.get("opponentHealth", 0) or 0
-                )
-                if turn_no != last_seen_turn_no:
-                    if total_hp >= turn_start_total_hp:
-                        turns_without_damage += 1
-                    else:
-                        turns_without_damage = 0
-                    turn_start_total_hp = total_hp
-                    last_seen_turn_no = turn_no
-
-                if phase_norm == "m":
-                    marker = (acting, turn_no)
-                    if marker not in seen_main_phase_turns:
-                        seen_main_phase_turns.add(marker)
-                        hand_size = int(obs_data.get("playerHandSize", 0) or 0)
-                        if hand_size < stall_min_attack_hand:
-                            low_hand_turn_streak[acting] = low_hand_turn_streak.get(acting, 0) + 1
-                        else:
-                            low_hand_turn_streak[acting] = 0
-
-                both_low_streak = (
-                    low_hand_turn_streak.get(1, 0) >= stall_low_hand_turns
-                    and low_hand_turn_streak.get(2, 0) >= stall_low_hand_turns
-                )
-                one_sided_low_streak = (
-                    max(low_hand_turn_streak.get(1, 0), low_hand_turn_streak.get(2, 0))
-                    >= stall_max_single_low_hand_turns
-                )
-                if turns_without_damage >= stall_no_damage_turns and (
-                    both_low_streak or one_sided_low_streak
-                ):
-                    stall_triggered = True
-                    truncated = True
-                    break
 
                 repeat_streak = int(last_info.get("repeat_streak", 0))
                 if repeat_streak >= _ANTI_STALL_STREAK:
-                    action = _prefer_non_pass_action(obs_data, env.sample_action())
+                    action = prefer_non_pass_index(obs_data, env.sample_action())
                 elif acting == 1:
                     action = p1_agent.act_greedy(obs)
                 elif p2_agent is not None:
@@ -1940,14 +1886,14 @@ def _run_eval_episode_batch(
                 else:
                     action = env.sample_action()
 
-                if phase in {
+                if is_mandatory_progress_phase(obs_data) or phase in {
                     "MULTICHOOSEHAND",
                     "CHOOSEHAND",
                     "CHOOSEMULTIZONE",
                     "MAYCHOOSEMULTIZONE",
                     "CHOOSEOPTION",
                 }:
-                    action = _prefer_non_pass_action(obs_data, action)
+                    action = prefer_non_pass_index(obs_data, action)
 
                 step = env.step(action)
                 if stuck_monitor is not None:
@@ -1964,6 +1910,8 @@ def _run_eval_episode_batch(
                 steps += 1
                 terminated = bool(step.terminated)
                 truncated = bool(step.truncated)
+                if last_info.get("macro_stall_truncated"):
+                    stall_triggered = True
 
             obs_data = json.loads(obs) if isinstance(obs, str) else (obs or {})
             p1_hp, p2_hp = absolute_p1_p2_hp_from_env(env)

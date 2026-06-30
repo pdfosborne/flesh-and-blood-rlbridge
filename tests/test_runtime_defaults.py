@@ -126,6 +126,9 @@ def test_game_controls_from_meta() -> None:
     assert runtime.game.stall_no_damage_turns == 9
     assert runtime.game.stall_min_attack_hand == 1
     assert runtime.game.stall_low_hand_turns == META.game.stall_low_hand_turns
+    kw = rd.game_env_kwargs(runtime.game)
+    assert kw["stall_no_damage_turns"] == 9
+    assert kw["macro_stall_enabled"] is True
 
 
 def test_apply_meta_updates_module_aliases() -> None:

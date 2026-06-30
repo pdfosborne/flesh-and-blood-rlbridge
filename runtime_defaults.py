@@ -15,9 +15,12 @@ class MetaGameControls:
     """Stall detection — when to force-skip stuck eval / replay sessions."""
 
     stall_no_damage_turns: int = 6
+    stall_pass_only_turns: int = 6
+    stall_no_damage_requires_low_hand: bool = False
     stall_low_hand_turns: int = 3
     stall_max_single_low_hand_turns: int = 5
     stall_min_attack_hand: int = 2
+    macro_stall_enabled: bool = True
 
 
 @dataclass
@@ -176,9 +179,12 @@ class GameControlsDefaults:
     """Force-skip thresholds for stuck games (eval checkpoint watcher, etc.)."""
 
     stall_no_damage_turns: int
+    stall_pass_only_turns: int
+    stall_no_damage_requires_low_hand: bool
     stall_low_hand_turns: int
     stall_max_single_low_hand_turns: int
     stall_min_attack_hand: int
+    macro_stall_enabled: bool
 
 
 @dataclass(frozen=True)
@@ -378,6 +384,29 @@ def _engine_controls(meta: MetaRuntime) -> EngineDefaults:
     )
 
 
+def game_env_kwargs(game: GameControlsDefaults | MetaGameControls) -> dict[str, object]:
+    """Keyword arguments for macro stall guard on RL environments."""
+    if isinstance(game, MetaGameControls):
+        return {
+            "macro_stall_enabled": game.macro_stall_enabled,
+            "stall_no_damage_turns": game.stall_no_damage_turns,
+            "stall_pass_only_turns": game.stall_pass_only_turns,
+            "stall_no_damage_requires_low_hand": game.stall_no_damage_requires_low_hand,
+            "stall_low_hand_turns": game.stall_low_hand_turns,
+            "stall_max_single_low_hand_turns": game.stall_max_single_low_hand_turns,
+            "stall_min_attack_hand": game.stall_min_attack_hand,
+        }
+    return {
+        "macro_stall_enabled": game.macro_stall_enabled,
+        "stall_no_damage_turns": game.stall_no_damage_turns,
+        "stall_pass_only_turns": game.stall_pass_only_turns,
+        "stall_no_damage_requires_low_hand": game.stall_no_damage_requires_low_hand,
+        "stall_low_hand_turns": game.stall_low_hand_turns,
+        "stall_max_single_low_hand_turns": game.stall_max_single_low_hand_turns,
+        "stall_min_attack_hand": game.stall_min_attack_hand,
+    }
+
+
 def engine_env_kwargs(engine: EngineDefaults | MetaEngineControls) -> dict[str, object]:
     """Keyword arguments for :class:`TalisharEngineEnvironment` / :class:`CppEngineEnvironment`."""
     if isinstance(engine, MetaEngineControls):
@@ -489,9 +518,12 @@ def _game_controls(meta: MetaRuntime) -> GameControlsDefaults:
     g = meta.game
     return GameControlsDefaults(
         stall_no_damage_turns=g.stall_no_damage_turns,
+        stall_pass_only_turns=g.stall_pass_only_turns,
+        stall_no_damage_requires_low_hand=g.stall_no_damage_requires_low_hand,
         stall_low_hand_turns=g.stall_low_hand_turns,
         stall_max_single_low_hand_turns=g.stall_max_single_low_hand_turns,
         stall_min_attack_hand=g.stall_min_attack_hand,
+        macro_stall_enabled=g.macro_stall_enabled,
     )
 
 
@@ -611,9 +643,12 @@ DEFAULT_WARMUP_EPISODES = RUNTIME.play.warmup_episodes
 DEFAULT_WARMUP_BASELINE_EVAL_EPISODES = RUNTIME.play.warmup_baseline_eval_episodes
 
 DEFAULT_STALL_NO_DAMAGE_TURNS = RUNTIME.game.stall_no_damage_turns
+DEFAULT_STALL_PASS_ONLY_TURNS = RUNTIME.game.stall_pass_only_turns
+DEFAULT_STALL_NO_DAMAGE_REQUIRES_LOW_HAND = RUNTIME.game.stall_no_damage_requires_low_hand
 DEFAULT_STALL_LOW_HAND_TURNS = RUNTIME.game.stall_low_hand_turns
 DEFAULT_STALL_MAX_SINGLE_LOW_HAND_TURNS = RUNTIME.game.stall_max_single_low_hand_turns
 DEFAULT_STALL_MIN_ATTACK_HAND = RUNTIME.game.stall_min_attack_hand
+DEFAULT_MACRO_STALL_ENABLED = RUNTIME.game.macro_stall_enabled
 
 DEFAULT_ANTI_STUCK_LOGGING = RUNTIME.eval_dashboard.anti_stuck_logging
 DEFAULT_ANTI_STUCK_PASS_STREAK = RUNTIME.eval_dashboard.anti_stuck_pass_streak
