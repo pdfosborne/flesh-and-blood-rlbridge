@@ -179,6 +179,15 @@ def _parse_args() -> argparse.Namespace:
         help="Allow the same deck pair to be sampled more than once per run",
     )
     parser.add_argument(
+        "--fabrary-weighted-heroes",
+        action=argparse.BooleanOptionalAction,
+        default=_UR.fabrary_weighted_heroes,
+        help=(
+            "Weight random matchup sampling by Fabrary hero play volume "
+            "(all Talishar games, last 30 days)"
+        ),
+    )
+    parser.add_argument(
         "--show-frontend",
         action="store_true",
         help="Write live training-state PNG during each matchup",
@@ -238,6 +247,7 @@ def main() -> None:
             rng,
             format_name,
             unique_pairs=not args.allow_repeat_pairs,
+            fabrary_weighted_heroes=bool(args.fabrary_weighted_heroes),
         )
     except RuntimeError as exc:
         print(str(exc))
@@ -296,6 +306,7 @@ def main() -> None:
         "seed": args.seed,
         "checkpoint_eval_logic_vs_logic": bool(args.checkpoint_eval_logic_vs_logic),
         "checkpoint_eval_agent_vs_logic": bool(args.checkpoint_eval_agent_vs_logic),
+        "fabrary_weighted_heroes": bool(args.fabrary_weighted_heroes),
         "started_at": datetime.now(timezone.utc).isoformat(),
     }
     (out_dir / "run_manifest.json").write_text(
@@ -315,6 +326,14 @@ def main() -> None:
     print(f"Format       : {format_name}")
     print(f"Deck pool    : {len(decks)} fabrary decks")
     print(f"Matchups     : {len(selected)} random pairs")
+    print(
+        "Fabrary meta : "
+        + (
+            "weighted hero sampling (all games, last 30 days)"
+            if args.fabrary_weighted_heroes
+            else "uniform deck sampling"
+        )
+    )
     print(f"Parallel     : {max(1, int(args.parallel_matchups))} matchup(s) per batch")
     print(f"Safe parallel: {'yes' if args.safe_parallel else 'no'}")
     for matchup in selected:

@@ -95,6 +95,8 @@ class MetaUnifiedRandomMatchups:
     # FaBrary slugs or full URLs; run scripts/deck/add_custom_decks_to_pool.py after editing.
     #  -- Or add using TUI option 
     custom_deck_links: tuple[str, ...] = ()
+    # Weight random matchup sampling by Fabrary hero play volume (all queue, last 30 days).
+    fabrary_weighted_heroes: bool = True
 
 
 @dataclass
@@ -352,6 +354,7 @@ class UnifiedRandomMatchupsDefaults:
     custom_deck_links: tuple[str, ...]
     checkpoint_eval_logic_vs_logic: bool
     checkpoint_eval_agent_vs_logic: bool
+    fabrary_weighted_heroes: bool
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -637,6 +640,7 @@ def build_runtime(meta: MetaRuntime) -> RuntimeDefaults:
             custom_deck_links=urm.custom_deck_links,
             checkpoint_eval_logic_vs_logic=bool(meta.checkpoint_eval_logic_vs_logic),
             checkpoint_eval_agent_vs_logic=bool(meta.checkpoint_eval_agent_vs_logic),
+            fabrary_weighted_heroes=bool(urm.fabrary_weighted_heroes),
         ),
     )
 

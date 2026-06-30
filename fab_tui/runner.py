@@ -721,6 +721,10 @@ def run_unified_random_matchups(
         cmd.extend(["--talishar-urls", env.talishar_urls.strip()])
     if spec.seed is not None:
         cmd.extend(["--seed", str(spec.seed)])
+    if spec.fabrary_weighted_heroes:
+        cmd.append("--fabrary-weighted-heroes")
+    else:
+        cmd.append("--no-fabrary-weighted-heroes")
     if spec.skip_converged:
         cmd.append("--skip-converged")
     else:

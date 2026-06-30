@@ -16,11 +16,13 @@ sys.path.insert(0, str(REPO_ROOT / "scripts" / "training"))
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from train_dual_agent_common import (  # noqa: E402
+    Matchup,
     _FastRolloutSlot,
     _batched_fast_rollout_step,
     _batched_fast_rollout_step_concurrent,
     _EnvRolloutWorker,
     _run_parallel_batched_fast_episodes,
+    _run_parallel_fast_episodes_threaded,
 )
 from runtime_defaults import normalize_rollout_mode  # noqa: E402
 
@@ -196,3 +198,57 @@ def test_run_parallel_batched_fast_episodes_respects_rollout_mode(monkeypatch) -
         rollout_mode="batched_concurrent",
     )
     assert calls == ["batched", "concurrent"]
+
+
+def test_threaded_episodes_honors_swap_envs() -> None:
+    matchup = Matchup(
+        name="a-vs-b",
+        p1_deck="deck_a",
+        p2_deck="deck_b",
+        description="test",
+        p1_hero="hero_a",
+        p2_hero="hero_b",
+    )
+    env = MagicMock()
+    swap_env = MagicMock()
+    for mock_env in (env, swap_env):
+        mock_env.fast_reset.return_value = {
+            "obs_vec": np.zeros(4),
+            "legal_count": 1,
+            "acting_player_id": 1,
+            "p1_health": 20,
+            "p2_health": 0,
+            "p1_deck": 40,
+            "p2_deck": 40,
+            "turn_no": 1,
+        }
+        mock_env.fast_step_index.return_value = {
+            "obs_vec": np.zeros(4),
+            "legal_count": 1,
+            "acting_player_id": 2,
+            "reward": 0.0,
+            "terminated": True,
+            "truncated": False,
+            "p1_health": 20,
+            "p2_health": 0,
+            "p1_deck": 40,
+            "p2_deck": 40,
+            "turn_no": 1,
+        }
+    policy = _mock_policy()
+    results = _run_parallel_fast_episodes_threaded(
+        [env],
+        policy,
+        policy,
+        max_steps=1,
+        warmup=True,
+        episode_indices=[1],
+        seed_base=0,
+        swap_envs=[swap_env],
+        max_workers=1,
+        matchup=matchup,
+    )
+    assert results[0]["active_p1_hero"] == "hero_b"
+    assert results[0]["active_p2_hero"] == "hero_a"
+    swap_env.fast_reset.assert_called_once()
+    env.fast_reset.assert_not_called()

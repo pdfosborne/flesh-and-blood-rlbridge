@@ -151,9 +151,7 @@ def test_unified_random_matchups_defaults_from_meta() -> None:
     if expected_workers <= 0:
         expected_workers = 1 if META.workers is None else META.workers
     assert urm.workers == expected_workers
-    assert urm.checkpoint_eval_episodes == min(
-        100, max(1, meta_urm.episodes // 100)
-    )
+    assert urm.checkpoint_eval_episodes == meta_urm.checkpoint_eval_episodes
     assert urm.custom_deck_links == meta_urm.custom_deck_links
 
 

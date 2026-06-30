@@ -78,11 +78,26 @@ def _vs_logic_avg(row: dict[str, Any]) -> Optional[float]:
     return sum(rates) / len(rates)
 
 
+def _hero1_win_rate_from_row(row: dict[str, Any]) -> Optional[float]:
+    heroes = row.get("heroes")
+    if isinstance(heroes, dict) and heroes.get("hero1_win_rate") is not None:
+        return float(heroes["hero1_win_rate"])
+    if row.get("hero1_win_rate") is not None:
+        return float(row["hero1_win_rate"])
+    if row.get("p1_win_rate") is not None:
+        if bool(row.get("deck_swap_eval", False)):
+            p1 = float(row["p1_win_rate"])
+            p2 = float(row.get("p2_win_rate", 0.0) or 0.0)
+            return (p1 + p2) / 2.0
+        return float(row["p1_win_rate"])
+    return None
+
+
 def _build_aggregate(per_matchup: dict[str, dict[str, Any]]) -> dict[str, Any]:
     self_play = [
-        float(row.get("p1_win_rate") or 0.0)
+        rate
         for row in per_matchup.values()
-        if row.get("p1_win_rate") is not None
+        if (rate := _hero1_win_rate_from_row(row)) is not None
     ]
     vs_logic = [
         rate

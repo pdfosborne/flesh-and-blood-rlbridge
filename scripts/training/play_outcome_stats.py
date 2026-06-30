@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Optional
+from dataclasses import dataclass
+from typing import Any, Literal, Optional
+
+NominalHeroSlot = Literal["hero1", "hero2"]
 
 OUTCOME_WIN = "win"
 OUTCOME_LOSS = "loss"
@@ -229,6 +232,290 @@ def classify_p1_episode_outcome(
     if p1 <= 0:
         return OUTCOME_LOSS
     return OUTCOME_TIMEOUT
+
+
+def winning_hero_id_from_seat_outcome(
+    outcome: str,
+    *,
+    active_p1_hero: str,
+    active_p2_hero: str,
+) -> Optional[str]:
+    """Return the winning hero id from a P1-seat classified outcome."""
+    if outcome == OUTCOME_WIN:
+        return active_p1_hero
+    if outcome == OUTCOME_LOSS:
+        return active_p2_hero
+    return None
+
+
+def nominal_hero_slot(
+    hero_id: str,
+    *,
+    hero1_id: str,
+    hero2_id: str,
+) -> Optional[NominalHeroSlot]:
+    """Map a hero id to nominal hero1 / hero2 slot."""
+    if hero_id == hero1_id:
+        return "hero1"
+    if hero_id == hero2_id:
+        return "hero2"
+    return None
+
+
+def agent_won_seat_outcome(outcome: str, *, agent_on_p1_seat: bool) -> bool:
+    """True when the agent (on P1 or P2 seat) won the episode."""
+    if agent_on_p1_seat:
+        return outcome == OUTCOME_WIN
+    return outcome == OUTCOME_LOSS
+
+
+def agent_hero_id_for_episode(
+    *,
+    agent_on_p1_seat: bool,
+    use_swap: bool,
+    nominal_hero1: str,
+    nominal_hero2: str,
+) -> str:
+    """Nominal hero id the agent controls this episode."""
+    if agent_on_p1_seat:
+        return nominal_hero2 if use_swap else nominal_hero1
+    return nominal_hero1 if use_swap else nominal_hero2
+
+
+@dataclass
+class OutcomeCounters:
+    """Dual seat + nominal-hero outcome accumulators."""
+
+    p1_wins: int = 0
+    p2_wins: int = 0
+    hero1_wins: int = 0
+    hero2_wins: int = 0
+    agent_hero1_wins: int = 0
+    agent_hero2_wins: int = 0
+    agent_hero1_eps: int = 0
+    agent_hero2_eps: int = 0
+    draws: int = 0
+    timeouts: int = 0
+    errors: int = 0
+    nominal_hero1: str = ""
+    nominal_hero2: str = ""
+
+    def record_seat_outcome(
+        self,
+        outcome: str,
+        *,
+        active_p1_hero: str,
+        active_p2_hero: str,
+        nominal_hero1: Optional[str] = None,
+        nominal_hero2: Optional[str] = None,
+    ) -> None:
+        if nominal_hero1 is not None:
+            self.nominal_hero1 = nominal_hero1
+        if nominal_hero2 is not None:
+            self.nominal_hero2 = nominal_hero2
+
+        if outcome == OUTCOME_WIN:
+            self.p1_wins += 1
+        elif outcome == OUTCOME_LOSS:
+            self.p2_wins += 1
+        elif outcome == OUTCOME_DRAW:
+            self.draws += 1
+        elif outcome == OUTCOME_ERROR:
+            self.errors += 1
+        else:
+            self.timeouts += 1
+
+        winner_id = winning_hero_id_from_seat_outcome(
+            outcome,
+            active_p1_hero=active_p1_hero,
+            active_p2_hero=active_p2_hero,
+        )
+        if winner_id is None:
+            return
+        slot = nominal_hero_slot(
+            winner_id,
+            hero1_id=self.nominal_hero1,
+            hero2_id=self.nominal_hero2,
+        )
+        if slot == "hero1":
+            self.hero1_wins += 1
+        elif slot == "hero2":
+            self.hero2_wins += 1
+
+    def record_agent_hero_outcome(
+        self,
+        outcome: str,
+        *,
+        agent_on_p1_seat: bool,
+        use_swap: bool,
+        nominal_hero1: Optional[str] = None,
+        nominal_hero2: Optional[str] = None,
+    ) -> None:
+        if nominal_hero1 is not None:
+            self.nominal_hero1 = nominal_hero1
+        if nominal_hero2 is not None:
+            self.nominal_hero2 = nominal_hero2
+        hero_id = agent_hero_id_for_episode(
+            agent_on_p1_seat=agent_on_p1_seat,
+            use_swap=use_swap,
+            nominal_hero1=self.nominal_hero1,
+            nominal_hero2=self.nominal_hero2,
+        )
+        slot = nominal_hero_slot(
+            hero_id,
+            hero1_id=self.nominal_hero1,
+            hero2_id=self.nominal_hero2,
+        )
+        if slot == "hero1":
+            self.agent_hero1_eps += 1
+        elif slot == "hero2":
+            self.agent_hero2_eps += 1
+        if not agent_won_seat_outcome(outcome, agent_on_p1_seat=agent_on_p1_seat):
+            return
+        if slot == "hero1":
+            self.agent_hero1_wins += 1
+        elif slot == "hero2":
+            self.agent_hero2_wins += 1
+
+    def to_summary(
+        self,
+        episodes: int,
+        *,
+        deck_swap_eval: bool = False,
+        track_agent: bool = False,
+    ) -> dict[str, Any]:
+        total = max(1, int(episodes))
+        decided = max(1, self.p1_wins + self.p2_wins + self.draws)
+        heroes_block: dict[str, Any] = {
+            "hero1_wins": self.hero1_wins,
+            "hero2_wins": self.hero2_wins,
+            "draws": self.draws,
+            "timeouts": self.timeouts + self.errors,
+            "errors": self.errors,
+            "hero1_win_rate": self.hero1_wins / total,
+            "hero2_win_rate": self.hero2_wins / total,
+            "draw_rate": self.draws / total,
+            "timeout_rate": (self.timeouts + self.errors) / total,
+            "win_rate_decided": self.hero1_wins / decided,
+        }
+        if track_agent:
+            heroes_block["agent_hero1_wins"] = self.agent_hero1_wins
+            heroes_block["agent_hero2_wins"] = self.agent_hero2_wins
+            heroes_block["agent_hero1_eps"] = self.agent_hero1_eps
+            heroes_block["agent_hero2_eps"] = self.agent_hero2_eps
+            heroes_block["agent_hero1_win_rate"] = (
+                self.agent_hero1_wins / max(1, self.agent_hero1_eps)
+            )
+            heroes_block["agent_hero2_win_rate"] = (
+                self.agent_hero2_wins / max(1, self.agent_hero2_eps)
+            )
+        seats_block: dict[str, Any] = {
+            "p1_wins": self.p1_wins,
+            "p2_wins": self.p2_wins,
+            "draws": self.draws,
+            "timeouts": self.timeouts + self.errors,
+            "errors": self.errors,
+            "p1_win_rate": self.p1_wins / total,
+            "p2_win_rate": self.p2_wins / total,
+            "draw_rate": self.draws / total,
+            "timeout_rate": (self.timeouts + self.errors) / total,
+            "win_rate_decided": self.p1_wins / decided,
+        }
+        summary: dict[str, Any] = {
+            "episodes": total,
+            "nominal_heroes": {
+                "hero1": self.nominal_hero1,
+                "hero2": self.nominal_hero2,
+            },
+            "heroes": heroes_block,
+            "seats": seats_block,
+            # Legacy top-level seat aliases
+            "p1_wins": self.p1_wins,
+            "p2_wins": self.p2_wins,
+            "draws": self.draws,
+            "timeouts": self.timeouts + self.errors,
+            "errors": self.errors,
+            "losses": self.p2_wins,
+            "p1_win_rate": self.p1_wins / total,
+            "p2_win_rate": self.p2_wins / total,
+            "win_rate": self.p1_wins / total,
+            "win_rate_decided": self.p1_wins / decided,
+            "loss_rate": self.p2_wins / total,
+            "draw_rate": self.draws / total,
+            "timeout_rate": (self.timeouts + self.errors) / total,
+            "hero1_win_rate": self.hero1_wins / total,
+            "hero2_win_rate": self.hero2_wins / total,
+            "deck_swap_eval": deck_swap_eval,
+        }
+        return summary
+
+
+def classify_and_record_fast_episode(
+    state: dict[str, Any],
+    counters: OutcomeCounters,
+    *,
+    active_p1_hero: str,
+    active_p2_hero: str,
+    nominal_hero1: str,
+    nominal_hero2: str,
+    max_steps_reached: bool = False,
+) -> tuple[str, Optional[str]]:
+    """Classify a fast-path episode and update *counters*."""
+    outcome, anomaly = classify_p1_fast_episode_outcome(
+        state,
+        max_steps_reached=max_steps_reached,
+    )
+    counters.record_seat_outcome(
+        outcome,
+        active_p1_hero=active_p1_hero,
+        active_p2_hero=active_p2_hero,
+        nominal_hero1=nominal_hero1,
+        nominal_hero2=nominal_hero2,
+    )
+    return outcome, anomaly
+
+
+def legacy_hero_rates_from_seat_summary(
+    summary: dict[str, Any],
+    *,
+    deck_swap_eval: bool = False,
+) -> tuple[Optional[float], Optional[float]]:
+    """Derive hero win rates from legacy seat-only summaries when deck swap was used."""
+    heroes = summary.get("heroes")
+    if isinstance(heroes, dict):
+        h1 = heroes.get("hero1_win_rate")
+        h2 = heroes.get("hero2_win_rate")
+        if h1 is not None and h2 is not None:
+            return float(h1), float(h2)
+
+    p1_wr = summary.get("p1_win_rate")
+    p2_wr = summary.get("p2_win_rate")
+    if p1_wr is None or p2_wr is None:
+        return None, None
+    p1 = float(p1_wr)
+    p2 = float(p2_wr)
+    if not deck_swap_eval:
+        return p1, p2
+    # With alternating deck swap, seat rates average to 50/50 for symmetric matchups;
+    # invert odd/even attribution is not recoverable from aggregates alone — use
+    # the midpoint as a conservative fallback for old records.
+    return (p1 + p2) / 2.0, (p1 + p2) / 2.0
+
+
+def summarize_hero_outcomes(
+    counters: OutcomeCounters,
+    *,
+    episodes: Optional[int] = None,
+) -> dict[str, Any]:
+    """Build hero + seat summary from accumulated counters."""
+    total = int(episodes) if episodes is not None else (
+        counters.p1_wins
+        + counters.p2_wins
+        + counters.draws
+        + counters.timeouts
+        + counters.errors
+    )
+    return counters.to_summary(max(1, total))
 
 
 def summarize_p1_outcomes(

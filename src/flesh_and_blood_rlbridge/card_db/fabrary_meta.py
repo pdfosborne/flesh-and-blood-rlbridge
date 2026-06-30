@@ -21,6 +21,8 @@ DEFAULT_USER_AGENT = (
 DEFAULT_PERIOD = "last-30-days"
 DEFAULT_GAMES = ("all", "competitive", "standard")
 DEFAULT_FORMATS = ("silver_age", "classic_constructed")
+DEFAULT_SAMPLING_GAMES = "all"
+DEFAULT_MIN_HERO_PLAY_WEIGHT = 1
 
 # Fabrary format + queue → CDN filename prefix (before -{period}.json)
 FORMAT_GAMES_SLUG: dict[tuple[str, str], str] = {
@@ -421,3 +423,52 @@ def lookup_all_queues_for_matchup_dir(
         )
         for games in DEFAULT_GAMES
     }
+
+
+def hero_play_counts(
+    format_name: str,
+    *,
+    games: str = DEFAULT_SAMPLING_GAMES,
+    period: str = DEFAULT_PERIOD,
+    meta: dict[str, Any] | None = None,
+    meta_path: Path | None = None,
+) -> dict[str, int]:
+    """Map Fabrary hero slug to total plays across all opponents in one dataset."""
+    lookup = meta if meta is not None else load_fabrary_meta(meta_path)
+    datasets = lookup.get("datasets")
+    if not isinstance(datasets, dict):
+        return {}
+    dataset = datasets.get(dataset_key(format_name, games, period))
+    if not isinstance(dataset, dict):
+        return {}
+    matchups = dataset.get("matchups")
+    if not isinstance(matchups, dict):
+        return {}
+    counts: dict[str, int] = {}
+    for row in matchups.values():
+        if not isinstance(row, dict):
+            continue
+        plays = int(row.get("plays") or 0)
+        if plays <= 0:
+            continue
+        hero_a = str(row.get("hero_a") or "").strip()
+        hero_b = str(row.get("hero_b") or "").strip()
+        if hero_a:
+            counts[hero_a] = counts.get(hero_a, 0) + plays
+        if hero_b:
+            counts[hero_b] = counts.get(hero_b, 0) + plays
+    return counts
+
+
+def deck_hero_play_weight(
+    deck_entry: dict[str, Any],
+    hero_counts: dict[str, int],
+    *,
+    min_weight: int = DEFAULT_MIN_HERO_PLAY_WEIGHT,
+) -> int:
+    """Sampling weight for a deck based on its hero's Fabrary play volume."""
+    hero_id = str(deck_entry.get("hero_id") or "").strip()
+    slug = hero_id_to_fabrary_slug(hero_id)
+    if not slug:
+        return max(min_weight, 1)
+    return max(min_weight, int(hero_counts.get(slug, 0)))

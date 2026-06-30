@@ -11,12 +11,16 @@ _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO / "scripts" / "training"))
 
 from play_outcome_stats import (  # noqa: E402
+    OutcomeCounters,
     absolute_p1_p2_deck_from_env,
     absolute_p1_p2_hp_from_env,
     absolute_p1_p2_hp_from_obs,
     classify_p1_episode_outcome,
     compute_eval_stability,
+    legacy_hero_rates_from_seat_summary,
+    nominal_hero_slot,
     summarize_p1_outcomes,
+    winning_hero_id_from_seat_outcome,
     win_rate_standard_error,
     win_rate_standard_error_from_rate,
 )
@@ -210,3 +214,100 @@ def test_fast_outcome_requires_lethal_hp() -> None:
         }
     )
     assert fixed_winner is None
+
+
+def test_winning_hero_id_from_seat_outcome() -> None:
+    assert winning_hero_id_from_seat_outcome(
+        "win", active_p1_hero="a", active_p2_hero="b"
+    ) == "a"
+    assert winning_hero_id_from_seat_outcome(
+        "loss", active_p1_hero="a", active_p2_hero="b"
+    ) == "b"
+    assert winning_hero_id_from_seat_outcome(
+        "timeout", active_p1_hero="a", active_p2_hero="b"
+    ) is None
+
+
+def test_outcome_counters_no_swap_seat_equals_hero() -> None:
+    counters = OutcomeCounters()
+    for outcome in ("win", "loss", "win"):
+        counters.record_seat_outcome(
+            outcome,
+            active_p1_hero="hero1",
+            active_p2_hero="hero2",
+            nominal_hero1="hero1",
+            nominal_hero2="hero2",
+        )
+    summary = counters.to_summary(3)
+    assert summary["seats"]["p1_wins"] == 2
+    assert summary["heroes"]["hero1_wins"] == 2
+    assert summary["seats"]["p2_wins"] == 1
+    assert summary["heroes"]["hero2_wins"] == 1
+
+
+def test_outcome_counters_swap_inverts_hero_attribution() -> None:
+    """All P1-seat losses with alternating swap → 50/50 nominal heroes."""
+    counters = OutcomeCounters()
+    for ep in range(10):
+        swapped = ep % 2 == 1
+        if swapped:
+            active_p1, active_p2 = "hero2", "hero1"
+        else:
+            active_p1, active_p2 = "hero1", "hero2"
+        counters.record_seat_outcome(
+            "loss",
+            active_p1_hero=active_p1,
+            active_p2_hero=active_p2,
+            nominal_hero1="hero1",
+            nominal_hero2="hero2",
+        )
+    summary = counters.to_summary(10, deck_swap_eval=True)
+    assert summary["seats"]["p1_wins"] == 0
+    assert summary["seats"]["p2_wins"] == 10
+    assert summary["heroes"]["hero1_wins"] == 5
+    assert summary["heroes"]["hero2_wins"] == 5
+
+
+def test_outcome_counters_draw_timeout_no_hero_win() -> None:
+    counters = OutcomeCounters()
+    counters.record_seat_outcome(
+        "draw",
+        active_p1_hero="h1",
+        active_p2_hero="h2",
+        nominal_hero1="h1",
+        nominal_hero2="h2",
+    )
+    counters.record_seat_outcome(
+        "timeout",
+        active_p1_hero="h1",
+        active_p2_hero="h2",
+        nominal_hero1="h1",
+        nominal_hero2="h2",
+    )
+    summary = counters.to_summary(2)
+    assert summary["heroes"]["hero1_wins"] == 0
+    assert summary["heroes"]["hero2_wins"] == 0
+    assert summary["draws"] == 1
+    assert summary["timeouts"] == 1
+
+
+def test_nominal_hero_slot() -> None:
+    assert nominal_hero_slot("a", hero1_id="a", hero2_id="b") == "hero1"
+    assert nominal_hero_slot("b", hero1_id="a", hero2_id="b") == "hero2"
+    assert nominal_hero_slot("c", hero1_id="a", hero2_id="b") is None
+
+
+def test_legacy_hero_rates_from_seat_summary() -> None:
+    h1, h2 = legacy_hero_rates_from_seat_summary(
+        {"p1_win_rate": 0.0, "p2_win_rate": 1.0},
+        deck_swap_eval=False,
+    )
+    assert h1 == 0.0
+    assert h2 == 1.0
+    h1, h2 = legacy_hero_rates_from_seat_summary(
+        {
+            "heroes": {"hero1_win_rate": 0.6, "hero2_win_rate": 0.4},
+        },
+    )
+    assert h1 == 0.6
+    assert h2 == 0.4

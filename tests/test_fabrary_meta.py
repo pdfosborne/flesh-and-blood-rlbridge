@@ -17,7 +17,9 @@ from flesh_and_blood_rlbridge.card_db.fabrary_meta import (  # noqa: E402
     FORMAT_GAMES_SLUG,
     build_cdn_url,
     dataset_key,
+    deck_hero_play_weight,
     hero_id_to_fabrary_slug,
+    hero_play_counts,
     load_fabrary_meta,
     lookup_deck_matchup,
     lookup_hero_matchup,
@@ -165,3 +167,38 @@ def test_load_fabrary_meta_committed_file() -> None:
     assert len(datasets) >= 1
     key = dataset_key("silver_age", "competitive", "last-30-days")
     assert key in datasets
+
+
+def test_hero_play_counts_sums_both_heroes_per_matchup() -> None:
+    meta = {
+        "datasets": {
+            dataset_key("silver_age", "all", "last-30-days"): {
+                "matchups": {
+                    "dash|gravy-bones": {
+                        "hero_a": "dash",
+                        "hero_b": "gravy-bones",
+                        "plays": 10,
+                    },
+                    "dash|kayo": {
+                        "hero_a": "dash",
+                        "hero_b": "kayo",
+                        "plays": 5,
+                    },
+                }
+            }
+        }
+    }
+    counts = hero_play_counts("silver_age", games="all", meta=meta)
+    assert counts["dash"] == 15
+    assert counts["gravy-bones"] == 10
+    assert counts["kayo"] == 5
+
+
+def test_deck_hero_play_weight_uses_min_weight_for_unknown_hero() -> None:
+    weight = deck_hero_play_weight(
+        {"hero_id": "hero_unknown_hero"},
+        {"dash": 100},
+        min_weight=1,
+    )
+    assert weight == 1
+    assert deck_hero_play_weight({"hero_id": "hero_dash"}, {"dash": 100}) == 100

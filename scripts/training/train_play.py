@@ -78,10 +78,12 @@ from checkpoint_eval_async import (  # noqa: E402
 )
 from play_outcome_stats import (  # noqa: E402
     OUTCOME_ERROR,
+    OutcomeCounters,
     absolute_p1_p2_deck_from_env,
     absolute_p1_p2_deck_from_obs,
     absolute_p1_p2_hp_from_env,
     absolute_p1_p2_hp_from_obs,
+    classify_and_record_fast_episode,
     classify_p1_episode_outcome,
     classify_p1_fast_episode_outcome,
     compute_eval_stability,
@@ -1903,6 +1905,50 @@ def _record_eval_outcome(
     return wins, losses, draws, timeouts, errors
 
 
+def _eval_hero_context(
+    matchup: "Matchup | None",
+    swap_matchup_obj: "Matchup | None",
+    *,
+    use_swap: bool,
+) -> tuple[str, str, str, str]:
+    """Return active P1/P2 hero ids and nominal hero1/hero2 ids for one eval episode."""
+    if matchup is None:
+        return "", "", "", ""
+    active = swap_matchup_obj if use_swap and swap_matchup_obj is not None else matchup
+    return (
+        active.p1_hero,
+        active.p2_hero,
+        matchup.p1_hero,
+        matchup.p2_hero,
+    )
+
+
+def _merge_agent_hero_vs_logic(
+    agent_as_p1: dict[str, Any],
+    agent_as_p2: dict[str, Any],
+) -> dict[str, Any]:
+    """Merge agent win counts across both seat eval runs into hero-attributed rates."""
+    h1_wins = h2_wins = h1_eps = h2_eps = 0
+    for run in (agent_as_p1, agent_as_p2):
+        heroes = run.get("heroes")
+        if not isinstance(heroes, dict):
+            continue
+        h1_wins += int(heroes.get("agent_hero1_wins", 0) or 0)
+        h2_wins += int(heroes.get("agent_hero2_wins", 0) or 0)
+        h1_eps += int(heroes.get("agent_hero1_eps", 0) or 0)
+        h2_eps += int(heroes.get("agent_hero2_eps", 0) or 0)
+    total_eps = max(1, h1_eps + h2_eps)
+    return {
+        "agent_hero1_wins": h1_wins,
+        "agent_hero2_wins": h2_wins,
+        "agent_hero1_eps": h1_eps,
+        "agent_hero2_eps": h2_eps,
+        "agent_hero1_win_rate": h1_wins / max(1, h1_eps),
+        "agent_hero2_win_rate": h2_wins / max(1, h2_eps),
+        "agent_hero_win_rate": (h1_wins + h2_wins) / total_eps,
+    }
+
+
 def _fast_eval_runtime_backend_label(env: Any) -> str:
     if bool(getattr(env, "_using_cpp", False)):
         return "C++ engine fast sampled eval"
@@ -1994,11 +2040,18 @@ def _evaluate_fast_policy_matchup(
     backend_pool: Any | None = None,
     matchup: "Matchup | None" = None,
     game_format: str = "",
+    agent_on_p1_seat: Optional[bool] = None,
 ) -> Optional[dict[str, Any]]:
     if not _env_supports_fast_training(env):
         return None
 
     runtime_backend_label = _fast_eval_runtime_backend_label(env)
+    swap_matchup_obj = swapped_matchup(matchup) if matchup is not None else None
+    deck_swap_eval = swap_env is not None
+    counters = OutcomeCounters()
+    if matchup is not None:
+        counters.nominal_hero1 = matchup.p1_hero
+        counters.nominal_hero2 = matchup.p2_hero
     wins = losses = draws = timeouts = errors = 0
     anomalies: list[str] = []
     end_state_keys: set[tuple[Any, ...]] = set()
@@ -2006,12 +2059,18 @@ def _evaluate_fast_policy_matchup(
     deck_card_ids = set(p1_deck_card_ids or ())
     p1_actions = p2_actions = 0
     p1_pass_actions = p2_pass_actions = 0
+    track_agent = agent_on_p1_seat is not None
     for ep in range(episodes):
         ep_seed = (seed + ep) if seed is not None else ep
         p1_rng = np.random.default_rng((ep_seed * 31 + 7) if seed is not None else None)
         p2_rng = np.random.default_rng((ep_seed * 31 + 13) if seed is not None else None)
         use_swap = swap_env is not None and (ep % 2 == 1)
         active_env = swap_env if use_swap else env
+        active_p1_hero, active_p2_hero, nominal_h1, nominal_h2 = _eval_hero_context(
+            matchup,
+            swap_matchup_obj,
+            use_swap=use_swap,
+        )
         if backend_pool is not None and matchup is not None and game_format:
             state, active_env = _fast_reset_with_eval_failover(
                 env,
@@ -2098,8 +2157,13 @@ def _evaluate_fast_policy_matchup(
                 break
 
         max_steps_reached = not terminated and not truncated and steps >= max_steps
-        outcome, anomaly = classify_p1_fast_episode_outcome(
+        outcome, anomaly = classify_and_record_fast_episode(
             state,
+            counters,
+            active_p1_hero=active_p1_hero,
+            active_p2_hero=active_p2_hero,
+            nominal_hero1=nominal_h1,
+            nominal_hero2=nominal_h2,
             max_steps_reached=max_steps_reached,
         )
         if anomaly:
@@ -2116,6 +2180,14 @@ def _evaluate_fast_policy_matchup(
                 1 + (ep % 2),
             )
         )
+        if track_agent and agent_on_p1_seat is not None:
+            counters.record_agent_hero_outcome(
+                outcome,
+                agent_on_p1_seat=agent_on_p1_seat,
+                use_swap=use_swap,
+                nominal_hero1=nominal_h1,
+                nominal_hero2=nominal_h2,
+            )
         wins, losses, draws, timeouts, errors = _record_eval_outcome(
             outcome,
             wins=wins,
@@ -2209,25 +2281,17 @@ def _evaluate_fast_policy_matchup(
         print(f"  WARNING: {eval_label}: {len(anomalies)} engine/HP anomalies (first 5 shown)")
 
     total = max(1, episodes)
-    decided = max(1, wins + losses + draws)
     damage_breakdown = (
         merge_damage_breakdowns(episode_damage_breakdowns)
         if episode_damage_breakdowns
         else None
     )
-    metrics: dict[str, Any] = {
-        "episodes": episodes,
-        "p1_wins": wins,
-        "p2_wins": losses,
-        "draws": draws,
-        "timeouts": timeouts,
-        "errors": errors,
-        "losses": losses,
-        "p1_win_rate": wins / total,
-        "p2_win_rate": losses / total,
-        "win_rate_decided": wins / decided,
-        "draw_rate": draws / total,
-        "timeout_rate": (timeouts + errors) / total,
+    metrics = counters.to_summary(
+        episodes,
+        deck_swap_eval=deck_swap_eval,
+        track_agent=track_agent,
+    )
+    metrics.update({
         "runtime_backend": runtime_backend_label,
         "eval_anomalies": anomalies[:20],
         "p1_policy": _policy_label(p1_policy),
@@ -2236,8 +2300,7 @@ def _evaluate_fast_policy_matchup(
         "p2_actions": p2_actions,
         "p1_pass_actions": p1_pass_actions,
         "p2_pass_actions": p2_pass_actions,
-        "deck_swap_eval": swap_env is not None,
-    }
+    })
     if damage_breakdown is not None:
         metrics["damage_breakdown"] = damage_breakdown
     return metrics
@@ -2284,6 +2347,7 @@ def _evaluate_p1_vs_fixed_opponent(
     live_progress_extra: Optional[dict[str, Any]] = None,
     p1_deck_card_ids: Optional[set[str]] = None,
     backend_pool: Any | None = None,
+    agent_on_p1_seat: Optional[bool] = None,
     **_: Any,
 ) -> dict[str, Any]:
     """Evaluate frozen P1/P2 policies against each other.
@@ -2374,6 +2438,7 @@ def _evaluate_p1_vs_fixed_opponent(
             backend_pool=eval_pool,
             matchup=matchup,
             game_format=game_format,
+            agent_on_p1_seat=agent_on_p1_seat,
         )
         if fast_metrics is not None:
             try:
@@ -2428,6 +2493,10 @@ def _evaluate_p1_vs_fixed_opponent(
     draws = 0
     timeouts = 0
     errors = 0
+    http_counters = OutcomeCounters(
+        nominal_hero1=matchup.p1_hero,
+        nominal_hero2=matchup.p2_hero,
+    )
     episode_damage_breakdowns: list[dict[str, Any]] = []
     deck_card_ids = set(p1_deck_card_ids or ())
     runtime_backend: Optional[str] = None
@@ -2536,6 +2605,21 @@ def _evaluate_p1_vs_fixed_opponent(
                 terminated=terminated,
                 truncated=truncated,
             )
+            http_counters.record_seat_outcome(
+                outcome,
+                active_p1_hero=matchup.p1_hero,
+                active_p2_hero=matchup.p2_hero,
+                nominal_hero1=matchup.p1_hero,
+                nominal_hero2=matchup.p2_hero,
+            )
+            if agent_on_p1_seat is not None:
+                http_counters.record_agent_hero_outcome(
+                    outcome,
+                    agent_on_p1_seat=agent_on_p1_seat,
+                    use_swap=False,
+                    nominal_hero1=matchup.p1_hero,
+                    nominal_hero2=matchup.p2_hero,
+                )
             wins, losses, draws, timeouts, errors = _record_eval_outcome(
                 outcome,
                 wins=wins,
@@ -2591,20 +2675,12 @@ def _evaluate_p1_vs_fixed_opponent(
         else None
     )
     total = max(1, episodes)
-    result = {
-        "episodes": episodes,
-        "p1_wins": wins,
-        "p2_wins": losses,
-        "draws": draws,
-        "timeouts": timeouts,
-        "errors": errors,
-        "losses": losses,
-        "p1_win_rate": wins / total,
-        "p2_win_rate": losses / total,
-        "draw_rate": draws / total,
-        "timeout_rate": (timeouts + errors) / total,
-        "runtime_backend": runtime_backend or "HTTP Talishar",
-    }
+    result = http_counters.to_summary(
+        episodes,
+        deck_swap_eval=False,
+        track_agent=agent_on_p1_seat is not None,
+    )
+    result["runtime_backend"] = runtime_backend or "HTTP Talishar"
     if damage_breakdown is not None:
         result["damage_breakdown"] = damage_breakdown
     return result
@@ -2776,6 +2852,7 @@ def evaluate_agent_vs_logic_both_seats(
         eval_label=f"{eval_label_prefix} (agent @ P1)",
         live_progress_path=live_progress_path,
         live_progress_extra=live_progress_extra,
+        agent_on_p1_seat=True,
         **kwargs,
     )
     agent_as_p2 = evaluate_policy_matchup(
@@ -2791,9 +2868,12 @@ def evaluate_agent_vs_logic_both_seats(
         eval_label=f"{eval_label_prefix} (agent @ P2)",
         live_progress_path=live_progress_path,
         live_progress_extra=live_progress_extra,
+        agent_on_p1_seat=False,
         **kwargs,
     )
+    merged = _merge_agent_hero_vs_logic(agent_as_p1, agent_as_p2)
     return {
+        **merged,
         "agent_p1_seat": {
             **agent_as_p1,
             "agent_win_rate": float(agent_as_p1.get("p1_win_rate", 0.0) or 0.0),

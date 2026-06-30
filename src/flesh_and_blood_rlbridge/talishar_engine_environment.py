@@ -3469,6 +3469,8 @@ def talishar_deck_player_won(
         ``None``  — draw (both at ≤ 0 HP) or timeout (no lethal HP)
 
     Lethal-HP rules match ``classify_p1_episode_outcome`` in play training.
+    For deck-swap eval, map the seat outcome to nominal heroes via
+    ``play_outcome_stats.OutcomeCounters`` instead of fixed ``deck_player_id=1``.
     """
     if truncated and not terminated:
         return None

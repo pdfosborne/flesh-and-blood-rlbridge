@@ -118,6 +118,7 @@ def execute_rollout_worker_job(payload: dict[str, Any]) -> dict[str, Any]:
             swap_envs=swap_envs[:n_envs],
             rollout_mode=rollout_mode,
             max_workers=n_envs,
+            matchup=matchup,
         )
     finally:
         for env in envs + swap_envs:

@@ -23,7 +23,7 @@ _bootstrap.configure_paths()
 
 from agent_cache import clone_agent_weights  # noqa: E402
 from flesh_and_blood_rlbridge.player_observation import ACTION_CAPACITY, PLAYER_OBS_DIM  # noqa: E402
-from play_outcome_stats import classify_p1_fast_episode_outcome  # noqa: E402
+from play_outcome_stats import classify_p1_fast_episode_outcome, OutcomeCounters  # noqa: E402
 from rl_agents.ppo import PPOAgent  # noqa: E402
 from train_dual_agent_common import (  # noqa: E402
     Matchup,
@@ -117,6 +117,10 @@ def main() -> None:
     odd_outcomes: list[str] = []   # Dorinthea in P1 seat (swapped)
     p1_starts: list[str] = []
     p2_starts: list[str] = []
+    hero_counters = OutcomeCounters(
+        nominal_hero1=p1_hero,
+        nominal_hero2=p2_hero,
+    )
 
     import numpy as np
 
@@ -154,6 +158,22 @@ def main() -> None:
             state,
             max_steps_reached=max_steps_reached,
         )
+        if use_swap:
+            hero_counters.record_seat_outcome(
+                outcome,
+                active_p1_hero=p2_hero,
+                active_p2_hero=p1_hero,
+                nominal_hero1=p1_hero,
+                nominal_hero2=p2_hero,
+            )
+        else:
+            hero_counters.record_seat_outcome(
+                outcome,
+                active_p1_hero=p1_hero,
+                active_p2_hero=p2_hero,
+                nominal_hero1=p1_hero,
+                nominal_hero2=p2_hero,
+            )
         bucket = odd_outcomes if use_swap else even_outcomes
         bucket.append(outcome)
         if starting_player_id == 1:
@@ -178,6 +198,10 @@ def main() -> None:
             _summarize("P2 started", p2_starts),
             _summarize("all games", even_outcomes + odd_outcomes),
         ],
+        "hero_attributed": hero_counters.to_summary(
+            args.episodes,
+            deck_swap_eval=True,
+        ),
     }
 
     even_wr = report["splits"][0]["p1_seat_win_rate"]

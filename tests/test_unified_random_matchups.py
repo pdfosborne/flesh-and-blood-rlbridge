@@ -6,6 +6,7 @@ import json
 import random
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO / "scripts" / "training"))
@@ -51,6 +52,38 @@ def test_sample_random_fabrary_matchups_unique_pairs() -> None:
         assert len(m.dir_name) <= 48
         assert m.p1_fabrary_entry is not None
         assert m.p2_fabrary_entry is not None
+
+
+def test_sample_random_fabrary_matchups_fabrary_weighted_prefers_heavy_hero() -> None:
+    decks = [
+        _fake_deck("heavy", "hero_dash"),
+        _fake_deck("light_a", "hero_gravy_bones"),
+        _fake_deck("light_b", "hero_kayo"),
+    ]
+    hero_counts = {"dash": 1000, "gravy-bones": 1, "kayo": 1}
+
+    def _counts(*_args, **_kwargs):
+        return hero_counts
+
+    rng = random.Random(0)
+    with patch(
+        "flesh_and_blood_rlbridge.card_db.fabrary_meta.hero_play_counts",
+        side_effect=_counts,
+    ):
+        matchups = sample_random_fabrary_matchups(
+            decks,
+            200,
+            rng,
+            "silver_age",
+            unique_pairs=False,
+            fabrary_weighted_heroes=True,
+        )
+    heavy_in_matchup = sum(
+        1
+        for m in matchups
+        if m.p1_deck == "fab_heavy" or m.p2_deck == "fab_heavy"
+    )
+    assert heavy_in_matchup > 150
 
 
 def test_resolve_checkpoint_interval_pct() -> None:

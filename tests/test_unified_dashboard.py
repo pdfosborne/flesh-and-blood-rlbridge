@@ -11,6 +11,7 @@ from fab_bridge.unified_dashboard import (
     LOGIC_VS_LOGIC_BASELINE_NAME,
     UNIFIED_DASHBOARD_NAME,
     UNIFIED_LIVE_STATE,
+    _checkpoint_point_from_row,
     _merged_aggregate_points,
     _rows_from_latest_merged,
     aggregate_checkpoint_points,
@@ -187,8 +188,11 @@ def test_collect_and_render_dashboard(tmp_path: Path) -> None:
     assert "Checkpoint eval (active batch)" in html
     assert html.count("<th>Matchup</th>") == 2
     assert "Vs logic win% (Hero 1)" in html
-    assert "Logic win% vs agent (Hero 2)" in html
+    assert "Logic win% vs agent (Hero 1)" in html
     assert "Agent vs agent (Hero 1 win%)" in html
+    assert "Hero 2 win%" not in html
+    assert "Fabrary all (n)" in html
+    assert "Fabrary std" not in html
     assert "(Hero 1) vs" in html
     assert "Timeout %" in html
     assert "class=\"summary\"" not in html
@@ -598,3 +602,25 @@ def test_chart_hides_vs_logic_columns_without_data(tmp_path: Path) -> None:
     assert "Agent vs agent (Hero 1 win%)" in html
     assert "Vs logic win% (Hero 1)" not in html
     assert "Logic vs logic (Hero 1 win%)" not in html
+    assert "Hero 2 win%" not in html
+
+
+def test_checkpoint_win_rates_exclude_timeouts() -> None:
+    row = {
+        "episodes_completed": 100,
+        "p1_wins": 4,
+        "p2_wins": 4,
+        "timeouts": 2,
+        "p1_win_rate": 0.4,
+        "win_rate_decided": 0.5,
+        "logic_vs_logic": {
+            "p1_wins": 3,
+            "p2_wins": 5,
+            "timeouts": 2,
+            "p1_win_rate": 0.3,
+            "win_rate_decided": 0.375,
+        },
+    }
+    point = _checkpoint_point_from_row(row)
+    assert point["agent_vs_agent_hero1_win_rate"] == pytest.approx(0.5)
+    assert point["logic_vs_logic_hero1_win_rate"] == pytest.approx(0.375)

@@ -718,6 +718,10 @@ def wizard_unified_random_matchups_train(env: EnvironmentSettings) -> None:
         "Skip already-converged deck pairs in cache?",
         default=spec.skip_converged,
     )
+    spec.fabrary_weighted_heroes = Confirm.ask(
+        "Weight hero sampling by Fabrary games (all queue, last 30 days)?",
+        default=spec.fabrary_weighted_heroes,
+    )
     console.print(
         "[dim]Training uses the Talishar fast backend "
         "(fast_reset / fast_step_index via RLStep).[/dim]"
@@ -744,6 +748,7 @@ def wizard_unified_random_matchups_train(env: EnvironmentSettings) -> None:
         ("Safe parallel", str(spec.safe_parallel)),
         ("Backend", "Talishar fast"),
         ("Skip converged", str(spec.skip_converged)),
+        ("Fabrary weighted heroes", str(spec.fabrary_weighted_heroes)),
         ("Seed", str(spec.seed) if spec.seed is not None else "random"),
         ("Output", str(out_dir)),
     ]:

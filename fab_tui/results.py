@@ -321,7 +321,12 @@ def _completion_summary(path: Path) -> str:
         if not row:
             continue
         cid = str(row.get("candidate_id") or result_path.parent.name)
-        for key in ("final_eval_win_rate", "latest_checkpoint_eval_win_rate", "play_win_rate"):
+        for key in (
+            "hero1_win_rate",
+            "final_eval_win_rate",
+            "latest_checkpoint_eval_win_rate",
+            "play_win_rate",
+        ):
             wr = row.get(key)
             if wr is None:
                 continue

@@ -42,9 +42,11 @@ from fab_bridge.unified_dashboard import (  # noqa: E402
 )
 from fab_bridge.unified_results import is_unified_random_matchup_run  # noqa: E402
 from play_outcome_stats import (  # noqa: E402
+    OutcomeCounters,
     absolute_p1_p2_deck_from_env,
     absolute_p1_p2_hp_from_env,
     classify_p1_episode_outcome,
+    summarize_hero_outcomes,
     summarize_p1_outcomes,
 )
 import numpy as np  # noqa: E402
@@ -1027,6 +1029,7 @@ def _retry_fast_episode_on_healthy_shards(
                 swap_envs=swap_slice,
                 rollout_mode=rollout_mode,
                 max_workers=1,
+                matchup=matchup,
             )[0]
             if talishar_pool is not None:
                 talishar_pool.note_shard_success(getattr(env, "_base_url", "") or "")
@@ -1117,6 +1120,7 @@ def _safe_parallel_fast_episode_batch(
             swap_envs=swap_envs,
             rollout_mode=rollout_mode,
             max_workers=max_workers,
+            matchup=matchup,
         )
         if talishar_pool is not None:
             for env in envs[:batch_size]:
@@ -1195,6 +1199,8 @@ def _fast_episode_result_from_slot(
         "turn_no": slot.final_turn_no,
         "p1_deck": slot.final_p1_deck,
         "p2_deck": slot.final_p2_deck,
+        "active_p1_hero": slot.active_p1_hero,
+        "active_p2_hero": slot.active_p2_hero,
     }
 
 
@@ -1218,6 +1224,8 @@ class _FastRolloutSlot:
     final_p1_deck: int = 0
     final_p2_deck: int = 0
     final_turn_no: int = 0
+    active_p1_hero: str = ""
+    active_p2_hero: str = ""
 
 
 class _EnvRolloutWorker:
@@ -1612,21 +1620,31 @@ def _run_parallel_batched_fast_episodes(
     seed_base: Optional[int],
     swap_envs: Optional[list[TalisharEngineEnvironment]] = None,
     rollout_mode: str = DEFAULT_ROLLOUT_MODE,
+    matchup: Optional["Matchup"] = None,
 ) -> list[dict[str, Any]]:
     """Run one episode per env slot with batched PPO inference across active slots."""
     mode = normalize_rollout_mode(rollout_mode)
     slots: list[_FastRolloutSlot] = []
+    swap_matchup = swapped_matchup(matchup) if matchup is not None and swap_envs is not None else None
     for worker, env in enumerate(envs):
         ep_index = episode_indices[worker]
         ep_seed = (seed_base + worker) if seed_base is not None else None
         slot_env = env
-        if swap_envs is not None and ep_index % 2 == 1:
+        use_swap = swap_envs is not None and ep_index % 2 == 1
+        if use_swap:
             slot_env = swap_envs[worker]
+        active_p1_hero = active_p2_hero = ""
+        if matchup is not None:
+            active = swap_matchup if use_swap and swap_matchup is not None else matchup
+            active_p1_hero = active.p1_hero
+            active_p2_hero = active.p2_hero
         slot = _FastRolloutSlot(
             env=slot_env,
             state={},
             p1_rng=np.random.default_rng((ep_seed * 31 + 7) if ep_seed is not None else None),
             p2_rng=np.random.default_rng((ep_seed * 31 + 13) if ep_seed is not None else None),
+            active_p1_hero=active_p1_hero,
+            active_p2_hero=active_p2_hero,
         )
         _reset_fast_rollout_slot(
             slot,
@@ -1682,6 +1700,7 @@ def _run_parallel_fast_episode_batch(
     swap_envs: Optional[list[TalisharEngineEnvironment]] = None,
     rollout_mode: str = DEFAULT_ROLLOUT_MODE,
     max_workers: int = 1,
+    matchup: Optional["Matchup"] = None,
 ) -> list[dict[str, Any]]:
     """Dispatch one rollout batch using the configured fast rollout mode."""
     mode = normalize_rollout_mode(rollout_mode)
@@ -1694,7 +1713,9 @@ def _run_parallel_fast_episode_batch(
             warmup=warmup,
             episode_indices=episode_indices,
             seed_base=seed_base,
+            swap_envs=swap_envs,
             max_workers=max(1, max_workers),
+            matchup=matchup,
         )
     return _run_parallel_batched_fast_episodes(
         envs,
@@ -1706,6 +1727,7 @@ def _run_parallel_fast_episode_batch(
         seed_base=seed_base,
         swap_envs=swap_envs,
         rollout_mode=mode,
+        matchup=matchup,
     )
 
 
@@ -1718,18 +1740,24 @@ def _run_parallel_fast_episodes_threaded(
     warmup: bool,
     episode_indices: list[int],
     seed_base: Optional[int],
+    swap_envs: Optional[list[TalisharEngineEnvironment]] = None,
     max_workers: int,
+    matchup: Optional["Matchup"] = None,
 ) -> list[dict[str, Any]]:
     """Run one episode per env using threads and per-step policy inference."""
     from concurrent.futures import ThreadPoolExecutor
+
+    swap_matchup = swapped_matchup(matchup) if matchup is not None and swap_envs else None
 
     def _run_worker(worker: int) -> dict[str, Any]:
         ep_index = episode_indices[worker]
         ep_seed = (seed_base + worker) if seed_base is not None else None
         p1_rng = np.random.default_rng((ep_seed * 31 + 7) if ep_seed is not None else None)
         p2_rng = np.random.default_rng((ep_seed * 31 + 13) if ep_seed is not None else None)
-        return _run_one_fast_episode(
-            envs[worker],
+        use_swap = swap_envs is not None and ep_index % 2 == 1
+        episode_env = swap_envs[worker] if use_swap and swap_envs is not None else envs[worker]
+        result = _run_one_fast_episode(
+            episode_env,
             p1_policy,
             p2_policy,
             max_steps,
@@ -1739,6 +1767,11 @@ def _run_parallel_fast_episodes_threaded(
             p2_rng,
             starting_player_id=1 + (ep_index % 2),
         )
+        if matchup is not None:
+            active = swap_matchup if use_swap and swap_matchup is not None else matchup
+            result["active_p1_hero"] = active.p1_hero
+            result["active_p2_hero"] = active.p2_hero
+        return result
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = [pool.submit(_run_worker, worker) for worker in range(len(envs))]
@@ -1960,6 +1993,24 @@ def _training_win_rates_from_outcomes(
     p1_wr = wins / episodes
     p2_wr = losses / episodes
     return p1_wr, p2_wr
+
+
+def _training_hero_win_rates_from_outcomes(
+    outcome_summary: dict[str, Any],
+) -> tuple[Optional[float], Optional[float]]:
+    """Nominal hero win rates from classified episode outcomes."""
+    heroes = outcome_summary.get("heroes")
+    if isinstance(heroes, dict):
+        h1 = heroes.get("hero1_win_rate")
+        h2 = heroes.get("hero2_win_rate")
+        if h1 is not None and h2 is not None:
+            return float(h1), float(h2)
+    if outcome_summary.get("hero1_win_rate") is not None:
+        return (
+            float(outcome_summary["hero1_win_rate"]),
+            float(outcome_summary.get("hero2_win_rate", 0.0) or 0.0),
+        )
+    return _training_win_rates_from_outcomes(outcome_summary)
 
 
 def _flush_ppo_buffers_auto(
@@ -2698,6 +2749,10 @@ def train_agents_from_both_perspectives_parallel(
     p1_ep_rewards:  list[float] = []
     p2_ep_rewards:  list[float] = []
     p1_outcomes:    list[str] = []
+    outcome_counters = OutcomeCounters(
+        nominal_hero1=matchup.p1_hero,
+        nominal_hero2=matchup.p2_hero,
+    )
     timeout_episodes  = 0
     terminated_episodes = 0
     skipped_episodes    = 0
@@ -2899,15 +2954,25 @@ def train_agents_from_both_perspectives_parallel(
                         batch_p2_trans.extend(result["p2_transitions"])
                     p1_ep_rewards.append(result["p1_reward"])
                     p2_ep_rewards.append(result["p2_reward"])
-                    p1_outcomes.append(
-                        classify_p1_episode_outcome(
-                            p1_hp=result.get("p1_hp"),
-                            p2_hp=result.get("p2_hp"),
-                            p1_deck=result.get("p1_deck"),
-                            p2_deck=result.get("p2_deck"),
-                            terminated=bool(result.get("terminated")),
-                            truncated=bool(result.get("truncated")),
-                        )
+                    ep_outcome = classify_p1_episode_outcome(
+                        p1_hp=result.get("p1_hp"),
+                        p2_hp=result.get("p2_hp"),
+                        p1_deck=result.get("p1_deck"),
+                        p2_deck=result.get("p2_deck"),
+                        terminated=bool(result.get("terminated")),
+                        truncated=bool(result.get("truncated")),
+                    )
+                    p1_outcomes.append(ep_outcome)
+                    outcome_counters.record_seat_outcome(
+                        ep_outcome,
+                        active_p1_hero=str(
+                            result.get("active_p1_hero") or matchup.p1_hero
+                        ),
+                        active_p2_hero=str(
+                            result.get("active_p2_hero") or matchup.p2_hero
+                        ),
+                        nominal_hero1=matchup.p1_hero,
+                        nominal_hero2=matchup.p2_hero,
                     )
                     if result["truncated"]:
                         timeout_episodes += 1
@@ -3101,6 +3166,7 @@ def train_agents_from_both_perspectives_parallel(
 
     total_eps = len(p1_ep_rewards)
     outcome_summary = summarize_p1_outcomes(p1_outcomes, episodes=total_eps)
+    hero_summary = summarize_hero_outcomes(outcome_counters, episodes=total_eps)
     stats = {
         "episodes":   total_eps,
         "timeouts":   outcome_summary["timeouts"],
@@ -3109,6 +3175,7 @@ def train_agents_from_both_perspectives_parallel(
         "timeout_rate": outcome_summary["timeout_rate"],
         "p1_outcomes": p1_outcomes,
         **outcome_summary,
+        **hero_summary,
     }
     return p1_ep_rewards, p2_ep_rewards, stats
 
@@ -3637,9 +3704,12 @@ def _unified_run_progress_callback(
     ) -> None:
         p1_wr: Optional[float] = None
         p2_wr: Optional[float] = None
+        hero1_wr: Optional[float] = None
+        hero2_wr: Optional[float] = None
         if p1_outcomes:
             summary = summarize_p1_outcomes(p1_outcomes, episodes=completed)
             p1_wr, p2_wr = _training_win_rates_from_outcomes(summary)
+            hero1_wr, hero2_wr = _training_hero_win_rates_from_outcomes(summary)
         if matchup_live_key:
             from fab_bridge.unified_dashboard import update_unified_matchup_live  # noqa: PLC0415
 
@@ -3650,6 +3720,8 @@ def _unified_run_progress_callback(
                 episodes_completed=completed,
                 p1_win_rate=p1_wr,
                 p2_win_rate=p2_wr,
+                hero1_win_rate=hero1_wr,
+                hero2_win_rate=hero2_wr,
                 status="training",
             )
             update_unified_training_live(
@@ -3868,7 +3940,12 @@ class _CheckpointEvalTracker:
         elif self._eval_logic_vs_logic and self._logic_vs_logic_baseline is not None:
             record["logic_vs_logic"] = self._logic_vs_logic_baseline
         self.log.append(record)
-        wr = float(metrics["p1_win_rate"])
+        heroes = metrics.get("heroes") if isinstance(metrics.get("heroes"), dict) else {}
+        wr = float(
+            heroes.get("hero1_win_rate")
+            or metrics.get("hero1_win_rate")
+            or metrics["p1_win_rate"]
+        )
         if self.first_win_rate is None:
             self.first_win_rate = wr
         self.final_win_rate = wr
@@ -3899,8 +3976,9 @@ class _CheckpointEvalTracker:
         history_path.write_text(json.dumps(self.log, indent=2), encoding="utf-8")
         print(
             f"  Checkpoint eval @ ep {completed}: "
-            f"self-play P1 win%={wr:.1%} "
-            f"({metrics['p1_wins']}W/{metrics['p2_wins']}L/{metrics['draws']}D "
+            f"self-play hero1 win%={wr:.1%} "
+            f"({metrics.get('heroes', {}).get('hero1_wins', metrics['p1_wins'])}H1/"
+            f"{metrics.get('heroes', {}).get('hero2_wins', metrics['p2_wins'])}H2 "
             f"over {self.checkpoint_eval_episodes} games)"
         )
         if vs_logic is not None:
@@ -3916,10 +3994,20 @@ class _CheckpointEvalTracker:
                 f"({self.checkpoint_eval_episodes} games per seat)"
             )
         if logic_vs_logic is not None:
-            logic_p1_wr = float(logic_vs_logic.get("p1_win_rate", 0.0) or 0.0)
+            logic_heroes = (
+                logic_vs_logic.get("heroes")
+                if isinstance(logic_vs_logic.get("heroes"), dict)
+                else {}
+            )
+            logic_p1_wr = float(
+                logic_heroes.get("hero1_win_rate")
+                or logic_vs_logic.get("hero1_win_rate")
+                or logic_vs_logic.get("p1_win_rate", 0.0)
+                or 0.0
+            )
             print(
                 f"  Checkpoint eval logic win% vs logic (matchup baseline): "
-                f"P1 win%={logic_p1_wr:.1%} "
+                f"hero1 win%={logic_p1_wr:.1%} "
                 f"({self.checkpoint_eval_episodes} games)"
             )
         maybe_refresh_unified_dashboard(self.out_dir, min_interval_seconds=0.0)
@@ -5917,12 +6005,38 @@ def sample_random_fabrary_matchups(
     format_name: str,
     *,
     unique_pairs: bool = True,
+    fabrary_weighted_heroes: bool = False,
 ) -> list[Matchup]:
     """Sample random deck-vs-deck matchups from a fabrary deck pool."""
     if len(decks) < 2:
         raise ValueError("need at least two decks to sample matchups")
     if count <= 0:
         return []
+
+    deck_weights: list[float] | None = None
+    if fabrary_weighted_heroes:
+        from flesh_and_blood_rlbridge.card_db.fabrary_meta import (  # noqa: PLC0415
+            DEFAULT_PERIOD,
+            DEFAULT_SAMPLING_GAMES,
+            deck_hero_play_weight,
+            hero_play_counts,
+        )
+
+        hero_counts = hero_play_counts(
+            format_name,
+            games=DEFAULT_SAMPLING_GAMES,
+            period=DEFAULT_PERIOD,
+        )
+        deck_weights = [
+            float(deck_hero_play_weight(entry, hero_counts))
+            for _slug, _stem, entry in decks
+        ]
+
+    def _pick_index(available: list[int]) -> int:
+        if deck_weights is None:
+            return rng.choice(available)
+        weights = [deck_weights[i] for i in available]
+        return rng.choices(available, weights=weights, k=1)[0]
 
     matchups: list[Matchup] = []
     seen: set[tuple[str, str]] = set()
@@ -5932,7 +6046,10 @@ def sample_random_fabrary_matchups(
 
     while len(matchups) < count and attempts < max_attempts:
         attempts += 1
-        i, j = rng.sample(indices, 2)
+        available = list(indices)
+        i = _pick_index(available)
+        available.remove(i)
+        j = _pick_index(available)
         slug1, stem1, entry1 = decks[i]
         slug2, stem2, entry2 = decks[j]
         if stem1 == stem2:

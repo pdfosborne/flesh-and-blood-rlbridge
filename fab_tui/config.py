@@ -395,6 +395,7 @@ class UnifiedRandomMatchupSpec:
     seed: int | None = RUNTIME.unified_random_matchups.seed
     cache_dir: str | None = RUNTIME.unified_random_matchups.cache_dir
     out_dir: str | None = RUNTIME.unified_random_matchups.out_dir
+    fabrary_weighted_heroes: bool = RUNTIME.unified_random_matchups.fabrary_weighted_heroes
 
     def resolved_out_dir(self) -> Path:
         if self.out_dir:
