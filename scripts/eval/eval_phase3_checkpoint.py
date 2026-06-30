@@ -57,6 +57,10 @@ from scripts.training.play_outcome_stats import (  # noqa: E402
     classify_p1_episode_outcome,
 )
 from runtime_defaults import (  # noqa: E402
+    DEFAULT_ANTI_STUCK_LOGGING,
+    DEFAULT_ANTI_STUCK_NO_PROGRESS_STEPS,
+    DEFAULT_ANTI_STUCK_PASS_STREAK,
+    DEFAULT_ANTI_STUCK_REPEAT_STREAK,
     DEFAULT_STALL_LOW_HAND_TURNS,
     DEFAULT_STALL_MAX_SINGLE_LOW_HAND_TURNS,
     DEFAULT_STALL_MIN_ATTACK_HAND,
@@ -852,6 +856,7 @@ def _unified_continuous_render_loop(
     render_max_steps: int,
     poll_seconds: float,
     render_cycle_seconds: float,
+    anti_stuck_config: Optional[Any] = None,
 ) -> None:
     """Continuously render greedy-policy episodes on random matchups on the render shard."""
     from flesh_and_blood_rlbridge.talishar_backend_pool import (  # noqa: PLC0415
@@ -867,6 +872,7 @@ def _unified_continuous_render_loop(
     rng = random.Random()
     idle_wait = max(1.0, float(poll_seconds))
     cycle_wait = max(0.5, float(render_cycle_seconds))
+    render_episode_no = 0
     shard_note = "dedicated render shard" if dedicated_render_shard else "eval shard"
     _write_unified_render_placeholder(
         live_frame_path,
@@ -946,6 +952,7 @@ def _unified_continuous_render_loop(
                     checkpoint_dir=str(ckpt_dir) if ckpt_dir else None,
                     weights_path=str(weights_path) if weights_path else None,
                 )
+            render_episode_no += 1
             _run_render_episode(
                 p1_agent=p1_agent,
                 p2_agent=p2_agent,
@@ -958,6 +965,9 @@ def _unified_continuous_render_loop(
                 render_dir=eval_dir,
                 player_label=assets.p1_bundle.role,
                 live_frame_path=live_frame_path,
+                anti_stuck_config=anti_stuck_config,
+                episode_no=render_episode_no,
+                matchup=assets.p1_bundle.matchup,
             )
         except Exception as exc:  # noqa: BLE001
             print(f"  [render] Unified live render error: {exc}", flush=True)
@@ -1002,6 +1012,7 @@ def _evaluate_unified_merged_checkpoint(
     run_parity: bool,
     cpp_engine_dir: Optional[str],
     cpp_engine_cache_dir: Optional[str],
+    anti_stuck_config: Optional[Any] = None,
 ) -> dict[str, Any]:
     from fab_bridge.eval_shard_lock import hold_eval_shard  # noqa: PLC0415
 
@@ -1024,6 +1035,7 @@ def _evaluate_unified_merged_checkpoint(
             run_parity=run_parity,
             cpp_engine_dir=cpp_engine_dir,
             cpp_engine_cache_dir=cpp_engine_cache_dir,
+            anti_stuck_config=anti_stuck_config,
         )
 
 
@@ -1045,6 +1057,7 @@ def _evaluate_unified_merged_checkpoint_body(
     run_parity: bool,
     cpp_engine_dir: Optional[str],
     cpp_engine_cache_dir: Optional[str],
+    anti_stuck_config: Optional[Any] = None,
 ) -> dict[str, Any]:
     matchup_dirs = list(bucket.keys())
     if not matchup_dirs:
@@ -1128,6 +1141,7 @@ def _evaluate_unified_merged_checkpoint_body(
                 stall_max_single_low_hand_turns=stall_max_single_low_hand_turns,
                 stall_min_attack_hand=stall_min_attack_hand,
                 verbose=verbose,
+                anti_stuck_config=anti_stuck_config,
             )
             for rec in logs:
                 outcome = str(rec.get("outcome", "timeout"))
@@ -1229,6 +1243,9 @@ def _run_render_episode(
     render_dir: Path,
     player_label: str,
     live_frame_path: Optional[Path] = None,
+    anti_stuck_config: Optional[Any] = None,
+    episode_no: int = 1,
+    matchup: str = "",
 ) -> tuple[list[Path], str]:
     """Run one Playwright render episode using render_mode='rgb_array'.
 
@@ -1246,6 +1263,12 @@ def _run_render_episode(
     frame_paths: list[Path] = []
     outcome = "timeout"
 
+    from fab_bridge.anti_stuck_logging import (  # noqa: PLC0415
+        is_enabled as anti_stuck_enabled,
+        monitor_for_episode,
+    )
+
+    combat_tracker_on = anti_stuck_config is not None and anti_stuck_enabled()
     env = TalisharEngineEnvironment(
         base_url=base_url,
         frontend_url=fe_url,
@@ -1257,7 +1280,20 @@ def _run_render_episode(
         render_mode="rgb_array",
         use_cpp_engine=False,
         talishar_backend=DEFAULT_TALISHAR_BACKEND,
+        enable_combat_tracker=combat_tracker_on,
     )
+    stuck_monitor = None
+    if combat_tracker_on and anti_stuck_config is not None:
+        stuck_monitor = monitor_for_episode(
+            config=anti_stuck_config,
+            episode=episode_no,
+            mode="render",
+            p1_deck=p1_deck_name,
+            p2_deck=p2_deck_name,
+            base_url=base_url,
+            game_format=game_format,
+            matchup=matchup,
+        )
 
     def _record_frame(obs: Any, path: Path) -> None:
         if _save_state_image(env, obs, path):
@@ -1306,6 +1342,15 @@ def _run_render_episode(
                 action = _pick_render_action(env, p2_agent, obs)
 
             step = env.step(action)
+            if stuck_monitor is not None:
+                stuck_monitor.observe_step(
+                    env,
+                    obs_data=obs_data,
+                    step_info=step.info or {},
+                    action=action,
+                    terminated=bool(step.terminated),
+                    truncated=bool(step.truncated),
+                )
             obs = step.observation
             terminated = bool(step.terminated)
             truncated = bool(step.truncated)
@@ -1322,6 +1367,8 @@ def _run_render_episode(
         outcome = _infer_render_outcome(
             obs, terminated=terminated, truncated=truncated, env=env,
         )
+        if stuck_monitor is not None:
+            stuck_monitor.finish_episode(outcome)
         if live_frame_path is not None:
             end_path = live_frame_path
             if _save_end_state_frame(env, obs, end_path, outcome=outcome, steps=step_no):
@@ -1752,6 +1799,7 @@ def _run_eval_episode_batch(
     stall_max_single_low_hand_turns: int,
     stall_min_attack_hand: int,
     verbose: bool,
+    anti_stuck_config: Optional[Any] = None,
 ) -> list[dict[str, Any]]:
     """Evaluate a batch of episodes in one worker thread.
 
@@ -1768,6 +1816,12 @@ def _run_eval_episode_batch(
     else:
         p2_agent = None
 
+    from fab_bridge.anti_stuck_logging import (  # noqa: PLC0415
+        is_enabled as anti_stuck_enabled,
+        monitor_for_episode,
+    )
+
+    combat_tracker_on = anti_stuck_config is not None and anti_stuck_enabled()
     env = TalisharEngineEnvironment(
         base_url=base_url,
         frontend_url=None,
@@ -1780,12 +1834,24 @@ def _run_eval_episode_batch(
         use_cpp_engine=False,
         talishar_backend=DEFAULT_TALISHAR_BACKEND,
         verbose=verbose,
+        enable_combat_tracker=combat_tracker_on,
     )
     logs: list[dict[str, Any]] = []
     _ANTI_STALL_STREAK = 5
     try:
         for ep in episode_numbers:
             ep_seed = (seed + ep) if seed is not None else None
+            stuck_monitor = None
+            if combat_tracker_on and anti_stuck_config is not None:
+                stuck_monitor = monitor_for_episode(
+                    config=anti_stuck_config,
+                    episode=ep,
+                    mode="eval",
+                    p1_deck=p1_deck_name,
+                    p2_deck=p2_deck_name,
+                    base_url=base_url,
+                    game_format=game_format,
+                )
             try:
                 result = env.reset(seed=ep_seed)
             except Exception:
@@ -1884,6 +1950,15 @@ def _run_eval_episode_batch(
                     action = _prefer_non_pass_action(obs_data, action)
 
                 step = env.step(action)
+                if stuck_monitor is not None:
+                    stuck_monitor.observe_step(
+                        env,
+                        obs_data=obs_data,
+                        step_info=step.info or {},
+                        action=action,
+                        terminated=bool(step.terminated),
+                        truncated=bool(step.truncated),
+                    )
                 obs = step.observation
                 last_info = step.info or {}
                 steps += 1
@@ -1910,6 +1985,8 @@ def _run_eval_episode_batch(
                     terminated=terminated,
                     truncated=truncated,
                 )
+            if stuck_monitor is not None:
+                stuck_monitor.finish_episode(outcome)
 
             logs.append(
                 {
@@ -1955,6 +2032,7 @@ def _evaluate_checkpoint(
     cpp_engine_dir: Optional[str] = None,
     cpp_engine_cache_dir: Optional[str] = None,
     skip_post_eval_render: bool = False,
+    anti_stuck_config: Optional[Any] = None,
 ) -> dict[str, Any]:
     print(f"\n{'='*72}")
     print(f"  Evaluating checkpoint  : {p1_bundle.checkpoint_dir.name}")
@@ -2132,6 +2210,7 @@ def _evaluate_checkpoint(
                 stall_max_single_low_hand_turns=stall_max_single_low_hand_turns,
                 stall_min_attack_hand=stall_min_attack_hand,
                 verbose=verbose,
+                anti_stuck_config=anti_stuck_config,
             )
         else:
             from concurrent.futures import ThreadPoolExecutor, as_completed  # noqa: PLC0415
@@ -2159,6 +2238,7 @@ def _evaluate_checkpoint(
                         stall_max_single_low_hand_turns=stall_max_single_low_hand_turns,
                         stall_min_attack_hand=stall_min_attack_hand,
                         verbose=verbose,
+                        anti_stuck_config=anti_stuck_config,
                     )
                     for batch in batches
                     if batch
@@ -2219,6 +2299,8 @@ def _evaluate_checkpoint(
                     render_dir=eval_dir,
                     player_label=p1_bundle.role,
                     live_frame_path=live_frame_path,
+                    anti_stuck_config=anti_stuck_config,
+                    matchup=p1_bundle.matchup,
                 )
             else:
                 gif_path = eval_dir / "optimal_policy.gif"
@@ -2238,6 +2320,8 @@ def _evaluate_checkpoint(
                     max_steps=render_max_steps,
                     render_dir=render_dir,
                     player_label=p1_bundle.role,
+                    anti_stuck_config=anti_stuck_config,
+                    matchup=p1_bundle.matchup,
                 )
                 if frame_paths:
                     _frames_to_gif(frame_paths, gif_path, fps=gif_fps)
@@ -2464,6 +2548,33 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--anti-stuck-logging",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Log combat log and server state when eval/render episodes appear stuck "
+            "(default: run_manifest anti_stuck_logging or runtime)."
+        ),
+    )
+    parser.add_argument(
+        "--anti-stuck-pass-streak",
+        type=int,
+        default=DEFAULT_ANTI_STUCK_PASS_STREAK,
+        help="Consecutive pass steps with no progress before pass_loop is logged.",
+    )
+    parser.add_argument(
+        "--anti-stuck-no-progress-steps",
+        type=int,
+        default=DEFAULT_ANTI_STUCK_NO_PROGRESS_STEPS,
+        help="Repeated decision points before decision_loop is logged.",
+    )
+    parser.add_argument(
+        "--anti-stuck-repeat-streak",
+        type=int,
+        default=DEFAULT_ANTI_STUCK_REPEAT_STREAK,
+        help="repeat_streak / loop-guard threshold before action_loop is logged.",
+    )
+    parser.add_argument(
         "--companion-to-training",
         action="store_true",
         help=(
@@ -2506,6 +2617,11 @@ def main() -> None:
         log_render_observation,
         read_debug_from_manifest,
     )
+    from fab_bridge.anti_stuck_logging import (  # noqa: PLC0415
+        AntiStuckConfig,
+        configure as configure_anti_stuck,
+        read_from_manifest as read_anti_stuck_from_manifest,
+    )
 
     debug_training = (
         bool(args.debug_training)
@@ -2516,6 +2632,28 @@ def main() -> None:
     debug_log = configure_unified_debug(run_dir=results_dir, enabled=debug_training)
     if debug_log is not None:
         print(f"  Debug log     : {debug_log}")
+
+    anti_stuck_logging = (
+        bool(args.anti_stuck_logging)
+        if args.anti_stuck_logging is not None
+        else read_anti_stuck_from_manifest(results_dir)
+        or RUNTIME.eval_dashboard.anti_stuck_logging
+    )
+    anti_stuck_log = configure_anti_stuck(
+        run_dir=results_dir,
+        enabled=anti_stuck_logging,
+    )
+    if anti_stuck_log is not None:
+        print(f"  Anti-stuck log: {anti_stuck_log}")
+    anti_stuck_config = (
+        AntiStuckConfig(
+            pass_streak=int(args.anti_stuck_pass_streak),
+            no_progress_steps=int(args.anti_stuck_no_progress_steps),
+            repeat_streak=int(args.anti_stuck_repeat_streak),
+        )
+        if anti_stuck_logging
+        else None
+    )
     if not args.assets_path:
         raise SystemExit("TALISHAR_ASSETS_PATH or --assets-path is required")
 
@@ -2628,6 +2766,7 @@ def main() -> None:
                 "render_max_steps": render_max_steps,
                 "poll_seconds": args.poll_seconds,
                 "render_cycle_seconds": render_cycle_seconds,
+                "anti_stuck_config": anti_stuck_config,
             },
             daemon=True,
             name="unified-live-render",
@@ -2692,6 +2831,7 @@ def main() -> None:
                         run_parity=not args.skip_parity,
                         cpp_engine_dir=args.parity_cpp_engine_dir,
                         cpp_engine_cache_dir=args.parity_cpp_engine_cache_dir,
+                        anti_stuck_config=anti_stuck_config,
                     )
                     last_seen_merged_episode = merged_episode
             elif args.companion_to_training:
@@ -2780,6 +2920,7 @@ def main() -> None:
                     cpp_engine_dir=args.parity_cpp_engine_dir,
                     cpp_engine_cache_dir=args.parity_cpp_engine_cache_dir,
                     skip_post_eval_render=skip_post_eval_render,
+                    anti_stuck_config=anti_stuck_config,
                 )
                 last_seen = p1_bundle.checkpoint_dir
             else:

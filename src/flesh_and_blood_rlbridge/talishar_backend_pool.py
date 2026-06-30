@@ -19,6 +19,35 @@ _HEALTH_PROBE_BODY = json.dumps(
     {"gameName": "0", "playerID": 1, "authKey": "", "mode": 99}
 ).encode("utf-8")
 
+_DEFAULT_SHARD_EVICTION_THRESHOLD = 3
+
+
+def shard_eviction_threshold() -> int:
+    raw = os.environ.get("FAB_SHARD_EVICTION_THRESHOLD", "").strip()
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    return _DEFAULT_SHARD_EVICTION_THRESHOLD
+
+
+def is_shard_connection_error(exc: BaseException) -> bool:
+    """True for transport-level Talishar backend failures that warrant eviction."""
+    if isinstance(exc, (ConnectionError, TimeoutError)):
+        return True
+    if isinstance(exc, OSError) and getattr(exc, "errno", None) is not None:
+        return True
+    text = repr(exc)
+    markers = (
+        "RemoteDisconnected",
+        "Connection aborted",
+        "Connection refused",
+        "Max retries exceeded",
+        "Connection reset",
+    )
+    return any(marker in text for marker in markers)
+
 
 def _rlstep_response_ready(
     *,
@@ -224,6 +253,7 @@ class TalisharBackendPool:
     urls: tuple[str, ...]
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _next_index: int = field(default=0, repr=False)
+    _failure_streak: dict[str, int] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
         if not self.urls:
@@ -255,7 +285,91 @@ class TalisharBackendPool:
 
     def url_for_worker(self, worker_index: int) -> str:
         """Map a stable worker slot index to a backend."""
-        return self.urls[int(worker_index) % len(self.urls)]
+        with self._lock:
+            if not self.urls:
+                return DEFAULT_TALISHAR_URL
+            return self.urls[int(worker_index) % len(self.urls)]
+
+    def note_shard_success(self, url: str) -> None:
+        """Reset the consecutive failure counter for a healthy backend."""
+        normalized = normalize_talishar_url(url)
+        with self._lock:
+            self._failure_streak.pop(normalized, None)
+
+    def note_shard_failure(self, url: str) -> bool:
+        """Record a connection failure; evict the shard when the streak is exceeded.
+
+        Returns ``True`` when the shard was evicted from the pool.
+        """
+        normalized = normalize_talishar_url(url)
+        threshold = shard_eviction_threshold()
+        with self._lock:
+            if normalized not in {normalize_talishar_url(u) for u in self.urls}:
+                return False
+            streak = self._failure_streak.get(normalized, 0) + 1
+            self._failure_streak[normalized] = streak
+            if streak < threshold:
+                return False
+            self._evict_unlocked(
+                normalized,
+                reason=f"{streak} consecutive connection failure(s)",
+            )
+            return True
+
+    def pick_replacement(
+        self,
+        failed_url: str,
+        *,
+        worker_index: int | None = None,
+    ) -> str | None:
+        """Return another healthy backend URL, or ``None`` when none remain."""
+        failed = normalize_talishar_url(failed_url)
+        with self._lock:
+            candidates = [
+                url
+                for url in self.urls
+                if normalize_talishar_url(url) != failed
+            ]
+            if not candidates:
+                return None
+            if worker_index is not None:
+                return candidates[int(worker_index) % len(candidates)]
+            return candidates[0]
+
+    def _evict_unlocked(self, url: str, *, reason: str) -> None:
+        normalized = normalize_talishar_url(url)
+        remaining = tuple(
+            backend
+            for backend in self.urls
+            if normalize_talishar_url(backend) != normalized
+        )
+        if len(remaining) == len(self.urls):
+            return
+        if not remaining:
+            return
+        object.__setattr__(self, "urls", remaining)
+        self._failure_streak.pop(normalized, None)
+        print(
+            f"  WARNING: evicted unhealthy Talishar shard {normalized} ({reason}); "
+            f"{len(remaining)} backend(s) remain",
+            flush=True,
+        )
+        try:
+            from fab_bridge.unified_training_debug import (  # noqa: PLC0415
+                log_event,
+                shard_label,
+            )
+
+            log_event(
+                "connection",
+                "Evicted unhealthy Talishar shard",
+                url=normalized,
+                shard=shard_label(normalized),
+                reason=reason,
+                remaining_shards=[shard_label(backend) for backend in remaining],
+            )
+        except Exception:
+            pass
 
     def allocate_url(self) -> str:
         """Thread-safe round-robin assignment for new worker slots."""

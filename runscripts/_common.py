@@ -126,6 +126,7 @@ def start_unified_random_matchups_eval_dashboard(
     companion_to_training: bool = True,
     live_render: bool | None = None,
     debug_training: bool | None = None,
+    anti_stuck_logging: bool | None = None,
 ) -> subprocess.Popen[Any]:
     """Watch unified random matchup checkpoints on the latest trained matchup."""
     _eval = RUNTIME.eval_dashboard
@@ -170,6 +171,15 @@ def start_unified_random_matchups_eval_dashboard(
         args.append("--debug-training")
     else:
         args.append("--no-debug-training")
+    anti_stuck_enabled = (
+        _eval.anti_stuck_logging
+        if anti_stuck_logging is None
+        else bool(anti_stuck_logging)
+    )
+    if anti_stuck_enabled:
+        args.append("--anti-stuck-logging")
+    else:
+        args.append("--no-anti-stuck-logging")
     if cache_dir is not None:
         args.extend(["--cache-dir", str(cache_dir)])
     if companion_to_training:

@@ -9,11 +9,13 @@ import pytest
 
 from flesh_and_blood_rlbridge.talishar_backend_pool import (
     TalisharBackendPool,
+    is_shard_connection_error,
     normalize_talishar_url,
     parse_talishar_urls_string,
     probe_backend_health,
     resolve_eval_backend_url,
     resolve_talishar_backend_urls,
+    shard_eviction_threshold,
 )
 
 
@@ -180,3 +182,71 @@ def test_resolve_excludes_render_shard_from_training(monkeypatch: pytest.MonkeyP
         "http://localhost:8080/game",
         "http://localhost:8081/game",
     )
+
+
+def test_is_shard_connection_error_detects_transport_failures() -> None:
+    assert is_shard_connection_error(ConnectionError("boom"))
+    assert is_shard_connection_error(
+        ConnectionError('MaxRetryError("HTTPConnectionPool: RemoteDisconnected")')
+    )
+    assert not is_shard_connection_error(ValueError("bad action"))
+
+
+def test_note_shard_failure_evicts_after_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FAB_SHARD_EVICTION_THRESHOLD", "2")
+    pool = TalisharBackendPool(
+        urls=(
+            "http://localhost:8080/game",
+            "http://localhost:8081/game",
+            "http://localhost:8082/game",
+        ),
+    )
+    assert not pool.note_shard_failure("http://localhost:8081/game")
+    assert pool.note_shard_failure("http://localhost:8081/game")
+    assert pool.urls == (
+        "http://localhost:8080/game",
+        "http://localhost:8082/game",
+    )
+
+
+def test_note_shard_failure_does_not_evict_last_backend() -> None:
+    pool = TalisharBackendPool(urls=("http://localhost:8080/game",))
+    pool.note_shard_failure("http://localhost:8080/game")
+    pool.note_shard_failure("http://localhost:8080/game")
+    pool.note_shard_failure("http://localhost:8080/game")
+    assert pool.urls == ("http://localhost:8080/game",)
+
+
+def test_pick_replacement_skips_failed_backend() -> None:
+    pool = TalisharBackendPool(
+        urls=(
+            "http://localhost:8080/game",
+            "http://localhost:8081/game",
+        ),
+    )
+    assert pool.pick_replacement(
+        "http://localhost:8081/game",
+        worker_index=1,
+    ) == "http://localhost:8080/game"
+
+
+def test_note_shard_success_resets_failure_streak(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FAB_SHARD_EVICTION_THRESHOLD", "2")
+    pool = TalisharBackendPool(
+        urls=(
+            "http://localhost:8080/game",
+            "http://localhost:8081/game",
+        ),
+    )
+    pool.note_shard_failure("http://localhost:8081/game")
+    pool.note_shard_success("http://localhost:8081/game")
+    assert not pool.note_shard_failure("http://localhost:8081/game")
+    assert pool.urls == (
+        "http://localhost:8080/game",
+        "http://localhost:8081/game",
+    )
+
+
+def test_shard_eviction_threshold_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FAB_SHARD_EVICTION_THRESHOLD", "5")
+    assert shard_eviction_threshold() == 5

@@ -295,6 +295,10 @@ def run_eval_dashboard(spec: EvalSpec, env: EnvironmentSettings) -> int:
         cmd.append("--watch")
     if spec.render_only:
         cmd.append("--render-only")
+    if spec.anti_stuck_logging:
+        cmd.append("--anti-stuck-logging")
+    else:
+        cmd.append("--no-anti-stuck-logging")
     return run_streaming(cmd)
 
 
@@ -751,6 +755,7 @@ def run_unified_random_matchups(
                 cache_dir=cache_dir,
                 live_render=True,
                 debug_training=spec.debug_training,
+                anti_stuck_logging=spec.anti_stuck_logging,
             )
         return run_streaming(cmd)
     finally:

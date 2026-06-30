@@ -113,6 +113,7 @@ from .state_loop_guard import (
     DEFAULT_LOOP_REPEAT_THRESHOLD,
     DEFAULT_MAX_STEPS_PER_TURN,
     TurnLoopGuard,
+    board_state_fingerprint,
     first_pass_action,
 )
 from .talishar_default_policy import (
@@ -1139,6 +1140,51 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             tail_events=tail_events,
             tail_log_lines=tail_log_lines,
         )
+
+    def get_server_report(self, *, tail_log_lines: int = 40) -> dict[str, Any]:
+        """Compact Talishar server state snapshot for stuck-game diagnostics."""
+        state = self._last_state or {}
+        legal_raw = self._legal_actions(state) if state else []
+        legal = self._filter_legal_actions(state, legal_raw) if state else []
+        snapshot = (
+            self._tracker_state_snapshot(state, legal)
+            if state
+            else {
+                "acting_player_id": int(self._acting_player_id),
+                "turn_no": 0,
+                "phase": "",
+                "player_health": 0,
+                "opponent_health": 0,
+                "legal_count": 0,
+            }
+        )
+        chat_lines = extract_talishar_chat_log_lines(state.get("chatLog", ""))
+        game_name = str(
+            state.get("gameName")
+            or state.get("gameID")
+            or state.get("game")
+            or ""
+        )
+        return {
+            **snapshot,
+            "have_priority": bool(state.get("havePriority", False)),
+            "game_over": self._is_game_over(state) if state else False,
+            "game_name": game_name,
+            "gamestate_revert": (
+                talishar_gamestate_revert_detected(state) if state else False
+            ),
+            "legal_actions": [
+                {
+                    "action_code": int(_dp_to_int(a.get("action_code", 0))),
+                    "label": str(a.get("label", "") or ""),
+                    "zone": str(a.get("zone", "") or ""),
+                    "button_input": str(a.get("button_input", "") or ""),
+                }
+                for a in legal[:40]
+            ],
+            "combat_log": chat_lines[-tail_log_lines:],
+            "board_fingerprint": board_state_fingerprint(state) if state else "",
+        }
 
     def get_combat_trace(self) -> list[dict[str, Any]]:
         """Return the full per-step trace captured by the combat tracker."""

@@ -82,7 +82,7 @@ class MetaUnifiedRandomMatchups:
     # Continuous optimal-policy PNG on the render shard during unified training.
     optimal_policy_live_render: bool = True
     # Write unified_training_debug.jsonl with connection/episode/deck/render details.
-    debug_training: bool = False
+    debug_training: bool = True
     # cpp engine is not implemented fully to match talishar engine, so we disable it by default
     build_cpp_engine: bool = False
     require_cpp_engine: bool = False
@@ -137,6 +137,12 @@ class MetaRuntime:
     eval_poll_seconds: int = 30
     gif_fps: float = 3.0
     gif_fps_matchup_sim: float = 2.0
+
+    # ── Eval/render anti-stuck diagnostics ───────────────────────────────────
+    anti_stuck_logging: bool = True
+    anti_stuck_pass_streak: int = 8
+    anti_stuck_no_progress_steps: int = 6
+    anti_stuck_repeat_streak: int = 5
 
     # ── Fast rollout parallelism ─────────────────────────────────────────────
     rollout: MetaRolloutControls = field(default_factory=MetaRolloutControls)
@@ -252,6 +258,10 @@ class EvalDashboardDefaults:
     poll_seconds: int = 30
     render_cycle_seconds: float = 3.0
     gif_fps: int = 3
+    anti_stuck_logging: bool = False
+    anti_stuck_pass_streak: int = 8
+    anti_stuck_no_progress_steps: int = 6
+    anti_stuck_repeat_streak: int = 5
 
 
 @dataclass(frozen=True)
@@ -542,6 +552,10 @@ def build_runtime(meta: MetaRuntime) -> RuntimeDefaults:
             max_steps=meta.eval_max_steps,
             poll_seconds=meta.eval_poll_seconds,
             gif_fps=int(meta.gif_fps),
+            anti_stuck_logging=meta.anti_stuck_logging,
+            anti_stuck_pass_streak=meta.anti_stuck_pass_streak,
+            anti_stuck_no_progress_steps=meta.anti_stuck_no_progress_steps,
+            anti_stuck_repeat_streak=meta.anti_stuck_repeat_streak,
         ),
         dual_matchup=DualMatchupDefaults(
             episodes=meta.play_episodes,
@@ -600,6 +614,11 @@ DEFAULT_STALL_NO_DAMAGE_TURNS = RUNTIME.game.stall_no_damage_turns
 DEFAULT_STALL_LOW_HAND_TURNS = RUNTIME.game.stall_low_hand_turns
 DEFAULT_STALL_MAX_SINGLE_LOW_HAND_TURNS = RUNTIME.game.stall_max_single_low_hand_turns
 DEFAULT_STALL_MIN_ATTACK_HAND = RUNTIME.game.stall_min_attack_hand
+
+DEFAULT_ANTI_STUCK_LOGGING = RUNTIME.eval_dashboard.anti_stuck_logging
+DEFAULT_ANTI_STUCK_PASS_STREAK = RUNTIME.eval_dashboard.anti_stuck_pass_streak
+DEFAULT_ANTI_STUCK_NO_PROGRESS_STEPS = RUNTIME.eval_dashboard.anti_stuck_no_progress_steps
+DEFAULT_ANTI_STUCK_REPEAT_STREAK = RUNTIME.eval_dashboard.anti_stuck_repeat_streak
 
 DEFAULT_MAX_STEPS_PER_TURN = RUNTIME.engine.max_steps_per_turn
 DEFAULT_LOOP_REPEAT_THRESHOLD = RUNTIME.engine.loop_repeat_threshold

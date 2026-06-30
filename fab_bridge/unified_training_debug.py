@@ -37,10 +37,20 @@ def configure(*, run_dir: Path | str, enabled: bool) -> Path | None:
         "on",
     }
     with _LOCK:
-        _ENABLED = bool(enabled) or env_on
-        _RUN_DIR = Path(run_dir).expanduser().resolve()
-        _LOG_PATH = _RUN_DIR / "unified_training_debug.jsonl" if _ENABLED else None
-        if _ENABLED and _LOG_PATH is not None:
+        new_run_dir = Path(run_dir).expanduser().resolve()
+        will_enable = bool(enabled) or env_on
+        new_log_path = (
+            new_run_dir / "unified_training_debug.jsonl" if will_enable else None
+        )
+        already_configured = (
+            _LOG_PATH is not None
+            and new_log_path is not None
+            and _LOG_PATH == new_log_path
+        )
+        _ENABLED = will_enable
+        _RUN_DIR = new_run_dir
+        _LOG_PATH = new_log_path
+        if _ENABLED and _LOG_PATH is not None and not already_configured:
             _RUN_DIR.mkdir(parents=True, exist_ok=True)
             _write_unlocked(
                 "debug",
@@ -266,7 +276,12 @@ def log_render_observation(
     acting = obs_data.get("actingPlayerID")
     p1_hp = obs_data.get("p1Health", obs_data.get("playerHealth"))
     p2_hp = obs_data.get("p2Health", obs_data.get("opponentHealth"))
-    suspicious = turn_no <= 0 or p1_hp in (0, "0", None) or p2_hp in (0, "0", None)
+    at_reset = turn_no == 0
+    suspicious = (
+        turn_no < 0
+        or p1_hp in (0, "0", None)
+        or p2_hp in (0, "0", None)
+    )
     payload = {
         **details,
         "turn_no": turn_no,
@@ -274,6 +289,7 @@ def log_render_observation(
         "p1_hp": p1_hp,
         "p2_hp": p2_hp,
         "legal_actions": len(obs_data.get("legalActions", []) or []),
+        "at_reset": at_reset,
         "suspicious_init": suspicious,
     }
     category = "render_init" if suspicious else "render"

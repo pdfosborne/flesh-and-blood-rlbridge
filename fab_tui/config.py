@@ -290,6 +290,7 @@ class EvalSpec:
     poll_seconds: int = RUNTIME.tui.eval_poll_seconds
     candidate_id: str | None = None
     render_only: bool = False
+    anti_stuck_logging: bool = RUNTIME.eval_dashboard.anti_stuck_logging
 
 
 @dataclass
@@ -384,6 +385,7 @@ class UnifiedRandomMatchupSpec:
         RUNTIME.unified_random_matchups.optimal_policy_live_render
     )
     debug_training: bool = RUNTIME.unified_random_matchups.debug_training
+    anti_stuck_logging: bool = RUNTIME.eval_dashboard.anti_stuck_logging
     workers: int = RUNTIME.unified_random_matchups.workers
     parallel_matchups: int = RUNTIME.unified_random_matchups.parallel_matchups
     safe_parallel: bool = RUNTIME.unified_random_matchups.safe_parallel

@@ -55,6 +55,10 @@ def main(argv: list[str] | None = None) -> int:
     stall_min_attack_hand = env_or_default(
         "STALL_MIN_ATTACK_HAND", str(_game.stall_min_attack_hand),
     )
+    anti_stuck_logging = env_or_default(
+        "ANTI_STUCK_LOGGING",
+        "1" if _eval.anti_stuck_logging else "0",
+    )
     gif_fps = env_or_default("GIF_FPS", str(_eval.gif_fps))
 
     parity_args: list[str] = []
@@ -92,6 +96,12 @@ def main(argv: list[str] | None = None) -> int:
         stall_max_single_low_hand_turns,
         "--stall-min-attack-hand",
         stall_min_attack_hand,
+    ]
+    if anti_stuck_logging.strip().lower() in {"1", "true", "yes", "on"}:
+        cmd.append("--anti-stuck-logging")
+    else:
+        cmd.append("--no-anti-stuck-logging")
+    cmd.extend([
         "--watch",
         "--poll-seconds",
         poll_seconds,
@@ -99,7 +109,7 @@ def main(argv: list[str] | None = None) -> int:
         gif_fps,
         *parity_args,
         *argv,
-    ]
+    ])
     return run_python(SCRIPTS_EVAL / "eval_phase3_checkpoint.py", *cmd)
 
 

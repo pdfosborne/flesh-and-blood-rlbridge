@@ -51,3 +51,53 @@ def test_read_debug_from_manifest(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     assert debug.read_debug_from_manifest(tmp_path) is True
+
+
+def test_configure_does_not_duplicate_enabled_line(tmp_path: Path) -> None:
+    debug.configure(run_dir=tmp_path, enabled=True)
+    debug.configure(run_dir=tmp_path, enabled=True)
+    lines = (tmp_path / "unified_training_debug.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    enabled_lines = [
+        line for line in lines
+        if json.loads(line).get("message") == "Unified training debug logging enabled"
+    ]
+    assert len(enabled_lines) == 1
+
+
+def test_log_render_observation_turn_zero_not_suspicious(tmp_path: Path) -> None:
+    debug.configure(run_dir=tmp_path, enabled=True)
+    debug.log_render_observation(
+        {
+            "turnNo": 0,
+            "actingPlayerID": 1,
+            "p1Health": 20,
+            "p2Health": 20,
+            "legalActions": [{"id": 1}, {"id": 2}],
+        },
+        message="Render episode reset observation",
+    )
+    record = json.loads(
+        (tmp_path / "unified_training_debug.jsonl").read_text(encoding="utf-8").strip().splitlines()[-1]
+    )
+    assert record["category"] == "render"
+    assert record["details"]["at_reset"] is True
+    assert record["details"]["suspicious_init"] is False
+
+
+def test_log_render_observation_zero_hp_is_suspicious(tmp_path: Path) -> None:
+    debug.configure(run_dir=tmp_path, enabled=True)
+    debug.log_render_observation(
+        {
+            "turnNo": 1,
+            "actingPlayerID": 1,
+            "p1Health": 0,
+            "p2Health": 20,
+            "legalActions": [],
+        },
+        message="Render episode reset observation",
+    )
+    record = json.loads(
+        (tmp_path / "unified_training_debug.jsonl").read_text(encoding="utf-8").strip().splitlines()[-1]
+    )
+    assert record["category"] == "render_init"
+    assert record["details"]["suspicious_init"] is True

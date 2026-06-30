@@ -61,7 +61,10 @@ from flesh_and_blood_rlbridge.talishar_engine_environment import (  # noqa: E402
     TalisharEngineEnvironment,
     run_talishar_eval_episode,
 )
-from flesh_and_blood_rlbridge.talishar_backend_pool import TalisharBackendPool  # noqa: E402
+from flesh_and_blood_rlbridge.talishar_backend_pool import (  # noqa: E402
+    TalisharBackendPool,
+    is_shard_connection_error,
+)
 from flesh_and_blood_rlbridge.player_observation import (  # noqa: E402
     ACTION_CAPACITY,
     PLAYER_OBS_SCHEMA_VERSION,
@@ -933,6 +936,150 @@ def _skipped_fast_episode_result(*, warmup: bool) -> dict[str, Any]:
     }
 
 
+def _episode_result_is_skipped(result: dict[str, Any]) -> bool:
+    return (
+        not result.get("p1_transitions")
+        and not result.get("p2_transitions")
+        and not int(result.get("steps") or 0)
+    )
+
+
+def _rebind_worker_env(
+    env: TalisharEngineEnvironment,
+    swap_env: TalisharEngineEnvironment | None,
+    *,
+    matchup: Matchup,
+    swap_matchup: Matchup,
+    base_url: str,
+    game_format: str,
+    max_turns: int,
+    worker_index: int | None = None,
+    worker_base_urls: list[str] | None = None,
+) -> str:
+    """Point a worker env (and optional swapped deck env) at a new Talishar backend."""
+    try:
+        env.close()
+    except Exception:
+        pass
+    if swap_env is not None:
+        try:
+            swap_env.close()
+        except Exception:
+            pass
+    new_env = make_env(
+        matchup,
+        base_url=base_url,
+        game_format=game_format,
+        max_turns=max_turns,
+    )
+    env.__dict__.update(new_env.__dict__)
+    if swap_env is not None:
+        new_swap = make_env(
+            swap_matchup,
+            base_url=base_url,
+            game_format=game_format,
+            max_turns=max_turns,
+        )
+        swap_env.__dict__.update(new_swap.__dict__)
+    if worker_base_urls is not None and worker_index is not None:
+        worker_base_urls[worker_index] = base_url
+    return base_url
+
+
+def _retry_fast_episode_on_healthy_shards(
+    env: TalisharEngineEnvironment,
+    swap_env: TalisharEngineEnvironment | None,
+    *,
+    worker: int,
+    p1_policy: PPOAgent,
+    p2_policy: PPOAgent,
+    max_steps: int,
+    warmup: bool,
+    episode_index: int,
+    seed_base: Optional[int],
+    rollout_mode: str,
+    talishar_pool: TalisharBackendPool | None,
+    matchup: Matchup | None,
+    swap_matchup: Matchup | None,
+    game_format: str,
+    worker_base_urls: list[str] | None = None,
+) -> dict[str, Any]:
+    """Run one fast episode, rebind to another shard after connection failures."""
+    max_attempts = max(1, len(talishar_pool.urls)) if talishar_pool else 1
+    swap_slice = [swap_env] if swap_env is not None else None
+    last_exc: BaseException | None = None
+
+    for _attempt in range(max_attempts):
+        try:
+            result = _run_parallel_fast_episode_batch(
+                [env],
+                p1_policy,
+                p2_policy,
+                max_steps=max_steps,
+                warmup=warmup,
+                episode_indices=[episode_index],
+                seed_base=seed_base,
+                swap_envs=swap_slice,
+                rollout_mode=rollout_mode,
+                max_workers=1,
+            )[0]
+            if talishar_pool is not None:
+                talishar_pool.note_shard_success(getattr(env, "_base_url", "") or "")
+            return result
+        except Exception as exc:
+            last_exc = exc
+            failed_url = getattr(env, "_base_url", "") or ""
+            can_rebind = (
+                talishar_pool is not None
+                and matchup is not None
+                and swap_matchup is not None
+                and game_format
+                and is_shard_connection_error(exc)
+            )
+            if can_rebind:
+                talishar_pool.note_shard_failure(failed_url)
+                replacement = talishar_pool.pick_replacement(
+                    failed_url,
+                    worker_index=worker,
+                )
+                if replacement and replacement != failed_url:
+                    _rebind_worker_env(
+                        env,
+                        swap_env,
+                        matchup=matchup,
+                        swap_matchup=swap_matchup,
+                        base_url=replacement,
+                        game_format=game_format,
+                        max_turns=max_steps,
+                        worker_index=worker,
+                        worker_base_urls=worker_base_urls,
+                    )
+                    continue
+            break
+
+    print(
+        f"  [parallel] episode failed ({last_exc!r}) — will retry without counting",
+        flush=True,
+    )
+    try:
+        from fab_bridge.unified_training_debug import (  # noqa: PLC0415
+            log_exception as unified_debug_exception,
+            shard_label,
+        )
+
+        unified_debug_exception(
+            "episode_failed",
+            "Fast episode failed after shard retries",
+            last_exc or RuntimeError("episode failed"),
+            worker=worker,
+            shard=shard_label(getattr(env, "_base_url", "") or ""),
+            episode_index=episode_index,
+        )
+    except Exception:
+        pass
+    return _skipped_fast_episode_result(warmup=warmup)
+
+
 def _safe_parallel_fast_episode_batch(
     envs: list[TalisharEngineEnvironment],
     p1_policy: PPOAgent,
@@ -945,11 +1092,16 @@ def _safe_parallel_fast_episode_batch(
     swap_envs: Optional[list[TalisharEngineEnvironment]] = None,
     rollout_mode: str = DEFAULT_ROLLOUT_MODE,
     max_workers: int = 1,
+    talishar_pool: TalisharBackendPool | None = None,
+    matchup: Matchup | None = None,
+    swap_matchup: Matchup | None = None,
+    game_format: str = "",
+    worker_base_urls: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Run a fast rollout batch; isolate failures to individual episodes."""
     batch_size = len(envs)
     try:
-        return _run_parallel_fast_episode_batch(
+        results = _run_parallel_fast_episode_batch(
             envs,
             p1_policy,
             p2_policy,
@@ -961,6 +1113,10 @@ def _safe_parallel_fast_episode_batch(
             rollout_mode=rollout_mode,
             max_workers=max_workers,
         )
+        if talishar_pool is not None:
+            for env in envs[:batch_size]:
+                talishar_pool.note_shard_success(getattr(env, "_base_url", "") or "")
+        return results
     except Exception as exc:
         print(
             f"  [parallel] fast batch failed ({exc!r}) — "
@@ -990,41 +1146,26 @@ def _safe_parallel_fast_episode_batch(
 
     results: list[dict[str, Any]] = []
     for worker in range(batch_size):
-        swap_slice = swap_envs[worker : worker + 1] if swap_envs is not None else None
-        try:
-            one = _run_parallel_fast_episode_batch(
-                envs[worker : worker + 1],
-                p1_policy,
-                p2_policy,
+        swap_env = swap_envs[worker] if swap_envs is not None else None
+        results.append(
+            _retry_fast_episode_on_healthy_shards(
+                envs[worker],
+                swap_env,
+                worker=worker,
+                p1_policy=p1_policy,
+                p2_policy=p2_policy,
                 max_steps=max_steps,
                 warmup=warmup,
-                episode_indices=[episode_indices[worker]],
+                episode_index=episode_indices[worker],
                 seed_base=(seed_base + worker) if seed_base is not None else None,
-                swap_envs=swap_slice,
                 rollout_mode=rollout_mode,
-                max_workers=1,
+                talishar_pool=talishar_pool,
+                matchup=matchup,
+                swap_matchup=swap_matchup,
+                game_format=game_format,
+                worker_base_urls=worker_base_urls,
             )
-            results.append(one[0])
-        except Exception as exc:
-            print(f"  [parallel] episode failed ({exc!r}) — skipping", flush=True)
-            try:
-                from fab_bridge.unified_training_debug import (  # noqa: PLC0415
-                    log_exception as unified_debug_exception,
-                    shard_label,
-                )
-
-                env = envs[worker]
-                unified_debug_exception(
-                    "episode_failed",
-                    "Fast episode failed after batch retry",
-                    exc,
-                    worker=worker,
-                    shard=shard_label(getattr(env, "_base_url", "") or ""),
-                    episode_index=episode_indices[worker],
-                )
-            except Exception:
-                pass
-            results.append(_skipped_fast_episode_result(warmup=warmup))
+        )
     return results
 
 
@@ -2491,7 +2632,7 @@ def train_agents_from_both_perspectives_parallel(
     swap_matchup = swapped_matchup(matchup)
     if not use_process_rollouts:
         for w in range(batch_parallelism):
-            worker_url = talishar_pool.allocate_url()
+            worker_url = talishar_pool.url_for_worker(w)
             worker_base_urls.append(worker_url)
             envs.append(
                 make_env(
@@ -2572,6 +2713,8 @@ def train_agents_from_both_perspectives_parallel(
     ppo_unified_accum: list[dict[str, Any]] = []
     warmup_bc_applied = warmup_episodes <= 0
     use_unified_policy = _uses_unified_policy(p1_tiers, p2_tiers)
+    consecutive_all_skipped_batches = 0
+    max_consecutive_skip_batches = max(10, len(talishar_pool.urls) * 3)
 
     try:
         with ThreadPoolExecutor(max_workers=batch_parallelism) as pool:
@@ -2618,6 +2761,11 @@ def train_agents_from_both_perspectives_parallel(
                         swap_envs=swap_envs[:batch_size],
                         rollout_mode=resolved_rollout_mode,
                         max_workers=batch_size,
+                        talishar_pool=talishar_pool,
+                        matchup=matchup,
+                        swap_matchup=swap_matchup,
+                        game_format=game_format,
+                        worker_base_urls=worker_base_urls,
                     )
                 else:
                     futures = {}
@@ -2700,12 +2848,6 @@ def train_agents_from_both_perspectives_parallel(
                             except Exception:
                                 pass
                             skipped_episodes += 1
-                            p1_ep_rewards.append(0.0)
-                            p2_ep_rewards.append(0.0)
-                            p1_outcomes.append(
-                                classify_p1_episode_outcome(skipped=True)
-                            )
-                            completed += 1
                             if on_episodes_progress is not None:
                                 try:
                                     on_episodes_progress(
@@ -2721,17 +2863,10 @@ def train_agents_from_both_perspectives_parallel(
                     if shutdown_flag:
                         break
 
+                batch_had_success = False
                 for result in result_iter:
-                    if (
-                        not result.get("p1_transitions")
-                        and not result.get("p2_transitions")
-                        and not int(result.get("steps") or 0)
-                    ):
+                    if _episode_result_is_skipped(result):
                         skipped_episodes += 1
-                        p1_ep_rewards.append(0.0)
-                        p2_ep_rewards.append(0.0)
-                        p1_outcomes.append(classify_p1_episode_outcome(skipped=True))
-                        completed += 1
                         if on_episodes_progress is not None:
                             try:
                                 on_episodes_progress(
@@ -2746,6 +2881,7 @@ def train_agents_from_both_perspectives_parallel(
                                     f"  [parallel] progress callback failed ({exc!r})"
                                 )
                         continue
+                    batch_had_success = True
                     if use_unified_policy:
                         batch_unified_trans.extend(
                             _merge_episode_transitions(
@@ -2810,6 +2946,17 @@ def train_agents_from_both_perspectives_parallel(
                             )
                         except Exception as exc:
                             print(f"  [parallel] progress callback failed ({exc!r})")
+                if not batch_had_success and batch_size > 0:
+                    consecutive_all_skipped_batches += 1
+                    if consecutive_all_skipped_batches >= max_consecutive_skip_batches:
+                        raise RuntimeError(
+                            "All Talishar training shards failed repeatedly; "
+                            f"no successful episodes in the last "
+                            f"{consecutive_all_skipped_batches} batch(es). "
+                            "Check docker Talishar backends and retry."
+                        )
+                else:
+                    consecutive_all_skipped_batches = 0
                 if shutdown_flag:
                     break
 

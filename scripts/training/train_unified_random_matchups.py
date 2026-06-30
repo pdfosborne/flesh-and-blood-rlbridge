@@ -111,6 +111,12 @@ def _parse_args() -> argparse.Namespace:
         default=_UR.debug_training,
         help="Log detailed errors to unified_training_debug.jsonl in the run folder.",
     )
+    parser.add_argument(
+        "--anti-stuck-logging",
+        action=argparse.BooleanOptionalAction,
+        default=RUNTIME.eval_dashboard.anti_stuck_logging,
+        help="Log eval/render stuck-game diagnostics to anti_stuck_reports.jsonl.",
+    )
     parser.add_argument("--seed", type=int, default=_UR.seed)
     parser.add_argument(
         "--workers",
@@ -268,6 +274,7 @@ def main() -> None:
         "parallel_matchups": max(1, int(args.parallel_matchups)),
         "safe_parallel": bool(args.safe_parallel),
         "debug_training": bool(args.debug_training),
+        "anti_stuck_logging": bool(args.anti_stuck_logging),
         "optimal_policy_live_render": bool(args.optimal_policy_live_render),
         "talishar_backends": list(backend_pool.urls),
         "talishar_eval_url": eval_url,
@@ -342,6 +349,7 @@ def main() -> None:
                 cache_dir=args.cache_dir,
                 live_render=True,
                 debug_training=bool(args.debug_training),
+                anti_stuck_logging=bool(args.anti_stuck_logging),
             )
         unified_debug_event(
             "matchup_load",

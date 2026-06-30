@@ -88,8 +88,8 @@ def execute_rollout_worker_job(payload: dict[str, Any]) -> dict[str, Any]:
 
     envs = []
     swap_envs = []
-    for _ in range(n_envs):
-        worker_url = talishar_pool.allocate_url()
+    for worker_idx in range(n_envs):
+        worker_url = talishar_pool.url_for_worker(worker_idx)
         envs.append(
             make_env(
                 matchup,
@@ -174,8 +174,8 @@ def collect_rollout_batch(
 
         envs = []
         swap_envs = []
-        for _ in range(n_workers):
-            worker_url = talishar_pool.allocate_url()
+        for worker_idx in range(n_workers):
+            worker_url = talishar_pool.url_for_worker(worker_idx)
             envs.append(
                 make_env(
                     matchup,
