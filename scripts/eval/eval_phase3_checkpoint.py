@@ -1812,6 +1812,15 @@ def _run_eval_episode_batch(
     )
 
     combat_tracker_on = anti_stuck_config is not None and anti_stuck_enabled()
+    macro_stall_kw = dict(game_env_kwargs(RUNTIME.game))
+    macro_stall_kw.update(
+        {
+            "stall_no_damage_turns": stall_no_damage_turns,
+            "stall_low_hand_turns": stall_low_hand_turns,
+            "stall_max_single_low_hand_turns": stall_max_single_low_hand_turns,
+            "stall_min_attack_hand": stall_min_attack_hand,
+        }
+    )
     env = TalisharEngineEnvironment(
         base_url=base_url,
         frontend_url=None,
@@ -1825,11 +1834,7 @@ def _run_eval_episode_batch(
         talishar_backend=DEFAULT_TALISHAR_BACKEND,
         verbose=verbose,
         enable_combat_tracker=combat_tracker_on,
-        **game_env_kwargs(RUNTIME.game),
-        stall_no_damage_turns=stall_no_damage_turns,
-        stall_low_hand_turns=stall_low_hand_turns,
-        stall_max_single_low_hand_turns=stall_max_single_low_hand_turns,
-        stall_min_attack_hand=stall_min_attack_hand,
+        **macro_stall_kw,
     )
     logs: list[dict[str, Any]] = []
     _ANTI_STALL_STREAK = 5
@@ -2534,10 +2539,23 @@ def main() -> None:
 
     if args.talishar_url is None:
         from flesh_and_blood_rlbridge.talishar_backend_pool import (  # noqa: PLC0415
+            pick_healthy_eval_backend,
             resolve_eval_backend_url,
         )
 
-        args.talishar_url = resolve_eval_backend_url()
+        fallback = resolve_eval_backend_url()
+        try:
+            args.talishar_url, _probe_status = pick_healthy_eval_backend(
+                fallback_url=fallback,
+                assets_path=args.assets_path,
+            )
+        except RuntimeError as exc:
+            print(
+                f"  WARNING: eval game-start probe failed ({exc!r}); "
+                f"using configured eval URL {fallback}",
+                flush=True,
+            )
+            args.talishar_url = fallback
 
     if args.talishar_render_url is None:
         from flesh_and_blood_rlbridge.talishar_backend_pool import (  # noqa: PLC0415

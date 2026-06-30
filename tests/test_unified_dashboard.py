@@ -45,7 +45,7 @@ def test_collect_and_render_dashboard(tmp_path: Path) -> None:
     matchup_dir = run_dir / "match_a"
     matchup_dir.mkdir()
     (matchup_dir / "matchup_label.json").write_text(
-        json.dumps({"name": "a-vs-b"}),
+        json.dumps({"name": "a-vs-b", "p1_hero": "viserai", "p2_hero": "kayo"}),
         encoding="utf-8",
     )
     (run_dir / "checkpoint_eval_scope.json").write_text(
@@ -100,6 +100,7 @@ def test_collect_and_render_dashboard(tmp_path: Path) -> None:
                     "matchup": "a-vs-b",
                     "episodes_completed": 200,
                     "p1_win_rate": 0.51,
+                    "p2_win_rate": 0.49,
                     "p1_wins": 51,
                     "p2_wins": 49,
                     "timeout_rate": 0.01,
@@ -185,9 +186,10 @@ def test_collect_and_render_dashboard(tmp_path: Path) -> None:
     assert "Training progress" in html
     assert "Checkpoint eval (active batch)" in html
     assert html.count("<th>Matchup</th>") == 2
-    assert "Agent win% vs logic" in html
-    assert "Logic vs agent win%" in html
-    assert "Agent win% vs agent" in html
+    assert "Vs logic win% (Hero 1)" in html
+    assert "Logic win% vs agent (Hero 2)" in html
+    assert "Agent vs agent (Hero 1 win%)" in html
+    assert "(Hero 1) vs" in html
     assert "Timeout %" in html
     assert "class=\"summary\"" not in html
     assert "class=\"metrics\"" not in html
@@ -307,8 +309,8 @@ def test_parallel_active_matchups_and_aggregate(tmp_path: Path) -> None:
     assert ep200["n_matchups"] == 2
 
     html = render_unified_random_matchups_html(state)
-    assert "a-vs-b" in html
-    assert "c-vs-d" in html
+    assert "(Hero 1) vs" in html
+    assert "c-vs-d" in html or "(Hero 2)" in html
     assert "matchup-progress" in html
 
 
@@ -382,6 +384,7 @@ def test_merged_checkpoint_eval_dashboard(tmp_path: Path) -> None:
             "match_a": {"name": "a-vs-b"},
             "match_b": {"name": "c-vs-d"},
         },
+        run_dir=run_dir,
     )
     assert len(rows) == 2
     assert rows[0]["eval_episodes"] == 50
@@ -481,6 +484,117 @@ def test_dashboard_shows_logic_vs_logic_baseline_before_checkpoint(
     assert row["eval_episodes"] == 20
 
     html = render_unified_random_matchups_html(state)
-    assert "Logic win% vs logic" in html
+    assert "Logic vs logic (Hero 1 win%)" in html
     assert "48.0%" in html
     assert "baseline" in html
+
+
+def test_chart_uses_self_play_when_merged_aggregate_null(tmp_path: Path) -> None:
+    run_dir = _write_run(tmp_path)
+    match_a = run_dir / "match_a"
+    match_b = run_dir / "match_b"
+    for subdir, name in (("match_a", "a-vs-b"), ("match_b", "c-vs-d")):
+        subdir_path = run_dir / subdir
+        subdir_path.mkdir()
+        (subdir_path / "matchup_label.json").write_text(
+            json.dumps({"name": name}),
+            encoding="utf-8",
+        )
+        (subdir_path / "checkpoint_eval_history.json").write_text(
+            json.dumps(
+                [
+                    {
+                        "matchup": name,
+                        "episodes_completed": 50,
+                        "eval_episodes": 5,
+                        "p1_win_rate": 0.6 if subdir == "match_a" else 0.4,
+                        "eval_mode": "self_play",
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
+    (run_dir / "checkpoint_eval_history.json").write_text(
+        json.dumps(
+            [
+                {
+                    "eval_mode": "merged",
+                    "status": "error",
+                    "episodes_completed": 50,
+                    "aggregate": {},
+                    "per_matchup": {},
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    update_unified_matchup_live(
+        run_dir,
+        "match_a",
+        name="a-vs-b",
+        episodes_completed=50,
+        status="training",
+    )
+    update_unified_matchup_live(
+        run_dir,
+        "match_b",
+        name="c-vs-d",
+        episodes_completed=50,
+        status="training",
+    )
+
+    state = collect_unified_run_state(run_dir)
+    points = state["checkpoint_aggregate_points"]
+    assert points
+    assert points[0]["win_rate_mean"] == pytest.approx(0.5)
+    html = render_unified_random_matchups_html(state)
+    assert "agent vs agent mean" in html
+    assert "agent vs logic mean" not in html
+
+
+def test_chart_hides_vs_logic_columns_without_data(tmp_path: Path) -> None:
+    run_dir = _write_run(tmp_path)
+    matchup_dir = run_dir / "match_a"
+    matchup_dir.mkdir()
+    (matchup_dir / "matchup_label.json").write_text(
+        json.dumps({"name": "a-vs-b"}),
+        encoding="utf-8",
+    )
+    (matchup_dir / "checkpoint_eval_history.json").write_text(
+        json.dumps(
+            [
+                {
+                    "matchup": "a-vs-b",
+                    "episodes_completed": 50,
+                    "eval_episodes": 5,
+                    "p1_win_rate": 0.55,
+                    "eval_mode": "self_play",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "run_manifest.json").write_text(
+        json.dumps(
+            {
+                "format": "silver_age",
+                "matchups_requested": 1,
+                "episodes_per_matchup": 1000,
+                "checkpoint_eval_logic_vs_logic": False,
+                "checkpoint_eval_agent_vs_logic": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    update_unified_matchup_live(
+        run_dir,
+        "match_a",
+        name="a-vs-b",
+        episodes_completed=50,
+        status="training",
+    )
+
+    html = render_unified_random_matchups_html(collect_unified_run_state(run_dir))
+    assert "Agent vs agent (Hero 1 win%)" in html
+    assert "Vs logic win% (Hero 1)" not in html
+    assert "Logic vs logic (Hero 1 win%)" not in html

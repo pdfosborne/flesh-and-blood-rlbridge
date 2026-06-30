@@ -10,6 +10,7 @@ import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Iterable, Optional
 
 from .talishar_fast_client import DEFAULT_TALISHAR_URL, TalisharFastClient
@@ -45,6 +46,22 @@ def is_shard_connection_error(exc: BaseException) -> bool:
         "Connection refused",
         "Max retries exceeded",
         "Connection reset",
+    )
+    return any(marker in text for marker in markers)
+
+
+def is_shard_reset_error(exc: BaseException) -> bool:
+    """True when a shard cannot start a game (Start.php / CreateGame failures)."""
+    if is_shard_connection_error(exc):
+        return True
+    text = repr(exc)
+    markers = (
+        "Start.php returned non-JSON",
+        "CreateGame failed",
+        "CreateLocalGame",
+        "Undefined array key 0",
+        "non-JSON response",
+        "TalisharConnectionError",
     )
     return any(marker in text for marker in markers)
 
@@ -127,6 +144,271 @@ def resolve_eval_backend_url(*, fallback_url: str | None = None) -> str:
         or os.environ.get("TALISHAR_URL", "").strip()
         or DEFAULT_TALISHAR_URL
     )
+
+
+def resolve_eval_backend_candidates(
+    *,
+    fallback_url: str | None = None,
+    include_render_fallback: bool | None = None,
+) -> tuple[str, ...]:
+    """Ordered Talishar URLs to try for checkpoint eval (dedicated eval first)."""
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def _add(url: str) -> None:
+        norm = normalize_talishar_url(url)
+        if norm and norm not in seen:
+            seen.add(norm)
+            candidates.append(norm)
+
+    eval_url = os.environ.get("TALISHAR_EVAL_URL", "").strip()
+    if eval_url:
+        _add(eval_url)
+    elif fallback_url:
+        _add(fallback_url)
+
+    for url in resolve_talishar_backend_urls(fallback_url=fallback_url):
+        _add(url)
+
+    if include_render_fallback is None:
+        include_render_fallback = os.environ.get(
+            "FAB_EVAL_FALLBACK_TO_RENDER", ""
+        ).strip().lower() in {"1", "true", "yes"}
+    render_url = os.environ.get("TALISHAR_RENDER_URL", "").strip()
+    if not include_render_fallback and render_url:
+        render_norm = normalize_talishar_url(render_url)
+        candidates = [url for url in candidates if url != render_norm]
+
+    if not candidates:
+        _add(
+            fallback_url
+            or os.environ.get("TALISHAR_URL", "").strip()
+            or DEFAULT_TALISHAR_URL
+        )
+    return tuple(candidates)
+
+
+def _resolve_probe_deck_stems(assets_dir: Path) -> tuple[str, str]:
+    """Pick two playable on-disk deck stems for a game-start health probe."""
+    stems: list[str] = []
+    for path in sorted(assets_dir.glob("fab_*.txt")):
+        try:
+            lines = [
+                line.strip()
+                for line in path.read_text(encoding="utf-8", errors="replace").splitlines()
+                if line.strip()
+            ]
+        except OSError:
+            continue
+        if not lines:
+            continue
+        stems.append(path.stem)
+        if len(stems) >= 2:
+            break
+    if not stems:
+        return "", ""
+    if len(stems) == 1:
+        return stems[0], stems[0]
+    return stems[0], stems[1]
+
+
+def probe_backend_game_start(
+    url: str,
+    *,
+    assets_path: str | Path | None = None,
+    game_format: str = "silver_age",
+    timeout: float = 15.0,
+) -> tuple[bool, str]:
+    """Probe *url* with CreateLocalGame + Start.php (fast_reset) using a real deck."""
+    if os.environ.get("FAB_SKIP_TALISHAR_HEALTH_CHECK", "").strip() in {
+        "1",
+        "true",
+        "yes",
+    }:
+        return True, "skipped"
+
+    if assets_path is not None:
+        assets_dir = Path(assets_path).expanduser().resolve()
+    else:
+        try:
+            from fab_bridge.paths import talishar_assets_dir  # noqa: PLC0415
+
+            assets_dir = talishar_assets_dir()
+        except Exception:
+            return False, "assets path unknown"
+
+    p1_stem, p2_stem = _resolve_probe_deck_stems(assets_dir)
+    if not p1_stem:
+        return False, "no playable probe deck in Assets"
+
+    from flesh_and_blood_rlbridge.talishar_engine_environment import (  # noqa: PLC0415
+        TalisharEngineEnvironment,
+    )
+
+    env = None
+    try:
+        env = TalisharEngineEnvironment(
+            base_url=normalize_talishar_url(url),
+            local_deck_name=p1_stem,
+            opponent_deck_name=p2_stem or p1_stem,
+            game_format=game_format,
+            self_play=True,
+            max_turns=30,
+            talishar_backend="fast",
+            request_timeout=float(timeout),
+        )
+        env.fast_reset(seed=0)
+        return True, "game_start"
+    except Exception as exc:
+        if is_shard_reset_error(exc):
+            return False, str(exc)[:240]
+        return False, f"probe failed ({exc!r})"[:240]
+    finally:
+        if env is not None:
+            try:
+                env.close()
+            except Exception:
+                pass
+
+
+def pick_healthy_eval_backend(
+    *,
+    fallback_url: str | None = None,
+    assets_path: str | Path | None = None,
+    timeout: float = 15.0,
+    game_format: str = "silver_age",
+    exclude_urls: Iterable[str] = (),
+) -> tuple[str, dict[str, str]]:
+    """Return the first backend that passes RLStep and game-start probes."""
+    excluded = {
+        normalize_talishar_url(url)
+        for url in exclude_urls
+        if str(url).strip()
+    }
+    candidates = [
+        url
+        for url in resolve_eval_backend_candidates(fallback_url=fallback_url)
+        if normalize_talishar_url(url) not in excluded
+    ]
+    if not candidates:
+        raise RuntimeError("No Talishar eval backend candidates configured")
+
+    preferred = normalize_talishar_url(candidates[0])
+    status: dict[str, str] = {}
+    for url in candidates:
+        ok_rl, reason_rl = probe_backend_health(url, timeout=min(float(timeout), 5.0))
+        if not ok_rl:
+            status[url] = reason_rl
+            continue
+        ok_start, reason_start = probe_backend_game_start(
+            url,
+            assets_path=assets_path,
+            game_format=game_format,
+            timeout=timeout,
+        )
+        if ok_start:
+            status[url] = "ok"
+            chosen = normalize_talishar_url(url)
+            if chosen != preferred:
+                print(
+                    f"  Eval backend: using {chosen} "
+                    f"(preferred {preferred} unavailable: {status.get(preferred, '?')})",
+                    flush=True,
+                )
+            return chosen, status
+        status[url] = reason_start
+
+    detail = "; ".join(f"{url} ({status.get(url, '?')})" for url in candidates)
+    raise RuntimeError(
+        "No Talishar backend passed eval game-start probe. Tried: " + detail
+    )
+
+
+def build_eval_backend_pool(
+    *,
+    fallback_url: str | None = None,
+    assets_path: str | Path | None = None,
+    game_format: str = "silver_age",
+) -> TalisharBackendPool:
+    """Build an eval failover pool with a healthy primary URL first."""
+    chosen, _status = pick_healthy_eval_backend(
+        fallback_url=fallback_url,
+        assets_path=assets_path,
+        game_format=game_format,
+    )
+    candidates = resolve_eval_backend_candidates(fallback_url=fallback_url)
+    ordered = [chosen] + [url for url in candidates if normalize_talishar_url(url) != chosen]
+    return TalisharBackendPool(urls=tuple(ordered))
+
+
+def reconcile_reserved_shard_urls(
+    training_env: dict[str, str],
+    *,
+    healthy_training_urls: Iterable[str],
+    assets_path: str | Path | None = None,
+    game_format: str = "silver_age",
+) -> dict[str, str]:
+    """Repoint reserved eval/render URLs when game-start probes fail at stack startup."""
+    updated = dict(training_env)
+    training = [
+        normalize_talishar_url(url)
+        for url in healthy_training_urls
+        if str(url).strip()
+    ]
+
+    for key in ("TALISHAR_EVAL_URL", "TALISHAR_RENDER_URL"):
+        url = updated.get(key, "").strip()
+        if not url:
+            continue
+        norm = normalize_talishar_url(url)
+        ok, reason = probe_backend_game_start(
+            norm,
+            assets_path=assets_path,
+            game_format=game_format,
+        )
+        if ok:
+            print(f"  {key}: game-start probe ok ({norm})", flush=True)
+            continue
+
+        print(
+            f"  WARNING: {key} failed game-start probe ({norm}): {reason}",
+            flush=True,
+        )
+        if key != "TALISHAR_EVAL_URL":
+            continue
+
+        replacement: str | None = None
+        for candidate in training:
+            if candidate == norm:
+                continue
+            ok_candidate, _ = probe_backend_game_start(
+                candidate,
+                assets_path=assets_path,
+                game_format=game_format,
+            )
+            if ok_candidate:
+                replacement = candidate
+                break
+
+        if replacement is None:
+            try:
+                replacement, _ = pick_healthy_eval_backend(
+                    fallback_url=training[0] if training else norm,
+                    assets_path=assets_path,
+                    game_format=game_format,
+                    exclude_urls=(norm,),
+                )
+            except RuntimeError:
+                replacement = None
+
+        if replacement:
+            updated[key] = replacement
+            print(
+                f"  Repointed {key} → {replacement} (game-start failover)",
+                flush=True,
+            )
+
+    return updated
 
 
 def resolve_render_backend_url(*, fallback_url: str | None = None) -> str:

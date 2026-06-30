@@ -17,6 +17,11 @@ from fab_bridge.unified_results import (
     is_unified_random_matchup_run,
     read_checkpoint_eval_scope,
 )
+from flesh_and_blood_rlbridge.card_db.fabrary_meta import (
+    DEFAULT_PERIOD,
+    load_fabrary_meta,
+    lookup_all_queues_for_matchup_dir,
+)
 
 UNIFIED_DASHBOARD_NAME = "unified_random_matchups_dashboard.html"
 UNIFIED_LIVE_STATE = "unified_training_live.json"
@@ -63,6 +68,78 @@ def _pct(value: object) -> str:
         return "—"
 
 
+def _hero_display_name(raw: str) -> str:
+    slug = str(raw or "").strip().removeprefix("fab_")
+    if not slug:
+        return "?"
+    if "-vs-" in slug:
+        slug = slug.split("-vs-", 1)[0]
+    slug = slug.replace("-", "_")
+    if slug.startswith("precon_"):
+        parts = slug.split("_")
+        if len(parts) >= 4:
+            slug = parts[-1]
+        elif len(parts) >= 2:
+            slug = parts[-1]
+    elif "_" in slug:
+        slug = slug.rsplit("_", 1)[-1]
+    return slug.replace("_", " ").replace("-", " ").title() or "?"
+
+
+def _read_matchup_hero_labels(matchup_dir: Path) -> tuple[str, str]:
+    raw = _read_json(matchup_dir / "matchup_label.json")
+    if isinstance(raw, dict):
+        h1 = str(raw.get("p1_hero") or "").strip()
+        h2 = str(raw.get("p2_hero") or "").strip()
+        if h1 and h2:
+            return _hero_display_name(h1), _hero_display_name(h2)
+        p1_deck = str(raw.get("p1_deck") or "").strip()
+        p2_deck = str(raw.get("p2_deck") or "").strip()
+        if p1_deck and p2_deck:
+            return _hero_display_name(p1_deck), _hero_display_name(p2_deck)
+        name = str(raw.get("name") or "").strip()
+        if "-vs-" in name:
+            left, right = name.split("-vs-", 1)
+            return _hero_display_name(left), _hero_display_name(right)
+    return _hero_display_name(matchup_dir.name), "?"
+
+
+def _format_matchup_hero_title(hero1: str, hero2: str) -> str:
+    return f"{hero1} (Hero 1) vs {hero2} (Hero 2)"
+
+
+def _optional_win_rate(row: dict[str, Any], key: str) -> Optional[float]:
+    if row.get(key) is None:
+        return None
+    try:
+        return float(row[key])
+    except (TypeError, ValueError):
+        return None
+
+
+def _logic_vs_logic_hero_win_rates(
+    row: dict[str, Any],
+) -> tuple[Optional[float], Optional[float]]:
+    logic_vs_logic = row.get("logic_vs_logic")
+    if not isinstance(logic_vs_logic, dict):
+        return None, None
+    return (
+        _optional_win_rate(logic_vs_logic, "p1_win_rate"),
+        _optional_win_rate(logic_vs_logic, "p2_win_rate"),
+    )
+
+
+def _apply_hero_labels_to_checkpoint_row(
+    row: dict[str, Any],
+    matchup_dir: Path,
+) -> dict[str, Any]:
+    hero1, hero2 = _read_matchup_hero_labels(matchup_dir)
+    row["hero1_name"] = hero1
+    row["hero2_name"] = hero2
+    row["matchup"] = _format_matchup_hero_title(hero1, hero2)
+    return row
+
+
 def _vs_logic_win_rates(row: dict[str, Any]) -> tuple[Optional[float], Optional[float], Optional[float]]:
     """Return (agent@P1 seat, agent@P2 seat, average) win rates vs logic policy."""
     vs_logic = row.get("vs_logic")
@@ -83,6 +160,32 @@ def _vs_logic_win_rates(row: dict[str, Any]) -> tuple[Optional[float], Optional[
     if p2_wr is not None:
         return None, p2_wr, p2_wr
     return None, None, None
+
+
+def _logic_vs_agent_hero_win_rates(
+    row: dict[str, Any],
+) -> tuple[Optional[float], Optional[float]]:
+    vs_logic = row.get("vs_logic")
+    if not isinstance(vs_logic, dict):
+        return None, None
+    p1_seat = vs_logic.get("agent_p1_seat")
+    p2_seat = vs_logic.get("agent_p2_seat")
+    logic_h1: Optional[float] = None
+    logic_h2: Optional[float] = None
+    if isinstance(p1_seat, dict) and p1_seat.get("p2_win_rate") is not None:
+        logic_h1 = float(p1_seat["p2_win_rate"])
+    if isinstance(p2_seat, dict) and p2_seat.get("p1_win_rate") is not None:
+        logic_h2 = float(p2_seat["p1_win_rate"])
+    if logic_h1 is None or logic_h2 is None:
+        avg = _logic_vs_agent_win_rate(row)
+        if avg is not None:
+            if logic_h1 is None and logic_h2 is None:
+                return avg, avg
+            if logic_h1 is None:
+                logic_h1 = max(0.0, min(1.0, 2.0 * avg - float(logic_h2)))
+            elif logic_h2 is None:
+                logic_h2 = max(0.0, min(1.0, 2.0 * avg - float(logic_h1)))
+    return logic_h1, logic_h2
 
 
 def _logic_vs_logic_win_rate(row: dict[str, Any]) -> Optional[float]:
@@ -306,12 +409,16 @@ def update_unified_matchup_live(
 
 def _checkpoint_point_from_row(row: dict[str, Any]) -> dict[str, Any]:
     vs_p1, vs_p2, vs_avg = _vs_logic_win_rates(row)
+    logic_h1, logic_h2 = _logic_vs_logic_hero_win_rates(row)
+    logic_vs_agent_h1, logic_vs_agent_h2 = _logic_vs_agent_hero_win_rates(row)
     timeout_rate: Optional[float] = None
     if row.get("timeout_rate") is not None:
         timeout_rate = float(row["timeout_rate"])
     eval_episodes: Optional[int] = None
     if row.get("eval_episodes") is not None:
         eval_episodes = int(row["eval_episodes"])
+    agent_h1 = _optional_win_rate(row, "p1_win_rate")
+    agent_h2 = _optional_win_rate(row, "p2_win_rate")
     return {
         "episode": int(row.get("episodes_completed") or 0),
         "win_rate": float(row.get("p1_win_rate") or 0.0),
@@ -321,9 +428,17 @@ def _checkpoint_point_from_row(row: dict[str, Any]) -> dict[str, Any]:
         "vs_logic_agent_p1": vs_p1,
         "vs_logic_agent_p2": vs_p2,
         "vs_logic_win_rate": vs_avg,
+        "vs_logic_hero1_win_rate": vs_p1,
+        "vs_logic_hero2_win_rate": vs_p2,
         "logic_vs_agent_win_rate": _logic_vs_agent_win_rate(row),
-        "agent_vs_agent_win_rate": float(row.get("p1_win_rate") or 0.0),
-        "logic_vs_logic_win_rate": _logic_vs_logic_win_rate(row),
+        "logic_vs_agent_hero1_win_rate": logic_vs_agent_h1,
+        "logic_vs_agent_hero2_win_rate": logic_vs_agent_h2,
+        "agent_vs_agent_win_rate": agent_h1,
+        "agent_vs_agent_hero1_win_rate": agent_h1,
+        "agent_vs_agent_hero2_win_rate": agent_h2,
+        "logic_vs_logic_win_rate": logic_h1,
+        "logic_vs_logic_hero1_win_rate": logic_h1,
+        "logic_vs_logic_hero2_win_rate": logic_h2,
         "timeout_rate": timeout_rate,
         "eval_episodes": eval_episodes,
     }
@@ -341,24 +456,111 @@ def _baseline_checkpoint_row(
     eval_episodes: Optional[int] = None
     if record.get("episodes") is not None:
         eval_episodes = int(record["episodes"])
-    return {
+    logic_h1, logic_h2 = _logic_vs_logic_hero_win_rates({"logic_vs_logic": record})
+    row = {
         "matchup": matchup_name,
         "matchup_dir": subdir,
         "episode": 0,
         "episode_label": "baseline",
         "eval_episodes": eval_episodes,
-        "logic_vs_logic_win_rate": _logic_vs_logic_win_rate(
-            {"logic_vs_logic": record}
-        ),
+        "logic_vs_logic_win_rate": logic_h1,
+        "logic_vs_logic_hero1_win_rate": logic_h1,
+        "logic_vs_logic_hero2_win_rate": logic_h2,
         "vs_logic_win_rate": None,
         "logic_vs_agent_win_rate": None,
         "agent_vs_agent_win_rate": None,
+        "agent_vs_agent_hero1_win_rate": None,
+        "agent_vs_agent_hero2_win_rate": None,
         "timeout_rate": (
             float(record["timeout_rate"])
             if record.get("timeout_rate") is not None
             else None
         ),
     }
+    return _apply_hero_labels_to_checkpoint_row(row, matchup_dir)
+
+
+def _normalize_run_format(raw: object) -> str:
+    token = str(raw or "").strip().lower()
+    if token in ("classic_constructed", "cc"):
+        return "classic_constructed"
+    if token in ("silver_age", "sa", "sage"):
+        return "silver_age"
+    return token or "silver_age"
+
+
+def _apply_fabrary_meta_to_row(
+    row: dict[str, Any],
+    matchup_dir: Path,
+    *,
+    format_name: str,
+    meta: dict[str, Any],
+) -> None:
+    """Attach Fabrary Talishar hero-meta reference win rates (all three queues)."""
+    if not matchup_dir.is_dir():
+        return
+    queues = lookup_all_queues_for_matchup_dir(
+        matchup_dir,
+        format_name=format_name,
+        period=DEFAULT_PERIOD,
+        meta=meta,
+    )
+    for games, prefix in (
+        ("competitive", "fabrary_competitive"),
+        ("all", "fabrary_all"),
+        ("standard", "fabrary_standard"),
+    ):
+        ref = queues.get(games)
+        if not isinstance(ref, dict):
+            continue
+        if ref.get("p1_win_rate") is not None:
+            row[f"{prefix}_p1_win_rate"] = float(ref["p1_win_rate"])
+        if games == "competitive" and ref.get("plays") is not None:
+            row[f"{prefix}_plays"] = int(ref["plays"])
+
+
+def _enrich_checkpoint_rows_with_fabrary_meta(
+    run_dir: Path,
+    rows: list[dict[str, Any]],
+    *,
+    format_name: str,
+    meta: dict[str, Any],
+) -> list[dict[str, Any]]:
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        subdir = str(row.get("matchup_dir") or "").strip()
+        if not subdir:
+            continue
+        _apply_fabrary_meta_to_row(
+            row,
+            run_dir / subdir,
+            format_name=format_name,
+            meta=meta,
+        )
+    return rows
+
+
+def _enrich_completed_rows_with_fabrary_meta(
+    run_dir: Path,
+    rows: list[dict[str, Any]],
+    *,
+    format_name: str,
+    meta: dict[str, Any],
+) -> list[dict[str, Any]]:
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        subdir = str(row.get("subdir") or "").strip()
+        if not subdir:
+            continue
+        _apply_fabrary_meta_to_row(
+            row,
+            run_dir / subdir,
+            format_name=format_name,
+            meta=meta,
+        )
+    return rows
 
 
 def _enrich_checkpoint_rows_with_baselines(
@@ -382,14 +584,24 @@ def _enrich_checkpoint_rows_with_baselines(
         name = str(info.get("name") or subdir)
         if str(subdir) in by_dir:
             row = by_dir[str(subdir)]
-            baseline_wr = _read_matchup_logic_vs_logic_baseline(matchup_dir)
-            if baseline_wr is not None:
-                row["logic_vs_logic_win_rate"] = baseline_wr
-            if row.get("logic_vs_logic_win_rate") is None:
-                embedded = _logic_vs_logic_win_rate(row)
-                if embedded is not None:
-                    row["logic_vs_logic_win_rate"] = embedded
-            enriched.append(row)
+            baseline_record = _read_matchup_logic_vs_logic_baseline_record(matchup_dir)
+            if baseline_record is not None:
+                baseline_h1, baseline_h2 = _logic_vs_logic_hero_win_rates(
+                    {"logic_vs_logic": baseline_record}
+                )
+                if baseline_h1 is not None:
+                    row["logic_vs_logic_hero1_win_rate"] = baseline_h1
+                    row["logic_vs_logic_win_rate"] = baseline_h1
+                if baseline_h2 is not None:
+                    row["logic_vs_logic_hero2_win_rate"] = baseline_h2
+            if row.get("logic_vs_logic_hero1_win_rate") is None:
+                embedded_h1, embedded_h2 = _logic_vs_logic_hero_win_rates(row)
+                if embedded_h1 is not None:
+                    row["logic_vs_logic_hero1_win_rate"] = embedded_h1
+                    row["logic_vs_logic_win_rate"] = embedded_h1
+                if embedded_h2 is not None:
+                    row["logic_vs_logic_hero2_win_rate"] = embedded_h2
+            enriched.append(_apply_hero_labels_to_checkpoint_row(row, matchup_dir))
             continue
         baseline_row = _baseline_checkpoint_row(
             matchup_dir=matchup_dir,
@@ -412,23 +624,92 @@ def _merged_aggregate_points(
             continue
         aggregate = row.get("aggregate")
         if not isinstance(aggregate, dict):
+            aggregate = {}
+        episode = int(row.get("episodes_completed") or 0)
+        win_rate_mean = aggregate.get("self_play_win_rate_mean")
+        win_rate_se = aggregate.get("self_play_win_rate_se")
+        vs_logic_mean = aggregate.get("vs_logic_win_rate_mean")
+        vs_logic_se = aggregate.get("vs_logic_win_rate_se")
+        if win_rate_mean is None or vs_logic_mean is None:
+            derived = _aggregate_means_from_per_matchup(row)
+            if derived is not None:
+                win_rate_mean = win_rate_mean if win_rate_mean is not None else derived[0]
+                win_rate_se = win_rate_se if win_rate_se is not None else derived[1]
+                vs_logic_mean = vs_logic_mean if vs_logic_mean is not None else derived[2]
+                vs_logic_se = vs_logic_se if vs_logic_se is not None else derived[3]
+        if win_rate_mean is None and vs_logic_mean is None:
             continue
         points.append(
             {
-                "episode": int(row.get("episodes_completed") or 0),
-                "win_rate_mean": aggregate.get("self_play_win_rate_mean"),
-                "win_rate_se": aggregate.get("self_play_win_rate_se"),
-                "vs_logic_mean": aggregate.get("vs_logic_win_rate_mean"),
-                "vs_logic_se": aggregate.get("vs_logic_win_rate_se"),
+                "episode": episode,
+                "win_rate_mean": win_rate_mean,
+                "win_rate_se": win_rate_se,
+                "vs_logic_mean": vs_logic_mean,
+                "vs_logic_se": vs_logic_se,
                 "n_matchups": int(row.get("matchups_evaluated") or 0),
             }
         )
     return points
 
 
+def _aggregate_means_from_per_matchup(
+    row: dict[str, Any],
+) -> Optional[tuple[Optional[float], Optional[float], Optional[float], Optional[float]]]:
+    per_matchup = row.get("per_matchup")
+    if not isinstance(per_matchup, dict) or not per_matchup:
+        return None
+    self_play: list[float] = []
+    vs_logic: list[float] = []
+    for matchup_row in per_matchup.values():
+        if not isinstance(matchup_row, dict):
+            continue
+        if matchup_row.get("p1_win_rate") is not None:
+            self_play.append(float(matchup_row["p1_win_rate"]))
+        point = _checkpoint_point_from_row(matchup_row)
+        if point.get("vs_logic_win_rate") is not None:
+            vs_logic.append(float(point["vs_logic_win_rate"]))
+    sp_mean, sp_se = _mean_and_se(self_play)
+    vl_mean, vl_se = _mean_and_se(vs_logic)
+    if sp_mean is None and vl_mean is None:
+        return None
+    return sp_mean, sp_se, vl_mean, vl_se
+
+
+def _resolve_checkpoint_aggregate_points(
+    ckpt_history: list[dict[str, Any]],
+    active_histories: dict[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    merged_points = _merged_aggregate_points(ckpt_history)
+    if any(point.get("win_rate_mean") is not None for point in merged_points):
+        return merged_points
+    fallback = aggregate_checkpoint_points(active_histories)
+    if any(point.get("win_rate_mean") is not None for point in fallback):
+        return fallback
+    return merged_points or fallback
+
+
+def _checkpoint_rows_have_vs_logic(rows: list[dict[str, Any]]) -> bool:
+    return any(
+        row.get("vs_logic_win_rate") is not None
+        or row.get("logic_vs_agent_win_rate") is not None
+        for row in rows
+        if isinstance(row, dict)
+    )
+
+
+def _checkpoint_rows_have_logic_vs_logic(rows: list[dict[str, Any]]) -> bool:
+    return any(
+        row.get("logic_vs_logic_win_rate") is not None
+        for row in rows
+        if isinstance(row, dict)
+    )
+
+
 def _rows_from_latest_merged(
     ckpt_history: list[dict[str, Any]],
     active_matchups: dict[str, Any],
+    *,
+    run_dir: Path,
 ) -> list[dict[str, Any]]:
     for row in reversed(ckpt_history):
         if row.get("eval_mode") != "merged":
@@ -441,11 +722,13 @@ def _rows_from_latest_merged(
             if not isinstance(matchup_row, dict):
                 continue
             point = _checkpoint_point_from_row(matchup_row)
-            info = active_matchups.get(str(subdir), {})
-            name = info.get("name") if isinstance(info, dict) else None
-            point["matchup"] = str(name or point.get("matchup") or subdir)
             point["matchup_dir"] = str(subdir)
-            rows.append(point)
+            rows.append(
+                _apply_hero_labels_to_checkpoint_row(
+                    point,
+                    run_dir / str(subdir),
+                )
+            )
         return rows
     return []
 
@@ -529,11 +812,15 @@ def _latest_checkpoint_rows_for_active(
             continue
         latest = hist[-1]
         point = _checkpoint_point_from_row(latest)
-        point["matchup"] = str(info.get("name") or point.get("matchup") or subdir)
         point["matchup_dir"] = str(subdir)
         if latest.get("eval_episodes") is not None:
             point["eval_episodes"] = int(latest["eval_episodes"])
-        rows.append(point)
+        rows.append(
+            _apply_hero_labels_to_checkpoint_row(
+                point,
+                run_dir / str(subdir),
+            )
+        )
     return rows
 
 
@@ -641,10 +928,15 @@ def collect_unified_run_state(run_dir: Path) -> dict[str, Any]:
             row for row in ckpt_history if isinstance(row, dict)
         ]
 
-    checkpoint_aggregate_points = _merged_aggregate_points(ckpt_history)
-    if not checkpoint_aggregate_points:
-        checkpoint_aggregate_points = aggregate_checkpoint_points(active_histories)
-    active_checkpoint_rows = _rows_from_latest_merged(ckpt_history, active_matchups)
+    checkpoint_aggregate_points = _resolve_checkpoint_aggregate_points(
+        ckpt_history,
+        active_histories,
+    )
+    active_checkpoint_rows = _rows_from_latest_merged(
+        ckpt_history,
+        active_matchups,
+        run_dir=run_dir,
+    )
     if not active_checkpoint_rows:
         active_checkpoint_rows = _latest_checkpoint_rows_for_active(
             run_dir, active_matchups
@@ -652,13 +944,32 @@ def collect_unified_run_state(run_dir: Path) -> dict[str, Any]:
     if not active_checkpoint_rows and ckpt_history:
         latest = ckpt_history[-1]
         if isinstance(latest, dict):
-            point = _checkpoint_point_from_row(latest)
-            point["matchup"] = str(point.get("matchup") or current_name or "—")
-            active_checkpoint_rows = [point]
+            if latest.get("status") == "error" and latest.get("eval_mode") == "merged":
+                active_checkpoint_rows = [
+                    {
+                        "matchup": "merged checkpoint eval (failed)",
+                        "episode": int(latest.get("episodes_completed") or 0),
+                        "eval_episodes": int(latest.get("eval_episodes_total") or 0),
+                        "error": str(latest.get("error") or "unknown"),
+                        "timeout_rate": 1.0,
+                    }
+                ]
+            else:
+                point = _checkpoint_point_from_row(latest)
+                point["matchup"] = str(point.get("matchup") or current_name or "—")
+                active_checkpoint_rows = [point]
     active_checkpoint_rows = _enrich_checkpoint_rows_with_baselines(
         run_dir,
         active_checkpoint_rows,
         active_matchups,
+    )
+    run_format = _normalize_run_format(manifest.get("format"))
+    fabrary_meta_doc = load_fabrary_meta()
+    active_checkpoint_rows = _enrich_checkpoint_rows_with_fabrary_meta(
+        run_dir,
+        active_checkpoint_rows,
+        format_name=run_format,
+        meta=fabrary_meta_doc,
     )
     checkpoint_points: list[dict[str, Any]] = []
     for row in ckpt_history:
@@ -671,6 +982,12 @@ def collect_unified_run_state(run_dir: Path) -> dict[str, Any]:
         for matchup_dir in reversed(iter_unified_matchup_dirs(run_dir))
         if _is_matchup_complete(matchup_dir, target_episodes)
     ]
+    completed_rows = _enrich_completed_rows_with_fabrary_meta(
+        run_dir,
+        completed_rows,
+        format_name=run_format,
+        meta=fabrary_meta_doc,
+    )
 
     overall_pct = 0.0
     if matchups_total > 0:
@@ -713,6 +1030,25 @@ def collect_unified_run_state(run_dir: Path) -> dict[str, Any]:
         "complete": status == "complete",
         "policy_weights": live.get("policy_weights"),
         "policy_weight_history": live.get("policy_weight_history") or [],
+        "checkpoint_eval_logic_vs_logic": bool(
+            manifest.get("checkpoint_eval_logic_vs_logic", True)
+        ),
+        "checkpoint_eval_agent_vs_logic": bool(
+            manifest.get("checkpoint_eval_agent_vs_logic", False)
+        ),
+        "show_logic_vs_logic_column": bool(
+            manifest.get("checkpoint_eval_logic_vs_logic", True)
+        )
+        or _checkpoint_rows_have_logic_vs_logic(active_checkpoint_rows),
+        "show_agent_vs_logic_columns": bool(
+            manifest.get("checkpoint_eval_agent_vs_logic", False)
+        )
+        or _checkpoint_rows_have_vs_logic(active_checkpoint_rows),
+        "fabrary_meta": {
+            "period": DEFAULT_PERIOD,
+            "fetched_at": str(fabrary_meta_doc.get("fetched_at") or ""),
+            "source": str(fabrary_meta_doc.get("source") or "fabrary.net/meta-results"),
+        },
     }
 
 
@@ -723,8 +1059,15 @@ def _svg_winrate_chart_with_error_bands(
     height: int = 200,
     target_episodes: int = 0,
     empty_message: str = "Waiting for checkpoint eval…",
+    show_vs_logic: bool = True,
 ) -> str:
-    if not points:
+    plottable = [
+        point
+        for point in points
+        if point.get("win_rate_mean") is not None
+        or (show_vs_logic and point.get("vs_logic_mean") is not None)
+    ]
+    if not plottable:
         return (
             f'<svg viewBox="0 0 {width} {height}" class="chart empty">'
             f'<text x="{width // 2}" y="{height // 2}" text-anchor="middle" '
@@ -735,7 +1078,7 @@ def _svg_winrate_chart_with_error_bands(
     plot_h = height - pad_t - pad_b
     max_x = max(
         int(target_episodes or 0),
-        max(int(p.get("episode", 0) or 0) for p in points),
+        max(int(p.get("episode", 0) or 0) for p in plottable),
         1,
     )
 
@@ -748,7 +1091,7 @@ def _svg_winrate_chart_with_error_bands(
     def band(mean_key: str, se_key: str, class_prefix: str) -> str:
         upper = []
         lower = []
-        for point in points:
+        for point in plottable:
             mean = point.get(mean_key)
             se = point.get(se_key)
             if mean is None:
@@ -761,12 +1104,25 @@ def _svg_winrate_chart_with_error_bands(
         polygon = " ".join(upper + list(reversed(lower)))
         line = " ".join(
             f"{px(point['episode']):.1f},{py(float(point[mean_key])):.1f}"
-            for point in points
+            for point in plottable
             if point.get(mean_key) is not None
         )
+        markers = ""
+        if line.count(",") <= 1:
+            for point in plottable:
+                mean = point.get(mean_key)
+                if mean is None:
+                    continue
+                cx = px(point["episode"])
+                cy = py(float(mean))
+                markers += (
+                    f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="3.5" '
+                    f'class="{class_prefix}-line"/>'
+                )
         return (
             f'<polygon points="{polygon}" class="{class_prefix}-band"/>'
             f'<polyline points="{line}" class="{class_prefix}-line" fill="none"/>'
+            f"{markers}"
         )
 
     grid = "\n".join(
@@ -774,14 +1130,25 @@ def _svg_winrate_chart_with_error_bands(
         f'<text x="{pad_l - 6}" y="{py(v) + 4:.1f}" text-anchor="end" class="chart-axis">{int(v * 100)}%</text>'
         for v in (0.0, 0.5, 1.0)
     )
-    legend = (
-        '<text x="' + str(pad_l) + f'" y="{height - 8}" class="chart-axis">'
-        "— self-play mean ± SE  ·  — vs logic mean ± SE</text>"
+    has_vs_logic = show_vs_logic and any(
+        point.get("vs_logic_mean") is not None for point in plottable
     )
+    if has_vs_logic:
+        legend = (
+            '<text x="' + str(pad_l) + f'" y="{height - 8}" class="chart-axis">'
+            "— agent vs agent mean ± SE  ·  — agent vs logic mean ± SE</text>"
+        )
+        vs_logic_band = band("vs_logic_mean", "vs_logic_se", "chart-vslogic")
+    else:
+        legend = (
+            '<text x="' + str(pad_l) + f'" y="{height - 8}" class="chart-axis">'
+            "— agent vs agent mean ± SE</text>"
+        )
+        vs_logic_band = ""
     return f"""<svg viewBox="0 0 {width} {height}" class="chart">
   {grid}
   {band("win_rate_mean", "win_rate_se", "chart-selfplay")}
-  {band("vs_logic_mean", "vs_logic_se", "chart-vslogic")}
+  {vs_logic_band}
   {legend}
 </svg>"""
 
@@ -954,15 +1321,21 @@ def render_unified_random_matchups_html(
     active_matchups = state.get("active_matchups") or {}
     progress_blocks = ""
     if isinstance(active_matchups, dict) and active_matchups:
+        run_path = Path(str(state.get("run_dir") or ""))
         for subdir, row in active_matchups.items():
             if not isinstance(row, dict):
                 continue
-            name = str(row.get("name") or subdir)
+            if run_path.is_dir():
+                hero_title = _format_matchup_hero_title(
+                    *_read_matchup_hero_labels(run_path / str(subdir))
+                )
+            else:
+                hero_title = str(row.get("name") or subdir)
             eps = int(row.get("episodes_completed") or 0)
             pct = (eps / max(1, target_eps)) * 100.0 if target_eps else 0.0
             progress_blocks += f"""
       <div class="matchup-progress">
-        <div class="progress-label"><span>{html.escape(name)}</span><span>{eps}/{target_eps}</span></div>
+        <div class="progress-label"><span>{html.escape(hero_title)}</span><span>{eps}/{target_eps}</span></div>
         <div class="progress-bar"><div class="progress-fill" style="width:{pct:.1f}%"></div></div>
       </div>"""
     else:
@@ -978,6 +1351,7 @@ def render_unified_random_matchups_html(
     ckpt_chart = _svg_winrate_chart_with_error_bands(
         state.get("checkpoint_aggregate_points") or [],
         target_episodes=target_eps,
+        show_vs_logic=bool(state.get("show_agent_vs_logic_columns")),
     )
     policy_weights_card = _render_policy_weights_card(state)
 
@@ -989,17 +1363,20 @@ def render_unified_random_matchups_html(
             f"<td>{_pct(row.get('first_checkpoint_win_rate'))}</td>"
             f"<td>{_pct(row.get('checkpoint_win_rate'))}</td>"
             f"<td>{_pct(row.get('checkpoint_vs_logic_win_rate'))}</td>"
+            f"<td>{_pct(row.get('fabrary_competitive_p1_win_rate'))}</td>"
             f"</tr>"
             for row in completed_rows
         )
         history_table = f"""
 <table class="history">
-  <thead><tr><th>Matchup</th><th>First self-play ckpt</th><th>Last self-play ckpt</th><th>Last vs logic</th></tr></thead>
+  <thead><tr><th>Matchup</th><th>First self-play ckpt</th><th>Last self-play ckpt</th><th>Last vs logic</th><th>Fabrary comp (H1%)</th></tr></thead>
   <tbody>{history_rows}</tbody>
 </table>"""
     else:
         history_table = '<p class="muted">No completed matchups yet.</p>'
 
+    show_logic_vs_logic = bool(state.get("show_logic_vs_logic_column"))
+    show_agent_vs_logic = bool(state.get("show_agent_vs_logic_columns"))
     ckpt_rows = ""
     for row in state.get("active_checkpoint_rows") or []:
         eval_games = row.get("eval_episodes")
@@ -1007,28 +1384,72 @@ def render_unified_random_matchups_html(
             str(int(eval_games)) if eval_games is not None else "—"
         )
         episode_cell = str(row.get("episode_label") or int(row.get("episode", 0)))
-        ckpt_rows += (
-            f"<tr>"
-            f"<td>{html.escape(str(row.get('matchup') or '—'))}</td>"
-            f"<td>{html.escape(episode_cell)}</td>"
-            f"<td>{eval_games_cell}</td>"
-            f"<td>{_pct(row.get('logic_vs_logic_win_rate'))}</td>"
-            f"<td>{_pct(row.get('vs_logic_win_rate'))}</td>"
-            f"<td>{_pct(row.get('logic_vs_agent_win_rate'))}</td>"
-            f"<td>{_pct(row.get('agent_vs_agent_win_rate'))}</td>"
-            f"<td>{_pct(row.get('timeout_rate'))}</td></tr>"
+        cells = [
+            f"<td>{html.escape(str(row.get('matchup') or '—'))}</td>",
+            f"<td>{html.escape(episode_cell)}</td>",
+            f"<td>{eval_games_cell}</td>",
+        ]
+        if show_logic_vs_logic:
+            cells.extend(
+                [
+                    f"<td>{_pct(row.get('logic_vs_logic_hero1_win_rate'))}</td>",
+                    f"<td>{_pct(row.get('logic_vs_logic_hero2_win_rate'))}</td>",
+                ]
+            )
+        if show_agent_vs_logic:
+            cells.extend(
+                [
+                    f"<td>{_pct(row.get('vs_logic_hero1_win_rate'))}</td>",
+                    f"<td>{_pct(row.get('vs_logic_hero2_win_rate'))}</td>",
+                    f"<td>{_pct(row.get('logic_vs_agent_hero1_win_rate'))}</td>",
+                    f"<td>{_pct(row.get('logic_vs_agent_hero2_win_rate'))}</td>",
+                ]
+            )
+        cells.extend(
+            [
+                f"<td>{_pct(row.get('agent_vs_agent_hero1_win_rate'))}</td>",
+                f"<td>{_pct(row.get('agent_vs_agent_hero2_win_rate'))}</td>",
+                f"<td>{_pct(row.get('timeout_rate'))}</td>",
+                f"<td>{_pct(row.get('fabrary_competitive_p1_win_rate'))}</td>",
+                f"<td>{row.get('fabrary_competitive_plays') if row.get('fabrary_competitive_plays') is not None else '—'}</td>",
+                f"<td>{_pct(row.get('fabrary_all_p1_win_rate'))}</td>",
+                f"<td>{_pct(row.get('fabrary_standard_p1_win_rate'))}</td>",
+            ]
         )
+        ckpt_rows += f"<tr>{''.join(cells)}</tr>"
+    header_cells = ["Matchup", "Episode", "Eval games"]
+    if show_logic_vs_logic:
+        header_cells.extend(
+            [
+                "Logic vs logic (Hero 1 win%)",
+                "Logic vs logic (Hero 2 win%)",
+            ]
+        )
+    if show_agent_vs_logic:
+        header_cells.extend(
+            [
+                "Vs logic win% (Hero 1)",
+                "Vs logic win% (Hero 2)",
+                "Logic win% vs agent (Hero 1)",
+                "Logic win% vs agent (Hero 2)",
+            ]
+        )
+    header_cells.extend(
+        [
+            "Agent vs agent (Hero 1 win%)",
+            "Agent vs agent (Hero 2 win%)",
+            "Timeout %",
+            "Fabrary comp (H1%)",
+            "Fabrary comp (n)",
+            "Fabrary all (H1%)",
+            "Fabrary std (H1%)",
+        ]
+    )
+    colspan = len(header_cells)
+    header_row = "".join(f"<th>{html.escape(label)}</th>" for label in header_cells)
     ckpt_table = (
-        f'<table class="history"><thead><tr>'
-        f"<th>Matchup</th>"
-        f"<th>Episode</th>"
-        f"<th>Eval games</th>"
-        f"<th>Logic win% vs logic</th>"
-        f"<th>Agent win% vs logic</th>"
-        f"<th>Logic vs agent win%</th>"
-        f"<th>Agent win% vs agent</th>"
-        f"<th>Timeout %</th>"
-        f"</tr></thead><tbody>{ckpt_rows or '<tr><td colspan=\"8\" class=\"muted\">No checkpoint eval yet</td></tr>'}</tbody></table>"
+        f'<table class="history"><thead><tr>{header_row}</tr></thead>'
+        f"<tbody>{ckpt_rows or f'<tr><td colspan=\"{colspan}\" class=\"muted\">No checkpoint eval yet</td></tr>'}</tbody></table>"
     )
 
     return f"""<!DOCTYPE html>
@@ -1087,7 +1508,8 @@ def render_unified_random_matchups_html(
   <div class="wrap">
     <h1>Training AI agents with random matchups</h1>
     <p class="sub">{html.escape(str(state.get('format', '—')).replace('_', ' '))} ·
-      <span class="status-pill{' complete' if status == 'complete' else ''}">{html.escape(status_label)}</span>
+      <span class="status-pill{' complete' if status == 'complete' else ''}">{html.escape(status_label)}</span><br>
+      <span class="muted">Fabrary reference = Talishar online hero meta (fabrary.net); deck matchups mapped via hero_id</span>
     </p>
 
     <p class="progress-headline">{html.escape(progress_headline)}</p>

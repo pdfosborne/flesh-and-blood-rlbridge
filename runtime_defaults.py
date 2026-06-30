@@ -124,6 +124,10 @@ class MetaRuntime:
     # ── Training Checkpoint evaluation (uses cpp engine if possible)  ────────
     eval_episodes: int = 100  # checkpoint / phase-3 eval watcher
     eval_max_steps: int = 1_000
+    # Logic-vs-logic baseline (win% vs logic) at checkpoint / batch start.
+    checkpoint_eval_logic_vs_logic: bool = True
+    # Agent-vs-logic eval (vs logic win%) at checkpoints.
+    checkpoint_eval_agent_vs_logic: bool = False
 
     # ── Final evaluation (after training, uses Talishar engine) ──────────────
     final_eval_episodes: int = 100
@@ -346,6 +350,8 @@ class UnifiedRandomMatchupsDefaults:
     cache_dir: str | None
     out_dir: str | None
     custom_deck_links: tuple[str, ...]
+    checkpoint_eval_logic_vs_logic: bool
+    checkpoint_eval_agent_vs_logic: bool
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -629,6 +635,8 @@ def build_runtime(meta: MetaRuntime) -> RuntimeDefaults:
             cache_dir=urm.cache_dir,
             out_dir=urm.out_dir,
             custom_deck_links=urm.custom_deck_links,
+            checkpoint_eval_logic_vs_logic=bool(meta.checkpoint_eval_logic_vs_logic),
+            checkpoint_eval_agent_vs_logic=bool(meta.checkpoint_eval_agent_vs_logic),
         ),
     )
 
@@ -690,6 +698,8 @@ DEFAULT_UNIFIED_CHECKPOINT_INTERVAL_PCT = _UR.checkpoint_interval_pct
 DEFAULT_UNIFIED_CHECKPOINT_EVAL_EPISODES = _UR.checkpoint_eval_episodes
 DEFAULT_UNIFIED_WORKERS = _UR.workers
 DEFAULT_UNIFIED_PARALLEL_MATCHUPS = _UR.parallel_matchups
+DEFAULT_CHECKPOINT_EVAL_LOGIC_VS_LOGIC = _UR.checkpoint_eval_logic_vs_logic
+DEFAULT_CHECKPOINT_EVAL_AGENT_VS_LOGIC = _UR.checkpoint_eval_agent_vs_logic
 DEFAULT_ROLLOUT_MODE = RUNTIME.rollout.mode
 DEFAULT_ROLLOUT_PROCESSES = RUNTIME.rollout.processes
 DEFAULT_ROLLOUT_HTTP_POOL_SIZE = RUNTIME.rollout.http_pool_size
@@ -717,6 +727,8 @@ def apply_meta(**overrides: object) -> RuntimeDefaults:
     global DEFAULT_UNIFIED_CHECKPOINT_INTERVAL_PCT  # noqa: PLW0603
     global DEFAULT_UNIFIED_CHECKPOINT_EVAL_EPISODES, DEFAULT_UNIFIED_WORKERS  # noqa: PLW0603
     global DEFAULT_UNIFIED_PARALLEL_MATCHUPS  # noqa: PLW0603
+    global DEFAULT_CHECKPOINT_EVAL_LOGIC_VS_LOGIC  # noqa: PLW0603
+    global DEFAULT_CHECKPOINT_EVAL_AGENT_VS_LOGIC  # noqa: PLW0603
     global DEFAULT_ROLLOUT_MODE, DEFAULT_ROLLOUT_PROCESSES, DEFAULT_ROLLOUT_HTTP_POOL_SIZE  # noqa: PLW0603
 
     META = replace(META, **overrides)
@@ -763,6 +775,8 @@ def apply_meta(**overrides: object) -> RuntimeDefaults:
     DEFAULT_UNIFIED_CHECKPOINT_EVAL_EPISODES = _ur.checkpoint_eval_episodes
     DEFAULT_UNIFIED_WORKERS = _ur.workers
     DEFAULT_UNIFIED_PARALLEL_MATCHUPS = _ur.parallel_matchups
+    DEFAULT_CHECKPOINT_EVAL_LOGIC_VS_LOGIC = _ur.checkpoint_eval_logic_vs_logic
+    DEFAULT_CHECKPOINT_EVAL_AGENT_VS_LOGIC = _ur.checkpoint_eval_agent_vs_logic
     DEFAULT_ROLLOUT_MODE = RUNTIME.rollout.mode
     DEFAULT_ROLLOUT_PROCESSES = RUNTIME.rollout.processes
     DEFAULT_ROLLOUT_HTTP_POOL_SIZE = RUNTIME.rollout.http_pool_size

@@ -1912,6 +1912,70 @@ def _fast_eval_runtime_backend_label(env: Any) -> str:
     return "Fast sampled eval"
 
 
+def _fast_reset_with_eval_failover(
+    env: Any,
+    swap_env: Any | None,
+    *,
+    ep: int,
+    ep_seed: int | None,
+    backend_pool: Any | None,
+    matchup: "Matchup | None",
+    game_format: str,
+    max_steps: int,
+) -> tuple[dict[str, Any], Any]:
+    """Run fast_reset, rebind envs to another eval shard on Start.php / transport errors."""
+    from flesh_and_blood_rlbridge.talishar_backend_pool import is_shard_reset_error  # noqa: PLC0415
+
+    max_attempts = max(1, len(backend_pool.urls)) if backend_pool is not None else 1
+    last_exc: BaseException | None = None
+    swap_matchup_obj = swapped_matchup(matchup) if matchup is not None else None
+
+    for _attempt in range(max_attempts):
+        use_swap = swap_env is not None and (ep % 2 == 1)
+        active_env = swap_env if use_swap else env
+        try:
+            state = active_env.fast_reset(
+                seed=ep_seed,
+                starting_player_id=1 + (ep % 2),
+            )
+            if backend_pool is not None:
+                backend_pool.note_shard_success(getattr(env, "_base_url", "") or "")
+            return state, active_env
+        except Exception as exc:
+            last_exc = exc
+            failed_url = getattr(env, "_base_url", "") or ""
+            can_rebind = (
+                backend_pool is not None
+                and matchup is not None
+                and swap_matchup_obj is not None
+                and is_shard_reset_error(exc)
+            )
+            if not can_rebind:
+                raise
+            backend_pool.note_shard_failure(failed_url)
+            replacement = backend_pool.pick_replacement(
+                failed_url,
+                worker_index=ep,
+            )
+            if not replacement or replacement == failed_url:
+                raise
+            from train_dual_agent_common import _rebind_worker_env  # noqa: PLC0415
+
+            _rebind_worker_env(
+                env,
+                swap_env,
+                matchup=matchup,
+                swap_matchup=swap_matchup_obj,
+                base_url=replacement,
+                game_format=game_format,
+                max_turns=max_steps,
+            )
+
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("fast_reset_with_eval_failover exhausted attempts")
+
+
 def _evaluate_fast_policy_matchup(
     env: Any,
     p1_policy: Any,
@@ -1927,6 +1991,9 @@ def _evaluate_fast_policy_matchup(
     live_phase: str = "cpp_checkpoint",
     p1_deck_card_ids: Optional[set[str]] = None,
     swap_env: Any = None,
+    backend_pool: Any | None = None,
+    matchup: "Matchup | None" = None,
+    game_format: str = "",
 ) -> Optional[dict[str, Any]]:
     if not _env_supports_fast_training(env):
         return None
@@ -1945,7 +2012,21 @@ def _evaluate_fast_policy_matchup(
         p2_rng = np.random.default_rng((ep_seed * 31 + 13) if seed is not None else None)
         use_swap = swap_env is not None and (ep % 2 == 1)
         active_env = swap_env if use_swap else env
-        state = active_env.fast_reset(seed=ep_seed, starting_player_id=1 + (ep % 2))
+        if backend_pool is not None and matchup is not None and game_format:
+            state, active_env = _fast_reset_with_eval_failover(
+                env,
+                swap_env,
+                ep=ep,
+                ep_seed=ep_seed,
+                backend_pool=backend_pool,
+                matchup=matchup,
+                game_format=game_format,
+                max_steps=max_steps,
+            )
+        else:
+            state = active_env.fast_reset(seed=ep_seed, starting_player_id=1 + (ep % 2))
+            if backend_pool is not None:
+                backend_pool.note_shard_success(getattr(active_env, "_base_url", "") or "")
         terminated = truncated = False
         steps = 0
         _touch_cpp_eval_live_replay(
@@ -2202,6 +2283,7 @@ def _evaluate_p1_vs_fixed_opponent(
     live_progress_path: Optional[Path] = None,
     live_progress_extra: Optional[dict[str, Any]] = None,
     p1_deck_card_ids: Optional[set[str]] = None,
+    backend_pool: Any | None = None,
     **_: Any,
 ) -> dict[str, Any]:
     """Evaluate frozen P1/P2 policies against each other.
@@ -2240,6 +2322,20 @@ def _evaluate_p1_vs_fixed_opponent(
 
     use_cpp = backend == "cpp"
     talishar_backend = "http" if backend == "http" else DEFAULT_TALISHAR_BACKEND
+    eval_pool = backend_pool
+    if eval_pool is None and backend in {DEFAULT_TALISHAR_BACKEND, "auto", "cpp"}:
+        try:
+            from flesh_and_blood_rlbridge.talishar_backend_pool import (  # noqa: PLC0415
+                build_eval_backend_pool,
+            )
+
+            eval_pool = build_eval_backend_pool(
+                fallback_url=base_url,
+                game_format=game_format,
+            )
+            base_url = eval_pool.primary_url
+        except RuntimeError:
+            eval_pool = None
     env = make_env(
         matchup,
         base_url=base_url,
@@ -2275,6 +2371,9 @@ def _evaluate_p1_vs_fixed_opponent(
             live_progress_extra=live_progress_extra,
             p1_deck_card_ids=p1_deck_card_ids,
             swap_env=swap_env,
+            backend_pool=eval_pool,
+            matchup=matchup,
+            game_format=game_format,
         )
         if fast_metrics is not None:
             try:

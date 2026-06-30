@@ -205,6 +205,8 @@ def test_checkpoint_eval_tracker_records_vs_logic(monkeypatch, tmp_path: Path) -
         p2_policy=policy,
         seed=0,
         out_dir=tmp_path,
+        eval_agent_vs_logic=True,
+        eval_logic_vs_logic=False,
     )
     tracker.on_parallel_progress(10)
     tracker.on_parallel_progress(20)
@@ -215,13 +217,7 @@ def test_checkpoint_eval_tracker_records_vs_logic(monkeypatch, tmp_path: Path) -
     assert record["vs_logic"]["agent_p1_seat"]["agent_win_rate"] == 0.6
     assert record["vs_logic"]["agent_p2_seat"]["agent_win_rate"] == 0.7
     assert "logic_vs_logic" not in record
-    assert logic_calls == 1
-    from fab_bridge.unified_dashboard import LOGIC_VS_LOGIC_BASELINE_NAME
-
-    baseline_path = tmp_path / matchup.name / LOGIC_VS_LOGIC_BASELINE_NAME
-    assert baseline_path.is_file()
-    baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
-    assert baseline["p1_win_rate"] == pytest.approx(0.54, abs=0.06)
+    assert logic_calls == 0
     ckpt_json = (
         tmp_path
         / matchup.name

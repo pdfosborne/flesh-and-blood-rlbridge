@@ -37,6 +37,8 @@ from train_dual_agent_common import (  # noqa: E402
     sample_random_fabrary_matchups,
 )
 from runtime_defaults import (  # noqa: E402
+    DEFAULT_CHECKPOINT_EVAL_AGENT_VS_LOGIC,
+    DEFAULT_CHECKPOINT_EVAL_LOGIC_VS_LOGIC,
     DEFAULT_UNIFIED_CHECKPOINT_EVAL_EPISODES,
     DEFAULT_UNIFIED_CHECKPOINT_INTERVAL_PCT,
     DEFAULT_UNIFIED_EPISODES,
@@ -98,6 +100,18 @@ def _parse_args() -> argparse.Namespace:
         "--checkpoint-eval-episodes",
         type=int,
         default=DEFAULT_UNIFIED_CHECKPOINT_EVAL_EPISODES,
+    )
+    parser.add_argument(
+        "--checkpoint-eval-logic-vs-logic",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_CHECKPOINT_EVAL_LOGIC_VS_LOGIC,
+        help="Run logic-vs-logic baseline (win%% vs logic) for each batch.",
+    )
+    parser.add_argument(
+        "--checkpoint-eval-agent-vs-logic",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_CHECKPOINT_EVAL_AGENT_VS_LOGIC,
+        help="Run agent-vs-logic eval (vs logic win%%) at merged checkpoints.",
     )
     parser.add_argument(
         "--optimal-policy-live-render",
@@ -280,6 +294,8 @@ def main() -> None:
         "talishar_eval_url": eval_url,
         "talishar_render_url": render_url,
         "seed": args.seed,
+        "checkpoint_eval_logic_vs_logic": bool(args.checkpoint_eval_logic_vs_logic),
+        "checkpoint_eval_agent_vs_logic": bool(args.checkpoint_eval_agent_vs_logic),
         "started_at": datetime.now(timezone.utc).isoformat(),
     }
     (out_dir / "run_manifest.json").write_text(
@@ -378,6 +394,8 @@ def main() -> None:
             checkpoint_interval_pct=float(args.checkpoint_interval_pct),
             checkpoint_interval=args.checkpoint_interval,
             checkpoint_eval_episodes=int(args.checkpoint_eval_episodes),
+            checkpoint_eval_logic_vs_logic=bool(args.checkpoint_eval_logic_vs_logic),
+            checkpoint_eval_agent_vs_logic=bool(args.checkpoint_eval_agent_vs_logic),
             skip_converged=bool(args.skip_converged),
             build_cpp_engine=build_cpp_engine,
             require_cpp_engine=require_cpp_engine,

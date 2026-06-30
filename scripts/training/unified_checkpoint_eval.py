@@ -15,6 +15,7 @@ from fab_bridge.unified_results import CHECKPOINT_EVAL_SCOPE
 
 if TYPE_CHECKING:
     from train_dual_agent_common import Matchup, PPOAgent
+    from flesh_and_blood_rlbridge.talishar_backend_pool import TalisharBackendPool
 
 
 def allocate_eval_episodes(
@@ -118,6 +119,9 @@ class UnifiedCheckpointCoordinator:
         unified_policy: "PPOAgent",
         policy_snapshot_fn: Callable[[], tuple["PPOAgent", "PPOAgent"]],
         seed: Optional[int] = None,
+        eval_backend_pool: Optional["TalisharBackendPool"] = None,
+        eval_agent_vs_logic: bool = False,
+        eval_logic_vs_logic: bool = True,
     ) -> None:
         self.out_dir = out_dir.expanduser().resolve()
         self.matchups = dict(matchups)
@@ -131,6 +135,9 @@ class UnifiedCheckpointCoordinator:
         self.unified_policy = unified_policy
         self.policy_snapshot_fn = policy_snapshot_fn
         self.seed = seed
+        self.eval_backend_pool = eval_backend_pool
+        self.eval_agent_vs_logic = bool(eval_agent_vs_logic)
+        self.eval_logic_vs_logic = bool(eval_logic_vs_logic)
         self.log: list[dict[str, Any]] = []
         self.first_win_rate: Optional[float] = None
         self.final_win_rate: Optional[float] = None
@@ -229,16 +236,14 @@ class UnifiedCheckpointCoordinator:
         from unified_logic_baseline import load_logic_vs_logic_baseline  # noqa: PLC0415
         from train_play import (  # noqa: PLC0415
             _evaluate_p1_vs_fixed_opponent,
+            evaluate_agent_vs_logic_both_seats,
         )
         from fab_bridge.cpp_eval_live_dashboard import (  # noqa: PLC0415
             unified_checkpoint_eval_live_path,
         )
         from fab_bridge.unified_dashboard import maybe_refresh_unified_dashboard  # noqa: PLC0415
-        from flesh_and_blood_rlbridge.talishar_backend_pool import (  # noqa: PLC0415
-            resolve_eval_backend_url,
-        )
 
-        eval_base_url = resolve_eval_backend_url(fallback_url=self.base_url)
+        eval_base_url = self.base_url
         live_progress_path = unified_checkpoint_eval_live_path(self.out_dir)
         keys = list(self.matchups.keys())
         alloc_seed = (
@@ -253,49 +258,80 @@ class UnifiedCheckpointCoordinator:
         matchups_total = len(keys)
         total_self_play_games = sum(schedule_counts.values())
 
-        for index, (matchup_key, matchup) in enumerate(self.matchups.items()):
-            eval_eps = schedule_counts.get(matchup_key, 0)
-            if eval_eps <= 0:
-                continue
-            eval_seed = (
-                (self.seed + episodes_completed + index * 10_000)
-                if self.seed is not None
-                else None
+        try:
+            for index, (matchup_key, matchup) in enumerate(self.matchups.items()):
+                eval_eps = schedule_counts.get(matchup_key, 0)
+                if eval_eps <= 0:
+                    continue
+                eval_seed = (
+                    (self.seed + episodes_completed + index * 10_000)
+                    if self.seed is not None
+                    else None
+                )
+                live_progress_extra = {
+                    "matchup": matchup.name,
+                    "matchup_dir": matchup_key,
+                    "merged_eval_index": index + 1,
+                    "matchups_total": matchups_total,
+                }
+                metrics = _evaluate_p1_vs_fixed_opponent(
+                    matchup,
+                    eval_p1,
+                    p2_agent=eval_p2,
+                    base_url=eval_base_url,
+                    game_format=self.game_format,
+                    max_steps=self.max_steps,
+                    episodes=eval_eps,
+                    seed=eval_seed,
+                    backend=DEFAULT_TALISHAR_BACKEND,
+                    eval_label="Checkpoint eval (self-play)",
+                    live_progress_path=live_progress_path,
+                    live_progress_extra=live_progress_extra,
+                    backend_pool=self.eval_backend_pool,
+                )
+                record = {
+                    "matchup": matchup.name,
+                    "matchup_dir": _resolve_matchup_subdir(self.out_dir, matchup),
+                    "episodes_completed": episodes_completed,
+                    "target_episodes": self.n_episodes,
+                    "eval_episodes": eval_eps,
+                    "eval_mode": "self_play",
+                    **metrics,
+                }
+                if self.eval_agent_vs_logic and eval_eps > 0:
+                    vs_logic = evaluate_agent_vs_logic_both_seats(
+                        matchup,
+                        eval_p1,
+                        base_url=eval_base_url,
+                        game_format=self.game_format,
+                        max_steps=self.max_steps,
+                        episodes=eval_eps,
+                        seed=(
+                            (eval_seed + 25_000) if eval_seed is not None else None
+                        ),
+                        backend=DEFAULT_TALISHAR_BACKEND,
+                        eval_label_prefix="Checkpoint eval vs logic",
+                        live_progress_path=live_progress_path,
+                        live_progress_extra=live_progress_extra,
+                        backend_pool=self.eval_backend_pool,
+                    )
+                    record["vs_logic"] = vs_logic
+                if self.eval_logic_vs_logic:
+                    baseline = load_logic_vs_logic_baseline(self.out_dir, matchup)
+                    if baseline is not None:
+                        record["logic_vs_logic"] = baseline
+                per_matchup[matchup_key] = record
+                self._write_per_matchup_artifacts(matchup, episodes_completed, record)
+        except Exception as exc:
+            self._append_failed_merged_record(
+                episodes_completed=episodes_completed,
+                bucket_kind=bucket_kind,
+                error=str(exc),
+                per_matchup=per_matchup,
+                eval_episodes_total=self.checkpoint_eval_episodes,
             )
-            live_progress_extra = {
-                "matchup": matchup.name,
-                "matchup_dir": matchup_key,
-                "merged_eval_index": index + 1,
-                "matchups_total": matchups_total,
-            }
-            metrics = _evaluate_p1_vs_fixed_opponent(
-                matchup,
-                eval_p1,
-                p2_agent=eval_p2,
-                base_url=eval_base_url,
-                game_format=self.game_format,
-                max_steps=self.max_steps,
-                episodes=eval_eps,
-                seed=eval_seed,
-                backend=DEFAULT_TALISHAR_BACKEND,
-                eval_label="Checkpoint eval (self-play)",
-                live_progress_path=live_progress_path,
-                live_progress_extra=live_progress_extra,
-            )
-            record = {
-                "matchup": matchup.name,
-                "matchup_dir": _resolve_matchup_subdir(self.out_dir, matchup),
-                "episodes_completed": episodes_completed,
-                "target_episodes": self.n_episodes,
-                "eval_episodes": eval_eps,
-                "eval_mode": "self_play",
-                **metrics,
-            }
-            baseline = load_logic_vs_logic_baseline(self.out_dir, matchup)
-            if baseline is not None:
-                record["logic_vs_logic"] = baseline
-            per_matchup[matchup_key] = record
-            self._write_per_matchup_artifacts(matchup, episodes_completed, record)
+            maybe_refresh_unified_dashboard(self.out_dir, min_interval_seconds=0.0)
+            raise
 
         aggregate = _build_aggregate(per_matchup)
         merged_record = {
@@ -351,6 +387,35 @@ class UnifiedCheckpointCoordinator:
             history.append(record)
             history_path.write_text(json.dumps(history, indent=2), encoding="utf-8")
             self.log.append(record)
+
+    def _append_failed_merged_record(
+        self,
+        *,
+        episodes_completed: int,
+        bucket_kind: str,
+        error: str,
+        per_matchup: dict[str, dict[str, Any]],
+        eval_episodes_total: int,
+    ) -> None:
+        aggregate = _build_aggregate(per_matchup) if per_matchup else {}
+        merged_record = {
+            "eval_mode": "merged",
+            "status": "error",
+            "error": error,
+            "episodes_completed": episodes_completed,
+            "target_episodes": self.n_episodes,
+            "eval_episodes_total": eval_episodes_total,
+            "matchups_evaluated": len(per_matchup),
+            "checkpoint_bucket": bucket_kind,
+            "aggregate": aggregate,
+            "per_matchup": per_matchup,
+        }
+        self._append_merged_record(merged_record)
+        print(
+            f"  Merged checkpoint eval @ ep {episodes_completed} ({bucket_kind}) FAILED: "
+            f"{error[:200]}",
+            flush=True,
+        )
 
     def _write_merged_scope(self) -> None:
         from train_dual_agent_common import _resolve_matchup_subdir  # noqa: PLC0415

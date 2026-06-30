@@ -63,7 +63,7 @@ from flesh_and_blood_rlbridge.talishar_engine_environment import (  # noqa: E402
 )
 from flesh_and_blood_rlbridge.talishar_backend_pool import (  # noqa: E402
     TalisharBackendPool,
-    is_shard_connection_error,
+    is_shard_reset_error,
 )
 from flesh_and_blood_rlbridge.player_observation import (  # noqa: E402
     ACTION_CAPACITY,
@@ -103,6 +103,8 @@ from runtime_defaults import (  # noqa: E402
     DEFAULT_WARMUP_EPISODES,
     DEFAULT_CHECKPOINT_INTERVAL_PCT,
     DEFAULT_CHECKPOINT_EVAL_EPISODES,
+    DEFAULT_CHECKPOINT_EVAL_AGENT_VS_LOGIC,
+    DEFAULT_CHECKPOINT_EVAL_LOGIC_VS_LOGIC,
     DEFAULT_TALISHAR_BACKEND,
     RUNTIME,
     engine_env_kwargs,
@@ -1037,7 +1039,7 @@ def _retry_fast_episode_on_healthy_shards(
                 and matchup is not None
                 and swap_matchup is not None
                 and game_format
-                and is_shard_connection_error(exc)
+                and is_shard_reset_error(exc)
             )
             if can_rebind:
                 talishar_pool.note_shard_failure(failed_url)
@@ -3721,6 +3723,8 @@ class _CheckpointEvalTracker:
         seed: Optional[int],
         out_dir: Path,
         policy_snapshot_fn: Optional[Callable[[], tuple[PPOAgent, PPOAgent]]] = None,
+        eval_agent_vs_logic: bool = DEFAULT_CHECKPOINT_EVAL_AGENT_VS_LOGIC,
+        eval_logic_vs_logic: bool = DEFAULT_CHECKPOINT_EVAL_LOGIC_VS_LOGIC,
     ) -> None:
         self.matchup = matchup
         self.base_url = base_url
@@ -3739,6 +3743,8 @@ class _CheckpointEvalTracker:
         self._episodes_done = 0
         self._logic_vs_logic_baseline = self._load_logic_vs_logic_baseline()
         self._policy_snapshot_fn = policy_snapshot_fn
+        self._eval_agent_vs_logic = bool(eval_agent_vs_logic)
+        self._eval_logic_vs_logic = bool(eval_logic_vs_logic)
 
     def _logic_vs_logic_baseline_path(self) -> Path:
         return (
@@ -3820,19 +3826,20 @@ class _CheckpointEvalTracker:
                 evaluate_logic_vs_logic,
             )
 
-            vs_logic = evaluate_agent_vs_logic_both_seats(
-                self.matchup,
-                eval_p1,
-                base_url=self.base_url,
-                game_format=self.game_format,
-                max_steps=self.max_steps,
-                episodes=self.checkpoint_eval_episodes,
-                seed=(self.seed + completed) if self.seed is not None else None,
-                backend=DEFAULT_TALISHAR_BACKEND,
-                eval_label_prefix="Checkpoint eval vs logic",
-                live_progress_path=live_progress_path,
-            )
-            if self._logic_vs_logic_baseline is None:
+            if self._eval_agent_vs_logic:
+                vs_logic = evaluate_agent_vs_logic_both_seats(
+                    self.matchup,
+                    eval_p1,
+                    base_url=self.base_url,
+                    game_format=self.game_format,
+                    max_steps=self.max_steps,
+                    episodes=self.checkpoint_eval_episodes,
+                    seed=(self.seed + completed) if self.seed is not None else None,
+                    backend=DEFAULT_TALISHAR_BACKEND,
+                    eval_label_prefix="Checkpoint eval vs logic",
+                    live_progress_path=live_progress_path,
+                )
+            if self._eval_logic_vs_logic and self._logic_vs_logic_baseline is None:
                 logic_vs_logic = evaluate_logic_vs_logic(
                     self.matchup,
                     base_url=self.base_url,
@@ -3853,8 +3860,13 @@ class _CheckpointEvalTracker:
             "eval_episodes": self.checkpoint_eval_episodes,
             "eval_mode": "self_play",
             **metrics,
-            "vs_logic": vs_logic,
         }
+        if vs_logic is not None:
+            record["vs_logic"] = vs_logic
+        if logic_vs_logic is not None:
+            record["logic_vs_logic"] = logic_vs_logic
+        elif self._eval_logic_vs_logic and self._logic_vs_logic_baseline is not None:
+            record["logic_vs_logic"] = self._logic_vs_logic_baseline
         self.log.append(record)
         wr = float(metrics["p1_win_rate"])
         if self.first_win_rate is None:
@@ -4188,6 +4200,8 @@ def _write_matchup_dir_label(out_dir: Path, matchup: Matchup) -> Path:
                     "output_subdir": matchup_root.name,
                     "p1_deck": matchup.p1_deck,
                     "p2_deck": matchup.p2_deck,
+                    "p1_hero": matchup.p1_hero,
+                    "p2_hero": matchup.p2_hero,
                     "description": matchup.description,
                 },
                 indent=2,
@@ -4217,6 +4231,8 @@ def train_matchup(
     checkpoint_interval_pct: float = DEFAULT_CHECKPOINT_INTERVAL_PCT,
     checkpoint_interval: Optional[int] = None,
     checkpoint_eval_episodes: int = DEFAULT_CHECKPOINT_EVAL_EPISODES,
+    checkpoint_eval_logic_vs_logic: bool = DEFAULT_CHECKPOINT_EVAL_LOGIC_VS_LOGIC,
+    checkpoint_eval_agent_vs_logic: bool = DEFAULT_CHECKPOINT_EVAL_AGENT_VS_LOGIC,
     build_cpp_engine: bool = False,
     require_cpp_engine: bool = False,
     rollout_mode: Optional[str] = None,
@@ -4534,6 +4550,8 @@ def train_matchup(
             seed=seed,
             out_dir=out_dir,
             policy_snapshot_fn=policy_snapshot_fn,
+            eval_agent_vs_logic=checkpoint_eval_agent_vs_logic,
+            eval_logic_vs_logic=checkpoint_eval_logic_vs_logic,
         )
         print(
             f"  Checkpoint eval: every {effective_ckpt_interval} episode(s), "
@@ -4929,6 +4947,8 @@ def run_matchup_training(
     checkpoint_interval_pct: float = DEFAULT_CHECKPOINT_INTERVAL_PCT,
     checkpoint_interval: Optional[int] = None,
     checkpoint_eval_episodes: int = DEFAULT_CHECKPOINT_EVAL_EPISODES,
+    checkpoint_eval_logic_vs_logic: bool = DEFAULT_CHECKPOINT_EVAL_LOGIC_VS_LOGIC,
+    checkpoint_eval_agent_vs_logic: bool = DEFAULT_CHECKPOINT_EVAL_AGENT_VS_LOGIC,
     skip_converged: bool = True,
     build_cpp_engine: bool = False,
     require_cpp_engine: bool = False,
@@ -5144,11 +5164,34 @@ def run_matchup_training(
         )
         if unified_run and checkpoint_eval_episodes > 0:
             from unified_checkpoint_eval import UnifiedCheckpointCoordinator  # noqa: PLC0415
+            from flesh_and_blood_rlbridge.talishar_backend_pool import (  # noqa: PLC0415
+                build_eval_backend_pool,
+                resolve_eval_backend_url,
+            )
+            from unified_logic_baseline import (  # noqa: PLC0415
+                submit_batch_logic_vs_logic_baselines,
+            )
+            from unified_checkpoint_eval import allocate_eval_episodes  # noqa: PLC0415
 
             batch_matchups = {
                 _resolve_matchup_subdir(out_dir, matchup): matchup
                 for matchup in batch
             }
+
+            try:
+                eval_backend_pool = build_eval_backend_pool(
+                    fallback_url=base_url,
+                    game_format=game_format,
+                )
+                eval_base_url = eval_backend_pool.primary_url
+            except RuntimeError as exc:
+                print(
+                    f"  WARNING: eval backend probe failed ({exc!r}); "
+                    "using configured eval URL",
+                    flush=True,
+                )
+                eval_backend_pool = None
+                eval_base_url = resolve_eval_backend_url(fallback_url=base_url)
 
             def _policy_snapshot_for_batch() -> tuple[PPOAgent, PPOAgent]:
                 if shared_buffer is not None:
@@ -5166,7 +5209,7 @@ def run_matchup_training(
                 checkpoint_coordinator = UnifiedCheckpointCoordinator(
                     out_dir=out_dir,
                     matchups=batch_matchups,
-                    base_url=base_url,
+                    base_url=eval_base_url,
                     game_format=game_format,
                     max_steps=max_steps,
                     n_episodes=n_episodes,
@@ -5176,23 +5219,17 @@ def run_matchup_training(
                     unified_policy=shared_policy,
                     policy_snapshot_fn=_policy_snapshot_for_batch,
                     seed=seed,
+                    eval_backend_pool=eval_backend_pool,
+                    eval_agent_vs_logic=checkpoint_eval_agent_vs_logic,
+                    eval_logic_vs_logic=checkpoint_eval_logic_vs_logic,
                 )
                 print(
                     f"  Merged checkpoint eval: every {effective_ckpt_interval} episode(s) "
                     f"when all {len(batch)} matchup(s) reach bucket; "
                     f"{checkpoint_eval_episodes} self-play eval game(s) total across matchups "
-                    f"(async, non-blocking)"
+                    f"(async, non-blocking; eval shard {eval_base_url})"
                 )
 
-            from flesh_and_blood_rlbridge.talishar_backend_pool import (  # noqa: PLC0415
-                resolve_eval_backend_url,
-            )
-            from unified_logic_baseline import (  # noqa: PLC0415
-                submit_batch_logic_vs_logic_baselines,
-            )
-            from unified_checkpoint_eval import allocate_eval_episodes  # noqa: PLC0415
-
-            eval_base_url = resolve_eval_backend_url(fallback_url=base_url)
             baseline_alloc = allocate_eval_episodes(
                 checkpoint_eval_episodes,
                 list(batch_matchups.keys()),
@@ -5202,15 +5239,17 @@ def run_matchup_training(
                 (count for count in baseline_alloc.values() if count > 0),
                 0,
             )
-            baseline_queued = submit_batch_logic_vs_logic_baselines(
-                batch_matchups,
-                out_dir=out_dir,
-                base_url=eval_base_url,
-                game_format=game_format,
-                max_steps=max_steps,
-                total_episodes=checkpoint_eval_episodes,
-                seed=(seed + 50_000) if seed is not None else None,
-            )
+            baseline_queued = 0
+            if checkpoint_eval_logic_vs_logic:
+                baseline_queued = submit_batch_logic_vs_logic_baselines(
+                    batch_matchups,
+                    out_dir=out_dir,
+                    base_url=eval_base_url,
+                    game_format=game_format,
+                    max_steps=max_steps,
+                    total_episodes=checkpoint_eval_episodes,
+                    seed=(seed + 50_000) if seed is not None else None,
+                )
             if baseline_queued > 0:
                 print(
                     f"  Logic win% vs logic baseline: {baseline_queued} matchup(s), "
@@ -5278,6 +5317,8 @@ def run_matchup_training(
                 checkpoint_interval_pct=checkpoint_interval_pct,
                 checkpoint_interval=checkpoint_interval,
                 checkpoint_eval_episodes=checkpoint_eval_episodes,
+                checkpoint_eval_logic_vs_logic=checkpoint_eval_logic_vs_logic,
+                checkpoint_eval_agent_vs_logic=checkpoint_eval_agent_vs_logic,
                 build_cpp_engine=build_cpp_engine,
                 require_cpp_engine=require_cpp_engine,
                 rollout_mode=rollout_mode,

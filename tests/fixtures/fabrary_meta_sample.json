@@ -1,0 +1,46 @@
+{
+  "heroResults": [
+    {
+      "heroIdentifier": "dash",
+      "results": [
+        {
+          "opposingHeroIdentifier": "gravy-bones",
+          "plays": 42,
+          "playsGoingFirst": 21,
+          "playsGoingSecond": 21,
+          "wins": 25,
+          "winsGoingFirst": 14,
+          "winsGoingSecond": 11
+        },
+        {
+          "opposingHeroIdentifier": "dash",
+          "plays": 0,
+          "wins": 0
+        }
+      ]
+    },
+    {
+      "heroIdentifier": "gravy-bones",
+      "results": [
+        {
+          "opposingHeroIdentifier": "dash",
+          "plays": 42,
+          "wins": 17
+        }
+      ]
+    },
+    {
+      "heroIdentifier": "arakni-web-of-deceit",
+      "results": [
+        {
+          "opposingHeroIdentifier": "azalea",
+          "plays": 10,
+          "wins": 6
+        }
+      ]
+    }
+  ],
+  "period": "Last 30 days",
+  "queue": "Silver Age Competitive",
+  "timestamp": "2026-06-30T07:00:47.004Z"
+}

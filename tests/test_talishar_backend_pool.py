@@ -10,9 +10,12 @@ import pytest
 from flesh_and_blood_rlbridge.talishar_backend_pool import (
     TalisharBackendPool,
     is_shard_connection_error,
+    is_shard_reset_error,
     normalize_talishar_url,
     parse_talishar_urls_string,
+    pick_healthy_eval_backend,
     probe_backend_health,
+    resolve_eval_backend_candidates,
     resolve_eval_backend_url,
     resolve_talishar_backend_urls,
     shard_eviction_threshold,
@@ -190,6 +193,50 @@ def test_is_shard_connection_error_detects_transport_failures() -> None:
         ConnectionError('MaxRetryError("HTTPConnectionPool: RemoteDisconnected")')
     )
     assert not is_shard_connection_error(ValueError("bad action"))
+
+
+def test_is_shard_reset_error_detects_start_php_failures() -> None:
+    assert is_shard_reset_error(
+        RuntimeError("GET http://localhost:8090/game/Start.php returned non-JSON")
+    )
+    assert is_shard_reset_error(ConnectionError("refused"))
+    assert not is_shard_reset_error(ValueError("bad logits"))
+
+
+def test_resolve_eval_backend_candidates_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TALISHAR_EVAL_URL", "http://localhost:8090/game")
+    monkeypatch.setenv(
+        "TALISHAR_URLS",
+        "http://localhost:8080/game,http://localhost:8081/game",
+    )
+    monkeypatch.setenv("TALISHAR_RENDER_URL", "http://localhost:8091/game")
+    candidates = resolve_eval_backend_candidates()
+    assert candidates[0] == "http://localhost:8090/game"
+    assert "http://localhost:8080/game" in candidates
+    assert "http://localhost:8091/game" not in candidates
+
+
+def test_pick_healthy_eval_backend_prefers_working_shard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TALISHAR_EVAL_URL", "http://localhost:8090/game")
+    monkeypatch.setenv("TALISHAR_URLS", "http://localhost:8089/game")
+
+    def _game_probe(url: str, **kwargs: object) -> tuple[bool, str]:
+        if "8090" in url:
+            return False, "Start.php failed"
+        return True, "game_start"
+
+    with patch(
+        "flesh_and_blood_rlbridge.talishar_backend_pool.probe_backend_game_start",
+        side_effect=_game_probe,
+    ), patch(
+        "flesh_and_blood_rlbridge.talishar_backend_pool.probe_backend_health",
+        return_value=(True, "rlstep"),
+    ):
+        chosen, status = pick_healthy_eval_backend()
+    assert chosen == "http://localhost:8089/game"
+    assert status["http://localhost:8090/game"] == "Start.php failed"
 
 
 def test_note_shard_failure_evicts_after_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
