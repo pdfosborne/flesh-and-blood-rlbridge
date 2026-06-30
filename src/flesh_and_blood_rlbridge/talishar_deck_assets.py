@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
@@ -160,30 +161,40 @@ def equipment_header_from_deck_stem(
     return best
 
 
-def ensure_full_equipment_header(
+def _sanitize_deck_token(token: str) -> str:
+    """Strip CR/LF artifacts from Talishar deck tokens (Windows ``\\r\\n`` reads)."""
+    return token.replace("\r", "").replace("\n", "").strip()
+
+
+def _sanitize_equipment_header(header: str) -> str:
+    parts = [_sanitize_deck_token(part) for part in (header or "").split()]
+    return " ".join(part for part in parts if part)
+
+
+@dataclass(frozen=True)
+class TalisharEquipmentLoadout:
+    """Talishar deck-file equipment layout (line 1 active + equipment sideboard lines)."""
+
+    line1: str
+    head_sb: tuple[str, ...] = ()
+    chest_sb: tuple[str, ...] = ()
+    arms_sb: tuple[str, ...] = ()
+    legs_sb: tuple[str, ...] = ()
+    offhand_sb: tuple[str, ...] = ()
+    weapon_sb: tuple[str, ...] = ()
+
+
+def _gather_equipment_header_candidates(
     hero_id: str,
     equipment_header: str,
-    assets_dir: str | Path,
+    assets: Path,
     *,
     deck_stem: str = "",
-) -> str:
-    """Return a Talishar line-1 header with hero plus filled equipment slots.
-
-    Merges the supplied header with the richest matching ``Assets/*.txt`` line
-    and promotes sideboard equipment into empty head/chest/arms/legs slots (and
-    weapon when available).
-    """
-    from fab_tui.equipment import (  # noqa: PLC0415
-        _equipment_pieces_from_header,
-        active_list_from_slot_map,
-        active_slot_map,
-        equipment_slot,
-        rebuild_equipment_header,
-        split_equipment_header,
-    )
+) -> tuple[str, list[str]]:
+    """Return ``(hero_token, candidate header lines)`` for loadout resolution."""
+    from fab_tui.equipment import equipment_slot  # noqa: PLC0415
 
     hero = hero_id.removeprefix("hero_").replace("-", "_").strip()
-    assets = Path(assets_dir)
     candidates: list[str] = []
 
     def _add_candidate(raw: str) -> None:
@@ -199,12 +210,11 @@ def ensure_full_equipment_header(
         _add_candidate(resolve_equipment_header_line(hero, assets, fallback=hero))
 
     if assets.is_dir():
+        asset_stems: list[str] = []
         if canonical_stem:
             asset_stems = [canonical_stem]
         elif stem:
             asset_stems = [stem]
-        else:
-            asset_stems = []
 
         for asset_stem in asset_stems:
             if not asset_stem:
@@ -250,48 +260,174 @@ def ensure_full_equipment_header(
         richest = max(candidates, key=lambda line: len(line.split()))
         hero = richest.split()[0]
 
-    slot_map: dict[str, str] = {"hero": hero}
-    sideboard_pool: list[str] = []
-
+    ordered_pieces: list[str] = []
+    seen: set[str] = set()
     for header in candidates:
-        active, sideboard = split_equipment_header(header, hero_id=hero)
-        for slot, card_id in active_slot_map(active, hero_id=hero).items():
-            if card_id and slot != "hero" and slot not in slot_map:
-                slot_map[slot] = card_id
-        for card_id in sideboard:
-            if card_id not in sideboard_pool:
-                sideboard_pool.append(card_id)
+        for card_id in header.split():
+            card_id = _sanitize_deck_token(card_id)
+            if not card_id or card_id in seen:
+                continue
+            seen.add(card_id)
+            if equipment_slot(card_id, hero_id=hero) == "hero":
+                continue
+            ordered_pieces.append(card_id)
 
-    required_slots = ("head", "chest", "arms", "legs", "weapon")
-    for slot in required_slots:
-        if slot_map.get(slot):
+    return hero, ordered_pieces
+
+
+def resolve_talishar_equipment_loadout(
+    hero_id: str,
+    equipment_header: str,
+    assets_dir: str | Path,
+    *,
+    deck_stem: str = "",
+) -> TalisharEquipmentLoadout:
+    """Resolve legal Talishar line-1 equipment and weapon/armor sideboard lines."""
+    from fab_tui.equipment import (  # noqa: PLC0415
+        build_talishar_active_equipment_line,
+        equipment_slot,
+        select_weapon_loadout,
+    )
+
+    assets = Path(assets_dir)
+    hero, ordered_pieces = _gather_equipment_header_candidates(
+        hero_id,
+        equipment_header,
+        assets,
+        deck_stem=deck_stem,
+    )
+
+    armor_slots = ("head", "chest", "arms", "legs")
+    armor_by_slot: dict[str, str] = {}
+    armor_sideboards: dict[str, list[str]] = {slot: [] for slot in armor_slots}
+    weapon_candidates: list[str] = []
+
+    for card_id in ordered_pieces:
+        slot = equipment_slot(card_id, hero_id=hero)
+        if slot in armor_slots:
+            if slot not in armor_by_slot:
+                armor_by_slot[slot] = card_id
+            else:
+                armor_sideboards[slot].append(card_id)
+        elif slot in {"weapon", "off_hand"}:
+            weapon_candidates.append(card_id)
+
+    for slot in armor_slots:
+        if armor_by_slot.get(slot):
             continue
-        for card_id in sideboard_pool:
+        for card_id in ordered_pieces:
             if equipment_slot(card_id, hero_id=hero) == slot:
-                slot_map[slot] = card_id
-                break
-        if slot_map.get(slot):
-            continue
-        for header in candidates:
-            for card_id in _equipment_pieces_from_header(header, hero_id=hero):
-                if equipment_slot(card_id, hero_id=hero) == slot:
-                    slot_map[slot] = card_id
-                    break
-            if slot_map.get(slot):
+                if slot not in armor_by_slot:
+                    armor_by_slot[slot] = card_id
                 break
 
-    active = active_list_from_slot_map(hero, slot_map)
-    used = set(active)
-    extras: list[str] = []
-    for header in candidates:
-        _, sideboard = split_equipment_header(header, hero_id=hero)
-        for card_id in sideboard:
-            if card_id not in used and card_id not in extras:
-                extras.append(card_id)
+    active_weapons, quiver_or_off_hand, weapon_sb = select_weapon_loadout(
+        weapon_candidates,
+        hero_id=hero,
+    )
+    if not active_weapons:
+        for card_id in ordered_pieces:
+            if equipment_slot(card_id, hero_id=hero) == "weapon":
+                active_weapons, quiver_or_off_hand, weapon_sb = select_weapon_loadout(
+                    [card_id, *weapon_candidates],
+                    hero_id=hero,
+                )
+                break
 
-    if active:
-        return rebuild_equipment_header(hero, [*active[1:], *extras])
-    return hero
+    line1 = build_talishar_active_equipment_line(
+        hero,
+        weapons=active_weapons,
+        quiver_or_off_hand=quiver_or_off_hand,
+        armor_by_slot=armor_by_slot,
+    )
+    if not line1:
+        line1 = hero
+
+    weapon_sb_only: list[str] = []
+    offhand_sb: list[str] = []
+    for card_id in weapon_sb:
+        slot = equipment_slot(card_id, hero_id=hero)
+        if slot == "off_hand" or "quiver" in card_id.replace("-", "_").lower():
+            offhand_sb.append(card_id)
+        else:
+            weapon_sb_only.append(card_id)
+
+    return TalisharEquipmentLoadout(
+        line1=_sanitize_equipment_header(line1),
+        head_sb=tuple(armor_sideboards["head"]),
+        chest_sb=tuple(armor_sideboards["chest"]),
+        arms_sb=tuple(armor_sideboards["arms"]),
+        legs_sb=tuple(armor_sideboards["legs"]),
+        offhand_sb=tuple(offhand_sb),
+        weapon_sb=tuple(weapon_sb_only),
+    )
+
+
+def format_talishar_deck_file_content(
+    loadout: TalisharEquipmentLoadout,
+    deck_card_ids: list[str],
+) -> str:
+    """Format a Talishar ``p*Deck.txt`` with active line 1 and equipment sideboard rows."""
+    clean_cards = [_sanitize_deck_token(cid) for cid in deck_card_ids]
+    clean_cards = [cid for cid in clean_cards if cid]
+    lines = [
+        _sanitize_equipment_header(loadout.line1),
+        " ".join(clean_cards),
+        " ".join(loadout.head_sb),
+        " ".join(loadout.chest_sb),
+        " ".join(loadout.arms_sb),
+        " ".join(loadout.legs_sb),
+        " ".join(loadout.offhand_sb),
+        " ".join(loadout.weapon_sb),
+        "",
+        "",
+        "",
+    ]
+    return "\r\n".join(lines) + "\r\n"
+
+
+def write_resolved_talishar_deck_file(
+    out_path: str | Path,
+    *,
+    hero_id: str,
+    equipment_header: str,
+    card_ids: list[str],
+    assets_dir: str | Path,
+    deck_stem: str = "",
+) -> Path:
+    """Write a Talishar deck file with legal line-1 weapons and equipment sideboard rows."""
+    hero = hero_id.removeprefix("hero_").replace("-", "_").strip()
+    stem = deck_stem or Path(out_path).stem
+    loadout = resolve_talishar_equipment_loadout(
+        hero,
+        _sanitize_equipment_header(equipment_header),
+        assets_dir,
+        deck_stem=stem,
+    )
+    content = format_talishar_deck_file_content(loadout, card_ids)
+    path = Path(out_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # newline="" avoids Python translating ``\\n`` inside our ``\\r\\n`` on Windows.
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        handle.write(content)
+    return path
+
+
+def ensure_full_equipment_header(
+    hero_id: str,
+    equipment_header: str,
+    assets_dir: str | Path,
+    *,
+    deck_stem: str = "",
+) -> str:
+    """Return Talishar line-1 equipment with hero, legal weapons, and filled armor slots."""
+    loadout = resolve_talishar_equipment_loadout(
+        hero_id,
+        equipment_header,
+        assets_dir,
+        deck_stem=deck_stem,
+    )
+    return loadout.line1
 
 
 def load_guide_sideboard_record(matchup_dir: Path) -> dict[str, Any]:

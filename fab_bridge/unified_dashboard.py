@@ -27,6 +27,7 @@ UNIFIED_DASHBOARD_NAME = "unified_random_matchups_dashboard.html"
 UNIFIED_LIVE_STATE = "unified_training_live.json"
 LOGIC_VS_LOGIC_BASELINE_NAME = "logic_vs_logic_baseline.json"
 POLICY_WEIGHT_HISTORY_LIMIT = 30
+TRAIN_WIN_RATE_HISTORY_LIMIT = 500
 
 _last_dashboard_write: dict[str, float] = {}
 _run_state_locks: dict[str, threading.Lock] = {}
@@ -482,6 +483,20 @@ def update_unified_matchup_live(
         if isinstance(existing, dict):
             row.update(existing)
         row.update({k: v for k, v in fields.items() if v is not None})
+        episode = row.get("episodes_completed")
+        hero1_wr = row.get("hero1_win_rate")
+        if hero1_wr is None:
+            hero1_wr = row.get("p1_win_rate")
+        hero2_wr = row.get("hero2_win_rate")
+        if hero2_wr is None:
+            hero2_wr = row.get("p2_win_rate")
+        if episode is not None and hero1_wr is not None:
+            _append_matchup_win_rate_history(
+                row,
+                episode=int(episode),
+                hero1_win_rate=float(hero1_wr),
+                hero2_win_rate=float(hero2_wr) if hero2_wr is not None else None,
+            )
         active[str(matchup_key)] = row
         current["active_matchups"] = active
         current["updated_at"] = datetime.now(timezone.utc).isoformat()
@@ -755,6 +770,146 @@ def _aggregate_means_from_per_matchup(
     return sp_mean, sp_se, vl_mean, vl_se
 
 
+def _checkpoint_matchup_series(
+    run_dir: Path,
+    active_matchups: dict[str, Any],
+    active_histories: dict[str, list[dict[str, Any]]],
+    ckpt_history: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build agent-vs-agent hero-1 win% time series for each active matchup."""
+    labels: dict[str, str] = {}
+    for subdir, row in active_matchups.items():
+        if not isinstance(row, dict):
+            continue
+        subdir_s = str(subdir)
+        matchup_dir = run_dir / subdir_s
+        hero1, hero2 = _read_matchup_hero_labels(matchup_dir)
+        label = _format_matchup_hero_title(hero1, hero2)
+        if not label.strip() or label == "? vs ?":
+            label = str(row.get("name") or subdir_s)
+        labels[subdir_s] = label
+
+    by_subdir: dict[str, list[dict[str, Any]]] = {}
+    for subdir_s, hist in active_histories.items():
+        if subdir_s == "__run_root__":
+            continue
+        for row in hist:
+            if row.get("eval_mode") == "merged":
+                continue
+            if row.get("episodes_completed") is None:
+                continue
+            point = _checkpoint_point_from_row(row)
+            wr = point.get("agent_vs_agent_hero1_win_rate")
+            if wr is None:
+                continue
+            by_subdir.setdefault(subdir_s, []).append(
+                {"episode": int(point["episode"]), "win_rate": float(wr)}
+            )
+
+    for row in ckpt_history:
+        if row.get("eval_mode") != "merged":
+            continue
+        episode = int(row.get("episodes_completed") or 0)
+        per_matchup = row.get("per_matchup")
+        if not isinstance(per_matchup, dict):
+            continue
+        for subdir_s, matchup_row in per_matchup.items():
+            if not isinstance(matchup_row, dict):
+                continue
+            subdir_key = str(subdir_s)
+            if subdir_key not in labels:
+                labels[subdir_key] = str(matchup_row.get("matchup") or subdir_key)
+            point = _checkpoint_point_from_row(matchup_row)
+            wr = point.get("agent_vs_agent_hero1_win_rate")
+            if wr is None:
+                continue
+            by_subdir.setdefault(subdir_key, []).append(
+                {"episode": episode, "win_rate": float(wr)}
+            )
+
+    series_list: list[dict[str, Any]] = []
+    for subdir in active_matchups:
+        subdir_s = str(subdir)
+        points = sorted(by_subdir.get(subdir_s, []), key=lambda p: int(p["episode"]))
+        if not points:
+            continue
+        series_list.append(
+            {
+                "label": labels.get(subdir_s, subdir_s),
+                "subdir": subdir_s,
+                "points": points,
+            }
+        )
+    return series_list
+
+
+def _append_matchup_win_rate_history(
+    row: dict[str, Any],
+    *,
+    episode: int,
+    hero1_win_rate: float,
+    hero2_win_rate: Optional[float] = None,
+) -> None:
+    """Append or refresh a training win-rate sample for dashboard charts."""
+    history_raw = row.get("win_rate_history")
+    history: list[dict[str, Any]] = (
+        list(history_raw) if isinstance(history_raw, list) else []
+    )
+    point: dict[str, Any] = {
+        "episode": int(episode),
+        "hero1_win_rate": float(hero1_win_rate),
+    }
+    if hero2_win_rate is not None:
+        point["hero2_win_rate"] = float(hero2_win_rate)
+    if history and int(history[-1].get("episode", -1)) == int(episode):
+        history[-1] = point
+    else:
+        history.append(point)
+    row["win_rate_history"] = history[-TRAIN_WIN_RATE_HISTORY_LIMIT:]
+
+
+def _training_matchup_series(
+    run_dir: Path,
+    active_matchups: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Build nominal hero-1 training win% time series for each active matchup."""
+    series_list: list[dict[str, Any]] = []
+    for subdir, row in active_matchups.items():
+        if not isinstance(row, dict):
+            continue
+        subdir_s = str(subdir)
+        history_raw = row.get("win_rate_history")
+        if not isinstance(history_raw, list):
+            continue
+        points: list[dict[str, Any]] = []
+        for sample in history_raw:
+            if not isinstance(sample, dict):
+                continue
+            wr = sample.get("hero1_win_rate")
+            if wr is None:
+                wr = sample.get("p1_win_rate")
+            if wr is None or sample.get("episode") is None:
+                continue
+            points.append(
+                {"episode": int(sample["episode"]), "win_rate": float(wr)}
+            )
+        if not points:
+            continue
+        matchup_dir = run_dir / subdir_s
+        hero1, hero2 = _read_matchup_hero_labels(matchup_dir)
+        label = _format_matchup_hero_title(hero1, hero2)
+        if not label.strip() or label == "? vs ?":
+            label = str(row.get("name") or subdir_s)
+        series_list.append(
+            {
+                "label": label,
+                "subdir": subdir_s,
+                "points": sorted(points, key=lambda p: int(p["episode"])),
+            }
+        )
+    return series_list
+
+
 def _resolve_checkpoint_aggregate_points(
     ckpt_history: list[dict[str, Any]],
     active_histories: dict[str, list[dict[str, Any]]],
@@ -1015,6 +1170,13 @@ def collect_unified_run_state(run_dir: Path) -> dict[str, Any]:
         ckpt_history,
         active_histories,
     )
+    checkpoint_matchup_series = _checkpoint_matchup_series(
+        run_dir,
+        active_matchups,
+        active_histories,
+        ckpt_history,
+    )
+    training_matchup_series = _training_matchup_series(run_dir, active_matchups)
     active_checkpoint_rows = _rows_from_latest_merged(
         ckpt_history,
         active_matchups,
@@ -1107,6 +1269,8 @@ def collect_unified_run_state(run_dir: Path) -> dict[str, Any]:
         "status": status,
         "checkpoint_points": checkpoint_points,
         "checkpoint_aggregate_points": checkpoint_aggregate_points,
+        "checkpoint_matchup_series": checkpoint_matchup_series,
+        "training_matchup_series": training_matchup_series,
         "active_checkpoint_rows": active_checkpoint_rows,
         "completed_matchups": completed_rows,
         "overall_pct": overall_pct,
@@ -1169,7 +1333,8 @@ def _svg_winrate_chart_with_error_bands(
         return pad_l + (ep / max_x) * plot_w
 
     def py(rate: float) -> float:
-        return pad_t + (1.0 - max(0.0, min(1.0, float(rate)))) * plot_h
+        centered = _centered_win_rate_deviation(rate)
+        return pad_t + (0.5 - centered) * plot_h
 
     def band(mean_key: str, se_key: str, class_prefix: str) -> str:
         upper = []
@@ -1209,8 +1374,10 @@ def _svg_winrate_chart_with_error_bands(
         )
 
     grid = "\n".join(
-        f'<line x1="{pad_l}" y1="{py(v):.1f}" x2="{width - pad_r}" y2="{py(v):.1f}" class="chart-grid"/>'
-        f'<text x="{pad_l - 6}" y="{py(v) + 4:.1f}" text-anchor="end" class="chart-axis">{int(v * 100)}%</text>'
+        f'<line x1="{pad_l}" y1="{py(v):.1f}" x2="{width - pad_r}" y2="{py(v):.1f}" '
+        f'class="{"chart-grid-zero" if v == 0.5 else "chart-grid"}"/>'
+        f'<text x="{pad_l - 6}" y="{py(v) + 4:.1f}" text-anchor="end" class="chart-axis">'
+        f"{_centered_axis_label(v)}</text>"
         for v in (0.0, 0.5, 1.0)
     )
     has_vs_logic = show_vs_logic and any(
@@ -1234,6 +1401,160 @@ def _svg_winrate_chart_with_error_bands(
   {vs_logic_band}
   {legend}
 </svg>"""
+
+
+_MATCHUP_LINE_COLORS = (
+    "#5b9cff",
+    "#3ecf8e",
+    "#f5a623",
+    "#e85d75",
+    "#b388ff",
+    "#4dd0e1",
+    "#ff8a65",
+    "#aed581",
+)
+
+
+def _centered_win_rate_deviation(win_rate: float) -> float:
+    """Map absolute win rate to deviation from even (50% → 0)."""
+    return float(win_rate) - 0.5
+
+
+def _centered_axis_label(win_rate: float) -> str:
+    """Format a grid label where 50% win rate reads as 0%."""
+    deviation_pct = _centered_win_rate_deviation(win_rate) * 100.0
+    if abs(deviation_pct) < 0.05:
+        return "0%"
+    sign = "+" if deviation_pct > 0 else ""
+    if abs(deviation_pct - round(deviation_pct)) < 0.05:
+        return f"{sign}{int(round(deviation_pct))}%"
+    return f"{sign}{deviation_pct:.1f}%"
+
+
+def _svg_centered_matchup_lines_chart(
+    series_list: list[dict[str, Any]],
+    *,
+    width: int = 520,
+    height: int = 200,
+    target_episodes: int = 0,
+    empty_message: str = "Waiting for data…",
+) -> str:
+    plottable = [
+        series
+        for series in series_list
+        if isinstance(series, dict) and isinstance(series.get("points"), list) and series["points"]
+    ]
+    if not plottable:
+        return (
+            f'<svg viewBox="0 0 {width} {height}" class="chart empty">'
+            f'<text x="{width // 2}" y="{height // 2}" text-anchor="middle" '
+            f'class="chart-empty">{html.escape(empty_message)}</text></svg>'
+        )
+
+    pad_l, pad_r, pad_t = 40, 12, 12
+    legend_rows = len(plottable) if len(plottable) > 3 else 1
+    pad_b = 16 + legend_rows * 14
+    plot_w = width - pad_l - pad_r
+    plot_h = height - pad_t - pad_b
+    all_points = [
+        point
+        for series in plottable
+        for point in series["points"]
+        if isinstance(point, dict) and point.get("episode") is not None
+    ]
+    max_x = max(
+        int(target_episodes or 0),
+        max(int(point.get("episode", 0) or 0) for point in all_points),
+        1,
+    )
+
+    def px(ep: float) -> float:
+        return pad_l + (ep / max_x) * plot_w
+
+    def py(rate: float) -> float:
+        centered = _centered_win_rate_deviation(rate)
+        return pad_t + (0.5 - centered) * plot_h
+
+    grid = "\n".join(
+        f'<line x1="{pad_l}" y1="{py(v):.1f}" x2="{width - pad_r}" y2="{py(v):.1f}" '
+        f'class="{"chart-grid-zero" if v == 0.5 else "chart-grid"}"/>'
+        f'<text x="{pad_l - 6}" y="{py(v) + 4:.1f}" text-anchor="end" class="chart-axis">'
+        f"{_centered_axis_label(v)}</text>"
+        for v in (0.0, 0.5, 1.0)
+    )
+
+    lines = ""
+    legend_items: list[str] = []
+    for index, series in enumerate(plottable):
+        color = _MATCHUP_LINE_COLORS[index % len(_MATCHUP_LINE_COLORS)]
+        points = [
+            point
+            for point in series["points"]
+            if isinstance(point, dict) and point.get("win_rate") is not None
+        ]
+        if not points:
+            continue
+        poly = " ".join(
+            f"{px(point['episode']):.1f},{py(float(point['win_rate'])):.1f}"
+            for point in points
+        )
+        lines += (
+            f'<polyline points="{poly}" fill="none" stroke="{color}" '
+            f'stroke-width="2" class="chart-matchup-line"/>'
+        )
+        if poly.count(",") <= 1:
+            for point in points:
+                cx = px(point["episode"])
+                cy = py(float(point["win_rate"]))
+                lines += (
+                    f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="3.5" '
+                    f'fill="{color}" class="chart-matchup-dot">'
+                    f"<title>{html.escape(str(series.get('label') or ''))} "
+                    f"ep {int(point['episode'])}: {_pct(point['win_rate'])} "
+                    f"({_centered_axis_label(float(point['win_rate']))} vs even)</title></circle>"
+                )
+        label = str(series.get("label") or series.get("subdir") or f"Matchup {index + 1}")
+        legend_items.append(
+            f'<tspan fill="{color}">—</tspan> {html.escape(label)}'
+        )
+
+    legend_y = height - 6
+    legend_x = pad_l
+    if len(legend_items) <= 3:
+        legend = (
+            f'<text x="{legend_x}" y="{legend_y}" class="chart-axis">'
+            + "  ·  ".join(legend_items)
+            + "</text>"
+        )
+    else:
+        legend = "\n  ".join(
+            f'<text x="{legend_x}" y="{legend_y - (len(legend_items) - 1 - row_idx) * 12}" '
+            f'class="chart-axis">{item}</text>'
+            for row_idx, item in enumerate(legend_items)
+        )
+
+    return f"""<svg viewBox="0 0 {width} {height}" class="chart">
+  {grid}
+  {lines}
+  {legend}
+</svg>"""
+
+
+def _svg_checkpoint_matchup_lines_chart(
+    series_list: list[dict[str, Any]],
+    *,
+    width: int = 520,
+    height: int = 200,
+    target_episodes: int = 0,
+    empty_message: str = "Waiting for checkpoint eval…",
+) -> str:
+    return _svg_centered_matchup_lines_chart(
+        series_list,
+        width=width,
+        height=height,
+        target_episodes=target_episodes,
+        empty_message=empty_message,
+    )
 
 
 def _svg_winrate_chart(
@@ -1263,19 +1584,23 @@ def _svg_winrate_chart(
         return pad_l + (ep / max_x) * plot_w
 
     def py(rate: float) -> float:
-        return pad_t + (1.0 - max(0.0, min(1.0, float(rate)))) * plot_h
+        centered = _centered_win_rate_deviation(rate)
+        return pad_t + (0.5 - centered) * plot_h
 
     poly = " ".join(
         f"{px(p['episode']):.1f},{py(p['win_rate']):.1f}" for p in points
     )
     dots = "\n".join(
         f'<circle cx="{px(p["episode"]):.1f}" cy="{py(p["win_rate"]):.1f}" r="3.5" class="chart-dot">'
-        f"<title>ep {p['episode']}: {_pct(p['win_rate'])}</title></circle>"
+        f"<title>ep {p['episode']}: {_pct(p['win_rate'])} "
+        f"({_centered_axis_label(float(p['win_rate']))} vs even)</title></circle>"
         for p in points
     )
     grid = "\n".join(
-        f'<line x1="{pad_l}" y1="{py(v):.1f}" x2="{width - pad_r}" y2="{py(v):.1f}" class="chart-grid"/>'
-        f'<text x="{pad_l - 6}" y="{py(v) + 4:.1f}" text-anchor="end" class="chart-axis">{int(v * 100)}%</text>'
+        f'<line x1="{pad_l}" y1="{py(v):.1f}" x2="{width - pad_r}" y2="{py(v):.1f}" '
+        f'class="{"chart-grid-zero" if v == 0.5 else "chart-grid"}"/>'
+        f'<text x="{pad_l - 6}" y="{py(v) + 4:.1f}" text-anchor="end" class="chart-axis">'
+        f"{_centered_axis_label(v)}</text>"
         for v in (0.0, 0.5, 1.0)
     )
     return f"""<svg viewBox="0 0 {width} {height}" class="chart">
@@ -1431,10 +1756,14 @@ def render_unified_random_matchups_html(
         <div class="progress-bar"><div class="progress-fill" style="width:{pct:.1f}%"></div></div>
       </div>"""
 
-    ckpt_chart = _svg_winrate_chart_with_error_bands(
-        state.get("checkpoint_aggregate_points") or [],
+    ckpt_chart = _svg_checkpoint_matchup_lines_chart(
+        state.get("checkpoint_matchup_series") or [],
         target_episodes=target_eps,
-        show_vs_logic=bool(state.get("show_agent_vs_logic_columns")),
+    )
+    train_chart = _svg_centered_matchup_lines_chart(
+        state.get("training_matchup_series") or [],
+        target_episodes=target_eps,
+        empty_message="Waiting for training rollouts…",
     )
     policy_weights_card = _render_policy_weights_card(state)
 
@@ -1568,12 +1897,16 @@ def render_unified_random_matchups_html(
     .muted {{ color: var(--muted); }}
     a {{ color: var(--primary); text-decoration: none; }}
     a:hover {{ text-decoration: underline; }}
-    .chart {{ width: 100%; max-width: 520px; }}
+    .chart {{ width: 100%; max-width: 100%; }}
+    .chart-row {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 18px; margin-bottom: 16px; }}
+    .chart-panel h3 {{ margin: 0 0 8px; font-size: 0.92rem; color: var(--muted); font-weight: 600; }}
+    .chart-caption {{ margin: 0 0 12px; font-size: 0.82rem; color: var(--muted); }}
     .chart-selfplay-line {{ stroke: var(--primary); stroke-width: 2; }}
     .chart-selfplay-band {{ fill: rgba(91, 156, 255, 0.18); stroke: none; }}
     .chart-vslogic-line {{ stroke: var(--good); stroke-width: 2; }}
     .chart-vslogic-band {{ fill: rgba(62, 207, 142, 0.15); stroke: none; }}
     .chart-grid {{ stroke: #243044; stroke-width: 1; }}
+    .chart-grid-zero {{ stroke: #3d516d; stroke-width: 1.5; }}
     .chart-axis {{ fill: var(--muted); font-size: 10px; }}
     .chart-empty {{ fill: var(--muted); font-size: 12px; }}
     footer {{ margin-top: 28px; color: var(--muted); font-size: 0.75rem; border-top: 1px solid var(--border); padding-top: 14px; }}
@@ -1595,8 +1928,22 @@ def render_unified_random_matchups_html(
     </div>
 
     <div class="card">
+      <h2>Win rate charts (active batch)</h2>
+      <p class="chart-caption">Y axis centered at even matchups: 0% = 50% Hero 1 win rate, +10% = 60%, −10% = 40%.</p>
+      <div class="chart-row">
+        <div class="chart-panel">
+          <h3>Training rollouts</h3>
+          {train_chart}
+        </div>
+        <div class="chart-panel">
+          <h3>Checkpoint eval</h3>
+          {ckpt_chart}
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
       <h2>Checkpoint eval (active batch)</h2>
-      {ckpt_chart}
       {ckpt_table}
     </div>
 

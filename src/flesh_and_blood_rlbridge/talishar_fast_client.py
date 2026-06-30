@@ -20,6 +20,47 @@ DEFAULT_TALISHAR_URL = "http://localhost:8080/game"
 _FAST_HTTP_RETRIES = 3
 
 
+def diagnose_talishar_http_failure(
+    url: str,
+    body_text: str,
+    *,
+    http_status: int = 200,
+    method: str = "GET",
+) -> RuntimeError:
+    """Build a helpful error when Talishar returns HTML, PHP noise, or empty output."""
+    preview = body_text[:2000]
+    if "No space left on device" in body_text or "errno=28" in body_text:
+        return RuntimeError(
+            f"{method} {url} failed: Talishar Docker container is out of disk space "
+            "(PHP errno 28). Free host disk space, reclaim Docker storage "
+            "(Docker Desktop → Settings → Resources, or `docker system prune`), "
+            "then restart Talishar (`python start_talishar.py --backend-only`)."
+            f"\nServer output:\n{preview}"
+        )
+    if any(tag in body_text for tag in ("<b>Fatal error</b>", "<b>Warning</b>", "<b>Notice</b>")):
+        return RuntimeError(
+            f"{method} {url} returned PHP errors (HTTP {http_status}):\n{preview}"
+        )
+    if not preview.strip():
+        return RuntimeError(
+            f"{method} {url} returned an empty body (HTTP {http_status}). "
+            "Talishar may still be initializing the game, or the Docker container "
+            "may be out of disk space — inspect the web-server container logs."
+        )
+    return RuntimeError(
+        f"{method} {url} returned non-JSON (HTTP {http_status}):\n{preview}"
+    )
+
+
+def _should_retry_talishar_http(body_text: str) -> bool:
+    """True for transient empty responses; false for PHP/disk failures."""
+    if "No space left on device" in body_text or "errno=28" in body_text:
+        return False
+    if any(tag in body_text for tag in ("<b>Fatal error</b>", "<b>Warning</b>", "<b>Notice</b>")):
+        return False
+    return not body_text.strip()
+
+
 def _parse_json_body(body_text: str, *, allow_empty: bool = False) -> dict[str, Any]:
     text = body_text.strip()
     if allow_empty and not text:
@@ -34,9 +75,10 @@ def _parse_json_body(body_text: str, *, allow_empty: bool = False) -> dict[str, 
     try:
         data = json.loads(text)
     except json.JSONDecodeError as exc:
-        preview = body_text[:500].replace("\n", " ")
-        raise RuntimeError(
-            f"Talishar returned non-JSON response: {preview!r}"
+        raise diagnose_talishar_http_failure(
+            "Talishar",
+            body_text,
+            method="HTTP",
         ) from exc
     return data if isinstance(data, dict) else {"_raw": data}
 

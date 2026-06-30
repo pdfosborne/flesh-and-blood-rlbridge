@@ -134,7 +134,12 @@ from .talishar_default_policy import (
     _BLOCK_PHASES as _dp_block_phases,
     _DEFENSE_PHASES as _dp_defense_phases,
 )
-from .talishar_fast_client import DEFAULT_TALISHAR_URL, TalisharFastClient
+from .talishar_fast_client import (
+    DEFAULT_TALISHAR_URL,
+    TalisharFastClient,
+    _should_retry_talishar_http,
+    diagnose_talishar_http_failure,
+)
 from .talishar_oracle import TalisharConnectionError
 
 # ── Optional C++ engine integration ──────────────────────────────────────────
@@ -1309,9 +1314,15 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                 data = json.loads(body_text)
                 return data if isinstance(data, dict) else {"_raw": data}
             except json.JSONDecodeError:
-                raise RuntimeError(
-                    f"GET {url} returned non-JSON (HTTP {resp.status_code}):\n{resp.text[:2000]}"
-                ) from None
+                last_exc = diagnose_talishar_http_failure(
+                    url,
+                    resp.text,
+                    http_status=resp.status_code,
+                )
+                if attempt < _retries - 1 and _should_retry_talishar_http(resp.text):
+                    self._http_retry_sleep(attempt)
+                    continue
+                raise last_exc from None
             except requests.RequestException as exc:
                 last_exc = exc
                 if attempt < _retries - 1:
@@ -1341,9 +1352,16 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                 data = json.loads(resp_text)
                 return data if isinstance(data, dict) else {"_raw": data}
             except json.JSONDecodeError:
-                raise RuntimeError(
-                    f"POST {url} returned non-JSON (HTTP {resp.status_code}):\n{resp.text[:2000]}"
-                ) from None
+                last_exc = diagnose_talishar_http_failure(
+                    url,
+                    resp.text,
+                    http_status=resp.status_code,
+                    method="POST",
+                )
+                if attempt < _retries - 1 and _should_retry_talishar_http(resp.text):
+                    self._http_retry_sleep(attempt)
+                    continue
+                raise last_exc from None
             except requests.RequestException as exc:
                 last_exc = exc
                 if attempt < _retries - 1:
@@ -1425,6 +1443,10 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         """
         resp = self._http_get("/Start.php", {"gameName": game_name, "playerID": "1"})
         # Start.php returns {"success": true, "authKey": "..."}
+        if not resp.get("success") and not resp.get("authKey"):
+            raise RuntimeError(
+                f"Start.php did not initialize game {game_name!r}: {resp}"
+            )
         returned_key = resp.get("authKey", "")
         return str(returned_key) if returned_key else self._auth_key
 

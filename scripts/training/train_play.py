@@ -87,6 +87,8 @@ from play_outcome_stats import (  # noqa: E402
     classify_p1_episode_outcome,
     classify_p1_fast_episode_outcome,
     compute_eval_stability,
+    infer_render_episode_outcome,
+    render_outcome_banner_label,
     summarize_p1_outcomes,
 )
 from runtime_defaults import (  # noqa: E402
@@ -3312,6 +3314,7 @@ def _render_game_with_talishar_frontend(
             render_mode="rgb_array",       # engine owns the Playwright worker
             use_cpp_engine=False,          # HTTP backend required so FE can connect
             enable_combat_tracker=True,
+            frontend_player_id=1,
         )
         try:
             result = env.reset()           # _open_playwright_page() runs here
@@ -3360,11 +3363,20 @@ def _render_game_with_talishar_frontend(
                     if on_frame_saved is not None:
                         on_frame_saved(fpath, len(frame_paths))
 
-            outcome = _infer_render_outcome(
+            render_result = infer_render_episode_outcome(
                 obs, terminated=terminated, truncated=truncated, env=env,
             )
+            outcome = render_result.outcome
             end_path = render_dir / f"frame_{step_no + 1:04d}_end_{outcome}.png"
-            if _save_end_state_frame(env, obs, end_path, outcome=outcome, steps=step_no):
+            if _save_end_state_frame(
+                env,
+                obs,
+                end_path,
+                render_result=render_result,
+                p1_hero=deck_name,
+                p2_hero=opp_name,
+                steps=step_no,
+            ):
                 frame_paths.append(end_path)
                 print(f"  [{player_label}] End frame saved ({outcome})")
                 if on_frame_saved is not None:
@@ -3422,25 +3434,12 @@ def _infer_render_outcome(
     env: Any = None,
 ) -> str:
     """Classify a rendered rollout as win/loss/draw/timeout from P1's perspective."""
-    p1_hp = p2_hp = None
-    p1_deck = p2_deck = None
-    if env is not None:
-        p1_hp, p2_hp = absolute_p1_p2_hp_from_env(env)
-        p1_deck, p2_deck = absolute_p1_p2_deck_from_env(env)
-    if p1_hp is None or p2_hp is None:
-        p1_hp_f, p2_hp_f = absolute_p1_p2_hp_from_obs(obs)
-        p1_hp = p1_hp_f
-        p2_hp = p2_hp_f
-    if p1_deck is None or p2_deck is None:
-        p1_deck, p2_deck = absolute_p1_p2_deck_from_obs(obs)
-    return classify_p1_episode_outcome(
-        p1_hp=p1_hp,
-        p2_hp=p2_hp,
-        p1_deck=p1_deck,
-        p2_deck=p2_deck,
+    return infer_render_episode_outcome(
+        obs,
         terminated=terminated,
         truncated=truncated,
-    )
+        env=env,
+    ).outcome
 
 
 def _save_end_state_frame(
@@ -3448,7 +3447,9 @@ def _save_end_state_frame(
     obs: Any,
     out_path: Path,
     *,
-    outcome: str,
+    render_result: Any,
+    p1_hero: str = "",
+    p2_hero: str = "",
     steps: int = 0,
 ) -> bool:
     """Save a final board screenshot with a game-end outcome banner."""
@@ -3478,23 +3479,14 @@ def _save_end_state_frame(
         finally:
             tmp.unlink(missing_ok=True)
 
-    obs_data = json.loads(obs) if isinstance(obs, str) else (obs or {})
-    p1_hp_f, p2_hp_f = absolute_p1_p2_hp_from_obs(obs_data)
-    if (p1_hp_f is None or p2_hp_f is None) and env is not None:
-        p1_hp_env, p2_hp_env = absolute_p1_p2_hp_from_env(env)
-        p1_hp_f = p1_hp_f if p1_hp_f is not None else p1_hp_env
-        p2_hp_f = p2_hp_f if p2_hp_f is not None else p2_hp_env
-    p1_hp = p1_hp_f if p1_hp_f is not None else "?"
-    p2_hp = p2_hp_f if p2_hp_f is not None else "?"
+    p1_hp = render_result.p1_hp if render_result.p1_hp is not None else "?"
+    p2_hp = render_result.p2_hp if render_result.p2_hp is not None else "?"
 
-    labels: dict[str, tuple[str, tuple[int, int, int]]] = {
-        "win": ("WIN", (34, 197, 94)),
-        "loss": ("LOSS", (239, 68, 68)),
-        "draw": ("DRAW", (250, 204, 21)),
-        "timeout": ("TIMEOUT", (249, 115, 22)),
-        "stall_timeout": ("STALL TIMEOUT", (249, 115, 22)),
-    }
-    label, color = labels.get(outcome, (outcome.upper().replace("_", " "), (200, 200, 200)))
+    label, color = render_outcome_banner_label(
+        render_result,
+        p1_hero=p1_hero,
+        p2_hero=p2_hero,
+    )
 
     draw = ImageDraw.Draw(img)
     width, height = img.size

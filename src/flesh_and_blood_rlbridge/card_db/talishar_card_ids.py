@@ -175,9 +175,30 @@ def load_talishar_card_subtypes(
     return mapping
 
 
+@lru_cache(maxsize=1)
+def load_talishar_one_handed_weapons(
+    php_path: str = str(_DEFAULT_TALISHAR_PHP),
+) -> frozenset[str]:
+    """Parse Talishar ``GeneratedIs1H`` weapon ids (true = one-handed)."""
+    path = Path(php_path)
+    if not path.is_file():
+        return frozenset()
+    text = path.read_text(encoding="utf-8", errors="replace")
+    start = text.find("function GeneratedIs1H")
+    if start < 0:
+        return frozenset()
+    end = text.find("\nfunction ", start + 1)
+    block = text[start:end] if end > start else text[start:]
+    one_handed: set[str] = set()
+    for match in re.finditer(r'"([a-z0-9][a-z0-9_]*)"\s*=>\s*true', block):
+        one_handed.add(match.group(1))
+    return frozenset(one_handed)
+
+
 def clear_talishar_card_id_caches() -> None:
     load_talishar_card_ids.cache_clear()
     load_talishar_card_subtypes.cache_clear()
+    load_talishar_one_handed_weapons.cache_clear()
     _talishar_name_to_ids.cache_clear()
     _cards_db_by_id.cache_clear()
 

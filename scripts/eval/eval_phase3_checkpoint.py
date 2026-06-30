@@ -44,7 +44,6 @@ from scripts.cpp.check_cpp_vs_talishar_parity import run_parity_check  # noqa: E
 from scripts.training.train_play import (  # noqa: E402
     _ensure_playwright,
     _frames_to_gif,
-    _infer_render_outcome,
     _prepare_render_dir,
     _save_end_state_frame,
     _save_state_image,
@@ -55,6 +54,7 @@ from scripts.training.play_outcome_stats import (  # noqa: E402
     absolute_p1_p2_hp_from_env,
     absolute_p1_p2_hp_from_obs,
     classify_p1_episode_outcome,
+    infer_render_episode_outcome,
 )
 from runtime_defaults import (  # noqa: E402
     DEFAULT_ANTI_STUCK_LOGGING,
@@ -815,6 +815,19 @@ def _iter_unified_live_render_matchup_dirs(run_dir: Path) -> list[Path]:
     return iter_unified_render_matchup_dirs(run_dir)
 
 
+def _pick_live_render_matchup_dir(run_dir: Path, matchup_dirs: list[Path]) -> Path:
+    """Pick one current matchup for the live example (latest activity, not random)."""
+    if not matchup_dirs:
+        raise RuntimeError("No matchup directories available for live render")
+    latest = resolve_latest_unified_matchup_dir(run_dir)
+    if latest is not None:
+        latest_resolved = latest.resolve()
+        for path in matchup_dirs:
+            if path.resolve() == latest_resolved:
+                return path
+    return sorted(matchup_dirs, key=lambda path: path.name)[0]
+
+
 def _is_logic_render_policy(agent: Any) -> bool:
     from train_play import LOGIC_POLICY  # noqa: PLC0415
 
@@ -885,7 +898,6 @@ def _unified_continuous_render_loop(
     eval_dir = results_dir / "eval_dashboard"
     eval_dir.mkdir(parents=True, exist_ok=True)
     live_frame_path = eval_dir / UNIFIED_LIVE_RENDER_IMAGE
-    rng = random.Random()
     idle_wait = max(1.0, float(poll_seconds))
     cycle_wait = max(0.5, float(render_cycle_seconds))
     render_episode_no = 0
@@ -896,7 +908,7 @@ def _unified_continuous_render_loop(
     )
     print(
         f"  [render] Unified live render started → {live_frame_path} "
-        f"(random matchup every {cycle_wait:.1f}s on {shard_note})",
+        f"(current matchup every {cycle_wait:.1f}s on {shard_note})",
         flush=True,
     )
     while not render_state.stop.is_set():
@@ -919,7 +931,7 @@ def _unified_continuous_render_loop(
             continue
 
         bucket = find_unified_render_bucket(results_dir)
-        matchup_dir = rng.choice(matchup_dirs)
+        matchup_dir = _pick_live_render_matchup_dir(results_dir, matchup_dirs)
         ckpt_dir = bucket.get(matchup_dir)
         weights_path = _resolve_unified_render_weights_path(results_dir, ckpt_dir)
         if not dedicated_render_shard:
@@ -1262,6 +1274,8 @@ def _run_render_episode(
     anti_stuck_config: Optional[Any] = None,
     episode_no: int = 1,
     matchup: str = "",
+    p1_hero: str = "",
+    p2_hero: str = "",
 ) -> tuple[list[Path], str]:
     """Run one Playwright render episode using render_mode='rgb_array'.
 
@@ -1297,6 +1311,7 @@ def _run_render_episode(
         use_cpp_engine=False,
         talishar_backend=DEFAULT_TALISHAR_BACKEND,
         enable_combat_tracker=combat_tracker_on,
+        frontend_player_id=1,
         **game_env_kwargs(RUNTIME.game),
     )
     stuck_monitor = None
@@ -1381,19 +1396,38 @@ def _run_render_episode(
                     if _save_state_image(env, obs, fpath):
                         frame_paths.append(fpath)
 
-        outcome = _infer_render_outcome(
+        render_result = infer_render_episode_outcome(
             obs, terminated=terminated, truncated=truncated, env=env,
         )
+        outcome = render_result.outcome
         if stuck_monitor is not None:
             stuck_monitor.finish_episode(outcome)
+        hero_p1 = p1_hero or p1_deck_name
+        hero_p2 = p2_hero or p2_deck_name
         if live_frame_path is not None:
             end_path = live_frame_path
-            if _save_end_state_frame(env, obs, end_path, outcome=outcome, steps=step_no):
+            if _save_end_state_frame(
+                env,
+                obs,
+                end_path,
+                render_result=render_result,
+                p1_hero=hero_p1,
+                p2_hero=hero_p2,
+                steps=step_no,
+            ):
                 if not frame_paths or frame_paths[-1] != end_path:
                     frame_paths.append(end_path)
         else:
             end_path = render_dir / f"frame_{step_no + 1:04d}_end_{outcome}.png"
-            if _save_end_state_frame(env, obs, end_path, outcome=outcome, steps=step_no):
+            if _save_end_state_frame(
+                env,
+                obs,
+                end_path,
+                render_result=render_result,
+                p1_hero=hero_p1,
+                p2_hero=hero_p2,
+                steps=step_no,
+            ):
                 frame_paths.append(end_path)
 
     except Exception as exc:
@@ -2254,6 +2288,8 @@ def _evaluate_checkpoint(
                     live_frame_path=live_frame_path,
                     anti_stuck_config=anti_stuck_config,
                     matchup=p1_bundle.matchup,
+                    p1_hero=p1_bundle.p1_hero or p1_deck_name,
+                    p2_hero=p1_bundle.p2_hero or p2_deck_name,
                 )
             else:
                 gif_path = eval_dir / "optimal_policy.gif"
@@ -2275,6 +2311,8 @@ def _evaluate_checkpoint(
                     player_label=p1_bundle.role,
                     anti_stuck_config=anti_stuck_config,
                     matchup=p1_bundle.matchup,
+                    p1_hero=p1_bundle.p1_hero or p1_deck_name,
+                    p2_hero=p1_bundle.p2_hero or p2_deck_name,
                 )
                 if frame_paths:
                     _frames_to_gif(frame_paths, gif_path, fps=gif_fps)
@@ -2576,6 +2614,28 @@ def main() -> None:
     if not results_dir.exists():
         raise SystemExit(f"results directory not found: {results_dir}")
 
+    unified_mode = is_unified_random_matchup_run(results_dir)
+    render_lock_held = False
+    if unified_mode and live_render_enabled:
+        from fab_bridge.optimal_policy_render_lock import (  # noqa: PLC0415
+            optimal_policy_render_lock_holder,
+            release_optimal_policy_render_lock,
+            try_acquire_optimal_policy_render_lock,
+        )
+
+        if not try_acquire_optimal_policy_render_lock(results_dir):
+            holder = optimal_policy_render_lock_holder(results_dir)
+            print(
+                "  [render] Another optimal-policy live render companion is already "
+                f"running (pid={holder}); skipping duplicate render process.",
+                flush=True,
+            )
+            if args.companion_to_training:
+                return 0
+            live_render_enabled = False
+        else:
+            render_lock_held = True
+
     from fab_bridge.unified_training_debug import (  # noqa: PLC0415
         configure as configure_unified_debug,
         log_exception as unified_debug_exception,
@@ -2631,7 +2691,6 @@ def main() -> None:
         if args.render_cycle_seconds is not None
         else RUNTIME.eval_dashboard.render_cycle_seconds
     )
-    unified_mode = is_unified_random_matchup_run(results_dir)
     cache_dir = Path(args.cache_dir).expanduser().resolve() if args.cache_dir else None
 
     print("=" * 72)
@@ -2718,190 +2777,202 @@ def main() -> None:
     poll_count = 0
     render_state: Optional[_UnifiedRenderState] = None
     render_thread: Optional[threading.Thread] = None
-    if unified_mode and live_render_enabled:
-        render_state = _UnifiedRenderState()
-        render_thread = threading.Thread(
-            target=_unified_continuous_render_loop,
-            kwargs={
-                "results_dir": results_dir,
-                "render_state": render_state,
-                "render_url": args.talishar_render_url,
-                "eval_url": args.talishar_url,
-                "fe_url": args.talishar_fe_url,
-                "assets_path": args.assets_path,
-                "render_max_steps": render_max_steps,
-                "poll_seconds": args.poll_seconds,
-                "render_cycle_seconds": render_cycle_seconds,
-                "anti_stuck_config": anti_stuck_config,
-            },
-            daemon=True,
-            name="unified-live-render",
-        )
-        render_thread.start()
+    try:
+        if unified_mode and live_render_enabled:
+            render_state = _UnifiedRenderState()
+            render_thread = threading.Thread(
+                target=_unified_continuous_render_loop,
+                kwargs={
+                    "results_dir": results_dir,
+                    "render_state": render_state,
+                    "render_url": args.talishar_render_url,
+                    "eval_url": args.talishar_url,
+                    "fe_url": args.talishar_fe_url,
+                    "assets_path": args.assets_path,
+                    "render_max_steps": render_max_steps,
+                    "poll_seconds": args.poll_seconds,
+                    "render_cycle_seconds": render_cycle_seconds,
+                    "anti_stuck_config": anti_stuck_config,
+                },
+                daemon=True,
+                name="unified-live-render",
+            )
+            render_thread.start()
 
-    while True:
-        if unified_mode and not args.checkpoint_dir:
-            bucket_result = find_latest_merged_unified_bucket(results_dir)
-            render_bucket = find_unified_render_bucket(results_dir)
-            if render_state is not None and render_bucket:
-                with render_state.lock:
-                    render_state.bucket = render_bucket
-                    render_state.matchup_dirs = list(render_bucket.keys())
-                    if bucket_result is not None:
-                        render_state.merged_episode = bucket_result[0]
+        while True:
+            if unified_mode and not args.checkpoint_dir:
+                bucket_result = find_latest_merged_unified_bucket(results_dir)
+                render_bucket = find_unified_render_bucket(results_dir)
+                if render_state is not None and render_bucket:
+                    with render_state.lock:
+                        render_state.bucket = render_bucket
+                        render_state.matchup_dirs = list(render_bucket.keys())
+                        if bucket_result is not None:
+                            render_state.merged_episode = bucket_result[0]
 
-            if bucket_result is None:
-                scope = results_dir
-                active = resolve_latest_unified_matchup_dir(results_dir)
-                if active is not None:
-                    scope = active
-                if args.companion_to_training:
+                if bucket_result is None:
+                    scope = results_dir
+                    active = resolve_latest_unified_matchup_dir(results_dir)
+                    if active is not None:
+                        scope = active
+                    if args.companion_to_training:
+                        print(
+                            f"  [watch] Live render active — waiting for matchup output "
+                            f"under {scope}  (poll #{poll_count + 1})",
+                            flush=True,
+                        )
+                    else:
+                        print(
+                            f"  [watch] Waiting for all matchups to reach the same checkpoint "
+                            f"under {scope}  (poll #{poll_count + 1})",
+                            flush=True,
+                        )
+                elif (
+                    not args.companion_to_training
+                    and bucket_result[0] != last_seen_merged_episode
+                ):
+                    merged_episode, bucket = bucket_result
+                    if args.render_only:
+                        print(
+                            f"  [watch] Merged checkpoint {merged_episode:06d} ready "
+                            f"({len(bucket)} matchup(s)); render-only — skipping eval episodes",
+                            flush=True,
+                        )
+                        last_seen_merged_episode = merged_episode
+                    else:
+                        _evaluate_unified_merged_checkpoint(
+                            results_dir=results_dir,
+                            merged_episode=merged_episode,
+                            bucket=bucket,
+                            episodes=args.episodes,
+                            max_steps=args.max_steps,
+                            base_url=args.talishar_url,
+                            assets_path=args.assets_path,
+                            seed=args.seed,
+                            stall_no_damage_turns=args.stall_no_damage_turns,
+                            stall_low_hand_turns=args.stall_low_hand_turns,
+                            stall_max_single_low_hand_turns=args.stall_max_single_low_hand_turns,
+                            stall_min_attack_hand=args.stall_min_attack_hand,
+                            verbose=args.verbose,
+                            run_parity=not args.skip_parity,
+                            cpp_engine_dir=args.parity_cpp_engine_dir,
+                            cpp_engine_cache_dir=args.parity_cpp_engine_cache_dir,
+                            anti_stuck_config=anti_stuck_config,
+                        )
+                        last_seen_merged_episode = merged_episode
+                elif args.companion_to_training:
                     print(
-                        f"  [watch] Live render active — waiting for matchup output "
-                        f"under {scope}  (poll #{poll_count + 1})",
+                        f"  [watch] Live render companion — checkpoint eval runs in training "
+                        f"(poll #{poll_count + 1})",
                         flush=True,
                     )
                 else:
+                    merged_episode = bucket_result[0]
                     print(
-                        f"  [watch] Waiting for all matchups to reach the same checkpoint "
-                        f"under {scope}  (poll #{poll_count + 1})",
+                        f"  [watch] Merged checkpoint {merged_episode:06d} already evaluated "
+                        f"— waiting {args.poll_seconds:.0f}s for next bucket "
+                        f"(poll #{poll_count + 1})",
                         flush=True,
                     )
-            elif (
-                not args.companion_to_training
-                and bucket_result[0] != last_seen_merged_episode
-            ):
-                merged_episode, bucket = bucket_result
-                if args.render_only:
-                    print(
-                        f"  [watch] Merged checkpoint {merged_episode:06d} ready "
-                        f"({len(bucket)} matchup(s)); render-only — skipping eval episodes",
-                        flush=True,
+            else:
+                unified_matchup_scope: Optional[Path] = None
+                if is_unified_random_matchup_run(results_dir):
+                    if args.watch:
+                        unified_matchup_scope = resolve_latest_unified_matchup_dir(results_dir)
+                    active_matchup = unified_matchup_scope or resolve_latest_unified_matchup_dir(
+                        results_dir
                     )
-                    last_seen_merged_episode = merged_episode
+                    if active_matchup != last_matchup_dir:
+                        last_seen = None
+                        last_matchup_dir = active_matchup
+                        if active_matchup is not None and args.watch:
+                            print(
+                                f"  [watch] Eval scope → latest matchup {active_matchup.name}",
+                                flush=True,
+                            )
+
+                if args.checkpoint_dir:
+                    p1_bundle = _load_checkpoint(
+                        Path(args.checkpoint_dir).expanduser().resolve(), "p1"
+                    )
                 else:
-                    _evaluate_unified_merged_checkpoint(
+                    p1_bundle = _latest_checkpoint(
+                        results_dir,
+                        "p1",
+                        candidate_id=args.candidate_id,
+                        unified_matchup_dir=unified_matchup_scope,
+                    )
+
+                if p1_bundle is None:
+                    scope = results_dir
+                    if args.candidate_id and is_sideboard_compare_dir(results_dir):
+                        scope = results_dir / _SIDEBOARD_CANDIDATES_DIR / args.candidate_id
+                    elif last_matchup_dir is not None:
+                        scope = last_matchup_dir
+                    print(
+                        f"  [watch] No checkpoints found under {scope}  "
+                        f"(poll #{poll_count + 1})",
+                        flush=True,
+                    )
+                elif p1_bundle.checkpoint_dir != last_seen:
+                    p2_bundle = _paired_checkpoint(p1_bundle, "p2")
+                    skip_post_eval_render = (
+                        unified_mode
+                        and live_render_enabled
+                        and is_unified_random_matchup_run(results_dir)
+                    )
+                    _evaluate_checkpoint(
                         results_dir=results_dir,
-                        merged_episode=merged_episode,
-                        bucket=bucket,
+                        p1_bundle=p1_bundle,
+                        p2_bundle=p2_bundle,
+                        candidate_id=args.candidate_id,
                         episodes=args.episodes,
                         max_steps=args.max_steps,
                         base_url=args.talishar_url,
+                        fe_url=args.talishar_fe_url,
                         assets_path=args.assets_path,
+                        render_gif=not args.no_render_gif or args.render_only,
+                        render_max_steps=render_max_steps,
+                        gif_fps=args.gif_fps,
                         seed=args.seed,
                         stall_no_damage_turns=args.stall_no_damage_turns,
                         stall_low_hand_turns=args.stall_low_hand_turns,
                         stall_max_single_low_hand_turns=args.stall_max_single_low_hand_turns,
                         stall_min_attack_hand=args.stall_min_attack_hand,
+                        parallel_workers=args.parallel_workers,
                         verbose=args.verbose,
                         run_parity=not args.skip_parity,
+                        render_only=args.render_only,
                         cpp_engine_dir=args.parity_cpp_engine_dir,
                         cpp_engine_cache_dir=args.parity_cpp_engine_cache_dir,
+                        skip_post_eval_render=skip_post_eval_render,
                         anti_stuck_config=anti_stuck_config,
                     )
-                    last_seen_merged_episode = merged_episode
-            elif args.companion_to_training:
-                print(
-                    f"  [watch] Live render companion — checkpoint eval runs in training "
-                    f"(poll #{poll_count + 1})",
-                    flush=True,
-                )
-            else:
-                merged_episode = bucket_result[0]
-                print(
-                    f"  [watch] Merged checkpoint {merged_episode:06d} already evaluated "
-                    f"— waiting {args.poll_seconds:.0f}s for next bucket "
-                    f"(poll #{poll_count + 1})",
-                    flush=True,
-                )
-        else:
-            unified_matchup_scope: Optional[Path] = None
-            if is_unified_random_matchup_run(results_dir):
-                if args.watch:
-                    unified_matchup_scope = resolve_latest_unified_matchup_dir(results_dir)
-                active_matchup = unified_matchup_scope or resolve_latest_unified_matchup_dir(
-                    results_dir
-                )
-                if active_matchup != last_matchup_dir:
-                    last_seen = None
-                    last_matchup_dir = active_matchup
-                    if active_matchup is not None and args.watch:
-                        print(
-                            f"  [watch] Eval scope → latest matchup {active_matchup.name}",
-                            flush=True,
-                        )
+                    last_seen = p1_bundle.checkpoint_dir
+                else:
+                    print(
+                        f"  [watch] checkpoint already evaluated "
+                        f"({p1_bundle.checkpoint_dir.name})  "
+                        f"— waiting {args.poll_seconds:.0f}s for new checkpoint "
+                        f"(poll #{poll_count + 1})",
+                        flush=True,
+                    )
 
-            if args.checkpoint_dir:
-                p1_bundle = _load_checkpoint(
-                    Path(args.checkpoint_dir).expanduser().resolve(), "p1"
-                )
-            else:
-                p1_bundle = _latest_checkpoint(
-                    results_dir,
-                    "p1",
-                    candidate_id=args.candidate_id,
-                    unified_matchup_dir=unified_matchup_scope,
-                )
+            poll_count += 1
+            if not args.watch:
+                break
+            time.sleep(max(1.0, args.poll_seconds))
+    finally:
+        if render_state is not None:
+            render_state.stop.set()
+        if render_thread is not None:
+            render_thread.join(timeout=5.0)
+        if render_lock_held:
+            from fab_bridge.optimal_policy_render_lock import (  # noqa: PLC0415
+                release_optimal_policy_render_lock,
+            )
 
-            if p1_bundle is None:
-                scope = results_dir
-                if args.candidate_id and is_sideboard_compare_dir(results_dir):
-                    scope = results_dir / _SIDEBOARD_CANDIDATES_DIR / args.candidate_id
-                elif last_matchup_dir is not None:
-                    scope = last_matchup_dir
-                print(
-                    f"  [watch] No checkpoints found under {scope}  "
-                    f"(poll #{poll_count + 1})",
-                    flush=True,
-                )
-            elif p1_bundle.checkpoint_dir != last_seen:
-                p2_bundle = _paired_checkpoint(p1_bundle, "p2")
-                skip_post_eval_render = (
-                    unified_mode
-                    and live_render_enabled
-                    and is_unified_random_matchup_run(results_dir)
-                )
-                _evaluate_checkpoint(
-                    results_dir=results_dir,
-                    p1_bundle=p1_bundle,
-                    p2_bundle=p2_bundle,
-                    candidate_id=args.candidate_id,
-                    episodes=args.episodes,
-                    max_steps=args.max_steps,
-                    base_url=args.talishar_url,
-                    fe_url=args.talishar_fe_url,
-                    assets_path=args.assets_path,
-                    render_gif=not args.no_render_gif or args.render_only,
-                    render_max_steps=render_max_steps,
-                    gif_fps=args.gif_fps,
-                    seed=args.seed,
-                    stall_no_damage_turns=args.stall_no_damage_turns,
-                    stall_low_hand_turns=args.stall_low_hand_turns,
-                    stall_max_single_low_hand_turns=args.stall_max_single_low_hand_turns,
-                    stall_min_attack_hand=args.stall_min_attack_hand,
-                    parallel_workers=args.parallel_workers,
-                    verbose=args.verbose,
-                    run_parity=not args.skip_parity,
-                    render_only=args.render_only,
-                    cpp_engine_dir=args.parity_cpp_engine_dir,
-                    cpp_engine_cache_dir=args.parity_cpp_engine_cache_dir,
-                    skip_post_eval_render=skip_post_eval_render,
-                    anti_stuck_config=anti_stuck_config,
-                )
-                last_seen = p1_bundle.checkpoint_dir
-            else:
-                print(
-                    f"  [watch] checkpoint already evaluated "
-                    f"({p1_bundle.checkpoint_dir.name})  "
-                    f"— waiting {args.poll_seconds:.0f}s for new checkpoint "
-                    f"(poll #{poll_count + 1})",
-                    flush=True,
-                )
-
-        poll_count += 1
-        if not args.watch:
-            break
-        time.sleep(max(1.0, args.poll_seconds))
+            release_optimal_policy_render_lock(results_dir)
 
 
 if __name__ == "__main__":

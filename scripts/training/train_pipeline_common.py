@@ -650,12 +650,13 @@ def _write_deck_file(
     assets_path: str,
 ) -> Path:
     from flesh_and_blood_rlbridge.talishar_deck_assets import (  # noqa: PLC0415
-        ensure_full_equipment_header,
+        TalisharEquipmentLoadout,
+        format_talishar_deck_file_content,
+        resolve_talishar_equipment_loadout,
     )
 
     hero_token = (equipment_header or "").split()[0] if equipment_header else deck_name
-    assets_root = Path(assets_path)
-    equipment_header = ensure_full_equipment_header(
+    loadout = resolve_talishar_equipment_loadout(
         hero_token,
         equipment_header,
         assets_path,
@@ -741,10 +742,10 @@ def _write_deck_file(
                     return slot
         return "deck"
 
-    header_parts = (equipment_header or "").split()
-    if len(header_parts) <= 1:
+    equipment_header = loadout.line1
+    if len((equipment_header or "").split()) <= 1:
         # Only a hero ID (or empty) — extract equipment from the deck
-        hero = header_parts[0] if header_parts else ""
+        hero = (equipment_header or "").split()[0] if equipment_header else hero_token
         slot_cards: dict[str, list[str]] = {s: [] for s in _EQUIP_SLOT_PATS}
         play_deck: dict[str, int] = {}
         for card_id, count in deck.items():
@@ -763,13 +764,12 @@ def _write_deck_file(
                 f"  [deck] Extracted {len(found)} equipment card(s) from deck "
                 f"into header: {found}"
             )
-
-    equipment_header = ensure_full_equipment_header(
-        hero_token,
-        equipment_header,
-        assets_path,
-        deck_stem=deck_name,
-    )
+            loadout = resolve_talishar_equipment_loadout(
+                hero_token,
+                equipment_header,
+                assets_path,
+                deck_stem=deck_name,
+            )
 
     if str(REPO_ROOT / "src") not in sys.path:
         sys.path.insert(0, str(REPO_ROOT / "src"))
@@ -781,13 +781,13 @@ def _write_deck_file(
     for warning in deck_warnings:
         print(f"  [deck] {warning}")
 
-    if equipment_header:
+    if loadout.line1:
         from flesh_and_blood_rlbridge.card_db.talishar_card_ids import (  # noqa: PLC0415
             TalisharCardIdResolver,
         )
 
         resolver = TalisharCardIdResolver()
-        header_parts = equipment_header.split()
+        header_parts = loadout.line1.split()
         if header_parts:
             fixed_header: list[str] = []
             for idx, part in enumerate(header_parts):
@@ -796,15 +796,24 @@ def _write_deck_file(
                     print(f"  [deck] Dropped unknown equipment id from header: {part}")
                     continue
                 fixed_header.append(resolved if resolved is not None else part)
-            equipment_header = " ".join(fixed_header)
+            loadout = TalisharEquipmentLoadout(
+                line1=" ".join(fixed_header),
+                head_sb=loadout.head_sb,
+                chest_sb=loadout.chest_sb,
+                arms_sb=loadout.arms_sb,
+                legs_sb=loadout.legs_sb,
+                offhand_sb=loadout.offhand_sb,
+                weapon_sb=loadout.weapon_sb,
+            )
 
     card_ids: list[str] = []
     for card_id, count in sorted(deck.items()):
         card_ids.extend([card_id] * count)
-    content = f"{equipment_header}\n{' '.join(card_ids)}\n"
+    content = format_talishar_deck_file_content(loadout, card_ids)
     out_path = Path(assets_path) / f"{deck_name}.txt"
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(content, encoding="utf-8")
+    with out_path.open("w", encoding="utf-8", newline="") as handle:
+        handle.write(content)
     return out_path
 
 def _save_all_agents(agents: PhaseAgents, out_dir: Path) -> None:

@@ -11,9 +11,11 @@ from fab_bridge.unified_dashboard import (
     LOGIC_VS_LOGIC_BASELINE_NAME,
     UNIFIED_DASHBOARD_NAME,
     UNIFIED_LIVE_STATE,
+    _centered_axis_label,
     _checkpoint_point_from_row,
     _merged_aggregate_points,
     _rows_from_latest_merged,
+    _training_matchup_series,
     aggregate_checkpoint_points,
     collect_unified_run_state,
     count_completed_matchups,
@@ -274,6 +276,8 @@ def test_parallel_active_matchups_and_aggregate(tmp_path: Path) -> None:
         "match_a",
         name="a-vs-b",
         episodes_completed=200,
+        p1_win_rate=0.52,
+        hero1_win_rate=0.52,
         status="training",
     )
     update_unified_matchup_live(
@@ -281,6 +285,8 @@ def test_parallel_active_matchups_and_aggregate(tmp_path: Path) -> None:
         "match_b",
         name="c-vs-d",
         episodes_completed=180,
+        p1_win_rate=0.61,
+        hero1_win_rate=0.61,
         status="training",
     )
     (run_dir / UNIFIED_LIVE_STATE).write_text(
@@ -301,6 +307,8 @@ def test_parallel_active_matchups_and_aggregate(tmp_path: Path) -> None:
     state = collect_unified_run_state(run_dir)
     assert len(state["active_matchups"]) == 2
     assert len(state["active_checkpoint_rows"]) == 2
+    assert len(state["checkpoint_matchup_series"]) == 2
+    assert len(state["training_matchup_series"]) == 2
     aggregate = aggregate_checkpoint_points(
         {
             "match_a": json.loads((match_a / "checkpoint_eval_history.json").read_text()),
@@ -316,6 +324,44 @@ def test_parallel_active_matchups_and_aggregate(tmp_path: Path) -> None:
     assert "(Hero 1) vs" in html
     assert "c-vs-d" in html or "(Hero 2)" in html
     assert "matchup-progress" in html
+    assert "chart-matchup-line" in html
+    assert "Training rollouts" in html
+    assert "Checkpoint eval" in html
+    assert "+50%" in html
+    assert "agent vs agent mean" not in html
+
+
+def test_centered_axis_label_and_training_series(tmp_path: Path) -> None:
+    assert _centered_axis_label(0.5) == "0%"
+    assert _centered_axis_label(0.6) == "+10%"
+    assert _centered_axis_label(0.4) == "-10%"
+
+    run_dir = _write_run(tmp_path)
+    match_a = run_dir / "match_a"
+    match_a.mkdir()
+    (match_a / "matchup_label.json").write_text(
+        json.dumps({"name": "a-vs-b", "p1_hero": "viserai", "p2_hero": "kayo"}),
+        encoding="utf-8",
+    )
+    update_unified_matchup_live(
+        run_dir,
+        "match_a",
+        name="a-vs-b",
+        episodes_completed=50,
+        hero1_win_rate=0.55,
+    )
+    update_unified_matchup_live(
+        run_dir,
+        "match_a",
+        name="a-vs-b",
+        episodes_completed=100,
+        hero1_win_rate=0.60,
+    )
+    live = json.loads((run_dir / UNIFIED_LIVE_STATE).read_text(encoding="utf-8"))
+    series = _training_matchup_series(run_dir, live["active_matchups"])
+    assert len(series) == 1
+    assert series[0]["points"][-1]["win_rate"] == pytest.approx(0.60)
+    assert series[0]["points"][-1]["episode"] == 100
 
 
 def test_merged_checkpoint_eval_dashboard(tmp_path: Path) -> None:
@@ -396,11 +442,13 @@ def test_merged_checkpoint_eval_dashboard(tmp_path: Path) -> None:
     state = collect_unified_run_state(run_dir)
     assert state["checkpoint_aggregate_points"][0]["win_rate_mean"] == pytest.approx(0.55)
     assert len(state["active_checkpoint_rows"]) == 2
+    assert len(state["checkpoint_matchup_series"]) == 2
     assert state["active_checkpoint_rows"][0]["eval_episodes"] == 50
 
     html = render_unified_random_matchups_html(state)
     assert "Eval games" in html
     assert "50" in html
+    assert "chart-matchup-line" in html
 
 
 def test_render_policy_weights_card(tmp_path: Path) -> None:
@@ -551,8 +599,10 @@ def test_chart_uses_self_play_when_merged_aggregate_null(tmp_path: Path) -> None
     points = state["checkpoint_aggregate_points"]
     assert points
     assert points[0]["win_rate_mean"] == pytest.approx(0.5)
+    assert len(state["checkpoint_matchup_series"]) == 2
     html = render_unified_random_matchups_html(state)
-    assert "agent vs agent mean" in html
+    assert "chart-matchup-line" in html
+    assert "agent vs agent mean" not in html
     assert "agent vs logic mean" not in html
 
 

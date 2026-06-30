@@ -6,6 +6,16 @@ import json
 from dataclasses import dataclass
 from typing import Any, Literal, Optional
 
+
+@dataclass(frozen=True)
+class RenderEpisodeResult:
+    """Resolved render-episode outcome with absolute seat HP."""
+
+    outcome: str
+    p1_hp: Optional[float]
+    p2_hp: Optional[float]
+    winning_seat: Optional[int] = None
+
 NominalHeroSlot = Literal["hero1", "hero2"]
 
 OUTCOME_WIN = "win"
@@ -24,6 +34,176 @@ def classify_p1_outcome_from_engine_winner(winner: int) -> Optional[str]:
     if winner < 0:
         return None
     return OUTCOME_DRAW
+
+
+def classify_p1_outcome_from_talishar_winner(winner: int) -> Optional[str]:
+    """Map Talishar HTTP ``winner`` (1=P1, 2=P2) to a P1-seat outcome."""
+    if winner == 1:
+        return OUTCOME_WIN
+    if winner == 2:
+        return OUTCOME_LOSS
+    if winner <= 0:
+        return None
+    return OUTCOME_DRAW
+
+
+def hero_display_name(raw: str) -> str:
+    """Human-readable hero label from a deck stem or hero id."""
+    slug = str(raw or "").strip().removeprefix("fab_")
+    if not slug:
+        return "?"
+    if "-vs-" in slug:
+        slug = slug.split("-vs-", 1)[0]
+    slug = slug.replace("-", "_")
+    if slug.startswith("precon_"):
+        parts = slug.split("_")
+        slug = parts[-1] if len(parts) >= 2 else slug
+    elif "_" in slug:
+        slug = slug.rsplit("_", 1)[-1]
+    return slug.replace("_", " ").title() or "?"
+
+
+def render_outcome_banner_label(
+    result: RenderEpisodeResult,
+    *,
+    p1_hero: str = "",
+    p2_hero: str = "",
+) -> tuple[str, tuple[int, int, int]]:
+    """Return ``(banner_text, rgb)`` for a render end-state overlay."""
+    if result.outcome == OUTCOME_DRAW:
+        return "DRAW", (250, 204, 21)
+    if result.outcome in {OUTCOME_TIMEOUT, OUTCOME_ERROR, "stall_timeout"}:
+        text = result.outcome.upper().replace("_", " ")
+        return text, (249, 115, 22)
+
+    winning_seat = result.winning_seat
+    if winning_seat is None:
+        if result.outcome == OUTCOME_WIN:
+            winning_seat = 1
+        elif result.outcome == OUTCOME_LOSS:
+            winning_seat = 2
+
+    if winning_seat == 1:
+        hero = hero_display_name(p1_hero or "P1")
+        return f"{hero} Won", (34, 197, 94)
+    if winning_seat == 2:
+        hero = hero_display_name(p2_hero or "P2")
+        return f"{hero} Won", (34, 197, 94)
+    return result.outcome.upper(), (200, 200, 200)
+
+
+def _parse_talishar_winner_seat(raw: Any) -> Optional[int]:
+    try:
+        winner = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if winner in (1, 2):
+        return winner
+    return None
+
+
+def talishar_winner_seat_from_env(env: Any) -> Optional[int]:
+    """Return Talishar winner seat (1 or 2) from dual-seat or last-state snapshots."""
+    if env is None or getattr(env, "_using_cpp", False):
+        return None
+    try:
+        from flesh_and_blood_rlbridge.game_state_parity import extract_talishar_state
+
+        snap = extract_talishar_state(env)
+        if snap:
+            winner = _parse_talishar_winner_seat(snap.get("winner", -1))
+            if winner is not None:
+                return winner
+    except Exception:
+        pass
+
+    last_state = getattr(env, "_last_state", None)
+    if isinstance(last_state, dict):
+        winner = _parse_talishar_winner_seat(last_state.get("winner"))
+        if winner is not None:
+            return winner
+    return None
+
+
+def absolute_p1_p2_hp_from_dual_seat_env(
+    env: Any,
+) -> tuple[Optional[int], Optional[int], Optional[int]]:
+    """Return ``(p1_hp, p2_hp, talishar_winner)`` from both Talishar seat snapshots."""
+    if env is None or getattr(env, "_using_cpp", False):
+        return None, None, None
+    try:
+        from flesh_and_blood_rlbridge.game_state_parity import extract_talishar_state
+
+        snap = extract_talishar_state(env)
+        if not snap:
+            return None, None, None
+        p1_hp = snap.get("p1_health")
+        p2_hp = snap.get("p2_health")
+        if p1_hp is None or p2_hp is None:
+            return None, None, None
+        winner = _parse_talishar_winner_seat(snap.get("winner", -1))
+        return int(p1_hp), int(p2_hp), winner
+    except Exception:
+        return None, None, None
+
+
+def infer_render_episode_outcome(
+    obs: Any,
+    *,
+    terminated: bool,
+    truncated: bool,
+    env: Any = None,
+) -> RenderEpisodeResult:
+    """Resolve render outcome using dual-seat HP and Talishar ``winner`` when available."""
+    p1_hp: Optional[float] = None
+    p2_hp: Optional[float] = None
+    talishar_winner: Optional[int] = None
+
+    dual_p1, dual_p2, dual_winner = absolute_p1_p2_hp_from_dual_seat_env(env)
+    if dual_p1 is not None and dual_p2 is not None:
+        p1_hp, p2_hp = float(dual_p1), float(dual_p2)
+        talishar_winner = dual_winner
+    else:
+        p1_deck = p2_deck = None
+        if env is not None:
+            env_p1, env_p2 = absolute_p1_p2_hp_from_env(env)
+            if env_p1 is not None and env_p2 is not None:
+                p1_hp, p2_hp = float(env_p1), float(env_p2)
+            p1_deck, p2_deck = absolute_p1_p2_deck_from_env(env)
+        if p1_hp is None or p2_hp is None:
+            obs_p1, obs_p2 = absolute_p1_p2_hp_from_obs(obs)
+            if obs_p1 is not None and obs_p2 is not None:
+                p1_hp, p2_hp = obs_p1, obs_p2
+        if p1_deck is None or p2_deck is None:
+            p1_deck, p2_deck = absolute_p1_p2_deck_from_obs(obs)
+        talishar_winner = talishar_winner_seat_from_env(env)
+
+    outcome = classify_p1_episode_outcome(
+        p1_hp=p1_hp,
+        p2_hp=p2_hp,
+        terminated=terminated,
+        truncated=truncated,
+    )
+
+    if terminated and talishar_winner is not None:
+        winner_outcome = classify_p1_outcome_from_talishar_winner(talishar_winner)
+        if winner_outcome is not None:
+            outcome = winner_outcome
+
+    winning_seat: Optional[int] = None
+    if outcome == OUTCOME_WIN:
+        winning_seat = 1
+    elif outcome == OUTCOME_LOSS:
+        winning_seat = 2
+    elif talishar_winner in (1, 2):
+        winning_seat = talishar_winner
+
+    return RenderEpisodeResult(
+        outcome=outcome,
+        p1_hp=p1_hp,
+        p2_hp=p2_hp,
+        winning_seat=winning_seat,
+    )
 
 
 def classify_p1_fast_episode_outcome(

@@ -686,11 +686,18 @@ class TalisharSideboardEnvironment(rlbridgeEnvironment):
                 continue  # tokens never belong in a Talishar deck file
             card_ids.extend([card_id] * count)
 
-        content = f"{self._equipment_header}\n{' '.join(card_ids)}\n"
-        out_path = Path(self._assets_path) / f"{deck_name}.txt"
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(content, encoding="utf-8")
-        return out_path
+        from flesh_and_blood_rlbridge.talishar_deck_assets import (  # noqa: PLC0415
+            write_resolved_talishar_deck_file,
+        )
+
+        return write_resolved_talishar_deck_file(
+            Path(self._assets_path) / f"{deck_name}.txt",
+            hero_id=self._hero_id,
+            equipment_header=self._equipment_header,
+            card_ids=card_ids,
+            assets_dir=self._assets_path,
+            deck_stem=deck_name,
+        )
 
     def _cpp_lookup_decks(self) -> tuple[str, str]:
         lookup1 = self._cpp_engine_deck1 or self._hero_id

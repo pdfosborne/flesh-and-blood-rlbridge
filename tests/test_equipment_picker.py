@@ -114,6 +114,51 @@ def test_hero_class_for_id_reads_cards_db() -> None:
     assert hero_talent_for_id("briar") == "Elemental"
 
 
+def test_suggest_guide_equipment_header_rejects_second_two_handed_weapon() -> None:
+    header = (
+        "briar scorpio_comet_tail blade_beckoner_helm blossom_of_spring "
+        "blade_beckoner_gauntlets blade_beckoner_boots star_fall"
+    )
+    suggested = suggest_guide_equipment_header(
+        header,
+        hero_id="briar",
+        opponent_hero_id="dorinthea",
+        game_format="silver_age",
+        pool_by_id={},
+    )
+    active, sideboard = split_equipment_header(suggested, hero_id="briar")
+    weapon_cards = [
+        cid
+        for cid in active[1:]
+        if equipment_slot(cid, hero_id="briar") == "weapon"
+    ]
+    assert len(weapon_cards) == 1
+    assert weapon_cards[0] in {"scorpio_comet_tail", "star_fall"}
+    inactive = {"scorpio_comet_tail", "star_fall"} - {weapon_cards[0]}
+    assert inactive.issubset(set(sideboard))
+
+
+def test_suggest_guide_equipment_header_allows_dual_one_handed_weapons() -> None:
+    header = (
+        "katsu harmonized_kodachi harmonized_kodachi_r "
+        "mask_of_momentum snapdragon_scalers"
+    )
+    suggested = suggest_guide_equipment_header(
+        header,
+        hero_id="katsu",
+        opponent_hero_id="dorinthea",
+        game_format="silver_age",
+        pool_by_id={},
+    )
+    active, _ = split_equipment_header(suggested, hero_id="katsu")
+    weapons = [
+        cid
+        for cid in active[1:]
+        if equipment_slot(cid, hero_id="katsu") == "weapon"
+    ]
+    assert weapons == ["harmonized_kodachi", "harmonized_kodachi_r"]
+
+
 def test_suggest_guide_equipment_header_keeps_briar_weapon() -> None:
     header = "briar rosetta_thorn blossom_of_spring mage_master_boots aether_crackers"
     suggested = suggest_guide_equipment_header(

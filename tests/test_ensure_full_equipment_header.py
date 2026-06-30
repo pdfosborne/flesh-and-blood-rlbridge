@@ -38,6 +38,37 @@ def test_ensure_full_equipment_header_fills_from_richer_asset(tmp_path: Path) ->
     assert "anothos" in parts
 
 
+def test_write_deck_file_uses_weapon_sideboard_line(tmp_path: Path) -> None:
+    import sys
+
+    repo = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(repo / "scripts" / "training"))
+    from train_pipeline_common import _write_deck_file  # noqa: PLC0415
+
+    assets = tmp_path / "Assets"
+    assets.mkdir()
+    header = (
+        "briar scorpio_comet_tail blade_beckoner_helm blossom_of_spring "
+        "blade_beckoner_gauntlets blade_beckoner_boots crown_of_dichotomy "
+        "quick_clicks star_fall swiftstrike_bracers"
+    )
+    (assets / "fab_briar_sage_aggro.txt").write_text(
+        f"{header}\narcane_polarity_red\n",
+        encoding="utf-8",
+    )
+
+    path = _write_deck_file(
+        {"arcane_polarity_red": 40},
+        header,
+        "eval_briar_test",
+        str(assets),
+    )
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert "scorpio_comet_tail" in lines[0].split()
+    assert "star_fall" not in lines[0].split()
+    assert lines[7] == "star_fall"
+
+
 def test_write_deck_file_uses_full_equipment_header(tmp_path: Path) -> None:
     import sys
 

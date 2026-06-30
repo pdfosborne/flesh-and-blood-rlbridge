@@ -85,7 +85,7 @@ class MetaUnifiedRandomMatchups:
     # Continuous optimal-policy PNG on the render shard during unified training.
     optimal_policy_live_render: bool = True
     # Write unified_training_debug.jsonl with connection/episode/deck/render details.
-    debug_training: bool = True
+    debug_training: bool = False
     # cpp engine is not implemented fully to match talishar engine, so we disable it by default
     build_cpp_engine: bool = False
     require_cpp_engine: bool = False
@@ -148,7 +148,7 @@ class MetaRuntime:
     gif_fps_matchup_sim: float = 2.0
 
     # ── Eval/render anti-stuck diagnostics ───────────────────────────────────
-    anti_stuck_logging: bool = True
+    anti_stuck_logging: bool = False
     anti_stuck_pass_streak: int = 8
     anti_stuck_no_progress_steps: int = 6
     anti_stuck_repeat_streak: int = 5

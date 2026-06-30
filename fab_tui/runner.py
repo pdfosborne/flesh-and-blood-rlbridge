@@ -743,27 +743,6 @@ def run_unified_random_matchups(
         cmd.append("--debug-training")
     else:
         cmd.append("--no-debug-training")
-    dashboard_proc = None
-    try:
-        if spec.optimal_policy_live_render:
-            from runscripts._common import (  # noqa: PLC0415
-                start_unified_random_matchups_eval_dashboard,
-                stop_background_process,
-            )
-
-            dashboard_proc = start_unified_random_matchups_eval_dashboard(
-                out_dir,
-                assets=env.assets_path,
-                talishar_url_value=env.talishar_eval_url,
-                talishar_render_url_value=env.talishar_render_url,
-                cache_dir=cache_dir,
-                live_render=True,
-                debug_training=spec.debug_training,
-                anti_stuck_logging=spec.anti_stuck_logging,
-            )
-        return run_streaming(cmd)
-    finally:
-        if dashboard_proc is not None:
-            from runscripts._common import stop_background_process  # noqa: PLC0415
-
-            stop_background_process(dashboard_proc)
+    # Optimal-policy live render companion is started by train_unified_random_matchups.py
+    # (single owner — avoids duplicate Playwright writers on optimal_policy_live.png).
+    return run_streaming(cmd)

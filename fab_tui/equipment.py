@@ -211,6 +211,101 @@ def _slot_from_card_id(card_id: str) -> str | None:
     return None
 
 
+def _is_quiver_card(card_id: str) -> bool:
+    return "quiver" in card_id.replace("-", "_").lower()
+
+
+def weapon_hands_occupied(card_id: str, *, hero_id: str = "") -> int:
+    """Return hand slots a weapon/off-hand piece occupies (0, 1, or 2)."""
+    slot = equipment_slot(card_id, hero_id=hero_id)
+    if slot not in {"weapon", "off_hand"}:
+        return 0
+    if _is_quiver_card(card_id) or slot == "off_hand":
+        return 1
+
+    tl = _type_line(card_id).lower()
+    if "(2h)" in tl:
+        return 2
+    if "(1h)" in tl:
+        return 1
+
+    token = card_id.replace("-", "_").lower()
+    from flesh_and_blood_rlbridge.card_db.talishar_card_ids import (  # noqa: PLC0415
+        load_talishar_card_subtypes,
+        load_talishar_one_handed_weapons,
+    )
+
+    if token in load_talishar_one_handed_weapons():
+        return 1
+
+    subtypes = load_talishar_card_subtypes().get(token, "")
+    if "off-hand" in subtypes.lower():
+        return 1
+
+    if slot == "weapon" or "weapon" in tl:
+        return 2
+    return 1
+
+
+def select_weapon_loadout(
+    ordered_candidates: list[str],
+    *,
+    hero_id: str,
+) -> tuple[list[str], str, list[str]]:
+    """Pick legal equipped weapons; return ``(weapons, quiver/offhand, sideboard)``."""
+    active_weapons: list[str] = []
+    quiver_or_off_hand = ""
+    sideboard: list[str] = []
+    hands_used = 0
+    seen: set[str] = set()
+
+    for card_id in ordered_candidates:
+        if card_id in seen:
+            continue
+        seen.add(card_id)
+        slot = equipment_slot(card_id, hero_id=hero_id)
+        if slot not in {"weapon", "off_hand"} and not _is_quiver_card(card_id):
+            continue
+
+        if _is_quiver_card(card_id) or slot == "off_hand":
+            if not quiver_or_off_hand and hands_used < 2:
+                quiver_or_off_hand = card_id
+                hands_used += 1
+            else:
+                sideboard.append(card_id)
+            continue
+
+        hands = weapon_hands_occupied(card_id, hero_id=hero_id)
+        if hands <= 0:
+            continue
+        if hands_used + hands <= 2:
+            active_weapons.append(card_id)
+            hands_used += hands
+        else:
+            sideboard.append(card_id)
+
+    return active_weapons, quiver_or_off_hand, sideboard
+
+
+def build_talishar_active_equipment_line(
+    hero_id: str,
+    *,
+    weapons: list[str],
+    quiver_or_off_hand: str = "",
+    armor_by_slot: dict[str, str],
+) -> str:
+    """Build Talishar line-1 equipment in engine order (hero, weapons, quiver, armor)."""
+    hero = hero_id.replace("-", "_").strip()
+    parts: list[str] = [hero, *weapons]
+    if quiver_or_off_hand:
+        parts.append(quiver_or_off_hand)
+    for slot in ("head", "chest", "arms", "legs"):
+        card_id = str(armor_by_slot.get(slot) or "").strip()
+        if card_id:
+            parts.append(card_id)
+    return " ".join(parts).strip()
+
+
 def equipment_slot(card_id: str, *, hero_id: str = "") -> str:
     """Classify an equipment / weapon card id into a loadout slot."""
     cid = card_id.lower()
@@ -255,10 +350,27 @@ def split_equipment_header(
     active: list[str] = [parts[0]]
     sideboard: list[str] = []
     filled: set[str] = {"hero"}
+    hands_used = 0
 
     for card_id in parts[1:]:
         slot = equipment_slot(card_id, hero_id=hero_id)
         if slot == "hero":
+            continue
+        if slot == "weapon":
+            hands = weapon_hands_occupied(card_id, hero_id=hero_id)
+            if hands > 0 and hands_used + hands <= 2:
+                active.append(card_id)
+                hands_used += hands
+            else:
+                sideboard.append(card_id)
+            continue
+        if _is_quiver_card(card_id) or slot == "off_hand":
+            if "off_hand" not in filled and hands_used < 2:
+                active.append(card_id)
+                filled.add("off_hand")
+                hands_used += 1
+            else:
+                sideboard.append(card_id)
             continue
         if slot in _EQUIPMENT_SLOTS and slot not in filled:
             active.append(card_id)
@@ -503,6 +615,8 @@ def suggest_guide_equipment_header(
 
     slot_map = active_slot_map(active, hero_id=hero_id)
     for slot, candidates in candidates_by_slot.items():
+        if slot in {"weapon", "off_hand"}:
+            continue
         best_id = candidates[0]
         best_score = score_card_for_archetype(
             best_id,
@@ -520,9 +634,42 @@ def suggest_guide_equipment_header(
                 best_id = alt_id
         slot_map[slot] = best_id
 
-    new_active = active_list_from_slot_map(hero_id, slot_map)
+    def _score_sorted(candidates: list[str]) -> list[str]:
+        if not candidates:
+            return []
+        return sorted(
+            candidates,
+            key=lambda cid: score_card_for_archetype(
+                cid,
+                _card_meta(cid, pool_meta),
+                archetype,
+            ),
+            reverse=True,
+        )
+
+    weapon_candidates = _score_sorted(candidates_by_slot.get("weapon", []))
+    off_hand_candidates = _score_sorted(candidates_by_slot.get("off_hand", []))
+    hand_pool = weapon_candidates + [
+        cid for cid in off_hand_candidates if cid not in weapon_candidates
+    ]
+    active_weapons, quiver_or_off_hand, _hand_sb = select_weapon_loadout(
+        hand_pool,
+        hero_id=hero_id,
+    )
+    armor_by_slot = {
+        slot: str(slot_map.get(slot) or "").strip()
+        for slot in ("head", "chest", "arms", "legs")
+        if str(slot_map.get(slot) or "").strip()
+    }
+    built_active = build_talishar_active_equipment_line(
+        hero_id,
+        weapons=active_weapons,
+        quiver_or_off_hand=quiver_or_off_hand,
+        armor_by_slot=armor_by_slot,
+    )
+    new_active = built_active.split() if built_active else active
     active_set = set(new_active)
-    new_sideboard = [cid for cid in active[1:] + sideboard if cid not in active_set]
+    new_sideboard = [cid for cid in active[1:] + sideboard + hand_pool if cid not in active_set]
     return " ".join([*new_active, *new_sideboard]).strip()
 
 

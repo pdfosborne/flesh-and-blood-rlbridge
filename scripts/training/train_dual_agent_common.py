@@ -5848,19 +5848,17 @@ def _write_talishar_deck_asset(
     card_ids: list[str],
 ) -> None:
     from flesh_and_blood_rlbridge.talishar_deck_assets import (  # noqa: PLC0415
-        ensure_full_equipment_header,
+        write_resolved_talishar_deck_file,
     )
 
-    hero = hero_id.removeprefix("hero_")
-    header_text = (equipment_header or "").strip()
-    if len(header_text.split()) < 8:
-        header_text = ensure_full_equipment_header(
-            hero,
-            header_text,
-            assets_path,
-            deck_stem=deck_stem,
-        )
-    out_path.write_text(f"{header_text}\n{' '.join(card_ids)}\n", encoding="utf-8")
+    write_resolved_talishar_deck_file(
+        out_path,
+        hero_id=hero_id,
+        equipment_header=equipment_header,
+        card_ids=card_ids,
+        assets_dir=assets_path,
+        deck_stem=deck_stem,
+    )
 
 
 def write_fabrary_deck_file(

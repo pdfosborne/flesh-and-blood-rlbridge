@@ -12,13 +12,18 @@ sys.path.insert(0, str(_REPO / "scripts" / "training"))
 
 from play_outcome_stats import (  # noqa: E402
     OutcomeCounters,
+    RenderEpisodeResult,
     absolute_p1_p2_deck_from_env,
     absolute_p1_p2_hp_from_env,
     absolute_p1_p2_hp_from_obs,
     classify_p1_episode_outcome,
+    classify_p1_outcome_from_talishar_winner,
     compute_eval_stability,
+    hero_display_name,
+    infer_render_episode_outcome,
     legacy_hero_rates_from_seat_summary,
     nominal_hero_slot,
+    render_outcome_banner_label,
     summarize_p1_outcomes,
     winning_hero_id_from_seat_outcome,
     win_rate_standard_error,
@@ -311,3 +316,55 @@ def test_legacy_hero_rates_from_seat_summary() -> None:
     )
     assert h1 == 0.6
     assert h2 == 0.4
+
+
+def test_classify_p1_outcome_from_talishar_winner() -> None:
+    assert classify_p1_outcome_from_talishar_winner(1) == "win"
+    assert classify_p1_outcome_from_talishar_winner(2) == "loss"
+    assert classify_p1_outcome_from_talishar_winner(0) is None
+
+
+def test_infer_render_episode_outcome_prefers_dual_seat_hp() -> None:
+    class _Env:
+        _using_cpp = False
+        _acting_player_id = 1
+        _player_hp = 15
+        _opp_hp = -1
+        _last_state = {"playerHealth": 15, "opponentHealth": -1}
+
+        def _fetch_state(self, player_id=None, last_update=None):
+            if player_id == 1:
+                return {"playerHealth": 0, "opponentHealth": 15, "winner": 2}
+            return {"playerHealth": 15, "opponentHealth": 0, "winner": 2}
+
+    result = infer_render_episode_outcome(
+        {"actingPlayerID": 1, "playerHealth": 15, "opponentHealth": -1},
+        terminated=True,
+        truncated=False,
+        env=_Env(),
+    )
+    assert result.outcome == "loss"
+    assert result.p1_hp == 0.0
+    assert result.p2_hp == 15.0
+    assert result.winning_seat == 2
+
+
+def test_render_outcome_banner_label_uses_hero_name() -> None:
+    result = RenderEpisodeResult(
+        outcome="loss",
+        p1_hp=0.0,
+        p2_hp=15.0,
+        winning_seat=2,
+    )
+    label, color = render_outcome_banner_label(
+        result,
+        p1_hero="fab_ira_crimson_haze_sage_aggro",
+        p2_hero="fab_precon_sage_ch2_dorinthea",
+    )
+    assert label == "Dorinthea Won"
+    assert color == (34, 197, 94)
+
+
+def test_hero_display_name_shortens_deck_stems() -> None:
+    assert hero_display_name("fab_precon_sage_ch2_dorinthea") == "Dorinthea"
+    assert hero_display_name("fab_ira_crimson_haze_sage_aggro") == "Aggro"
