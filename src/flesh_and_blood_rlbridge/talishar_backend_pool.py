@@ -65,12 +65,12 @@ def resolve_talishar_backend_urls(
     configured_backends: Iterable[str] = (),
     fallback_url: str | None = None,
 ) -> tuple[str, ...]:
-    """Resolve Talishar backend URLs from env, runtime config, and fallbacks."""
+    """Resolve Talishar backend URLs for training rollouts (excludes eval shard)."""
     env_urls = os.environ.get("TALISHAR_URLS", "").strip()
     if env_urls:
         parsed = parse_talishar_urls_string(env_urls)
         if parsed:
-            return parsed
+            return _exclude_eval_backend(parsed)
 
     configured = tuple(
         normalize_talishar_url(u)
@@ -78,14 +78,58 @@ def resolve_talishar_backend_urls(
         if str(u).strip()
     )
     if configured:
-        return configured
+        return _exclude_eval_backend(configured)
 
     single = (
         fallback_url
         or os.environ.get("TALISHAR_URL", "").strip()
         or DEFAULT_TALISHAR_URL
     )
-    return (normalize_talishar_url(single),)
+    return _exclude_eval_backend((normalize_talishar_url(single),))
+
+
+def resolve_eval_backend_url(*, fallback_url: str | None = None) -> str:
+    """Return the dedicated eval Talishar backend URL when configured."""
+    eval_url = os.environ.get("TALISHAR_EVAL_URL", "").strip()
+    if eval_url:
+        return normalize_talishar_url(eval_url)
+    return normalize_talishar_url(
+        fallback_url
+        or os.environ.get("TALISHAR_URL", "").strip()
+        or DEFAULT_TALISHAR_URL
+    )
+
+
+def resolve_render_backend_url(*, fallback_url: str | None = None) -> str:
+    """Return the dedicated live-render Talishar backend when configured."""
+    render_url = os.environ.get("TALISHAR_RENDER_URL", "").strip()
+    if render_url:
+        return normalize_talishar_url(render_url)
+    return resolve_eval_backend_url(fallback_url=fallback_url)
+
+
+def _exclude_reserved_backends(urls: Iterable[str]) -> tuple[str, ...]:
+    """Drop dedicated eval and render shards from a training backend URL list."""
+    reserved: set[str] = set()
+    for env_key in ("TALISHAR_EVAL_URL", "TALISHAR_RENDER_URL"):
+        reserved_url = os.environ.get(env_key, "").strip()
+        if reserved_url:
+            reserved.add(normalize_talishar_url(reserved_url))
+    if not reserved:
+        return tuple(urls)
+    training = tuple(
+        normalize_talishar_url(url)
+        for url in urls
+        if normalize_talishar_url(url) not in reserved
+    )
+    if training:
+        return training
+    return tuple(normalize_talishar_url(url) for url in urls)
+
+
+def _exclude_eval_backend(urls: Iterable[str]) -> tuple[str, ...]:
+    """Drop the dedicated eval shard from a training backend URL list."""
+    return _exclude_reserved_backends(urls)
 
 
 def probe_backend_health(url: str, *, timeout: float = 3.0) -> tuple[bool, str]:

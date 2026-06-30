@@ -7,7 +7,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from flesh_and_blood_rlbridge.talishar_engine_environment import TalisharEngineEnvironment
+from flesh_and_blood_rlbridge.talishar_engine_environment import (
+    TalisharEngineEnvironment,
+    rewrite_frontend_api_url,
+)
 
 
 def test_frontend_game_url_includes_disable_card_hover_for_rgb_array() -> None:
@@ -106,3 +109,42 @@ def test_frontend_game_url_omits_disable_card_hover_without_rgb_array() -> None:
     url = env._frontend_game_url()
     assert url is not None
     assert "disableCardHover" not in url
+
+
+def test_rewrite_frontend_api_url_maps_vite_api_prefix() -> None:
+    backend = "http://localhost:8091/game"
+    assert (
+        rewrite_frontend_api_url(
+            "http://localhost:5173/api/GetNextTurn.php?gameName=ABC",
+            backend,
+        )
+        == "http://localhost:8091/game/GetNextTurn.php?gameName=ABC"
+    )
+
+
+def test_rewrite_frontend_api_url_maps_apis_and_account_files() -> None:
+    backend = "http://localhost:8091/game"
+    assert (
+        rewrite_frontend_api_url(
+            "http://localhost:5173/APIs/CreateLocalGame.php",
+            backend,
+        )
+        == "http://localhost:8091/game/APIs/CreateLocalGame.php"
+    )
+    assert (
+        rewrite_frontend_api_url(
+            "http://localhost:5173/AccountFiles/foo.json",
+            backend,
+        )
+        == "http://localhost:8091/game/AccountFiles/foo.json"
+    )
+
+
+def test_rewrite_frontend_api_url_ignores_static_assets() -> None:
+    assert (
+        rewrite_frontend_api_url(
+            "http://localhost:5173/src/main.tsx",
+            "http://localhost:8091/game",
+        )
+        is None
+    )

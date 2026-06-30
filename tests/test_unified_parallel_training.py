@@ -91,3 +91,35 @@ def test_workers_per_parallel_matchup() -> None:
     assert workers_per_parallel_matchup(16, 4) == 4
     assert workers_per_parallel_matchup(16, 1) == 16
     assert workers_per_parallel_matchup(3, 4) == 1
+
+
+def test_resolve_safe_parallel_limits() -> None:
+    from unified_parallel_training import (  # noqa: PLC0415
+        concurrent_training_game_slots,
+        resolve_safe_parallel_limits,
+    )
+
+    workers, matchups, wpm = resolve_safe_parallel_limits(
+        workers=1,
+        parallel_matchups=5,
+        n_training_shards=5,
+    )
+    assert (matchups, wpm) == (5, 1)
+    assert concurrent_training_game_slots(workers, matchups) == 5
+
+    workers, matchups, wpm = resolve_safe_parallel_limits(
+        workers=1,
+        parallel_matchups=5,
+        n_training_shards=4,
+    )
+    assert matchups == 4
+    assert wpm == 1
+    assert concurrent_training_game_slots(workers, matchups) <= 4
+
+    workers, matchups, wpm = resolve_safe_parallel_limits(
+        workers=16,
+        parallel_matchups=4,
+        n_training_shards=5,
+    )
+    assert concurrent_training_game_slots(workers, matchups) <= 5
+    assert wpm >= 1

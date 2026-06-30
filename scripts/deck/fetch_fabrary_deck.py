@@ -715,8 +715,10 @@ def append_to_fabrary_decks_json(
     slug: str,
     deck_id: str,
     json_path: Path,
+    *,
+    replace_existing: bool = False,
 ) -> None:
-    """Append the deck as a static entry in fabrary_decks.json."""
+    """Append (or replace) the deck as a static entry in fabrary_decks.json."""
     if not json_path.exists():
         print(f"  WARNING: {json_path} not found — skipping append", file=sys.stderr)
         return
@@ -726,16 +728,14 @@ def append_to_fabrary_decks_json(
 
     decks: list[dict] = db.get("decks", [])
 
-    # Check for duplicate
     existing_ids = {d.get("id") for d in decks}
-    if deck_id in existing_ids:
-        print(f"  Deck ID '{deck_id}' already in fabrary_decks.json — skipping append",
-              file=sys.stderr)
+    if deck_id in existing_ids and not replace_existing:
+        print(
+            f"  Deck ID '{deck_id}' already in fabrary_decks.json — skipping append",
+            file=sys.stderr,
+        )
         return
 
-    # Build card name list from deck dict.
-    # fabrary_decks.json uses card *names*, not IDs — but since we have IDs
-    # here (from the API), we store them under "card_ids" for direct use.
     new_entry: dict[str, Any] = {
         "id": deck_id,
         "name": deck_info["name"],
@@ -744,12 +744,11 @@ def append_to_fabrary_decks_json(
         "format": deck_info["format"],
         "style": "aggro",
         "source_url": f"https://fabrary.net/decks/{slug}",
-        # card_ids is an rlbridge extension (IDs, not names)
+        "equipment_header": deck_info.get("equipment_header", ""),
         "card_ids": [
             {"id": cid, "count": cnt}
             for cid, cnt in sorted(deck_info["deck"].items())
         ],
-        # Also keep original names-based cards array empty for compatibility
         "cards": [],
     }
     if deck_info["sideboard"]:
@@ -758,13 +757,19 @@ def append_to_fabrary_decks_json(
             for cid, cnt in sorted(deck_info["sideboard"].items())
         ]
 
-    decks.append(new_entry)
+    if deck_id in existing_ids:
+        decks = [new_entry if d.get("id") == deck_id else d for d in decks]
+        action = "Replaced"
+    else:
+        decks.append(new_entry)
+        action = "Appended"
+
     db["decks"] = decks
 
     with json_path.open("w", encoding="utf-8") as fh:
         json.dump(db, fh, indent=2, ensure_ascii=False)
 
-    print(f"  Appended '{deck_id}' to {json_path}", file=sys.stderr)
+    print(f"  {action} '{deck_id}' in {json_path}", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------

@@ -601,6 +601,48 @@ PRECONS: dict[str, tuple[list[str], list[str]]] = {
             }
         ),
     ),
+    "BravoFlatteringShowmanSAGEPrecon": (
+        [
+            "bravo_flattering_showman",
+            "basalt_boots",
+            "blade_beckoner_gauntlets",
+            "blade_beckoner_helm",
+            "enclosed_firemind",
+            "magmatic_carapace",
+            "nullrune_boots",
+            "nullrune_gloves",
+            "nullrune_robe",
+            "sledge_of_anvilheim",
+            "steelbraid_buckler",
+            "titans_fist",
+        ],
+        _expand(
+            {
+                "boulder_drop_red": 2,
+                "buckling_blow_red": 2,
+                "cartilage_crush_red": 2,
+                "chokeslam_red": 2,
+                "crash_and_bash_red": 2,
+                "debilitate_red": 2,
+                "fault_line_red": 2,
+                "pummel_red": 2,
+                "staunch_response_red": 2,
+                "zealous_belting_red": 2,
+                "boulder_drop_blue": 2,
+                "buckling_blow_blue": 2,
+                "chokeslam_blue": 2,
+                "clash_of_vigor_blue": 2,
+                "crush_the_weak_blue": 2,
+                "debilitate_blue": 2,
+                "disable_blue": 2,
+                "edge_of_their_seats_blue": 2,
+                "flatten_the_field_blue": 2,
+                "macho_grande_blue": 2,
+                "the_suspense_is_killing_me_blue": 2,
+                "thunder_quake_blue": 2,
+            }
+        ),
+    ),
 }
 
 FAB_PRECON_ALIASES: dict[str, str] = {
@@ -618,6 +660,7 @@ FAB_PRECON_ALIASES: dict[str, str] = {
     "GravyBonesSAGEPrecon": "fab_precon_sage_ch3_gravy_bones",
     "LyathGoldmaneSAGEPrecon": "fab_precon_sage_ch3_lyath_goldmane",
     "BlazeSAGEPrecon": "fab_precon_sage_ch3_blaze_firemind",
+    "BravoFlatteringShowmanSAGEPrecon": "fab_precon_sage_ch1_bravo_flattering_showman",
 }
 
 YOUNG_HEROES = {
@@ -635,6 +678,7 @@ YOUNG_HEROES = {
     "gravy_bones",
     "lyath_goldmane",
     "blaze_firemind",
+    "bravo_flattering_showman",
 }
 
 ADULT_HERO_IDS = {

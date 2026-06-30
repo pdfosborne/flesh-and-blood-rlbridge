@@ -99,6 +99,18 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=DEFAULT_UNIFIED_CHECKPOINT_EVAL_EPISODES,
     )
+    parser.add_argument(
+        "--optimal-policy-live-render",
+        action=argparse.BooleanOptionalAction,
+        default=_UR.optimal_policy_live_render,
+        help="Continuous optimal-policy PNG render on the render shard during training.",
+    )
+    parser.add_argument(
+        "--debug-training",
+        action=argparse.BooleanOptionalAction,
+        default=_UR.debug_training,
+        help="Log detailed errors to unified_training_debug.jsonl in the run folder.",
+    )
     parser.add_argument("--seed", type=int, default=_UR.seed)
     parser.add_argument(
         "--workers",
@@ -111,6 +123,15 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=DEFAULT_UNIFIED_PARALLEL_MATCHUPS,
         help="Number of matchups to train concurrently per batch",
+    )
+    parser.add_argument(
+        "--safe-parallel",
+        action=argparse.BooleanOptionalAction,
+        default=_UR.safe_parallel,
+        help=(
+            "Cap concurrent training games to one session per Talishar shard "
+            "(reduces parallel_matchups/workers when needed)"
+        ),
     )
     parser.add_argument(
         "--cache-dir",
@@ -212,6 +233,13 @@ def main() -> None:
     backend_urls = resolve_talishar_backend_urls(fallback_url=base_url)
     backend_pool = TalisharBackendPool(urls=backend_urls)
     base_url = backend_pool.primary_url
+    from flesh_and_blood_rlbridge.talishar_backend_pool import (  # noqa: PLC0415
+        resolve_eval_backend_url,
+        resolve_render_backend_url,
+    )
+
+    eval_url = resolve_eval_backend_url(fallback_url=base_url)
+    render_url = resolve_render_backend_url(fallback_url=base_url)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     if args.run_dir:
         out_dir = Path(args.run_dir)
@@ -219,13 +247,31 @@ def main() -> None:
         out_dir = Path(args.out_dir) / format_name / stamp
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    from fab_bridge.unified_training_debug import (  # noqa: PLC0415
+        audit_matchup_decks,
+        configure as configure_unified_debug,
+        log_event as unified_debug_event,
+    )
+
+    debug_log = configure_unified_debug(
+        run_dir=out_dir,
+        enabled=bool(args.debug_training),
+    )
+    if debug_log is not None:
+        print(f"Debug log    : {debug_log}")
+
     manifest = {
         "format": format_name,
         "matchups_requested": int(args.matchups),
         "matchups_sampled": [m.name for m in selected],
         "episodes_per_matchup": int(args.episodes),
         "parallel_matchups": max(1, int(args.parallel_matchups)),
+        "safe_parallel": bool(args.safe_parallel),
+        "debug_training": bool(args.debug_training),
+        "optimal_policy_live_render": bool(args.optimal_policy_live_render),
         "talishar_backends": list(backend_pool.urls),
+        "talishar_eval_url": eval_url,
+        "talishar_render_url": render_url,
         "seed": args.seed,
         "started_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -235,14 +281,22 @@ def main() -> None:
     )
 
     print(f"Talishar URL : {backend_pool.format_log_label()}")
+    if eval_url != base_url:
+        print(f"Eval backend : {eval_url} (checkpoint eval)")
+    if args.optimal_policy_live_render and render_url != eval_url:
+        print(f"Render backend: {render_url} (optimal-policy live render)")
+    elif args.optimal_policy_live_render:
+        print(f"Render backend: {render_url} (shares eval shard — set TALISHAR_RENDER_URL)")
     print(f"Backend      : Talishar fast (fast_reset / fast_step_index)")
     print(f"Rollout mode : {args.rollout_mode} ({args.rollout_processes} process(es))")
     print(f"Format       : {format_name}")
     print(f"Deck pool    : {len(decks)} fabrary decks")
     print(f"Matchups     : {len(selected)} random pairs")
     print(f"Parallel     : {max(1, int(args.parallel_matchups))} matchup(s) per batch")
+    print(f"Safe parallel: {'yes' if args.safe_parallel else 'no'}")
     for matchup in selected:
         print(f"  - {matchup.name}")
+        audit_matchup_decks(matchup, game_format=format_name)
     print(f"Output dir   : {out_dir}")
     print(f"Cache dir    : {args.cache_dir}")
 
@@ -264,15 +318,39 @@ def main() -> None:
         require_cpp_engine = False
 
     dashboard_proc = None
+    eval_dashboard_proc = None
     summary: list = []
     failed: list = []
     try:
         from runscripts._common import (  # noqa: PLC0415
+            start_unified_random_matchups_eval_dashboard,
             start_unified_random_matchups_train_dashboard,
             stop_background_process,
         )
 
         dashboard_proc = start_unified_random_matchups_train_dashboard(out_dir)
+        assets_path = os.environ.get(
+            "TALISHAR_ASSETS_PATH",
+            str(REPO_ROOT / "Talishar" / "Assets"),
+        )
+        if args.optimal_policy_live_render:
+            eval_dashboard_proc = start_unified_random_matchups_eval_dashboard(
+                out_dir,
+                assets=assets_path,
+                talishar_url_value=eval_url,
+                talishar_render_url_value=render_url,
+                cache_dir=args.cache_dir,
+                live_render=True,
+                debug_training=bool(args.debug_training),
+            )
+        unified_debug_event(
+            "matchup_load",
+            "Starting unified matchup training",
+            matchups=[m.name for m in selected],
+            workers=int(args.workers),
+            parallel_matchups=int(args.parallel_matchups),
+            backends=list(backend_pool.urls),
+        )
         summary, failed = run_matchup_training(
             selected,
             eval_env_ids,
@@ -298,8 +376,14 @@ def main() -> None:
             rollout_mode=str(args.rollout_mode),
             rollout_processes=int(args.rollout_processes),
             backend_pool=backend_pool,
+            safe_parallel=bool(args.safe_parallel),
+            debug_training=bool(args.debug_training),
         )
     finally:
+        if eval_dashboard_proc is not None:
+            from runscripts._common import stop_background_process  # noqa: PLC0415
+
+            stop_background_process(eval_dashboard_proc)
         if dashboard_proc is not None:
             from runscripts._common import stop_background_process  # noqa: PLC0415
 

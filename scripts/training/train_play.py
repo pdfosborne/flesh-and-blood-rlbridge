@@ -2592,7 +2592,7 @@ def evaluate_logic_vs_logic(
     episodes: int,
     seed: Optional[int] = None,
     backend: str = DEFAULT_TALISHAR_BACKEND,
-    eval_label: str = "Eval logic vs logic",
+    eval_label: str = "Eval logic win% vs logic",
     live_progress_path: Optional[Path] = None,
     live_progress_extra: Optional[dict[str, Any]] = None,
     **kwargs: Any,

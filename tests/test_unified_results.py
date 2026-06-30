@@ -9,9 +9,11 @@ from fab_bridge.unified_results import (
     active_merged_matchup_dirs,
     find_latest_merged_unified_bucket,
     find_latest_unified_checkpoint_metadata,
+    find_unified_render_bucket,
     has_unified_selfplay_checkpoints,
     is_unified_random_matchup_run,
     iter_unified_checkpoint_metadata,
+    iter_unified_render_matchup_dirs,
     resolve_latest_unified_matchup_dir,
     resolve_unified_run_root,
 )
@@ -175,3 +177,52 @@ def test_find_latest_merged_unified_bucket_requires_all_matchups(tmp_path: Path)
     assert merged_100 is not None
     assert merged_100[0] == 100
     assert merged_100[1][match_b] == ckpt_b_100.parent
+
+
+def test_find_unified_render_bucket_allows_partial_matchups(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "run_manifest.json").write_text("{}", encoding="utf-8")
+    match_a = run_dir / "match_a"
+    match_b = run_dir / "match_b"
+    match_a.mkdir()
+    match_b.mkdir()
+    (match_a / "matchup_label.json").write_text("{}", encoding="utf-8")
+    (match_b / "matchup_label.json").write_text("{}", encoding="utf-8")
+    (run_dir / "checkpoint_eval_scope.json").write_text(
+        json.dumps(
+            {
+                "matchups": [
+                    {"matchup_dir": "match_a"},
+                    {"matchup_dir": "match_b"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    ckpt_a_50 = _write_unified_checkpoint(match_a, 50)
+    bucket = find_unified_render_bucket(run_dir)
+    assert match_a in bucket
+    assert match_b not in bucket
+    assert bucket[match_a] == ckpt_a_50.parent
+
+    ckpt_b_75 = _write_unified_checkpoint(match_b, 75)
+    _write_unified_checkpoint(match_a, 100)
+    bucket = find_unified_render_bucket(run_dir)
+    assert bucket[match_a] == (match_a / "unified_selfplay" / "p1" / "episode_000100")
+    assert bucket[match_b] == ckpt_b_75.parent
+
+
+def test_iter_unified_render_matchup_dirs_includes_label_only(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "run_manifest.json").write_text("{}", encoding="utf-8")
+    matchup_dir = run_dir / "deck_a-vs-deck_b"
+    matchup_dir.mkdir()
+    (matchup_dir / "matchup_label.json").write_text(
+        json.dumps({"name": "a-vs-b", "p1_deck": "deck_a", "p2_deck": "deck_b"}),
+        encoding="utf-8",
+    )
+    dirs = iter_unified_render_matchup_dirs(run_dir)
+    assert dirs == [matchup_dir]

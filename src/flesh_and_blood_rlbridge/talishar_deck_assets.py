@@ -28,6 +28,49 @@ SAGE_PRECON_BY_HERO: dict[str, str] = {
     "ira": "Ira",
 }
 
+# Official SAGE precon ``Assets`` stems keyed by fabrary_decks.json id.
+SAGE_PRECON_CANONICAL_STEM_BY_ID: dict[str, str] = {
+    "fab_precon_sage_ch1_kayo": "KayoSAGEPrecon",
+    "fab_precon_sage_ch1_viserai": "ViseraiSAGEPrecon",
+    "fab_precon_sage_ch1_iyslander": "IyslanderSAGEPrecon",
+    "fab_precon_sage_ch1_dash": "DashSAGEPrecon",
+    "fab_precon_sage_ch1_bravo_flattering_showman": "BravoFlatteringShowmanSAGEPrecon",
+    "fab_precon_sage_ch2_azalea": "AzaleaSAGEPrecon",
+    "fab_precon_sage_ch2_dorinthea": "DorintheSAGEPrecon",
+    "fab_precon_sage_ch2_fai": "FaiSAGEPrecon",
+    "fab_precon_sage_ch2_enigma": "EnigmaSAGEPrecon",
+    "fab_precon_sage_ch2_arakni_web_of_deceit": "ArakniWebOfDeceitSAGEPrecon",
+    "fab_precon_sage_ch3_boltyn": "BoltynSAGEPrecon",
+    "fab_precon_sage_ch3_briar": "BriarSAGEPrecon",
+    "fab_precon_sage_ch3_gravy_bones": "GravyBonesSAGEPrecon",
+    "fab_precon_sage_ch3_lyath_goldmane": "LyathGoldmaneSAGEPrecon",
+    "fab_precon_sage_ch3_blaze_firemind": "BlazeSAGEPrecon",
+}
+
+
+def read_talishar_deck_asset(path: str | Path) -> tuple[str, list[str]]:
+    """Return ``(equipment_header, card_ids)`` from a Talishar ``Assets`` deck file."""
+    lines = [
+        line.strip()
+        for line in Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+        if line.strip()
+    ]
+    if not lines:
+        return "", []
+    header = lines[0]
+    cards = " ".join(lines[1:]).split() if len(lines) > 1 else []
+    return header, cards
+
+
+def deck_asset_is_playable(header: str, cards: list[str], *, min_cards: int = 40) -> bool:
+    """True when a deck file has equipment beyond the hero token and enough cards."""
+    return len(header.split()) > 1 and len(cards) >= min_cards
+
+
+def resolve_canonical_sage_precon_stem(deck_id: str) -> str:
+    """Return the canonical ``Assets`` stem for a SAGE precon fabrary id."""
+    return SAGE_PRECON_CANONICAL_STEM_BY_ID.get((deck_id or "").strip(), "")
+
 
 def build_assets_equipment_headers(assets_dir: str | Path) -> dict[str, str]:
     """Map hero id -> fullest equipment header line found in ``Assets/*.txt``."""
@@ -149,28 +192,59 @@ def ensure_full_equipment_header(
             candidates.append(text)
 
     _add_candidate(equipment_header)
-    if deck_stem:
-        _add_candidate(
-            equipment_header_from_deck_stem(deck_stem, assets, fallback="")
-        )
-    _add_candidate(resolve_equipment_header_line(hero, assets, fallback=hero))
+    stem = (deck_stem or "").strip()
+    canonical_stem = resolve_canonical_sage_precon_stem(stem)
+    rich_header = len((equipment_header or "").strip().split()) > 1
+    if not (rich_header and (canonical_stem or stem)):
+        _add_candidate(resolve_equipment_header_line(hero, assets, fallback=hero))
 
     if assets.is_dir():
-        for txt_file in sorted(assets.glob("*.txt")):
+        if canonical_stem:
+            asset_stems = [canonical_stem]
+        elif stem:
+            asset_stems = [stem]
+        else:
+            asset_stems = []
+
+        for asset_stem in asset_stems:
+            if not asset_stem:
+                continue
+            asset_file = assets / f"{asset_stem}.txt"
+            if not asset_file.is_file():
+                continue
             try:
                 lines = [
                     line.strip()
-                    for line in txt_file.read_text(encoding="utf-8", errors="replace").splitlines()
+                    for line in asset_file.read_text(
+                        encoding="utf-8", errors="replace"
+                    ).splitlines()
                     if line.strip()
                 ]
             except OSError:
                 continue
-            if not lines:
-                continue
-            first_line = lines[0]
-            first_token = first_line.split()[0]
-            if _hero_tokens_match(first_token, hero):
-                _add_candidate(first_line)
+            if lines:
+                _add_candidate(lines[0])
+
+        if not canonical_stem:
+            for txt_file in sorted(assets.glob("*.txt")):
+                if stem and txt_file.stem in {stem, canonical_stem}:
+                    continue
+                try:
+                    lines = [
+                        line.strip()
+                        for line in txt_file.read_text(
+                            encoding="utf-8", errors="replace"
+                        ).splitlines()
+                        if line.strip()
+                    ]
+                except OSError:
+                    continue
+                if not lines:
+                    continue
+                first_line = lines[0]
+                first_token = first_line.split()[0]
+                if _hero_tokens_match(first_token, hero):
+                    _add_candidate(first_line)
 
     if candidates:
         richest = max(candidates, key=lambda line: len(line.split()))

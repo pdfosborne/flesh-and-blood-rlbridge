@@ -133,6 +133,19 @@ def run_parallel_matchup_batch(
                 rows.append(meta)
             except Exception as exc:
                 print(f"\n  ERROR training {matchup.name}: {exc}", flush=True)
+                try:
+                    from fab_bridge.unified_training_debug import (  # noqa: PLC0415
+                        log_exception as unified_debug_exception,
+                    )
+
+                    unified_debug_exception(
+                        "matchup_load",
+                        f"Matchup training failed: {matchup.name}",
+                        exc,
+                        matchup=matchup.name,
+                    )
+                except Exception:
+                    pass
                 failed.append(matchup.name)
 
     print(
@@ -149,6 +162,46 @@ def workers_per_parallel_matchup(
 ) -> int:
     """Split rollout worker budget across concurrent matchups."""
     return workers_per_parallel_seed(total_workers, parallel_matchups)
+
+
+def concurrent_training_game_slots(
+    total_workers: int,
+    parallel_matchups: int,
+) -> int:
+    """Return how many Talishar game sessions may run at once."""
+    matchups = max(1, int(parallel_matchups))
+    workers = max(1, int(total_workers))
+    return matchups * workers_per_parallel_matchup(workers, matchups)
+
+
+def resolve_safe_parallel_limits(
+    *,
+    workers: int,
+    parallel_matchups: int,
+    n_training_shards: int,
+) -> tuple[int, int, int]:
+    """Cap parallelism so at most one concurrent game runs on each training shard.
+
+    Returns ``(workers, parallel_matchups, workers_per_matchup)``.
+    """
+    shards = max(1, int(n_training_shards))
+    workers = max(1, int(workers))
+    matchups = max(1, int(parallel_matchups))
+    matchups = min(matchups, shards)
+    workers_per_matchup = workers_per_parallel_matchup(workers, matchups)
+
+    while matchups * workers_per_matchup > shards:
+        if workers_per_matchup > 1:
+            workers_per_matchup -= 1
+            continue
+        if matchups > 1:
+            matchups -= 1
+            workers_per_matchup = workers_per_parallel_matchup(workers, matchups)
+            continue
+        break
+
+    workers = matchups * workers_per_matchup
+    return workers, matchups, workers_per_matchup
 
 
 def persist_batch_to_cache(

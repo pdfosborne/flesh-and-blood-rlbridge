@@ -62,12 +62,16 @@ from runtime_defaults import (  # noqa: E402
     DEFAULT_STALL_MIN_ATTACK_HAND,
     DEFAULT_STALL_NO_DAMAGE_TURNS,
     DEFAULT_TALISHAR_BACKEND,
+    RUNTIME,
 )
 from fab_bridge.unified_results import (  # noqa: E402
+    active_merged_matchup_dirs,
     find_latest_merged_unified_bucket,
     find_latest_unified_checkpoint_metadata,
+    find_unified_render_bucket,
     is_unified_random_matchup_run,
     iter_unified_checkpoint_metadata,
+    iter_unified_render_matchup_dirs,
     matchup_dir_from_unified_checkpoint,
     resolve_latest_unified_matchup_dir,
     resolve_unified_run_root,
@@ -637,64 +641,315 @@ def _cleanup_eval_deck_files(paths: list[Path]) -> None:
             pass
 
 
+def _unified_run_game_format(run_dir: Path) -> str:
+    manifest_path = run_dir / "run_manifest.json"
+    if manifest_path.is_file():
+        try:
+            data = json.loads(manifest_path.read_text(encoding="utf-8"))
+            fmt = str(data.get("format") or "").strip()
+            if fmt:
+                return fmt
+        except (json.JSONDecodeError, OSError, TypeError):
+            pass
+    return "silver_age"
+
+
+def _read_matchup_label(matchup_dir: Path) -> dict[str, Any]:
+    path = matchup_dir / "matchup_label.json"
+    if not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, TypeError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _prepare_unified_matchup_render_assets(
+    *,
+    matchup_dir: Path,
+    run_dir: Path,
+    assets_path: str,
+    p1_checkpoint_dir: Path | None = None,
+) -> _UnifiedMatchupEvalAssets:
+    if p1_checkpoint_dir is not None:
+        return _prepare_unified_matchup_eval_assets(
+            matchup_dir=matchup_dir,
+            p1_checkpoint_dir=p1_checkpoint_dir,
+            assets_path=assets_path,
+        )
+    label = _read_matchup_label(matchup_dir)
+    if not label:
+        raise RuntimeError(f"Missing matchup_label.json under {matchup_dir}")
+    game_format = _unified_run_game_format(run_dir)
+    p1_deck_stem = str(label.get("p1_deck") or "").strip()
+    p2_deck_stem = str(label.get("p2_deck") or "").strip()
+    if not p1_deck_stem or not p2_deck_stem:
+        raise RuntimeError(f"Matchup label missing deck stems: {matchup_dir}")
+
+    from flesh_and_blood_rlbridge.deck_context import _read_asset_deck  # noqa: PLC0415
+    from flesh_and_blood_rlbridge.talishar_deck_assets import (  # noqa: PLC0415
+        load_guide_sideboard_record,
+        resolve_matchup_equipment_header,
+    )
+
+    p1_hero, p1_cards = _read_asset_deck(Path(assets_path), p1_deck_stem)
+    p2_hero, p2_cards = _read_asset_deck(Path(assets_path), p2_deck_stem)
+    if not p1_cards or not p2_cards:
+        raise RuntimeError(f"Could not load deck assets for {matchup_dir.name}")
+
+    guide = load_guide_sideboard_record(matchup_dir)
+    p1_header = resolve_matchup_equipment_header(
+        role="p1",
+        hero_id=p1_hero,
+        deck_stem=p1_deck_stem,
+        assets_dir=assets_path,
+        fallback=p1_hero,
+        guide_sideboard=guide,
+    )
+    p2_header = resolve_matchup_equipment_header(
+        role="p2",
+        hero_id=p2_hero,
+        deck_stem=p2_deck_stem,
+        assets_dir=assets_path,
+        fallback=p2_hero,
+        guide_sideboard=guide,
+    )
+    p1_deck_name = f"eval_p1_{uuid.uuid4().hex[:8]}"
+    p2_deck_name = f"eval_p2_{uuid.uuid4().hex[:8]}"
+    cleanup_files = [
+        _write_deck_file(p1_cards, p1_header, p1_deck_name, assets_path),
+        _write_deck_file(p2_cards, p2_header, p2_deck_name, assets_path),
+    ]
+    synthetic_meta = {
+        "matchup": str(label.get("name") or matchup_dir.name),
+        "game_format": game_format,
+        "p1_deck": p1_deck_stem,
+        "p2_deck": p2_deck_stem,
+        "checkpoint_type": "unified_selfplay",
+        "opponent_mode": "mirror",
+    }
+    fake_ckpt = matchup_dir / "_live_render"
+    p1_bundle = CheckpointBundle(
+        role="p1",
+        checkpoint_dir=fake_ckpt,
+        metadata=synthetic_meta,
+        weights_path=fake_ckpt / "agent_weights.json",
+    )
+    return _UnifiedMatchupEvalAssets(
+        matchup_dir=matchup_dir,
+        p1_bundle=p1_bundle,
+        p2_bundle=None,
+        p1_deck_name=p1_deck_name,
+        p2_deck_name=p2_deck_name,
+        opponent_label="unified agent (logic policy until first checkpoint)",
+        cleanup_files=cleanup_files,
+    )
+
+
+def _load_unified_render_agents(
+    *,
+    assets: _UnifiedMatchupEvalAssets,
+    has_checkpoint: bool,
+) -> tuple[Any, Any]:
+    if has_checkpoint and assets.p1_bundle.weights_path.is_file():
+        p1_agent = _load_agent(assets.p1_bundle.weights_path)
+        if assets.p2_bundle is not None and assets.p2_bundle.weights_path.is_file():
+            return p1_agent, _load_agent(assets.p2_bundle.weights_path)
+        return p1_agent, p1_agent
+
+    from train_play import LOGIC_POLICY  # noqa: PLC0415
+
+    return LOGIC_POLICY, LOGIC_POLICY
+
+
+def _resolve_unified_render_weights_path(
+    run_dir: Path,
+    matchup_ckpt: Path | None,
+) -> Path | None:
+    """Return the newest unified agent weights file available for live render."""
+    candidates: list[Path] = []
+    if matchup_ckpt is not None:
+        candidates.append(matchup_ckpt / "weights" / "agent_weights.json")
+    meta = find_latest_unified_checkpoint_metadata(run_dir, "p1")
+    if meta is not None:
+        candidates.append(meta.parent / "weights" / "agent_weights.json")
+    for path in candidates:
+        if path.is_file():
+            return path
+    return None
+
+
+def _load_unified_render_agents_for_episode(
+    *,
+    weights_path: Path | None,
+) -> tuple[Any, Any]:
+    if weights_path is not None and weights_path.is_file():
+        agent = _load_agent(weights_path)
+        return agent, agent
+    from train_play import LOGIC_POLICY  # noqa: PLC0415
+
+    return LOGIC_POLICY, LOGIC_POLICY
+
+
+def _iter_unified_live_render_matchup_dirs(run_dir: Path) -> list[Path]:
+    """Prefer matchups in the active training batch, then any labeled matchup."""
+    active = active_merged_matchup_dirs(run_dir)
+    if active:
+        eligible = [
+            path
+            for path in active
+            if (path / "matchup_label.json").is_file()
+            or find_latest_unified_checkpoint_metadata(
+                run_dir, "p1", matchup_dir=path
+            )
+            is not None
+        ]
+        if eligible:
+            return eligible
+    return iter_unified_render_matchup_dirs(run_dir)
+
+
+def _is_logic_render_policy(agent: Any) -> bool:
+    from train_play import LOGIC_POLICY  # noqa: PLC0415
+
+    return agent is LOGIC_POLICY or str(agent) == LOGIC_POLICY
+
+
+def _pick_render_action(env: TalisharEngineEnvironment, agent: Any, obs: Any) -> Any:
+    if agent is not None and _is_logic_render_policy(agent):
+        return env.sample_action()
+    if agent is not None and hasattr(agent, "act_greedy"):
+        return agent.act_greedy(obs)
+    return env.sample_action()
+
+
+def _write_unified_render_placeholder(path: Path, message: str) -> None:
+    try:
+        from PIL import Image, ImageDraw, ImageFont  # noqa: PLC0415
+
+        img = Image.new("RGB", (1280, 720), color=(18, 18, 18))
+        draw = ImageDraw.Draw(img)
+        try:
+            font = ImageFont.truetype("arial.ttf", 32)
+        except Exception:
+            font = ImageFont.load_default()
+        draw.text((40, 320), message, fill=(220, 220, 220), font=font)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        img.save(path)
+    except Exception:
+        pass
+
+
 def _unified_continuous_render_loop(
     *,
     results_dir: Path,
     render_state: _UnifiedRenderState,
-    base_url: str,
+    render_url: str,
+    eval_url: str,
     fe_url: str,
     assets_path: str,
     render_max_steps: int,
     poll_seconds: float,
+    render_cycle_seconds: float,
 ) -> None:
-    """Continuously render one greedy-policy episode on a random merged matchup."""
+    """Continuously render greedy-policy episodes on random matchups on the render shard."""
+    from flesh_and_blood_rlbridge.talishar_backend_pool import (  # noqa: PLC0415
+        normalize_talishar_url,
+    )
+
+    dedicated_render_shard = (
+        normalize_talishar_url(render_url) != normalize_talishar_url(eval_url)
+    )
     eval_dir = results_dir / "eval_dashboard"
     eval_dir.mkdir(parents=True, exist_ok=True)
     live_frame_path = eval_dir / UNIFIED_LIVE_RENDER_IMAGE
     rng = random.Random()
+    idle_wait = max(1.0, float(poll_seconds))
+    cycle_wait = max(0.5, float(render_cycle_seconds))
+    shard_note = "dedicated render shard" if dedicated_render_shard else "eval shard"
+    _write_unified_render_placeholder(
+        live_frame_path,
+        "Unified optimal-policy live render — starting…",
+    )
     print(
         f"  [render] Unified live render started → {live_frame_path} "
-        f"(random matchup, one episode per cycle)",
+        f"(random matchup every {cycle_wait:.1f}s on {shard_note})",
         flush=True,
     )
     while not render_state.stop.is_set():
-        with render_state.lock:
-            bucket = dict(render_state.bucket or {})
-            merged_episode = render_state.merged_episode
-        if not bucket or merged_episode is None:
-            if render_state.stop.wait(timeout=max(1.0, poll_seconds)):
-                break
-            continue
-        matchup_dirs = list(bucket.keys())
+        if not dedicated_render_shard:
+            from fab_bridge.eval_shard_lock import is_eval_shard_busy  # noqa: PLC0415
+
+            if is_eval_shard_busy(results_dir):
+                if render_state.stop.wait(timeout=0.5):
+                    break
+                continue
+
+        matchup_dirs = _iter_unified_live_render_matchup_dirs(results_dir)
         if not matchup_dirs:
-            if render_state.stop.wait(timeout=max(1.0, poll_seconds)):
+            _write_unified_render_placeholder(
+                live_frame_path,
+                "Waiting for matchup folders…",
+            )
+            if render_state.stop.wait(timeout=idle_wait):
                 break
             continue
+
+        bucket = find_unified_render_bucket(results_dir)
         matchup_dir = rng.choice(matchup_dirs)
         ckpt_dir = bucket.get(matchup_dir)
-        if ckpt_dir is None:
-            continue
+        weights_path = _resolve_unified_render_weights_path(results_dir, ckpt_dir)
+        if not dedicated_render_shard:
+            from fab_bridge.eval_shard_lock import wait_for_eval_shard_idle  # noqa: PLC0415
+
+            if not wait_for_eval_shard_idle(
+                results_dir,
+                poll_seconds=0.5,
+                stop=render_state.stop,
+            ):
+                break
+
+        assets: _UnifiedMatchupEvalAssets | None = None
         try:
-            assets = _prepare_unified_matchup_eval_assets(
+            assets = _prepare_unified_matchup_render_assets(
                 matchup_dir=matchup_dir,
-                p1_checkpoint_dir=ckpt_dir,
+                run_dir=results_dir,
                 assets_path=assets_path,
+                p1_checkpoint_dir=None,
             )
-            p1_agent = _load_agent(assets.p1_bundle.weights_path)
-            p2_agent = (
-                _load_agent(assets.p2_bundle.weights_path)
-                if assets.p2_bundle is not None
-                else None
+            p1_agent, p2_agent = _load_unified_render_agents_for_episode(
+                weights_path=weights_path,
             )
+            policy_note = "checkpoint" if weights_path is not None else "logic"
             print(
-                f"  [render] episode @ merged ep {merged_episode:06d} — "
-                f"{assets.p1_bundle.matchup}",
+                f"  [render] episode — {assets.p1_bundle.matchup} "
+                f"({len(matchup_dirs)} matchup(s), policy={policy_note})",
                 flush=True,
             )
+            from fab_bridge.unified_training_debug import (  # noqa: PLC0415
+                is_enabled as unified_debug_enabled,
+                log_event as unified_debug_event,
+                shard_label,
+            )
+
+            if unified_debug_enabled():
+                unified_debug_event(
+                    "render_init",
+                    "Starting live render episode",
+                    matchup=assets.p1_bundle.matchup,
+                    matchup_dir=str(matchup_dir),
+                    policy=policy_note,
+                    render_shard=shard_label(render_url),
+                    p1_deck=assets.p1_deck_name,
+                    p2_deck=assets.p2_deck_name,
+                    checkpoint_dir=str(ckpt_dir) if ckpt_dir else None,
+                    weights_path=str(weights_path) if weights_path else None,
+                )
             _run_render_episode(
                 p1_agent=p1_agent,
                 p2_agent=p2_agent,
-                base_url=base_url,
+                base_url=render_url,
                 fe_url=fe_url,
                 game_format=assets.p1_bundle.game_format,
                 p1_deck_name=assets.p1_deck_name,
@@ -706,14 +961,73 @@ def _unified_continuous_render_loop(
             )
         except Exception as exc:  # noqa: BLE001
             print(f"  [render] Unified live render error: {exc}", flush=True)
+            try:
+                from fab_bridge.unified_training_debug import (  # noqa: PLC0415
+                    log_exception as unified_debug_exception,
+                    shard_label,
+                )
+
+                unified_debug_exception(
+                    "render_init",
+                    "Live render episode failed",
+                    exc,
+                    matchup_dir=str(matchup_dir),
+                    render_shard=shard_label(render_url),
+                    checkpoint_dir=str(ckpt_dir) if ckpt_dir else None,
+                )
+            except Exception:
+                pass
         finally:
-            if "assets" in locals():
+            if assets is not None:
                 _cleanup_eval_deck_files(assets.cleanup_files)
-        if render_state.stop.wait(timeout=max(1.0, poll_seconds)):
+        if render_state.stop.wait(timeout=cycle_wait):
             break
 
 
 def _evaluate_unified_merged_checkpoint(
+    *,
+    results_dir: Path,
+    merged_episode: int,
+    bucket: dict[Path, Path],
+    episodes: int,
+    max_steps: int,
+    base_url: str,
+    assets_path: str,
+    seed: Optional[int],
+    stall_no_damage_turns: int,
+    stall_low_hand_turns: int,
+    stall_max_single_low_hand_turns: int,
+    stall_min_attack_hand: int,
+    verbose: bool,
+    run_parity: bool,
+    cpp_engine_dir: Optional[str],
+    cpp_engine_cache_dir: Optional[str],
+) -> dict[str, Any]:
+    from fab_bridge.eval_shard_lock import hold_eval_shard  # noqa: PLC0415
+
+    label = f"merged ep {merged_episode:06d}"
+    with hold_eval_shard(results_dir, "merged_eval", label=label):
+        return _evaluate_unified_merged_checkpoint_body(
+            results_dir=results_dir,
+            merged_episode=merged_episode,
+            bucket=bucket,
+            episodes=episodes,
+            max_steps=max_steps,
+            base_url=base_url,
+            assets_path=assets_path,
+            seed=seed,
+            stall_no_damage_turns=stall_no_damage_turns,
+            stall_low_hand_turns=stall_low_hand_turns,
+            stall_max_single_low_hand_turns=stall_max_single_low_hand_turns,
+            stall_min_attack_hand=stall_min_attack_hand,
+            verbose=verbose,
+            run_parity=run_parity,
+            cpp_engine_dir=cpp_engine_dir,
+            cpp_engine_cache_dir=cpp_engine_cache_dir,
+        )
+
+
+def _evaluate_unified_merged_checkpoint_body(
     *,
     results_dir: Path,
     merged_episode: int,
@@ -953,6 +1267,23 @@ def _run_render_episode(
     try:
         result = env.reset()
         obs = result.observation
+        try:
+            from fab_bridge.unified_training_debug import (  # noqa: PLC0415
+                log_render_observation,
+                shard_label,
+            )
+
+            log_render_observation(
+                obs,
+                message="Render episode reset observation",
+                base_url=base_url,
+                shard=shard_label(base_url),
+                p1_deck=p1_deck_name,
+                p2_deck=p2_deck_name,
+                game_format=game_format,
+            )
+        except Exception:
+            pass
 
         if live_frame_path is not None:
             _record_frame(obs, live_frame_path)
@@ -970,11 +1301,9 @@ def _run_render_episode(
             acting = int(obs_data.get("actingPlayerID", 1) or 1)
 
             if acting == 1:
-                action = (p1_agent.act_greedy(obs) if p1_agent and hasattr(p1_agent, "act_greedy")
-                          else env.sample_action())
+                action = _pick_render_action(env, p1_agent, obs)
             else:
-                action = (p2_agent.act_greedy(obs) if p2_agent and hasattr(p2_agent, "act_greedy")
-                          else env.sample_action())
+                action = _pick_render_action(env, p2_agent, obs)
 
             step = env.step(action)
             obs = step.observation
@@ -2036,7 +2365,27 @@ def main() -> None:
     parser.add_argument("--watch", action="store_true",
                         help="Keep watching results/ and re-evaluate when a new checkpoint appears.")
     parser.add_argument("--poll-seconds", type=float, default=30.0)
+    parser.add_argument(
+        "--render-cycle-seconds",
+        type=float,
+        default=None,
+        help="Seconds between unified live-render episodes (default: 3).",
+    )
     parser.add_argument("--no-render-gif", action="store_true")
+    parser.add_argument(
+        "--live-render",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Unified optimal-policy live PNG render during training "
+            "(default: runtime unified_random_matchups.optimal_policy_live_render)."
+        ),
+    )
+    parser.add_argument(
+        "--talishar-render-url",
+        default=None,
+        help="Talishar backend for live render (default: TALISHAR_RENDER_URL or eval URL).",
+    )
     parser.add_argument(
         "--render-only",
         action="store_true",
@@ -2090,20 +2439,96 @@ def main() -> None:
         default=None,
         help="C++ engine cache directory for the checkpoint parity check.",
     )
-    parser.add_argument("--talishar-url", default=os.environ.get("TALISHAR_URL", "http://localhost:8080/game"))
+    parser.add_argument(
+        "--talishar-url",
+        default=None,
+        help="Talishar game API base URL (default: TALISHAR_EVAL_URL or TALISHAR_URL)",
+    )
     parser.add_argument("--talishar-fe-url", default=os.environ.get("TALISHAR_FE_URL", "http://localhost:5173"))
     parser.add_argument("--assets-path", default=os.environ.get("TALISHAR_ASSETS_PATH", ""))
+    parser.add_argument(
+        "--cache-dir",
+        default=os.environ.get(
+            "FAB_AGENT_CACHE_DIR",
+            str(REPO_ROOT / "results" / "agent_cache"),
+        ),
+        help="Unified agent cache directory (legacy; live render uses logic policy pre-checkpoint).",
+    )
+    parser.add_argument(
+        "--debug-training",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Log detailed errors to unified_training_debug.jsonl "
+            "(default: run_manifest debug_training or runtime)."
+        ),
+    )
+    parser.add_argument(
+        "--companion-to-training",
+        action="store_true",
+        help=(
+            "Companion mode for an active unified training run: continuous live "
+            "render only; checkpoint eval is owned by the training process."
+        ),
+    )
     args = parser.parse_args()
+
+    if args.talishar_url is None:
+        from flesh_and_blood_rlbridge.talishar_backend_pool import (  # noqa: PLC0415
+            resolve_eval_backend_url,
+        )
+
+        args.talishar_url = resolve_eval_backend_url()
+
+    if args.talishar_render_url is None:
+        from flesh_and_blood_rlbridge.talishar_backend_pool import (  # noqa: PLC0415
+            resolve_render_backend_url,
+        )
+
+        args.talishar_render_url = resolve_render_backend_url(
+            fallback_url=args.talishar_url,
+        )
+
+    live_render_enabled = (
+        RUNTIME.unified_random_matchups.optimal_policy_live_render
+        if args.live_render is None
+        else bool(args.live_render)
+    )
 
     results_dir = resolve_unified_run_root(Path(args.results_dir).expanduser())
     if not results_dir.exists():
         raise SystemExit(f"results directory not found: {results_dir}")
+
+    from fab_bridge.unified_training_debug import (  # noqa: PLC0415
+        configure as configure_unified_debug,
+        log_exception as unified_debug_exception,
+        log_event as unified_debug_event,
+        log_render_observation,
+        read_debug_from_manifest,
+    )
+
+    debug_training = (
+        bool(args.debug_training)
+        if args.debug_training is not None
+        else read_debug_from_manifest(results_dir)
+        or RUNTIME.unified_random_matchups.debug_training
+    )
+    debug_log = configure_unified_debug(run_dir=results_dir, enabled=debug_training)
+    if debug_log is not None:
+        print(f"  Debug log     : {debug_log}")
     if not args.assets_path:
         raise SystemExit("TALISHAR_ASSETS_PATH or --assets-path is required")
 
     render_max_steps = (
         args.render_max_steps if args.render_max_steps is not None else args.max_steps
     )
+    render_cycle_seconds = (
+        args.render_cycle_seconds
+        if args.render_cycle_seconds is not None
+        else RUNTIME.eval_dashboard.render_cycle_seconds
+    )
+    unified_mode = is_unified_random_matchup_run(results_dir)
+    cache_dir = Path(args.cache_dir).expanduser().resolve() if args.cache_dir else None
 
     print("=" * 72)
     print("  Phase 3 Eval Dashboard — starting up")
@@ -2123,7 +2548,10 @@ def main() -> None:
             else:
                 print("  Candidate     : (all under candidates/)")
     elif is_unified_random_matchup_run(results_dir):
-        print("  Run type      : unified random matchups (merged-batch eval)")
+        mode_label = "unified random matchups"
+        if args.companion_to_training:
+            mode_label += " (live render companion — training owns checkpoint eval)"
+        print(f"  Run type      : {mode_label}")
         merged = find_latest_merged_unified_bucket(results_dir)
         if merged is not None:
             merged_episode, bucket = merged
@@ -2141,6 +2569,8 @@ def main() -> None:
             else:
                 print("  Merged bucket : waiting for first matchup output")
     print(f"  Talishar URL  : {args.talishar_url}")
+    if unified_mode and live_render_enabled:
+        print(f"  Render URL    : {args.talishar_render_url}")
     print(f"  Assets path   : {args.assets_path}")
     if args.render_only:
         print(f"  Mode          : render optimal policy only")
@@ -2157,12 +2587,14 @@ def main() -> None:
     else:
         render_label = (
             f"live frame ({UNIFIED_LIVE_RENDER_IMAGE})"
-            if is_unified_random_matchup_run(results_dir) and not args.no_render_gif
+            if is_unified_random_matchup_run(results_dir) and live_render_enabled
             else ("yes" if not args.no_render_gif else "no")
         )
         print(f"  Render output : {render_label}")
-        if not args.no_render_gif:
+        if live_render_enabled or not args.no_render_gif:
             print(f"  Render steps  : {render_max_steps}")
+            if unified_mode and live_render_enabled:
+                print(f"  Render cycle  : {render_cycle_seconds:.1f}s between episodes")
     if args.render_only:
         print(f"  Parity check  : no (render-only mode)")
     else:
@@ -2180,21 +2612,22 @@ def main() -> None:
     last_seen_merged_episode: Optional[int] = None
     last_matchup_dir: Optional[Path] = None
     poll_count = 0
-    unified_mode = is_unified_random_matchup_run(results_dir)
     render_state: Optional[_UnifiedRenderState] = None
     render_thread: Optional[threading.Thread] = None
-    if unified_mode and not args.no_render_gif:
+    if unified_mode and live_render_enabled:
         render_state = _UnifiedRenderState()
         render_thread = threading.Thread(
             target=_unified_continuous_render_loop,
             kwargs={
                 "results_dir": results_dir,
                 "render_state": render_state,
-                "base_url": args.talishar_url,
+                "render_url": args.talishar_render_url,
+                "eval_url": args.talishar_url,
                 "fe_url": args.talishar_fe_url,
                 "assets_path": args.assets_path,
                 "render_max_steps": render_max_steps,
                 "poll_seconds": args.poll_seconds,
+                "render_cycle_seconds": render_cycle_seconds,
             },
             daemon=True,
             name="unified-live-render",
@@ -2204,24 +2637,35 @@ def main() -> None:
     while True:
         if unified_mode and not args.checkpoint_dir:
             bucket_result = find_latest_merged_unified_bucket(results_dir)
-            if render_state is not None and bucket_result is not None:
-                merged_episode, bucket = bucket_result
+            render_bucket = find_unified_render_bucket(results_dir)
+            if render_state is not None and render_bucket:
                 with render_state.lock:
-                    render_state.merged_episode = merged_episode
-                    render_state.bucket = bucket
-                    render_state.matchup_dirs = list(bucket.keys())
+                    render_state.bucket = render_bucket
+                    render_state.matchup_dirs = list(render_bucket.keys())
+                    if bucket_result is not None:
+                        render_state.merged_episode = bucket_result[0]
 
             if bucket_result is None:
                 scope = results_dir
                 active = resolve_latest_unified_matchup_dir(results_dir)
                 if active is not None:
                     scope = active
-                print(
-                    f"  [watch] Waiting for all matchups to reach the same checkpoint "
-                    f"under {scope}  (poll #{poll_count + 1})",
-                    flush=True,
-                )
-            elif bucket_result[0] != last_seen_merged_episode:
+                if args.companion_to_training:
+                    print(
+                        f"  [watch] Live render active — waiting for matchup output "
+                        f"under {scope}  (poll #{poll_count + 1})",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"  [watch] Waiting for all matchups to reach the same checkpoint "
+                        f"under {scope}  (poll #{poll_count + 1})",
+                        flush=True,
+                    )
+            elif (
+                not args.companion_to_training
+                and bucket_result[0] != last_seen_merged_episode
+            ):
                 merged_episode, bucket = bucket_result
                 if args.render_only:
                     print(
@@ -2250,6 +2694,12 @@ def main() -> None:
                         cpp_engine_cache_dir=args.parity_cpp_engine_cache_dir,
                     )
                     last_seen_merged_episode = merged_episode
+            elif args.companion_to_training:
+                print(
+                    f"  [watch] Live render companion — checkpoint eval runs in training "
+                    f"(poll #{poll_count + 1})",
+                    flush=True,
+                )
             else:
                 merged_episode = bucket_result[0]
                 print(
@@ -2302,7 +2752,7 @@ def main() -> None:
                 p2_bundle = _paired_checkpoint(p1_bundle, "p2")
                 skip_post_eval_render = (
                     unified_mode
-                    and render_state is not None
+                    and live_render_enabled
                     and is_unified_random_matchup_run(results_dir)
                 )
                 _evaluate_checkpoint(

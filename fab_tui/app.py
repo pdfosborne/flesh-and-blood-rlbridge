@@ -685,9 +685,21 @@ def wizard_unified_random_matchups_train(env: EnvironmentSettings) -> None:
         "Eval games per checkpoint",
         default=spec.checkpoint_eval_episodes,
     )
+    spec.optimal_policy_live_render = Confirm.ask(
+        "Optimal-policy live render (dedicated render shard)?",
+        default=spec.optimal_policy_live_render,
+    )
+    spec.debug_training = Confirm.ask(
+        "Debug training (write unified_training_debug.jsonl)?",
+        default=spec.debug_training,
+    )
     console.print(
-        "[dim]When checkpoint eval is enabled, a Talishar eval watcher runs in the "
-        "background on the latest matchup in this experiment.[/dim]"
+        "[dim]When live render is enabled, a companion watcher plays random matchups "
+        "from the start (logic policy until the first checkpoint).[/dim]"
+    )
+    console.print(
+        "[dim]When checkpoint eval is enabled, eval runs in the training process "
+        "on the eval shard.[/dim]"
     )
     console.print(
         "[dim]A live HTML training dashboard is written to "
@@ -697,6 +709,10 @@ def wizard_unified_random_matchups_train(env: EnvironmentSettings) -> None:
     spec.parallel_matchups = IntPrompt.ask(
         "Parallel matchups per batch",
         default=spec.parallel_matchups,
+    )
+    spec.safe_parallel = Confirm.ask(
+        "Safe parallel (one game per Talishar shard)?",
+        default=spec.safe_parallel,
     )
     spec.skip_converged = Confirm.ask(
         "Skip already-converged deck pairs in cache?",
@@ -721,8 +737,11 @@ def wizard_unified_random_matchups_train(env: EnvironmentSettings) -> None:
         ("Warmup episodes", str(spec.warmup_episodes)),
         ("Checkpoint interval", f"{spec.checkpoint_interval_pct:g}%"),
         ("Checkpoint eval games", str(spec.checkpoint_eval_episodes)),
+        ("Live optimal-policy render", str(spec.optimal_policy_live_render)),
+        ("Debug training log", str(spec.debug_training)),
         ("Workers", str(spec.workers)),
         ("Parallel matchups", str(spec.parallel_matchups)),
+        ("Safe parallel", str(spec.safe_parallel)),
         ("Backend", "Talishar fast"),
         ("Skip converged", str(spec.skip_converged)),
         ("Seed", str(spec.seed) if spec.seed is not None else "random"),

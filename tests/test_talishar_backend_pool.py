@@ -12,6 +12,7 @@ from flesh_and_blood_rlbridge.talishar_backend_pool import (
     normalize_talishar_url,
     parse_talishar_urls_string,
     probe_backend_health,
+    resolve_eval_backend_url,
     resolve_talishar_backend_urls,
 )
 
@@ -33,6 +34,7 @@ def test_parse_talishar_urls_string() -> None:
 
 
 def test_resolve_prefers_talishar_urls_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("TALISHAR_EVAL_URL", raising=False)
     monkeypatch.setenv(
         "TALISHAR_URLS",
         "http://localhost:8081/game,http://localhost:8082/game",
@@ -44,6 +46,7 @@ def test_resolve_prefers_talishar_urls_env(monkeypatch: pytest.MonkeyPatch) -> N
 
 def test_resolve_falls_back_to_talishar_url(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("TALISHAR_URLS", raising=False)
+    monkeypatch.delenv("TALISHAR_EVAL_URL", raising=False)
     monkeypatch.setenv("TALISHAR_URL", "http://localhost:9090/game")
     urls = resolve_talishar_backend_urls()
     assert urls == ("http://localhost:9090/game",)
@@ -120,6 +123,60 @@ def test_filter_healthy_uses_reachable_subset(monkeypatch: pytest.MonkeyPatch) -
         )
         filtered = pool.filter_healthy()
     assert filtered.urls == (
+        "http://localhost:8080/game",
+        "http://localhost:8081/game",
+    )
+
+
+def test_resolve_excludes_eval_shard_from_training(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(
+        "TALISHAR_URLS",
+        "http://localhost:8080/game,"
+        "http://localhost:8081/game,"
+        "http://localhost:8082/game",
+    )
+    monkeypatch.setenv("TALISHAR_EVAL_URL", "http://localhost:8082/game")
+    urls = resolve_talishar_backend_urls()
+    assert urls == (
+        "http://localhost:8080/game",
+        "http://localhost:8081/game",
+    )
+
+
+def test_resolve_eval_backend_url_prefers_eval_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TALISHAR_EVAL_URL", "http://localhost:8083/game")
+    monkeypatch.setenv("TALISHAR_URL", "http://localhost:8080/game")
+    assert resolve_eval_backend_url() == "http://localhost:8083/game"
+
+
+def test_resolve_eval_backend_url_falls_back_to_primary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("TALISHAR_EVAL_URL", raising=False)
+    monkeypatch.setenv("TALISHAR_URL", "http://localhost:8080/game")
+    assert resolve_eval_backend_url() == "http://localhost:8080/game"
+
+
+def test_resolve_render_backend_url_prefers_render_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    from flesh_and_blood_rlbridge.talishar_backend_pool import resolve_render_backend_url
+
+    monkeypatch.setenv("TALISHAR_RENDER_URL", "http://localhost:8085/game")
+    monkeypatch.setenv("TALISHAR_EVAL_URL", "http://localhost:8084/game")
+    assert resolve_render_backend_url() == "http://localhost:8085/game"
+
+
+def test_resolve_excludes_render_shard_from_training(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(
+        "TALISHAR_URLS",
+        "http://localhost:8080/game,"
+        "http://localhost:8081/game,"
+        "http://localhost:8082/game,"
+        "http://localhost:8083/game",
+    )
+    monkeypatch.setenv("TALISHAR_EVAL_URL", "http://localhost:8082/game")
+    monkeypatch.setenv("TALISHAR_RENDER_URL", "http://localhost:8083/game")
+    urls = resolve_talishar_backend_urls()
+    assert urls == (
         "http://localhost:8080/game",
         "http://localhost:8081/game",
     )

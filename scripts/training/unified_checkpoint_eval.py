@@ -23,7 +23,11 @@ def allocate_eval_episodes(
     *,
     seed: Optional[int] = None,
 ) -> dict[str, int]:
-    """Split *total_episodes* evenly across *matchup_keys* (remainder shuffled)."""
+    """Split *total_episodes* evenly across *matchup_keys* (remainder shuffled).
+
+    The returned counts sum to *total_episodes* and are the self-play eval games
+    budget per matchup (not per supplementary eval mode).
+    """
     if total_episodes <= 0 or not matchup_keys:
         return {}
     keys = list(matchup_keys)
@@ -207,6 +211,7 @@ class UnifiedCheckpointCoordinator:
                 eval_p2=p2,
             ),
             label=f"merged ep {bucket_ep}",
+            run_dir=self.out_dir,
         )
 
     def _run_merged_eval(
@@ -219,35 +224,34 @@ class UnifiedCheckpointCoordinator:
     ) -> None:
         from train_dual_agent_common import (  # noqa: PLC0415
             DEFAULT_TALISHAR_BACKEND,
-            LOGIC_VS_LOGIC_BASELINE_NAME,
             _resolve_matchup_subdir,
-            matchup_out_dir,
         )
+        from unified_logic_baseline import load_logic_vs_logic_baseline  # noqa: PLC0415
         from train_play import (  # noqa: PLC0415
             _evaluate_p1_vs_fixed_opponent,
-            evaluate_agent_vs_logic_both_seats,
-            evaluate_logic_vs_logic,
         )
         from fab_bridge.cpp_eval_live_dashboard import (  # noqa: PLC0415
             unified_checkpoint_eval_live_path,
         )
         from fab_bridge.unified_dashboard import maybe_refresh_unified_dashboard  # noqa: PLC0415
+        from flesh_and_blood_rlbridge.talishar_backend_pool import (  # noqa: PLC0415
+            resolve_eval_backend_url,
+        )
 
+        eval_base_url = resolve_eval_backend_url(fallback_url=self.base_url)
         live_progress_path = unified_checkpoint_eval_live_path(self.out_dir)
         keys = list(self.matchups.keys())
         alloc_seed = (
             (self.seed + episodes_completed) if self.seed is not None else None
         )
-        schedule = uniform_matchup_schedule(
+        schedule_counts = allocate_eval_episodes(
             self.checkpoint_eval_episodes,
             keys,
             seed=alloc_seed,
         )
-        schedule_counts: dict[str, int] = {}
-        for key in schedule:
-            schedule_counts[key] = schedule_counts.get(key, 0) + 1
         per_matchup: dict[str, dict[str, Any]] = {}
         matchups_total = len(keys)
+        total_self_play_games = sum(schedule_counts.values())
 
         for index, (matchup_key, matchup) in enumerate(self.matchups.items()):
             eval_eps = schedule_counts.get(matchup_key, 0)
@@ -268,7 +272,7 @@ class UnifiedCheckpointCoordinator:
                 matchup,
                 eval_p1,
                 p2_agent=eval_p2,
-                base_url=self.base_url,
+                base_url=eval_base_url,
                 game_format=self.game_format,
                 max_steps=self.max_steps,
                 episodes=eval_eps,
@@ -278,40 +282,6 @@ class UnifiedCheckpointCoordinator:
                 live_progress_path=live_progress_path,
                 live_progress_extra=live_progress_extra,
             )
-            vs_logic = evaluate_agent_vs_logic_both_seats(
-                matchup,
-                eval_p1,
-                base_url=self.base_url,
-                game_format=self.game_format,
-                max_steps=self.max_steps,
-                episodes=eval_eps,
-                seed=eval_seed,
-                backend=DEFAULT_TALISHAR_BACKEND,
-                eval_label_prefix="Checkpoint eval vs logic",
-                live_progress_path=live_progress_path,
-                live_progress_extra=live_progress_extra,
-            )
-            baseline_path = (
-                matchup_out_dir(self.out_dir, matchup) / LOGIC_VS_LOGIC_BASELINE_NAME
-            )
-            if not baseline_path.is_file():
-                logic_vs_logic = evaluate_logic_vs_logic(
-                    matchup,
-                    base_url=self.base_url,
-                    game_format=self.game_format,
-                    max_steps=self.max_steps,
-                    episodes=eval_eps,
-                    seed=(self.seed + 100_000 + index) if self.seed is not None else None,
-                    backend=DEFAULT_TALISHAR_BACKEND,
-                    eval_label="Checkpoint eval logic vs logic",
-                    live_progress_path=live_progress_path,
-                    live_progress_extra=live_progress_extra,
-                )
-                baseline_path.parent.mkdir(parents=True, exist_ok=True)
-                baseline_path.write_text(
-                    json.dumps(logic_vs_logic, indent=2),
-                    encoding="utf-8",
-                )
             record = {
                 "matchup": matchup.name,
                 "matchup_dir": _resolve_matchup_subdir(self.out_dir, matchup),
@@ -320,8 +290,10 @@ class UnifiedCheckpointCoordinator:
                 "eval_episodes": eval_eps,
                 "eval_mode": "self_play",
                 **metrics,
-                "vs_logic": vs_logic,
             }
+            baseline = load_logic_vs_logic_baseline(self.out_dir, matchup)
+            if baseline is not None:
+                record["logic_vs_logic"] = baseline
             per_matchup[matchup_key] = record
             self._write_per_matchup_artifacts(matchup, episodes_completed, record)
 
@@ -331,6 +303,7 @@ class UnifiedCheckpointCoordinator:
             "episodes_completed": episodes_completed,
             "target_episodes": self.n_episodes,
             "eval_episodes_total": self.checkpoint_eval_episodes,
+            "self_play_games_total": total_self_play_games,
             "matchups_evaluated": len(per_matchup),
             "checkpoint_bucket": bucket_kind,
             "aggregate": aggregate,
@@ -347,7 +320,7 @@ class UnifiedCheckpointCoordinator:
             f"  Merged checkpoint eval @ ep {episodes_completed} ({bucket_kind}): "
             f"self-play mean={float(wr or 0.0):.1%} "
             f"({len(per_matchup)} matchup(s), "
-            f"{self.checkpoint_eval_episodes} total eval games)"
+            f"{total_self_play_games} self-play game(s) total)"
         )
         maybe_refresh_unified_dashboard(self.out_dir, min_interval_seconds=0.0)
 

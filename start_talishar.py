@@ -718,6 +718,8 @@ def run(
         training_env_values = write_training_env(
             urls=backend_urls,
             fe_url=FE_URL,
+            reserve_eval_shard=len(backend_urls) >= 2,
+            reserve_render_shard=len(backend_urls) >= 3,
         )
         apply_training_env_values(training_env_values)
 
@@ -741,6 +743,12 @@ def run(
         print(f"  {training_env_path()}")
         if "TALISHAR_URLS" in training_env_values:
             print(f"  TALISHAR_URLS={training_env_values['TALISHAR_URLS']}")
+        if "TALISHAR_EVAL_URL" in training_env_values:
+            print(f"  TALISHAR_EVAL_URL={training_env_values['TALISHAR_EVAL_URL']}")
+            print("  (last eval shard reserved for checkpoint / eval traffic only)")
+        if "TALISHAR_RENDER_URL" in training_env_values:
+            print(f"  TALISHAR_RENDER_URL={training_env_values['TALISHAR_RENDER_URL']}")
+            print("  (last shard reserved for optimal-policy live render only)")
         print(f"  TALISHAR_URL={training_env_values.get('TALISHAR_URL', '')}")
         print(f"  TALISHAR_FE_URL={training_env_values.get('TALISHAR_FE_URL', FE_URL)}")
     else:

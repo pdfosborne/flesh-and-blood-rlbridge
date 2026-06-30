@@ -21,6 +21,7 @@ from fab_bridge.unified_results import (
 UNIFIED_DASHBOARD_NAME = "unified_random_matchups_dashboard.html"
 UNIFIED_LIVE_STATE = "unified_training_live.json"
 LOGIC_VS_LOGIC_BASELINE_NAME = "logic_vs_logic_baseline.json"
+POLICY_WEIGHT_HISTORY_LIMIT = 30
 
 _last_dashboard_write: dict[str, float] = {}
 _run_state_locks: dict[str, threading.Lock] = {}
@@ -96,9 +97,18 @@ def _logic_vs_logic_win_rate(row: dict[str, Any]) -> Optional[float]:
 
 def _read_matchup_logic_vs_logic_baseline(matchup_dir: Path) -> Optional[float]:
     """Read once-per-matchup logic-vs-logic baseline from the matchup directory."""
+    record = _read_matchup_logic_vs_logic_baseline_record(matchup_dir)
+    if record is not None and record.get("p1_win_rate") is not None:
+        return float(record["p1_win_rate"])
+    return None
+
+
+def _read_matchup_logic_vs_logic_baseline_record(
+    matchup_dir: Path,
+) -> Optional[dict[str, Any]]:
     raw = _read_json(matchup_dir / LOGIC_VS_LOGIC_BASELINE_NAME)
-    if isinstance(raw, dict) and raw.get("p1_win_rate") is not None:
-        return float(raw["p1_win_rate"])
+    if isinstance(raw, dict):
+        return raw
     return None
 
 
@@ -235,6 +245,35 @@ def update_unified_training_live(run_dir: Path, **fields: Any) -> None:
         _atomic_write_json(path, current)
 
 
+def record_policy_weight_update(run_dir: Path, summary: dict[str, Any]) -> None:
+    """Append a weight summary snapshot to unified live state."""
+    if not is_unified_random_matchup_run(run_dir):
+        return
+    run_dir = run_dir.expanduser().resolve()
+    path = run_dir / UNIFIED_LIVE_STATE
+    with _run_state_lock(run_dir):
+        current: dict[str, Any] = {}
+        raw = _read_json(path)
+        if isinstance(raw, dict):
+            current.update(raw)
+        current["policy_weights"] = summary
+        history_raw = current.get("policy_weight_history")
+        history: list[dict[str, Any]] = (
+            list(history_raw) if isinstance(history_raw, list) else []
+        )
+        history.append(
+            {
+                "update_count": summary.get("update_count"),
+                "l2_norm": summary.get("l2_norm"),
+                "fingerprint": summary.get("fingerprint"),
+                "at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        current["policy_weight_history"] = history[-POLICY_WEIGHT_HISTORY_LIMIT:]
+        current["updated_at"] = datetime.now(timezone.utc).isoformat()
+        _atomic_write_json(path, current)
+
+
 def update_unified_matchup_live(
     run_dir: Path,
     matchup_key: str,
@@ -284,9 +323,84 @@ def _checkpoint_point_from_row(row: dict[str, Any]) -> dict[str, Any]:
         "vs_logic_win_rate": vs_avg,
         "logic_vs_agent_win_rate": _logic_vs_agent_win_rate(row),
         "agent_vs_agent_win_rate": float(row.get("p1_win_rate") or 0.0),
+        "logic_vs_logic_win_rate": _logic_vs_logic_win_rate(row),
         "timeout_rate": timeout_rate,
         "eval_episodes": eval_episodes,
     }
+
+
+def _baseline_checkpoint_row(
+    *,
+    matchup_dir: Path,
+    matchup_name: str,
+    subdir: str,
+) -> Optional[dict[str, Any]]:
+    record = _read_matchup_logic_vs_logic_baseline_record(matchup_dir)
+    if record is None:
+        return None
+    eval_episodes: Optional[int] = None
+    if record.get("episodes") is not None:
+        eval_episodes = int(record["episodes"])
+    return {
+        "matchup": matchup_name,
+        "matchup_dir": subdir,
+        "episode": 0,
+        "episode_label": "baseline",
+        "eval_episodes": eval_episodes,
+        "logic_vs_logic_win_rate": _logic_vs_logic_win_rate(
+            {"logic_vs_logic": record}
+        ),
+        "vs_logic_win_rate": None,
+        "logic_vs_agent_win_rate": None,
+        "agent_vs_agent_win_rate": None,
+        "timeout_rate": (
+            float(record["timeout_rate"])
+            if record.get("timeout_rate") is not None
+            else None
+        ),
+    }
+
+
+def _enrich_checkpoint_rows_with_baselines(
+    run_dir: Path,
+    rows: list[dict[str, Any]],
+    active_matchups: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Merge logic-vs-logic baseline metrics into active checkpoint table rows."""
+    if not active_matchups:
+        return rows
+    by_dir = {
+        str(row.get("matchup_dir") or ""): dict(row)
+        for row in rows
+        if str(row.get("matchup_dir") or "")
+    }
+    enriched: list[dict[str, Any]] = []
+    for subdir, info in active_matchups.items():
+        if not isinstance(info, dict):
+            continue
+        matchup_dir = run_dir / str(subdir)
+        name = str(info.get("name") or subdir)
+        if str(subdir) in by_dir:
+            row = by_dir[str(subdir)]
+            baseline_wr = _read_matchup_logic_vs_logic_baseline(matchup_dir)
+            if baseline_wr is not None:
+                row["logic_vs_logic_win_rate"] = baseline_wr
+            if row.get("logic_vs_logic_win_rate") is None:
+                embedded = _logic_vs_logic_win_rate(row)
+                if embedded is not None:
+                    row["logic_vs_logic_win_rate"] = embedded
+            enriched.append(row)
+            continue
+        baseline_row = _baseline_checkpoint_row(
+            matchup_dir=matchup_dir,
+            matchup_name=name,
+            subdir=str(subdir),
+        )
+        if baseline_row is not None:
+            enriched.append(baseline_row)
+    if enriched:
+        return enriched
+    return rows
 
 
 def _merged_aggregate_points(
@@ -541,8 +655,12 @@ def collect_unified_run_state(run_dir: Path) -> dict[str, Any]:
             point = _checkpoint_point_from_row(latest)
             point["matchup"] = str(point.get("matchup") or current_name or "—")
             active_checkpoint_rows = [point]
-
-    checkpoint_points = []
+    active_checkpoint_rows = _enrich_checkpoint_rows_with_baselines(
+        run_dir,
+        active_checkpoint_rows,
+        active_matchups,
+    )
+    checkpoint_points: list[dict[str, Any]] = []
     for row in ckpt_history:
         if not isinstance(row, dict) or row.get("episodes_completed") is None:
             continue
@@ -593,6 +711,8 @@ def collect_unified_run_state(run_dir: Path) -> dict[str, Any]:
         "completed_matchups": completed_rows,
         "overall_pct": overall_pct,
         "complete": status == "complete",
+        "policy_weights": live.get("policy_weights"),
+        "policy_weight_history": live.get("policy_weight_history") or [],
     }
 
 
@@ -715,6 +835,91 @@ def _svg_winrate_chart(
 </svg>"""
 
 
+def _svg_l2_norm_sparkline(
+    history: list[dict[str, Any]],
+    *,
+    width: int = 520,
+    height: int = 72,
+) -> str:
+    values = [
+        float(row["l2_norm"])
+        for row in history
+        if isinstance(row, dict) and row.get("l2_norm") is not None
+    ]
+    if len(values) < 2:
+        return ""
+    pad_l, pad_r, pad_t, pad_b = 36, 12, 8, 16
+    plot_w = width - pad_l - pad_r
+    plot_h = height - pad_t - pad_b
+    min_v = min(values)
+    max_v = max(values)
+    span = max(max_v - min_v, 1e-9)
+
+    def px(i: int) -> float:
+        return pad_l + (i / max(1, len(values) - 1)) * plot_w
+
+    def py(v: float) -> float:
+        return pad_t + plot_h - ((v - min_v) / span) * plot_h
+
+    poly = " ".join(f"{px(i):.1f},{py(v):.1f}" for i, v in enumerate(values))
+    return f"""<svg viewBox="0 0 {width} {height}" class="chart sparkline">
+  <text x="{pad_l}" y="{height - 4}" class="chart-axis">L2 norm trend ({len(values)} updates)</text>
+  <polyline points="{poly}" class="chart-selfplay-line" fill="none"/>
+</svg>"""
+
+
+def _render_policy_weights_card(state: dict[str, Any]) -> str:
+    weights = state.get("policy_weights")
+    if not isinstance(weights, dict) or not weights.get("initialized"):
+        return '<p class="muted">Waiting for unified policy weights…</p>'
+
+    history_raw = state.get("policy_weight_history") or []
+    history = [row for row in history_raw if isinstance(row, dict)]
+    update_count = weights.get("update_count")
+    l2_norm = weights.get("l2_norm")
+    fingerprint = str(weights.get("fingerprint") or "—")
+    param_count = int(weights.get("param_count") or 0)
+
+    delta_text = ""
+    if len(history) >= 2:
+        prev = history[-2].get("l2_norm")
+        if prev is not None and l2_norm is not None:
+            delta = float(l2_norm) - float(prev)
+            sign = "+" if delta >= 0 else ""
+            delta_text = f" ({sign}{delta:.4f} vs prior update)"
+
+    sparkline = _svg_l2_norm_sparkline(history)
+
+    recent_rows = ""
+    for row in reversed(history[-8:]):
+        recent_rows += (
+            "<tr>"
+            f"<td>{html.escape(str(row.get('update_count') or '—'))}</td>"
+            f"<td>{html.escape(str(row.get('l2_norm') or '—'))}</td>"
+            f"<td><code>{html.escape(str(row.get('fingerprint') or '—'))}</code></td>"
+            "</tr>"
+        )
+    recent_table = ""
+    if recent_rows:
+        recent_table = (
+            '<table class="history weights-history"><thead><tr>'
+            "<th>Update</th><th>L2 norm</th><th>Fingerprint</th>"
+            f"</tr></thead><tbody>{recent_rows}</tbody></table>"
+        )
+
+    return f"""
+      <dl class="weights-summary">
+        <div><dt>Architecture</dt><dd>d_model={weights.get('d_model')} · layers={weights.get('n_layers')} · heads={weights.get('n_heads')}</dd></div>
+        <div><dt>Observation / actions</dt><dd>obs_dim={weights.get('obs_dim')} · n_actions={weights.get('n_actions')}</dd></div>
+        <div><dt>Parameters</dt><dd>{param_count:,}</dd></div>
+        <div><dt>PPO updates</dt><dd>{html.escape(str(update_count if update_count is not None else '—'))}</dd></div>
+        <div><dt>L2 norm</dt><dd>{html.escape(str(l2_norm if l2_norm is not None else '—'))}{html.escape(delta_text)}</dd></div>
+        <div><dt>Fingerprint</dt><dd><code>{html.escape(fingerprint)}</code></dd></div>
+      </dl>
+      {sparkline}
+      {recent_table}"""
+
+
 def render_unified_random_matchups_html(
     state: dict[str, Any],
     *,
@@ -774,6 +979,7 @@ def render_unified_random_matchups_html(
         state.get("checkpoint_aggregate_points") or [],
         target_episodes=target_eps,
     )
+    policy_weights_card = _render_policy_weights_card(state)
 
     completed_rows = state.get("completed_matchups") or []
     if completed_rows:
@@ -800,11 +1006,13 @@ def render_unified_random_matchups_html(
         eval_games_cell = (
             str(int(eval_games)) if eval_games is not None else "—"
         )
+        episode_cell = str(row.get("episode_label") or int(row.get("episode", 0)))
         ckpt_rows += (
             f"<tr>"
             f"<td>{html.escape(str(row.get('matchup') or '—'))}</td>"
-            f"<td>{int(row.get('episode', 0))}</td>"
+            f"<td>{html.escape(episode_cell)}</td>"
             f"<td>{eval_games_cell}</td>"
+            f"<td>{_pct(row.get('logic_vs_logic_win_rate'))}</td>"
             f"<td>{_pct(row.get('vs_logic_win_rate'))}</td>"
             f"<td>{_pct(row.get('logic_vs_agent_win_rate'))}</td>"
             f"<td>{_pct(row.get('agent_vs_agent_win_rate'))}</td>"
@@ -815,11 +1023,12 @@ def render_unified_random_matchups_html(
         f"<th>Matchup</th>"
         f"<th>Episode</th>"
         f"<th>Eval games</th>"
+        f"<th>Logic win% vs logic</th>"
         f"<th>Agent win% vs logic</th>"
         f"<th>Logic vs agent win%</th>"
         f"<th>Agent win% vs agent</th>"
         f"<th>Timeout %</th>"
-        f"</tr></thead><tbody>{ckpt_rows or '<tr><td colspan=\"7\" class=\"muted\">No checkpoint eval yet</td></tr>'}</tbody></table>"
+        f"</tr></thead><tbody>{ckpt_rows or '<tr><td colspan=\"8\" class=\"muted\">No checkpoint eval yet</td></tr>'}</tbody></table>"
     )
 
     return f"""<!DOCTYPE html>
@@ -853,6 +1062,13 @@ def render_unified_random_matchups_html(
     .history {{ width: 100%; border-collapse: collapse; font-size: 0.85rem; }}
     .history th, .history td {{ text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }}
     .history th {{ color: var(--muted); font-weight: 500; }}
+    .weights-summary {{ display: grid; gap: 10px; margin: 0 0 14px; }}
+    .weights-summary > div {{ display: grid; grid-template-columns: 160px 1fr; gap: 10px; font-size: 0.9rem; }}
+    .weights-summary dt {{ margin: 0; color: var(--muted); }}
+    .weights-summary dd {{ margin: 0; }}
+    .weights-history {{ margin-top: 12px; }}
+    .sparkline {{ margin-top: 8px; }}
+    code {{ font-family: Consolas, "Courier New", monospace; font-size: 0.82rem; color: #c5d4ea; }}
     .muted {{ color: var(--muted); }}
     a {{ color: var(--primary); text-decoration: none; }}
     a:hover {{ text-decoration: underline; }}
@@ -890,6 +1106,11 @@ def render_unified_random_matchups_html(
     <div class="card">
       <h2>Completed matchups</h2>
       {history_table}
+    </div>
+
+    <div class="card">
+      <h2>Agent weights</h2>
+      {policy_weights_card}
     </div>
 
     <footer>Generated {generated} · {html.escape(str(state.get('run_dir', '')))}</footer>

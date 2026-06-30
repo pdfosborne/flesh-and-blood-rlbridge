@@ -171,7 +171,39 @@ _DISABLE_CARD_HOVER_STORAGE_KEY = "talishar-disable-card-hover"
 _PLAYWRIGHT_GDPR_INIT_SCRIPT = (
     "localStorage.setItem('gdpr-analytics-enabled','true');"
     "localStorage.setItem('gdpr-consent-accepted','true');"
+    "localStorage.setItem('cookieConsent','accepted');"
 )
+
+
+def rewrite_frontend_api_url(request_url: str, backend_base_url: str) -> str | None:
+    """Map Talishar-FE dev-server API paths to a specific PHP backend shard.
+
+    Vite proxies ``/api/*`` and ``/APIs/*`` to ``VITE_BACKEND_PORT`` (usually
+    8080).  During rgb_array capture the game lives on another shard (e.g. the
+    dedicated render port), so Playwright must forward those requests directly.
+    Returns ``None`` when *request_url* should not be proxied.
+    """
+    from urllib.parse import urlsplit, urlunsplit
+
+    backend = str(backend_base_url or "").strip().rstrip("/")
+    if not backend:
+        return None
+    parsed = urlsplit(str(request_url or "").strip())
+    path = parsed.path or ""
+    if path.startswith("/api/"):
+        target_path = path[len("/api/") :]
+    elif path.startswith("/APIs/") or path.startswith("/AccountFiles/"):
+        target_path = path.lstrip("/")
+    elif path.endswith(".php"):
+        target_path = path.lstrip("/")
+    else:
+        return None
+    if not target_path:
+        return None
+    target = f"{backend}/{target_path}"
+    if parsed.query:
+        target = f"{target}?{parsed.query}"
+    return target
 
 _PLAYWRIGHT_DISABLE_CARD_HOVER_INIT_SCRIPT = (
     f"localStorage.setItem('{_DISABLE_CARD_HOVER_STORAGE_KEY}','true');"
@@ -2852,6 +2884,18 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                     viewport={"width": self._render_width, "height": self._render_height}
                 )
                 page = ctx.new_page()
+                backend_base = (self._base_url or "").rstrip("/")
+                if backend_base:
+
+                    def _proxy_backend_route(route: Any) -> None:
+                        target = rewrite_frontend_api_url(route.request.url, backend_base)
+                        if target is None:
+                            route.continue_()
+                            return
+                        route.continue_(url=target)
+
+                    page.route("**/*", _proxy_backend_route)
+
                 init_script = _PLAYWRIGHT_GDPR_INIT_SCRIPT
                 if self._render_mode == "rgb_array" and not self._enable_frontend_card_hover:
                     init_script += _PLAYWRIGHT_DISABLE_CARD_HOVER_INIT_SCRIPT
@@ -2863,11 +2907,21 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                 page.goto(url, timeout=20000)
                 page.wait_for_load_state("domcontentloaded", timeout=15000)
                 page.wait_for_timeout(5000)
+                for consent_label in (
+                    "Accept All Cookies",
+                    "Essential Only",
+                    "Agree",
+                ):
+                    try:
+                        btn = page.locator("button", has_text=consent_label).first
+                        if btn.is_visible(timeout=500):
+                            btn.click()
+                            page.wait_for_timeout(1500)
+                            break
+                    except Exception:
+                        pass
                 try:
-                    btn = page.locator("button", has_text="Agree").first
-                    if btn.is_visible(timeout=500):
-                        btn.click()
-                        page.wait_for_timeout(1500)
+                    page.wait_for_url("**/game/play/**", timeout=15000)
                 except Exception:
                     pass
                 self._pw_page = page

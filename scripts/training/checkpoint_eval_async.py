@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 _eval_executor: Optional[ThreadPoolExecutor] = None
@@ -25,11 +26,18 @@ def submit_checkpoint_eval(
     fn: Callable[[], Any],
     *,
     label: str = "",
+    run_dir: Path | str | None = None,
 ) -> Future[Any]:
     """Run *fn* on the shared single-worker eval pool (training does not wait)."""
+    lock_root = Path(run_dir).expanduser().resolve() if run_dir is not None else None
 
     def _wrapped() -> Any:
         try:
+            if lock_root is not None:
+                from fab_bridge.eval_shard_lock import hold_eval_shard  # noqa: PLC0415
+
+                with hold_eval_shard(lock_root, "checkpoint_eval", label=label):
+                    return fn()
             return fn()
         except Exception as exc:
             suffix = f" ({label})" if label else ""

@@ -4,107 +4,135 @@
   "decks": [
     {
       "id": "fab_ira_crimson_haze_sage_aggro",
-      "name": "Ira, Crimson Haze - SAGE Aggro",
-      "description": "hoski's Ira tournament deck (Silver Age). Ninja aggro with Pouncing Qi chains and tempo attacks.",
+      "name": "Ira SAGE",
+      "description": "Imported from https://fabrary.net/decks/01KR40W4Z2ZS9EQPT6VT6CDSPE",
       "hero_id": "hero_ira_crimson_haze",
       "format": "silver_age",
       "style": "aggro",
       "source_url": "https://fabrary.net/decks/01KR40W4Z2ZS9EQPT6VT6CDSPE",
-      "cards": [
+      "equipment_header": "ira_crimson_haze harmonized_kodachi blade_beckoner_helm blood_scent nullrune_gloves pouncing_paws",
+      "card_ids": [
         {
-          "name": "Aspect of Tiger: Body",
-          "count": 2
-        },
-        {
-          "name": "Bittering Thorns",
+          "id": "arcane_polarity_red",
           "count": 1
         },
         {
-          "name": "Blessing of Qi",
+          "id": "aspect_of_tiger_body_red",
           "count": 2
         },
         {
-          "name": "Bluster Buff",
-          "count": 2
-        },
-        {
-          "name": "Cut Through",
+          "id": "bittering_thorns_red",
           "count": 1
         },
         {
-          "name": "Down But Not Out",
+          "id": "blessing_of_qi_red",
+          "count": 2
+        },
+        {
+          "id": "bluster_buff_red",
+          "count": 2
+        },
+        {
+          "id": "cut_through_red",
           "count": 1
         },
         {
-          "name": "Flying Kick",
-          "count": 2
-        },
-        {
-          "name": "Growl",
-          "count": 2
-        },
-        {
-          "name": "Pouncing Qi",
-          "count": 2
-        },
-        {
-          "name": "Razor Reflex",
+          "id": "down_but_not_out_red",
           "count": 1
         },
         {
-          "name": "Reinforce the Line",
+          "id": "feign_vengeance_blue",
           "count": 2
         },
         {
-          "name": "Scar for a Scar",
+          "id": "fluster_fist_blue",
           "count": 2
         },
         {
-          "name": "Sound the Alarm",
+          "id": "flying_kick_red",
           "count": 2
         },
         {
-          "name": "Torrent of Tempo",
+          "id": "growl_red",
           "count": 2
         },
         {
-          "name": "Untamed",
+          "id": "legacy_of_ikaru_blue",
           "count": 2
         },
         {
-          "name": "Up Sticks and Run",
+          "id": "nip_at_the_heels_blue",
           "count": 2
         },
         {
-          "name": "Salt the Wound",
+          "id": "pouncing_qi_blue",
+          "count": 2
+        },
+        {
+          "id": "pouncing_qi_red",
+          "count": 2
+        },
+        {
+          "id": "razor_reflex_red",
           "count": 1
         },
         {
-          "name": "Tiger Eye Reflex",
+          "id": "reinforce_the_line_red",
           "count": 2
         },
         {
-          "name": "Fluster Fist",
+          "id": "salt_the_wound_yellow",
+          "count": 1
+        },
+        {
+          "id": "scar_for_a_scar_red",
           "count": 2
         },
         {
-          "name": "Legacy of Ikaru",
+          "id": "seek_vengeance_blue",
           "count": 2
         },
         {
-          "name": "Nip at the Heels",
+          "id": "soulbead_strike_blue",
           "count": 2
         },
         {
-          "name": "Seek Vengeance",
+          "id": "sound_the_alarm_red",
           "count": 2
         },
         {
-          "name": "Soulbead Strike",
+          "id": "tiger_eye_reflex_yellow",
           "count": 2
         },
         {
-          "name": "Arcane Polarity",
+          "id": "torrent_of_tempo_red",
+          "count": 2
+        },
+        {
+          "id": "untamed_red",
+          "count": 2
+        },
+        {
+          "id": "up_sticks_and_run_red",
+          "count": 2
+        }
+      ],
+      "cards": [],
+      "sideboard_ids": [
+        {
+          "id": "double_cross_strap",
+          "count": 1
+        },
+        {
+          "id": "harmonized_kodachi",
+          "count": 1
+        },
+        {
+          "id": "mask_of_the_swarming_claw",
+          "count": 1
+        },
+        {
+          "id": "tearing_shuko",
           "count": 1
         }
       ]
@@ -519,62 +547,87 @@
       "format": "silver_age",
       "style": "balanced",
       "source_url": "https://fabrary.net/decks?format=blitz&class=Mechanologist",
-      "cards": [
+      "cards": [],
+      "card_ids": [
         {
-          "name": "Big Bertha",
+          "id": "big_bertha_blue",
           "count": 2
         },
         {
-          "name": "Big Shot",
+          "id": "boom_grenade_red",
           "count": 2
         },
         {
-          "name": "Cloud City Steamboat",
+          "id": "crankshaft_blue",
           "count": 2
         },
         {
-          "name": "Cogwerx Zeppelin",
+          "id": "crankshaft_red",
           "count": 2
         },
         {
-          "name": "Heavy Artillery",
+          "id": "fender_bender_red",
           "count": 2
         },
         {
-          "name": "Hydraulic Press",
+          "id": "jump_start_blue",
           "count": 2
         },
         {
-          "name": "Infuse Titanium",
-          "count": 1
-        },
-        {
-          "name": "Firewall",
+          "id": "jump_start_red",
           "count": 2
         },
         {
-          "name": "Blessing of Ingenuity",
+          "id": "jump_start_yellow",
           "count": 2
         },
         {
-          "name": "Reinforce the Line",
+          "id": "out_pace_red",
           "count": 2
         },
         {
-          "name": "Razor Reflex",
-          "count": 1
-        },
-        {
-          "name": "Down But Not Out",
+          "id": "overblast_red",
           "count": 2
         },
         {
-          "name": "Sound the Alarm",
+          "id": "rev_up_red",
           "count": 2
         },
         {
-          "name": "Bluster Buff",
-          "count": 1
+          "id": "throttle_blue",
+          "count": 2
+        },
+        {
+          "id": "throttle_red",
+          "count": 2
+        },
+        {
+          "id": "under_loop_red",
+          "count": 2
+        },
+        {
+          "id": "zero_to_sixty_blue",
+          "count": 2
+        },
+        {
+          "id": "zero_to_sixty_red",
+          "count": 2
+        },
+        {
+          "id": "zero_to_sixty_yellow",
+          "count": 2
+        },
+        {
+          "id": "zipper_hit_blue",
+          "count": 2
+        },
+        {
+          "id": "zipper_hit_red",
+          "count": 2
+        },
+        {
+          "id": "zipper_hit_yellow",
+          "count": 2
         }
       ]
     },
@@ -586,62 +639,91 @@
       "format": "silver_age",
       "style": "control",
       "source_url": "https://fabrary.net/decks?format=blitz&class=Ranger",
-      "cards": [
+      "cards": [],
+      "card_ids": [
         {
-          "name": "Blizzard Bolt",
+          "id": "boltn_shot_red",
           "count": 2
         },
         {
-          "name": "Buzz Bolt",
+          "id": "call_in_the_big_guns_red",
           "count": 2
         },
         {
-          "name": "Chilling Icevein",
+          "id": "drill_shot_red",
           "count": 2
         },
         {
-          "name": "Cold Wave",
+          "id": "drop_the_anchor_red",
           "count": 2
         },
         {
-          "name": "Fatigue Shot",
+          "id": "dry_powder_shot_red",
           "count": 2
         },
         {
-          "name": "Flake Out",
+          "id": "entangling_shot_red",
           "count": 2
         },
         {
-          "name": "Hamstring Shot",
+          "id": "infecting_shot_red",
           "count": 2
         },
         {
-          "name": "Take Cover",
+          "id": "infecting_shot_yellow",
           "count": 2
         },
         {
-          "name": "Tripwire Trap",
+          "id": "lace_with_bloodrot_red",
           "count": 2
         },
         {
-          "name": "Razor Reflex",
+          "id": "lace_with_frailty_red",
+          "count": 2
+        },
+        {
+          "id": "lace_with_inertia_red",
+          "count": 2
+        },
+        {
+          "id": "memorial_ground_yellow",
           "count": 1
         },
         {
-          "name": "Reinforce the Line",
+          "id": "murkmire_grapnel_red",
           "count": 2
         },
         {
-          "name": "Sound the Alarm",
-          "count": 2
-        },
-        {
-          "name": "Down But Not Out",
-          "count": 2
-        },
-        {
-          "name": "Bluster Buff",
+          "id": "nimblism_red",
           "count": 1
+        },
+        {
+          "id": "ravenous_rabble_red",
+          "count": 2
+        },
+        {
+          "id": "release_the_tension_red",
+          "count": 2
+        },
+        {
+          "id": "ridge_rider_shot_red",
+          "count": 2
+        },
+        {
+          "id": "searing_shot_red",
+          "count": 2
+        },
+        {
+          "id": "spire_sniping_yellow",
+          "count": 2
+        },
+        {
+          "id": "swift_shot_red",
+          "count": 2
+        },
+        {
+          "id": "widowmaker_yellow",
+          "count": 2
         }
       ]
     },
@@ -720,57 +802,86 @@
       "format": "silver_age",
       "style": "aggro",
       "source_url": "https://fabrary.net/decks?format=blitz&class=Runeblade",
-      "cards": [
+      "cards": [],
+      "card_ids": [
         {
-          "name": "Amplify the Arknight",
+          "id": "arcane_polarity_red",
           "count": 2
         },
         {
-          "name": "Arcanic Spike",
+          "id": "arcane_seeds__life_red",
           "count": 2
         },
         {
-          "name": "Deathly Wail",
+          "id": "arcanic_shockwave_red",
           "count": 2
         },
         {
-          "name": "Reduce to Runechant",
+          "id": "burn_up__shock_red",
           "count": 2
         },
         {
-          "name": "Splintering Deadwood",
+          "id": "cloud_cover_red",
           "count": 2
         },
         {
-          "name": "Vantage Point",
+          "id": "entwine_lightning_red",
           "count": 2
         },
         {
-          "name": "Vantom Banshee",
+          "id": "fry_red",
           "count": 2
         },
         {
-          "name": "Reinforce the Line",
+          "id": "jack_be_quick_red",
           "count": 2
         },
         {
-          "name": "Razor Reflex",
-          "count": 1
-        },
-        {
-          "name": "Sound the Alarm",
+          "id": "lightning_press_red",
           "count": 2
         },
         {
-          "name": "Down But Not Out",
+          "id": "lightning_surge_red",
           "count": 2
         },
         {
-          "name": "Bluster Buff",
+          "id": "nimblism_red",
           "count": 2
         },
         {
-          "name": "Cut Through",
+          "id": "nimblism_yellow",
+          "count": 2
+        },
+        {
+          "id": "path_of_same_ends_red",
+          "count": 2
+        },
+        {
+          "id": "ravenous_rabble_red",
+          "count": 2
+        },
+        {
+          "id": "scar_for_a_scar_red",
+          "count": 2
+        },
+        {
+          "id": "second_strike_red",
+          "count": 2
+        },
+        {
+          "id": "sizzle_red",
+          "count": 2
+        },
+        {
+          "id": "snatch_red",
+          "count": 2
+        },
+        {
+          "id": "static_shock_red",
+          "count": 2
+        },
+        {
+          "id": "weave_lightning_red",
           "count": 2
         }
       ]
@@ -850,77 +961,102 @@
       "format": "silver_age",
       "style": "aggro",
       "source_url": "https://fabtcg.com/decklists/silver-age-chapter-1-kayo/",
-      "cards": [
+      "cards": [],
+      "card_ids": [
         {
-          "name": "Bare Fangs",
-          "count": 4
-        },
-        {
-          "name": "Buckwild",
-          "count": 4
-        },
-        {
-          "name": "Clash of Agility",
+          "id": "agile_windup_blue",
           "count": 2
         },
         {
-          "name": "Clash of Might",
-          "count": 3
-        },
-        {
-          "name": "High Pitched Howl",
+          "id": "bare_fangs_red",
           "count": 2
         },
         {
-          "name": "Pulping",
+          "id": "bare_fangs_yellow",
           "count": 2
         },
         {
-          "name": "Rough Up",
+          "id": "bear_hug_blue",
           "count": 2
         },
         {
-          "name": "Savage Feast",
+          "id": "buckwild_blue",
           "count": 2
         },
         {
-          "name": "Strongest Survive",
-          "count": 6
-        },
-        {
-          "name": "Test of Might",
+          "id": "buckwild_red",
           "count": 2
         },
         {
-          "name": "Wild Ride",
-          "count": 4
-        },
-        {
-          "name": "Agile Windup",
+          "id": "clash_of_agility_red",
           "count": 2
         },
         {
-          "name": "Bear Hug",
+          "id": "clash_of_might_red",
           "count": 2
         },
         {
-          "name": "Rally the Coast Guard",
+          "id": "clash_of_might_yellow",
+          "count": 1
+        },
+        {
+          "id": "high_pitched_howl_red",
           "count": 2
         },
         {
-          "name": "Reincarnate",
+          "id": "pulping_red",
           "count": 2
         },
         {
-          "name": "Run Roughshod",
+          "id": "rally_the_coast_guard_blue",
           "count": 2
         },
         {
-          "name": "Smash Instinct",
+          "id": "reincarnate_blue",
           "count": 2
         },
         {
-          "name": "Unexpected Backhand",
+          "id": "rough_up_red",
+          "count": 2
+        },
+        {
+          "id": "run_roughshod_blue",
+          "count": 2
+        },
+        {
+          "id": "savage_feast_red",
+          "count": 2
+        },
+        {
+          "id": "smash_instinct_blue",
+          "count": 2
+        },
+        {
+          "id": "strongest_survive_blue",
+          "count": 2
+        },
+        {
+          "id": "strongest_survive_red",
+          "count": 2
+        },
+        {
+          "id": "strongest_survive_yellow",
+          "count": 2
+        },
+        {
+          "id": "test_of_might_red",
+          "count": 2
+        },
+        {
+          "id": "unexpected_backhand_blue",
+          "count": 2
+        },
+        {
+          "id": "wild_ride_red",
+          "count": 2
+        },
+        {
+          "id": "wild_ride_yellow",
           "count": 2
         }
       ]
@@ -933,73 +1069,98 @@
       "format": "silver_age",
       "style": "balanced",
       "source_url": "https://fabtcg.com/decklists/silver-age-chapter-1-viserai/",
-      "cards": [
+      "cards": [],
+      "card_ids": [
         {
-          "name": "Amplify the Arknight",
+          "id": "amplify_the_arknight_red",
           "count": 2
         },
         {
-          "name": "Condemn to Slaughter",
-          "count": 4
-        },
-        {
-          "name": "Hit the High Notes",
+          "id": "condemn_to_slaughter_blue",
           "count": 2
         },
         {
-          "name": "Malefic Incantation",
-          "count": 4
-        },
-        {
-          "name": "Mauvrion Skies",
-          "count": 4
-        },
-        {
-          "name": "Read the Runes",
+          "id": "condemn_to_slaughter_red",
           "count": 2
         },
         {
-          "name": "Reduce to Runechant",
+          "id": "flying_high_blue",
           "count": 2
         },
         {
-          "name": "Rune Flash",
+          "id": "hit_the_high_notes_red",
           "count": 2
         },
         {
-          "name": "Runerager Swarm",
+          "id": "malefic_incantation_red",
           "count": 2
         },
         {
-          "name": "Runic Fellingsong",
+          "id": "malefic_incantation_yellow",
           "count": 2
         },
         {
-          "name": "Shrill of Skullform",
-          "count": 6
-        },
-        {
-          "name": "Sigil of Suffering",
+          "id": "mauvrion_skies_blue",
           "count": 2
         },
         {
-          "name": "Spellblade Assault",
-          "count": 4
-        },
-        {
-          "name": "Flying High",
+          "id": "mauvrion_skies_red",
           "count": 2
         },
         {
-          "name": "Sigil of Silphidae",
+          "id": "read_the_runes_red",
           "count": 2
         },
         {
-          "name": "Trot Along",
+          "id": "reduce_to_runechant_red",
           "count": 2
         },
         {
-          "name": "Vexing Malice",
+          "id": "rune_flash_red",
+          "count": 2
+        },
+        {
+          "id": "runerager_swarm_red",
+          "count": 2
+        },
+        {
+          "id": "runic_fellingsong_red",
+          "count": 2
+        },
+        {
+          "id": "shrill_of_skullform_blue",
+          "count": 2
+        },
+        {
+          "id": "shrill_of_skullform_red",
+          "count": 2
+        },
+        {
+          "id": "shrill_of_skullform_yellow",
+          "count": 2
+        },
+        {
+          "id": "sigil_of_silphidae_blue",
+          "count": 2
+        },
+        {
+          "id": "sigil_of_suffering_red",
+          "count": 2
+        },
+        {
+          "id": "spellblade_assault_blue",
+          "count": 2
+        },
+        {
+          "id": "spellblade_assault_red",
+          "count": 2
+        },
+        {
+          "id": "trot_along_blue",
+          "count": 2
+        },
+        {
+          "id": "vexing_malice_blue",
           "count": 2
         }
       ]
@@ -1012,93 +1173,106 @@
       "format": "silver_age",
       "style": "control",
       "source_url": "https://fabtcg.com/decklists/silver-age-chapter-1-iyslander/",
-      "cards": [
+      "cards": [],
+      "card_ids": [
         {
-          "name": "Absorb in Aether",
+          "id": "absorb_in_aether_red",
           "count": 2
         },
         {
-          "name": "Aether Icevein",
-          "count": 6
-        },
-        {
-          "name": "Fyendal's Fighting Spirit",
+          "id": "aether_hail_blue",
           "count": 2
         },
         {
-          "name": "Ice Bolt",
-          "count": 4
+          "id": "aether_icevein_blue",
+          "count": 2
         },
         {
-          "name": "Look Tuff",
+          "id": "aether_icevein_red",
+          "count": 2
+        },
+        {
+          "id": "aether_icevein_yellow",
+          "count": 2
+        },
+        {
+          "id": "arcane_twining_blue",
+          "count": 2
+        },
+        {
+          "id": "brain_freeze_blue",
+          "count": 2
+        },
+        {
+          "id": "brothers_in_arms_blue",
+          "count": 2
+        },
+        {
+          "id": "cold_snap_blue",
+          "count": 2
+        },
+        {
+          "id": "emeritus_scolding_blue",
+          "count": 2
+        },
+        {
+          "id": "frost_spike_blue",
+          "count": 2
+        },
+        {
+          "id": "frosting_blue",
+          "count": 2
+        },
+        {
+          "id": "fyendals_fighting_spirit_red",
+          "count": 2
+        },
+        {
+          "id": "ice_bolt_blue",
+          "count": 2
+        },
+        {
+          "id": "ice_bolt_red",
+          "count": 2
+        },
+        {
+          "id": "ice_eternal_blue",
+          "count": 2
+        },
+        {
+          "id": "look_tuff_red",
           "count": 1
         },
         {
-          "name": "On the Horizon",
+          "id": "on_the_horizon_red",
           "count": 2
         },
         {
-          "name": "Polar Cap",
+          "id": "photon_splicing_blue",
           "count": 2
         },
         {
-          "name": "Wounded Bull",
+          "id": "polar_cap_red",
           "count": 2
         },
         {
-          "name": "Aether Hail",
-          "count": 2
-        },
-        {
-          "name": "Arcane Twining",
-          "count": 2
-        },
-        {
-          "name": "Brain Freeze",
-          "count": 2
-        },
-        {
-          "name": "Brothers in Arms",
-          "count": 2
-        },
-        {
-          "name": "Cold Snap",
-          "count": 2
-        },
-        {
-          "name": "Emeritus Scolding",
-          "count": 2
-        },
-        {
-          "name": "Frosting",
-          "count": 2
-        },
-        {
-          "name": "Frost Spike",
-          "count": 2
-        },
-        {
-          "name": "Ice Eternal",
-          "count": 2
-        },
-        {
-          "name": "Photon Splicing",
-          "count": 2
-        },
-        {
-          "name": "Pyroglyphic Protection",
+          "id": "pyroglyphic_protection_blue",
           "count": 1
         },
         {
-          "name": "Stir the Aetherwinds",
+          "id": "stir_the_aetherwinds_blue",
           "count": 1
         },
         {
-          "name": "Voltic Bolt",
+          "id": "voltic_bolt_blue",
           "count": 2
         },
         {
-          "name": "Winter's Bite",
+          "id": "winters_bite_blue",
+          "count": 2
+        },
+        {
+          "id": "wounded_bull_red",
           "count": 2
         }
       ]
@@ -1111,65 +1285,98 @@
       "format": "silver_age",
       "style": "balanced",
       "source_url": "https://fabtcg.com/decklists/silver-age-chapter-1-dash/",
-      "cards": [
+      "cards": [],
+      "card_ids": [
         {
-          "name": "Boom Grenade",
+          "id": "big_bertha_blue",
           "count": 2
         },
         {
-          "name": "Crankshaft",
-          "count": 4
-        },
-        {
-          "name": "Fender Bender",
+          "id": "boom_grenade_red",
           "count": 2
         },
         {
-          "name": "Hyper Driver",
+          "id": "crankshaft_blue",
+          "count": 2
+        },
+        {
+          "id": "crankshaft_red",
+          "count": 2
+        },
+        {
+          "id": "fender_bender_red",
+          "count": 2
+        },
+        {
+          "id": "hyper_driver_red",
           "count": 1
         },
         {
-          "name": "Jump Start",
-          "count": 6
-        },
-        {
-          "name": "Out Pace",
+          "id": "jump_start_blue",
           "count": 2
         },
         {
-          "name": "Overblast",
+          "id": "jump_start_red",
           "count": 2
         },
         {
-          "name": "Re-Charge!",
+          "id": "jump_start_yellow",
           "count": 2
         },
         {
-          "name": "Rev Up",
+          "id": "out_pace_red",
           "count": 2
         },
         {
-          "name": "Throttle",
-          "count": 4
-        },
-        {
-          "name": "Under Loop",
+          "id": "overblast_red",
           "count": 2
         },
         {
-          "name": "Zero to Sixty",
-          "count": 6
-        },
-        {
-          "name": "Zipper Hit",
-          "count": 6
-        },
-        {
-          "name": "Big Bertha",
+          "id": "re_charge_red",
           "count": 2
         },
         {
-          "name": "Teklo Trebuchet 2000",
+          "id": "rev_up_red",
+          "count": 2
+        },
+        {
+          "id": "teklo_trebuchet_2000_blue",
+          "count": 2
+        },
+        {
+          "id": "throttle_blue",
+          "count": 2
+        },
+        {
+          "id": "throttle_red",
+          "count": 2
+        },
+        {
+          "id": "under_loop_red",
+          "count": 2
+        },
+        {
+          "id": "zero_to_sixty_blue",
+          "count": 2
+        },
+        {
+          "id": "zero_to_sixty_red",
+          "count": 2
+        },
+        {
+          "id": "zero_to_sixty_yellow",
+          "count": 2
+        },
+        {
+          "id": "zipper_hit_blue",
+          "count": 2
+        },
+        {
+          "id": "zipper_hit_red",
+          "count": 2
+        },
+        {
+          "id": "zipper_hit_yellow",
           "count": 2
         }
       ]
@@ -1182,77 +1389,94 @@
       "format": "silver_age",
       "style": "control",
       "source_url": "https://fabtcg.com/decklists/silver-age-chapter-1-bravo-flattering-showman/",
-      "cards": [
+      "cards": [],
+      "card_ids": [
         {
-          "name": "Boulder Drop",
-          "count": 4
-        },
-        {
-          "name": "Buckling Blow",
-          "count": 4
-        },
-        {
-          "name": "Cartilage Crush",
+          "id": "boulder_drop_blue",
           "count": 2
         },
         {
-          "name": "Chokeslam",
-          "count": 4
-        },
-        {
-          "name": "Crash and Bash",
+          "id": "boulder_drop_red",
           "count": 2
         },
         {
-          "name": "Debilitate",
-          "count": 4
-        },
-        {
-          "name": "Fault Line",
+          "id": "buckling_blow_blue",
           "count": 2
         },
         {
-          "name": "Pummel",
+          "id": "buckling_blow_red",
           "count": 2
         },
         {
-          "name": "Staunch Response",
+          "id": "cartilage_crush_red",
           "count": 2
         },
         {
-          "name": "Zealous Belting",
+          "id": "chokeslam_blue",
           "count": 2
         },
         {
-          "name": "Clash of Vigor",
+          "id": "chokeslam_red",
           "count": 2
         },
         {
-          "name": "Crush the Weak",
+          "id": "clash_of_vigor_blue",
           "count": 2
         },
         {
-          "name": "Disable",
+          "id": "crash_and_bash_red",
           "count": 2
         },
         {
-          "name": "Edge of Their Seats",
+          "id": "crush_the_weak_blue",
           "count": 2
         },
         {
-          "name": "Flatten the Field",
+          "id": "debilitate_blue",
           "count": 2
         },
         {
-          "name": "Macho Grande",
+          "id": "debilitate_red",
           "count": 2
         },
         {
-          "name": "The Suspense is Killing Me",
+          "id": "disable_blue",
           "count": 2
         },
         {
-          "name": "Thunder Quake",
+          "id": "edge_of_their_seats_blue",
+          "count": 2
+        },
+        {
+          "id": "fault_line_red",
+          "count": 2
+        },
+        {
+          "id": "flatten_the_field_blue",
+          "count": 2
+        },
+        {
+          "id": "macho_grande_blue",
+          "count": 2
+        },
+        {
+          "id": "pummel_red",
+          "count": 2
+        },
+        {
+          "id": "staunch_response_red",
+          "count": 2
+        },
+        {
+          "id": "the_suspense_is_killing_me_blue",
+          "count": 2
+        },
+        {
+          "id": "thunder_quake_blue",
+          "count": 2
+        },
+        {
+          "id": "zealous_belting_red",
           "count": 2
         }
       ]
@@ -1265,101 +1489,110 @@
       "format": "silver_age",
       "style": "control",
       "source_url": "https://fabtcg.com/decklists/silver-age-chapter-2-enigma/",
-      "cards": [
+      "cards": [],
+      "card_ids": [
         {
-          "name": "Astral Etchings",
-          "count": 2
-        },
-        {
-          "name": "Enigma Chimera",
-          "count": 4
-        },
-        {
-          "name": "Look Tuff",
-          "count": 2
-        },
-        {
-          "name": "Oasis Respite",
-          "count": 2
-        },
-        {
-          "name": "On the Horizon",
-          "count": 2
-        },
-        {
-          "name": "Spectral Manifestations",
-          "count": 2
-        },
-        {
-          "name": "Test of Strength",
-          "count": 2
-        },
-        {
-          "name": "Unmovable",
-          "count": 4
-        },
-        {
-          "name": "Waning Vengeance",
-          "count": 2
-        },
-        {
-          "name": "Waxing Specter",
-          "count": 2
-        },
-        {
-          "name": "Springboard Somersault",
-          "count": 2
-        },
-        {
-          "name": "A Drop in the Ocean",
+          "id": "a_drop_in_the_ocean_blue",
           "count": 1
         },
         {
-          "name": "Big Blue Sky",
+          "id": "astral_etchings_red",
           "count": 2
         },
         {
-          "name": "Fluid Motion",
+          "id": "big_blue_sky_blue",
           "count": 2
         },
         {
-          "name": "Homage to Ancestors",
+          "id": "enigma_chimera_red",
+          "count": 2
+        },
+        {
+          "id": "enigma_chimera_yellow",
+          "count": 2
+        },
+        {
+          "id": "fluid_motion_blue",
+          "count": 2
+        },
+        {
+          "id": "homage_to_ancestors_blue",
           "count": 1
         },
         {
-          "name": "Manifest Muscle",
+          "id": "look_tuff_red",
           "count": 2
         },
         {
-          "name": "Pass Over",
+          "id": "manifest_muscle_blue",
+          "count": 2
+        },
+        {
+          "id": "oasis_respite_red",
+          "count": 2
+        },
+        {
+          "id": "on_the_horizon_red",
+          "count": 2
+        },
+        {
+          "id": "pass_over_blue",
           "count": 1
         },
         {
-          "name": "Phantasmal Haze",
+          "id": "phantasmal_haze_blue",
           "count": 2
         },
         {
-          "name": "Preserve Tradition",
+          "id": "preserve_tradition_blue",
           "count": 1
         },
         {
-          "name": "Put in Context",
+          "id": "put_in_context_blue",
           "count": 2
         },
         {
-          "name": "Rising Sun, Setting Moon",
+          "id": "rising_sun_setting_moon_blue",
           "count": 1
         },
         {
-          "name": "Second Tenet of Chi: Wind",
+          "id": "second_tenet_of_chi_wind_blue",
           "count": 2
         },
         {
-          "name": "Spears of Surreality",
+          "id": "spears_of_surreality_blue",
           "count": 2
         },
         {
-          "name": "Spectral Rider",
+          "id": "spectral_manifestations_red",
+          "count": 2
+        },
+        {
+          "id": "spectral_rider_blue",
+          "count": 2
+        },
+        {
+          "id": "springboard_somersault_yellow",
+          "count": 2
+        },
+        {
+          "id": "test_of_strength_red",
+          "count": 2
+        },
+        {
+          "id": "unmovable_blue",
+          "count": 2
+        },
+        {
+          "id": "unmovable_red",
+          "count": 2
+        },
+        {
+          "id": "waning_vengeance_red",
+          "count": 2
+        },
+        {
+          "id": "waxing_specter_red",
           "count": 2
         }
       ]
@@ -1372,102 +1605,111 @@
       "format": "silver_age",
       "style": "aggro",
       "source_url": "https://fabtcg.com/decklists/silver-age-chapter-2-fai/",
-      "cards": [
+      "cards": [],
+      "card_ids": [
         {
-          "name": "Arcane Polarity",
+          "id": "arcane_polarity_red",
           "count": 1
         },
         {
-          "name": "Art of the Dragon: Fire",
+          "id": "art_of_the_dragon_fire_red",
           "count": 1
         },
         {
-          "name": "Blaze Headlong",
+          "id": "blaze_headlong_red",
           "count": 2
         },
         {
-          "name": "Brand with Cinderclaw",
-          "count": 6
-        },
-        {
-          "name": "Display Loyalty",
+          "id": "brand_with_cinderclaw_blue",
           "count": 2
         },
         {
-          "name": "Enflame the Firebrand",
+          "id": "brand_with_cinderclaw_red",
           "count": 2
         },
         {
-          "name": "Fire Tenet: Strike First",
+          "id": "brand_with_cinderclaw_yellow",
           "count": 2
         },
         {
-          "name": "Fire that Burns Within",
+          "id": "cinderskin_devotion_blue",
           "count": 2
         },
         {
-          "name": "Flamecall Awakening",
+          "id": "display_loyalty_red",
           "count": 2
         },
         {
-          "name": "Hot on Their Heels",
+          "id": "dragon_power_blue",
           "count": 2
         },
         {
-          "name": "Lava Burst",
-          "count": 2
-        },
-        {
-          "name": "Mounting Anger",
-          "count": 2
-        },
-        {
-          "name": "Phoenix Flame",
-          "count": 2
-        },
-        {
-          "name": "Rise from the Ashes",
-          "count": 2
-        },
-        {
-          "name": "Rising Resentment",
-          "count": 2
-        },
-        {
-          "name": "Ronin Renegade",
-          "count": 2
-        },
-        {
-          "name": "Scar for a Scar",
-          "count": 2
-        },
-        {
-          "name": "Snatch",
-          "count": 2
-        },
-        {
-          "name": "Wax On",
+          "id": "energy_potion_blue",
           "count": 1
         },
         {
-          "name": "Salt the Wound",
+          "id": "enflame_the_firebrand_red",
+          "count": 2
+        },
+        {
+          "id": "fire_tenet_strike_first_red",
+          "count": 2
+        },
+        {
+          "id": "fire_that_burns_within_red",
+          "count": 2
+        },
+        {
+          "id": "flamecall_awakening_red",
+          "count": 2
+        },
+        {
+          "id": "hot_on_their_heels_red",
+          "count": 2
+        },
+        {
+          "id": "lava_burst_red",
+          "count": 2
+        },
+        {
+          "id": "mounting_anger_red",
+          "count": 2
+        },
+        {
+          "id": "nip_at_the_heels_blue",
+          "count": 2
+        },
+        {
+          "id": "phoenix_flame_red",
+          "count": 2
+        },
+        {
+          "id": "rise_from_the_ashes_red",
+          "count": 2
+        },
+        {
+          "id": "rising_resentment_red",
+          "count": 2
+        },
+        {
+          "id": "ronin_renegade_red",
+          "count": 2
+        },
+        {
+          "id": "salt_the_wound_yellow",
           "count": 1
         },
         {
-          "name": "Cinderskin Devotion",
+          "id": "scar_for_a_scar_red",
           "count": 2
         },
         {
-          "name": "Dragon Power",
+          "id": "snatch_red",
           "count": 2
         },
         {
-          "name": "Energy Potion",
+          "id": "wax_on_red",
           "count": 1
-        },
-        {
-          "name": "Nip at the Heels",
-          "count": 2
         }
       ]
     },
@@ -1479,85 +1721,106 @@
       "format": "silver_age",
       "style": "aggro",
       "source_url": "https://fabtcg.com/decklists/silver-age-chapter-2-dorinthea/",
-      "cards": [
+      "cards": [],
+      "card_ids": [
         {
-          "name": "Agile Engagement",
+          "id": "agile_engagement_red",
           "count": 2
         },
         {
-          "name": "Ironsong Response",
-          "count": 4
-        },
-        {
-          "name": "Lead with Speed",
-          "count": 2
-        },
-        {
-          "name": "Oasis Respite",
-          "count": 2
-        },
-        {
-          "name": "Out for Blood",
-          "count": 2
-        },
-        {
-          "name": "Overpower",
-          "count": 4
-        },
-        {
-          "name": "Puncture",
-          "count": 3
-        },
-        {
-          "name": "Scar for a Scar",
-          "count": 2
-        },
-        {
-          "name": "Sharpen Steel",
-          "count": 2
-        },
-        {
-          "name": "Stroke of Foresight",
-          "count": 2
-        },
-        {
-          "name": "Warrior's Valor",
-          "count": 6
-        },
-        {
-          "name": "Wreck Havoc",
-          "count": 2
-        },
-        {
-          "name": "Run Through",
+          "id": "energy_potion_blue",
           "count": 1
         },
         {
-          "name": "Springboard Somersault",
+          "id": "goblet_of_bloodrun_wine_blue",
           "count": 2
         },
         {
-          "name": "Energy Potion",
+          "id": "hit_and_run_blue",
+          "count": 2
+        },
+        {
+          "id": "ironsong_response_blue",
+          "count": 2
+        },
+        {
+          "id": "ironsong_response_red",
+          "count": 2
+        },
+        {
+          "id": "lead_with_speed_red",
+          "count": 2
+        },
+        {
+          "id": "nip_at_the_heels_blue",
+          "count": 2
+        },
+        {
+          "id": "oasis_respite_red",
+          "count": 2
+        },
+        {
+          "id": "out_for_blood_red",
+          "count": 2
+        },
+        {
+          "id": "overpower_blue",
+          "count": 2
+        },
+        {
+          "id": "overpower_red",
+          "count": 2
+        },
+        {
+          "id": "puncture_blue",
           "count": 1
         },
         {
-          "name": "Goblet of Bloodrun Wine",
+          "id": "puncture_red",
           "count": 2
         },
         {
-          "name": "Hit and Run",
+          "id": "put_in_context_blue",
           "count": 2
         },
         {
-          "name": "Nip at the Heels",
+          "id": "run_through_yellow",
+          "count": 1
+        },
+        {
+          "id": "scar_for_a_scar_red",
           "count": 2
         },
         {
-          "name": "Put in Context",
+          "id": "sharpen_steel_red",
           "count": 2
         },
         {
-          "name": "Trot Along",
+          "id": "springboard_somersault_yellow",
+          "count": 2
+        },
+        {
+          "id": "stroke_of_foresight_red",
+          "count": 2
+        },
+        {
+          "id": "trot_along_blue",
+          "count": 2
+        },
+        {
+          "id": "warriors_valor_blue",
+          "count": 2
+        },
+        {
+          "id": "warriors_valor_red",
+          "count": 2
+        },
+        {
+          "id": "warriors_valor_yellow",
+          "count": 2
+        },
+        {
+          "id": "wreck_havoc_red",
           "count": 2
         }
       ]
@@ -1570,93 +1833,86 @@
       "format": "silver_age",
       "style": "control",
       "source_url": "https://fabtcg.com/decklists/silver-age-chapter-2-arakni-web-of-deceit/",
-      "cards": [
+      "cards": [],
+      "card_ids": [
         {
-          "name": "Art of Desire: Body",
+          "id": "art_of_desire_body_red",
           "count": 2
         },
         {
-          "name": "Concoct Disorder",
+          "id": "art_of_desire_mind_blue",
           "count": 2
         },
         {
-          "name": "Den of the Spider",
+          "id": "den_of_the_spider_red",
           "count": 2
         },
         {
-          "name": "Frailty Trap",
+          "id": "frailty_trap_red",
           "count": 2
         },
         {
-          "name": "Hyper Inflation",
+          "id": "inertia_trap_red",
           "count": 2
         },
         {
-          "name": "Inertia Trap",
+          "id": "infect_red",
           "count": 2
         },
         {
-          "name": "Infect",
+          "id": "lair_of_the_spider_red",
           "count": 2
         },
         {
-          "name": "Lair of the Spider",
+          "id": "mark_of_the_black_widow_red",
           "count": 2
         },
         {
-          "name": "Mark of the Black Widow",
-          "count": 4
-        },
-        {
-          "name": "Mark of the Funnel Web",
+          "id": "mark_of_the_funnel_web_red",
           "count": 2
         },
         {
-          "name": "Mark the Prey",
+          "id": "mark_the_prey_red",
           "count": 2
         },
         {
-          "name": "Orb-Weaver Spinneret",
+          "id": "nights_embrace_blue",
           "count": 2
         },
         {
-          "name": "Pick Up the Point",
+          "id": "orb_weaver_spinneret_red",
           "count": 2
         },
         {
-          "name": "Scar Tissue",
+          "id": "pick_up_the_point_red",
           "count": 2
         },
         {
-          "name": "Spike with Bloodrot",
+          "id": "reapers_call_red",
           "count": 2
         },
         {
-          "name": "Stains of the Redback",
+          "id": "scar_tissue_red",
           "count": 2
         },
         {
-          "name": "Two Sides to the Blade",
+          "id": "shred_red",
           "count": 2
         },
         {
-          "name": "Up Sticks and Run",
+          "id": "spike_with_bloodrot_red",
           "count": 2
         },
         {
-          "name": "Art of Desire: Mind",
+          "id": "stains_of_the_redback_red",
           "count": 2
         },
         {
-          "name": "Night's Embrace",
+          "id": "two_sides_to_the_blade_red",
           "count": 2
         },
         {
-          "name": "Reaper's Call",
-          "count": 2
-        },
-        {
-          "name": "Shred",
+          "id": "up_sticks_and_run_red",
           "count": 2
         }
       ]
@@ -1669,97 +1925,102 @@
       "format": "silver_age",
       "style": "aggro",
       "source_url": "https://fabtcg.com/decklists/silver-age-chapter-2-azalea/",
-      "cards": [
+      "cards": [],
+      "card_ids": [
         {
-          "name": "Bolt'n' Shot",
+          "id": "boltn_shot_red",
           "count": 2
         },
         {
-          "name": "Call in the Big Guns",
+          "id": "call_in_the_big_guns_red",
           "count": 2
         },
         {
-          "name": "Drill Shot",
+          "id": "drill_shot_red",
           "count": 2
         },
         {
-          "name": "Drop the Anchor",
+          "id": "drop_the_anchor_red",
           "count": 2
         },
         {
-          "name": "Dry Powder Shot",
+          "id": "dry_powder_shot_red",
           "count": 2
         },
         {
-          "name": "Entangling Shot",
+          "id": "entangling_shot_red",
           "count": 2
         },
         {
-          "name": "Infecting Shot",
-          "count": 4
-        },
-        {
-          "name": "Lace with Bloodrot",
+          "id": "infecting_shot_red",
           "count": 2
         },
         {
-          "name": "Lace with Frailty",
+          "id": "infecting_shot_yellow",
           "count": 2
         },
         {
-          "name": "Lace with Inertia",
+          "id": "lace_with_bloodrot_red",
           "count": 2
         },
         {
-          "name": "Murkmire Grapnel",
+          "id": "lace_with_frailty_red",
           "count": 2
         },
         {
-          "name": "Nimblism",
+          "id": "lace_with_inertia_red",
           "count": 2
         },
         {
-          "name": "Ravenous Rabble",
-          "count": 2
-        },
-        {
-          "name": "Read the Glide Path",
-          "count": 2
-        },
-        {
-          "name": "Release the Tension",
-          "count": 2
-        },
-        {
-          "name": "Ridge Rider Shot",
-          "count": 2
-        },
-        {
-          "name": "Scout the Periphery",
-          "count": 2
-        },
-        {
-          "name": "Searing Shot",
-          "count": 2
-        },
-        {
-          "name": "Swift Shot",
-          "count": 2
-        },
-        {
-          "name": "Take Aim",
-          "count": 2
-        },
-        {
-          "name": "Memorial Ground",
+          "id": "memorial_ground_yellow",
           "count": 1
         },
         {
-          "name": "Spire Sniping",
+          "id": "murkmire_grapnel_red",
           "count": 2
         },
         {
-          "name": "Widowmaker",
+          "id": "nimblism_red",
+          "count": 2
+        },
+        {
+          "id": "ravenous_rabble_red",
+          "count": 2
+        },
+        {
+          "id": "read_the_glide_path_red",
+          "count": 2
+        },
+        {
+          "id": "release_the_tension_red",
+          "count": 2
+        },
+        {
+          "id": "ridge_rider_shot_red",
+          "count": 2
+        },
+        {
+          "id": "scout_the_periphery_red",
+          "count": 2
+        },
+        {
+          "id": "searing_shot_red",
+          "count": 2
+        },
+        {
+          "id": "spire_sniping_yellow",
+          "count": 2
+        },
+        {
+          "id": "swift_shot_red",
+          "count": 2
+        },
+        {
+          "id": "take_aim_red",
+          "count": 2
+        },
+        {
+          "id": "widowmaker_yellow",
           "count": 2
         }
       ]
@@ -1772,89 +2033,106 @@
       "format": "silver_age",
       "style": "balanced",
       "source_url": "https://fabtcg.com/decklists/silver-age-chapter-3-gravy-bones/",
-      "cards": [
+      "cards": [],
+      "card_ids": [
         {
-          "name": "Battalion Barque",
+          "id": "avast_ye_blue",
           "count": 2
         },
         {
-          "name": "Golden Tipple",
-          "count": 6
-        },
-        {
-          "name": "Saltwater Swell",
-          "count": 4
-        },
-        {
-          "name": "Swiftwater Sloop",
-          "count": 4
-        },
-        {
-          "name": "Barnacle",
-          "count": 2
-        },
-        {
-          "name": "Cutty Shark, Quick Clip",
-          "count": 2
-        },
-        {
-          "name": "Limpit, Hop-a-long",
-          "count": 2
-        },
-        {
-          "name": "Oysten, Heart of Gold",
-          "count": 2
-        },
-        {
-          "name": "Riggermortis",
-          "count": 2
-        },
-        {
-          "name": "Swabbie",
-          "count": 2
-        },
-        {
-          "name": "Avast Ye!",
-          "count": 2
-        },
-        {
-          "name": "Back Alley Breakline",
+          "id": "back_alley_breakline_blue",
           "count": 1
         },
         {
-          "name": "Flying High",
+          "id": "barnacle_yellow",
           "count": 2
         },
         {
-          "name": "Jittery Bones",
+          "id": "battalion_barque_red",
           "count": 2
         },
         {
-          "name": "Loot the Arsenal",
+          "id": "cutty_shark_quick_clip_yellow",
           "count": 2
         },
         {
-          "name": "Loot the Hold",
+          "id": "flying_high_blue",
           "count": 2
         },
         {
-          "name": "Murderous Rabble",
+          "id": "golden_tipple_blue",
           "count": 2
         },
         {
-          "name": "Portside Exchange",
+          "id": "golden_tipple_red",
           "count": 2
         },
         {
-          "name": "Throw Caution to the Wind",
+          "id": "golden_tipple_yellow",
           "count": 2
         },
         {
-          "name": "Timesnap Potion",
+          "id": "jittery_bones_blue",
+          "count": 2
+        },
+        {
+          "id": "limpit_hop_a_long_yellow",
+          "count": 2
+        },
+        {
+          "id": "loot_the_arsenal_blue",
+          "count": 2
+        },
+        {
+          "id": "loot_the_hold_blue",
+          "count": 2
+        },
+        {
+          "id": "murderous_rabble_blue",
+          "count": 2
+        },
+        {
+          "id": "oysten_heart_of_gold_yellow",
+          "count": 2
+        },
+        {
+          "id": "portside_exchange_blue",
+          "count": 2
+        },
+        {
+          "id": "riggermortis_yellow",
+          "count": 2
+        },
+        {
+          "id": "saltwater_swell_blue",
+          "count": 2
+        },
+        {
+          "id": "saltwater_swell_red",
+          "count": 2
+        },
+        {
+          "id": "swabbie_yellow",
+          "count": 2
+        },
+        {
+          "id": "swiftwater_sloop_blue",
+          "count": 2
+        },
+        {
+          "id": "swiftwater_sloop_red",
+          "count": 2
+        },
+        {
+          "id": "throw_caution_to_the_wind_blue",
+          "count": 2
+        },
+        {
+          "id": "timesnap_potion_blue",
           "count": 1
         },
         {
-          "name": "Yo Ho Ho!",
+          "id": "yo_ho_ho_blue",
           "count": 1
         }
       ]
@@ -1867,93 +2145,98 @@
       "format": "silver_age",
       "style": "aggro",
       "source_url": "https://fabtcg.com/decklists/silver-age-chapter-3-briar/",
-      "cards": [
+      "cards": [],
+      "card_ids": [
         {
-          "name": "Arcane Polarity",
+          "id": "arcane_polarity_red",
           "count": 2
         },
         {
-          "name": "Arcane Seeds // Life",
+          "id": "arcane_seeds__life_red",
           "count": 2
         },
         {
-          "name": "Arcanic Shockwave",
+          "id": "arcanic_shockwave_red",
           "count": 2
         },
         {
-          "name": "Burn Up // Shock",
+          "id": "burn_up__shock_red",
           "count": 2
         },
         {
-          "name": "Cloud Cover",
+          "id": "cloud_cover_red",
           "count": 2
         },
         {
-          "name": "Entwine Lightning",
+          "id": "entwine_lightning_red",
           "count": 2
         },
         {
-          "name": "Fry",
+          "id": "fry_red",
           "count": 2
         },
         {
-          "name": "Jack Be Quick",
+          "id": "jack_be_quick_red",
           "count": 2
         },
         {
-          "name": "Lightning Press",
+          "id": "lightning_press_red",
           "count": 2
         },
         {
-          "name": "Lightning Surge",
+          "id": "lightning_surge_red",
           "count": 2
         },
         {
-          "name": "Nimblism",
-          "count": 4
-        },
-        {
-          "name": "Path of Same Ends",
+          "id": "nimblism_red",
           "count": 2
         },
         {
-          "name": "Ravenous Rabble",
+          "id": "nimblism_yellow",
           "count": 2
         },
         {
-          "name": "Rush of Power",
+          "id": "path_of_same_ends_red",
           "count": 2
         },
         {
-          "name": "Scar for a Scar",
+          "id": "ravenous_rabble_red",
           "count": 2
         },
         {
-          "name": "Second Strike",
+          "id": "rush_of_power_red",
           "count": 2
         },
         {
-          "name": "Sigil of Suffering",
+          "id": "scar_for_a_scar_red",
           "count": 2
         },
         {
-          "name": "Sizzle",
+          "id": "second_strike_red",
           "count": 2
         },
         {
-          "name": "Snatch",
+          "id": "sigil_of_suffering_red",
           "count": 2
         },
         {
-          "name": "Sprout Strength",
+          "id": "sizzle_red",
           "count": 2
         },
         {
-          "name": "Static Shock",
+          "id": "snatch_red",
           "count": 2
         },
         {
-          "name": "Weave Lightning",
+          "id": "sprout_strength_red",
+          "count": 2
+        },
+        {
+          "id": "static_shock_red",
+          "count": 2
+        },
+        {
+          "id": "weave_lightning_red",
           "count": 2
         }
       ]
@@ -1966,73 +2249,98 @@
       "format": "silver_age",
       "style": "aggro",
       "source_url": "https://fabtcg.com/decklists/silver-age-chapter-3-boltyn/",
-      "cards": [
+      "cards": [],
+      "card_ids": [
         {
-          "name": "Beaming Bravado",
-          "count": 4
-        },
-        {
-          "name": "Bolt of Courage",
-          "count": 4
-        },
-        {
-          "name": "Courageous Steelhand",
+          "id": "banneret_of_salvation_yellow",
           "count": 2
         },
         {
-          "name": "Duty Bound Blitz",
-          "count": 4
-        },
-        {
-          "name": "Edict of Steel",
+          "id": "beaming_bravado_red",
           "count": 2
         },
         {
-          "name": "Engulfing Light",
-          "count": 4
-        },
-        {
-          "name": "Glisten",
+          "id": "beaming_bravado_yellow",
           "count": 2
         },
         {
-          "name": "Illuminate",
+          "id": "bolt_of_courage_red",
           "count": 2
         },
         {
-          "name": "Light the Way",
-          "count": 4
-        },
-        {
-          "name": "Snatch",
+          "id": "bolt_of_courage_yellow",
           "count": 2
         },
         {
-          "name": "Take Flight",
-          "count": 4
-        },
-        {
-          "name": "Toe the Line",
+          "id": "courageous_steelhand_red",
           "count": 2
         },
         {
-          "name": "Banneret of Salvation",
+          "id": "duty_bound_blitz_red",
           "count": 2
         },
         {
-          "name": "Roaring Beam",
+          "id": "duty_bound_blitz_yellow",
           "count": 2
         },
         {
-          "name": "Springboard Somersault",
+          "id": "edict_of_steel_red",
           "count": 2
         },
         {
-          "name": "Valiant Thrust",
+          "id": "engulfing_light_red",
           "count": 2
         },
         {
-          "name": "V of the Vanguard",
+          "id": "engulfing_light_yellow",
+          "count": 2
+        },
+        {
+          "id": "glisten_red",
+          "count": 2
+        },
+        {
+          "id": "illuminate_red",
+          "count": 2
+        },
+        {
+          "id": "light_the_way_red",
+          "count": 2
+        },
+        {
+          "id": "light_the_way_yellow",
+          "count": 2
+        },
+        {
+          "id": "roaring_beam_yellow",
+          "count": 2
+        },
+        {
+          "id": "snatch_red",
+          "count": 2
+        },
+        {
+          "id": "springboard_somersault_yellow",
+          "count": 2
+        },
+        {
+          "id": "take_flight_red",
+          "count": 2
+        },
+        {
+          "id": "take_flight_yellow",
+          "count": 2
+        },
+        {
+          "id": "toe_the_line_red",
+          "count": 2
+        },
+        {
+          "id": "v_of_the_vanguard_yellow",
+          "count": 2
+        },
+        {
+          "id": "valiant_thrust_yellow",
           "count": 2
         }
       ]
@@ -2045,85 +2353,98 @@
       "format": "silver_age",
       "style": "midrange",
       "source_url": "https://fabtcg.com/decklists/silver-age-chapter-3-lyath-goldmane/",
-      "cards": [
+      "cards": [],
+      "card_ids": [
         {
-          "name": "Act of Glory",
+          "id": "act_of_glory_red",
           "count": 2
         },
         {
-          "name": "Drag Down",
+          "id": "booze_blue",
           "count": 2
         },
         {
-          "name": "Edge of Their Seats",
-          "count": 4
-        },
-        {
-          "name": "Mocking Blow",
-          "count": 6
-        },
-        {
-          "name": "Oasis Respite",
+          "id": "brothers_in_arms_blue",
           "count": 2
         },
         {
-          "name": "Prime the Crowd",
+          "id": "concealed_object_blue",
           "count": 2
         },
         {
-          "name": "Sadistic Scowl",
+          "id": "drag_down_red",
           "count": 2
         },
         {
-          "name": "Tension in the Air",
+          "id": "edge_of_their_seats_blue",
           "count": 2
         },
         {
-          "name": "Villainous Pose",
+          "id": "edge_of_their_seats_red",
           "count": 2
         },
         {
-          "name": "Short Shrift",
+          "id": "full_of_bravado_blue",
           "count": 2
         },
         {
-          "name": "Walk in My Shoes",
+          "id": "goon_beatdown_blue",
           "count": 2
         },
         {
-          "name": "Wee Wrecking Ball",
+          "id": "goon_tactics_blue",
           "count": 2
         },
         {
-          "name": "Booze!",
+          "id": "mocking_blow_blue",
           "count": 2
         },
         {
-          "name": "Brothers in Arms",
+          "id": "mocking_blow_red",
           "count": 2
         },
         {
-          "name": "Concealed Object",
+          "id": "mocking_blow_yellow",
           "count": 2
         },
         {
-          "name": "Full of Bravado",
+          "id": "oasis_respite_red",
           "count": 2
         },
         {
-          "name": "Goon Beatdown",
+          "id": "power_play_blue",
           "count": 2
         },
         {
-          "name": "Goon Tactics",
+          "id": "prime_the_crowd_red",
           "count": 2
         },
         {
-          "name": "Power Play",
+          "id": "sadistic_scowl_red",
           "count": 2
         },
         {
-          "name": "The Suspense is Killing Me",
+          "id": "short_shrift_yellow",
+          "count": 2
+        },
+        {
+          "id": "tension_in_the_air_red",
+          "count": 2
+        },
+        {
+          "id": "the_suspense_is_killing_me_blue",
+          "count": 2
+        },
+        {
+          "id": "villainous_pose_red",
+          "count": 2
+        },
+        {
+          "id": "walk_in_my_shoes_yellow",
+          "count": 2
+        },
+        {
+          "id": "wee_wrecking_ball_yellow",
           "count": 2
         }
       ]
@@ -2136,69 +2457,102 @@
       "format": "silver_age",
       "style": "control",
       "source_url": "https://fabtcg.com/decklists/silver-age-chapter-3-blaze/",
-      "cards": [
+      "cards": [],
+      "card_ids": [
         {
-          "name": "Absorb in Aether",
+          "id": "absorb_in_aether_red",
           "count": 2
         },
         {
-          "name": "Aether Spindle",
-          "count": 4
-        },
-        {
-          "name": "Arcane Polarity",
+          "id": "aether_quickening_blue",
           "count": 2
         },
         {
-          "name": "Cindering Foresight",
-          "count": 6
-        },
-        {
-          "name": "Emeritus Scolding",
-          "count": 6
-        },
-        {
-          "name": "Fyendal's Fighting Spirit",
+          "id": "aether_spindle_blue",
           "count": 2
         },
         {
-          "name": "Look Tuff",
+          "id": "aether_spindle_red",
           "count": 2
         },
         {
-          "name": "Snapback",
+          "id": "arcane_polarity_red",
           "count": 2
         },
         {
-          "name": "Turn to Mindfire",
+          "id": "arcane_twining_blue",
           "count": 2
         },
         {
-          "name": "Voltic Bolt",
-          "count": 4
-        },
-        {
-          "name": "Whisper of the Oracle",
-          "count": 6
-        },
-        {
-          "name": "Wounded Bull",
+          "id": "cindering_foresight_blue",
           "count": 2
         },
         {
-          "name": "Aether Quickening",
+          "id": "cindering_foresight_red",
           "count": 2
         },
         {
-          "name": "Arcane Twining",
+          "id": "cindering_foresight_yellow",
           "count": 2
         },
         {
-          "name": "Open the Flood Gates",
+          "id": "emeritus_scolding_blue",
           "count": 2
         },
         {
-          "name": "Photon Splicing",
+          "id": "emeritus_scolding_red",
+          "count": 2
+        },
+        {
+          "id": "emeritus_scolding_yellow",
+          "count": 2
+        },
+        {
+          "id": "fyendals_fighting_spirit_red",
+          "count": 2
+        },
+        {
+          "id": "look_tuff_red",
+          "count": 2
+        },
+        {
+          "id": "open_the_flood_gates_blue",
+          "count": 2
+        },
+        {
+          "id": "photon_splicing_blue",
+          "count": 2
+        },
+        {
+          "id": "snapback_red",
+          "count": 2
+        },
+        {
+          "id": "turn_to_mindfire_red",
+          "count": 2
+        },
+        {
+          "id": "voltic_bolt_blue",
+          "count": 2
+        },
+        {
+          "id": "voltic_bolt_red",
+          "count": 2
+        },
+        {
+          "id": "whisper_of_the_oracle_blue",
+          "count": 2
+        },
+        {
+          "id": "whisper_of_the_oracle_red",
+          "count": 2
+        },
+        {
+          "id": "whisper_of_the_oracle_yellow",
+          "count": 2
+        },
+        {
+          "id": "wounded_bull_red",
           "count": 2
         }
       ]
@@ -2400,6 +2754,7 @@
       "format": "silver_age",
       "style": "aggro",
       "source_url": "https://fabrary.net/decks/01KVY39BSCSNC9A0ZAGMQBCW6N",
+      "equipment_header": "oscilio volzar_meteor_storm voltic_vanguard spellfire_cloak constella_waves twinkle_toes",
       "card_ids": [
         {
           "id": "comet_collision_red",

@@ -113,23 +113,58 @@ class TalisharFastClient:
         allow_empty_body: bool = False,
     ) -> dict[str, Any]:
         url = self.base_url + path
-        resp = self.session.get(url, params=params, timeout=self.request_timeout)
-        body_text = resp.text
-        if allow_empty_body and body_text.strip() == "":
-            return {}
-        return _parse_json_body(body_text, allow_empty=allow_empty_body)
+        try:
+            resp = self.session.get(url, params=params, timeout=self.request_timeout)
+            body_text = resp.text
+            if allow_empty_body and body_text.strip() == "":
+                return {}
+            return _parse_json_body(body_text, allow_empty=allow_empty_body)
+        except Exception as exc:
+            self._log_client_error(path, exc)
+            raise
 
     def http_post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         url = self.base_url + path
-        resp = self.session.post(
-            url,
-            json=payload,
-            timeout=self.request_timeout,
-        )
-        return _parse_json_body(resp.text)
+        try:
+            resp = self.session.post(
+                url,
+                json=payload,
+                timeout=self.request_timeout,
+            )
+            return _parse_json_body(resp.text)
+        except Exception as exc:
+            self._log_client_error(path, exc, payload=payload)
+            raise
 
     def post_rlstep(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self.http_post_json(self.RLSTEP_PATH, payload)
+
+    def _log_client_error(
+        self,
+        path: str,
+        exc: BaseException,
+        *,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        try:
+            from fab_bridge.unified_training_debug import (  # noqa: PLC0415
+                is_enabled,
+                log_exception,
+                shard_label,
+            )
+
+            if not is_enabled():
+                return
+            details: dict[str, Any] = {
+                "base_url": self.base_url,
+                "shard": shard_label(self.base_url),
+                "path": path,
+            }
+            if payload is not None:
+                details["payload_keys"] = sorted(payload.keys())
+            log_exception("connection", f"Talishar fast client failed: {path}", exc, **details)
+        except Exception:
+            return
 
     def fetch_both_player_states(
         self,

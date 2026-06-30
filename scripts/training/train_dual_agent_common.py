@@ -967,6 +967,26 @@ def _safe_parallel_fast_episode_batch(
             f"retrying {batch_size} episode(s) individually",
             flush=True,
         )
+        try:
+            from fab_bridge.unified_training_debug import (  # noqa: PLC0415
+                log_exception as unified_debug_exception,
+                shard_label,
+            )
+
+            shards = [
+                shard_label(getattr(env, "_base_url", "") or "")
+                for env in envs[:batch_size]
+            ]
+            unified_debug_exception(
+                "episode_batch_failed",
+                "Fast rollout batch failed",
+                exc,
+                batch_size=batch_size,
+                shards=shards,
+                episode_indices=episode_indices[:batch_size],
+            )
+        except Exception:
+            pass
 
     results: list[dict[str, Any]] = []
     for worker in range(batch_size):
@@ -987,6 +1007,23 @@ def _safe_parallel_fast_episode_batch(
             results.append(one[0])
         except Exception as exc:
             print(f"  [parallel] episode failed ({exc!r}) — skipping", flush=True)
+            try:
+                from fab_bridge.unified_training_debug import (  # noqa: PLC0415
+                    log_exception as unified_debug_exception,
+                    shard_label,
+                )
+
+                env = envs[worker]
+                unified_debug_exception(
+                    "episode_failed",
+                    "Fast episode failed after batch retry",
+                    exc,
+                    worker=worker,
+                    shard=shard_label(getattr(env, "_base_url", "") or ""),
+                    episode_index=episode_indices[worker],
+                )
+            except Exception:
+                pass
             results.append(_skipped_fast_episode_result(warmup=warmup))
     return results
 
@@ -1659,7 +1696,67 @@ def _flush_unified_merged_transitions(
 ) -> None:
     if merged_trans:
         buf = _transitions_to_buf(merged_trans)
-        _ppo_update(policy, buf, merged_trans[-1]["next_obs_vec"])
+        _ppo_update_unified(policy, buf, merged_trans[-1]["next_obs_vec"])
+
+
+@dataclass
+class _UnifiedWeightReporter:
+    run_dir: Path
+    update_count: int = 0
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+
+_unified_weight_reporter: Optional[_UnifiedWeightReporter] = None
+
+
+def _set_unified_weight_reporter(run_dir: Optional[Path]) -> None:
+    global _unified_weight_reporter
+    if run_dir is None:
+        _unified_weight_reporter = None
+        return
+    _unified_weight_reporter = _UnifiedWeightReporter(run_dir=run_dir.expanduser().resolve())
+
+
+def _maybe_record_unified_policy_weights(policy: PPOAgent) -> None:
+    reporter = _unified_weight_reporter
+    if reporter is None:
+        return
+    from fab_bridge.policy_weights import summarize_policy_weights  # noqa: PLC0415
+    from fab_bridge.unified_dashboard import (  # noqa: PLC0415
+        maybe_refresh_unified_dashboard,
+        record_policy_weight_update,
+    )
+
+    with reporter._lock:
+        reporter.update_count += 1
+        summary = summarize_policy_weights(policy)
+        summary["update_count"] = reporter.update_count
+        record_policy_weight_update(reporter.run_dir, summary)
+    maybe_refresh_unified_dashboard(reporter.run_dir)
+
+
+def _ppo_update_unified(
+    policy: PPOAgent,
+    buf: dict[str, Any],
+    next_obs_vec: np.ndarray,
+) -> None:
+    _ppo_update(policy, buf, next_obs_vec)
+    _maybe_record_unified_policy_weights(policy)
+
+
+def _record_initial_unified_policy_weights(policy: PPOAgent, run_dir: Path) -> None:
+    from fab_bridge.policy_weights import summarize_policy_weights  # noqa: PLC0415
+    from fab_bridge.unified_dashboard import record_policy_weight_update  # noqa: PLC0415
+
+    reporter = _unified_weight_reporter
+    if reporter is not None:
+        with reporter._lock:
+            if reporter.update_count > 0:
+                return
+    summary = summarize_policy_weights(policy)
+    summary["update_count"] = 0
+    summary["phase"] = "bootstrap"
+    record_policy_weight_update(run_dir.expanduser().resolve(), summary)
 
 
 def _flush_unified_warmup_buffers(
@@ -2404,6 +2501,22 @@ def train_agents_from_both_perspectives_parallel(
                     max_turns=max_steps,
                 )
             )
+            try:
+                from fab_bridge.unified_training_debug import (  # noqa: PLC0415
+                    log_event as unified_debug_event,
+                    shard_label,
+                )
+
+                unified_debug_event(
+                    "connection",
+                    "Training worker bound to shard",
+                    matchup=matchup.name,
+                    worker=w,
+                    shard=shard_label(worker_url),
+                    base_url=worker_url,
+                )
+            except Exception:
+                pass
             swap_envs.append(
                 make_env(
                     swap_matchup,
@@ -2569,6 +2682,23 @@ def train_agents_from_both_perspectives_parallel(
                             break
                         except Exception as exc:
                             print(f"  [parallel] episode failed ({exc!r}) — skipping")
+                            try:
+                                from fab_bridge.unified_training_debug import (  # noqa: PLC0415
+                                    log_exception as unified_debug_exception,
+                                    shard_label,
+                                )
+
+                                unified_debug_exception(
+                                    "episode_failed",
+                                    "Threaded episode failed",
+                                    exc,
+                                    worker=w,
+                                    shard=shard_label(worker_base_urls[w]),
+                                    matchup=matchup.name,
+                                    episode_index=completed + w,
+                                )
+                            except Exception:
+                                pass
                             skipped_episodes += 1
                             p1_ep_rewards.append(0.0)
                             p2_ep_rewards.append(0.0)
@@ -3112,7 +3242,7 @@ def train_agents_from_both_perspectives(
         if not in_warmup:
             if _uses_unified_policy(p1_tiers, p2_tiers):
                 if len(unified_buf["obs"]) >= DEFAULT_PPO_ROLLOUT_BATCH:
-                    _ppo_update(p1_tiers[0], unified_buf, next_obs_vec)
+                    _ppo_update_unified(p1_tiers[0], unified_buf, next_obs_vec)
                     unified_buf.clear()
                     unified_buf.update(_empty_buf())
             else:
@@ -3125,7 +3255,7 @@ def train_agents_from_both_perspectives(
     if _uses_unified_policy(p1_tiers, p2_tiers):
         if len(unified_buf["obs"]) > 0:
             next_vec = p1_tiers[0]._obs_to_vec(obs)
-            _ppo_update(p1_tiers[0], unified_buf, next_vec)
+            _ppo_update_unified(p1_tiers[0], unified_buf, next_vec)
     else:
         for tiers, buf_ref in [(p1_tiers, p1_buf), (p2_tiers, p2_buf)]:
             if len(buf_ref["obs"]) > 0:
@@ -3561,7 +3691,7 @@ class _CheckpointEvalTracker:
                     episodes=self.checkpoint_eval_episodes,
                     seed=(self.seed + 100_000) if self.seed is not None else None,
                     backend=DEFAULT_TALISHAR_BACKEND,
-                    eval_label="Checkpoint eval logic vs logic",
+                    eval_label="Checkpoint eval logic win% vs logic",
                     live_progress_path=live_progress_path,
                 )
                 self._save_logic_vs_logic_baseline(logic_vs_logic)
@@ -3626,7 +3756,7 @@ class _CheckpointEvalTracker:
         if logic_vs_logic is not None:
             logic_p1_wr = float(logic_vs_logic.get("p1_win_rate", 0.0) or 0.0)
             print(
-                f"  Checkpoint eval logic vs logic (matchup baseline): "
+                f"  Checkpoint eval logic win% vs logic (matchup baseline): "
                 f"P1 win%={logic_p1_wr:.1%} "
                 f"({self.checkpoint_eval_episodes} games)"
             )
@@ -4172,6 +4302,8 @@ def train_matchup(
         "  Unified self-play: one shared policy controls both seats; "
         "PPO updates merge P1+P2 transitions"
     )
+    if _unified_matchups_total is not None and is_unified_random_matchup_run(out_dir):
+        _record_initial_unified_policy_weights(unified_policy, out_dir)
 
     use_fast_parallel = _env_supports_fast_training(probe_env)
     rollout_workers = max(1, int(n_workers))
@@ -4256,7 +4388,7 @@ def train_matchup(
         print(
             f"  Checkpoint eval: every {effective_ckpt_interval} episode(s), "
             f"{checkpoint_eval_episodes} eval game(s) per checkpoint "
-            f"(self-play + vs logic on P1/P2 seats; logic vs logic once per matchup)"
+            f"(self-play + vs logic on P1/P2 seats; logic win% vs logic once per matchup)"
         )
         _write_unified_checkpoint_eval_scope(out_dir, matchup)
 
@@ -4653,11 +4785,24 @@ def run_matchup_training(
     rollout_mode: Optional[str] = None,
     rollout_processes: Optional[int] = None,
     backend_pool: TalisharBackendPool | None = None,
+    safe_parallel: bool = False,
+    debug_training: bool = False,
 ) -> tuple[list[dict], list[str]]:
     from agent_cache import AgentCacheStore
+    from fab_bridge.unified_training_debug import (  # noqa: PLC0415
+        audit_matchup_decks,
+        configure as configure_unified_debug,
+        is_enabled as unified_debug_enabled,
+        log_event as unified_debug_event,
+        log_exception as unified_debug_exception,
+        log_shard_pool,
+        shard_label,
+    )
     from unified_parallel_training import (
         UnifiedSharedExperienceBuffer,
+        concurrent_training_game_slots,
         persist_batch_to_cache,
+        resolve_safe_parallel_limits,
         run_parallel_matchup_batch,
         workers_per_parallel_matchup,
     )
@@ -4672,9 +4817,13 @@ def run_matchup_training(
     summary: list[dict] = []
     failed: list[str] = []
     unified_run = is_unified_random_matchup_run(out_dir)
+    if debug_training or unified_debug_enabled():
+        configure_unified_debug(run_dir=out_dir, enabled=True)
     matchups_total = len(matchups)
     parallel_matchups = max(1, int(parallel_matchups))
+    n_workers = max(1, int(n_workers))
     if unified_run:
+        _set_unified_weight_reporter(out_dir)
         manifest_path = out_dir / "run_manifest.json"
         if manifest_path.is_file():
             try:
@@ -4691,7 +4840,55 @@ def run_matchup_training(
     shared_policy: Optional[PPOAgent] = None
     matchups_completed_count = 0
     talishar_pool = backend_pool or TalisharBackendPool.from_runtime(fallback_url=base_url)
+    urls_before = list(talishar_pool.urls)
+    failed_health = talishar_pool.health_check()
     talishar_pool = talishar_pool.filter_healthy()
+    log_shard_pool(
+        urls_before=urls_before,
+        urls_after=list(talishar_pool.urls),
+        failed_health=failed_health,
+    )
+    if safe_parallel:
+        safe_workers, safe_parallel_matchups, safe_workers_per_matchup = (
+            resolve_safe_parallel_limits(
+                workers=n_workers,
+                parallel_matchups=parallel_matchups,
+                n_training_shards=len(talishar_pool.urls),
+            )
+        )
+        if (
+            safe_workers != n_workers
+            or safe_parallel_matchups != parallel_matchups
+        ):
+            before_slots = concurrent_training_game_slots(
+                n_workers, parallel_matchups
+            )
+            after_slots = concurrent_training_game_slots(
+                safe_workers, safe_parallel_matchups
+            )
+            print(
+                f"  Safe parallel: capped concurrent games "
+                f"{before_slots} → {after_slots} "
+                f"(≤ {len(talishar_pool.urls)} shard(s)); "
+                f"parallel_matchups {parallel_matchups} → {safe_parallel_matchups}, "
+                f"workers/matchup "
+                f"{workers_per_parallel_matchup(n_workers, parallel_matchups)} "
+                f"→ {safe_workers_per_matchup}",
+                flush=True,
+            )
+            unified_debug_event(
+                "connection",
+                "Safe parallel capped worker budget",
+                before_slots=before_slots,
+                after_slots=after_slots,
+                parallel_matchups_before=parallel_matchups,
+                parallel_matchups_after=safe_parallel_matchups,
+                workers_before=n_workers,
+                workers_after=safe_workers,
+                training_shards=len(talishar_pool.urls),
+            )
+        n_workers = safe_workers
+        parallel_matchups = safe_parallel_matchups
     if len(talishar_pool.urls) > 1:
         print(f"  Talishar backends: {talishar_pool.format_log_label()}")
 
@@ -4746,6 +4943,8 @@ def run_matchup_training(
                     shared_policy = _bootstrap_unified_policy(
                         cache_store, probe_env, seed,
                     ).policy
+                    if unified_run:
+                        _record_initial_unified_policy_weights(shared_policy, out_dir)
                 finally:
                     try:
                         probe_env.close()
@@ -4777,6 +4976,8 @@ def run_matchup_training(
                 shared_policy = _bootstrap_unified_policy(
                     cache_store, probe_env, seed,
                 ).policy
+                if unified_run:
+                    _record_initial_unified_policy_weights(shared_policy, out_dir)
             finally:
                 try:
                     probe_env.close()
@@ -4829,12 +5030,66 @@ def run_matchup_training(
                 print(
                     f"  Merged checkpoint eval: every {effective_ckpt_interval} episode(s) "
                     f"when all {len(batch)} matchup(s) reach bucket; "
-                    f"{checkpoint_eval_episodes} total eval games split across matchups "
+                    f"{checkpoint_eval_episodes} self-play eval game(s) total across matchups "
                     f"(async, non-blocking)"
+                )
+
+            from flesh_and_blood_rlbridge.talishar_backend_pool import (  # noqa: PLC0415
+                resolve_eval_backend_url,
+            )
+            from unified_logic_baseline import (  # noqa: PLC0415
+                submit_batch_logic_vs_logic_baselines,
+            )
+            from unified_checkpoint_eval import allocate_eval_episodes  # noqa: PLC0415
+
+            eval_base_url = resolve_eval_backend_url(fallback_url=base_url)
+            baseline_alloc = allocate_eval_episodes(
+                checkpoint_eval_episodes,
+                list(batch_matchups.keys()),
+                seed=seed,
+            )
+            baseline_eps_example = next(
+                (count for count in baseline_alloc.values() if count > 0),
+                0,
+            )
+            baseline_queued = submit_batch_logic_vs_logic_baselines(
+                batch_matchups,
+                out_dir=out_dir,
+                base_url=eval_base_url,
+                game_format=game_format,
+                max_steps=max_steps,
+                total_episodes=checkpoint_eval_episodes,
+                seed=(seed + 50_000) if seed is not None else None,
+            )
+            if baseline_queued > 0:
+                print(
+                    f"  Logic win% vs logic baseline: {baseline_queued} matchup(s), "
+                    f"~{baseline_eps_example} game(s) each "
+                    f"({checkpoint_eval_episodes} total, async on eval shard)",
+                    flush=True,
+                )
+            elif baseline_alloc:
+                print(
+                    "  Logic win% vs logic baseline: already on disk for this batch",
+                    flush=True,
                 )
 
         def _train_one(matchup: Matchup) -> dict[str, Any]:
             nonlocal shared_policy
+            if unified_run:
+                matchup_dir = _resolve_matchup_subdir(out_dir, matchup)
+                audit_matchup_decks(
+                    matchup,
+                    game_format=game_format,
+                    matchup_dir=matchup_dir,
+                )
+                unified_debug_event(
+                    "matchup_load",
+                    f"Training matchup {matchup.name}",
+                    matchup=matchup.name,
+                    matchup_dir=str(matchup_dir),
+                    workers=workers_per_matchup if use_parallel_batch else n_workers,
+                )
             train_kwargs: dict[str, Any] = {}
             if not skip_converged:
                 train_kwargs["_force_train"] = True
@@ -4967,6 +5222,8 @@ def run_matchup_training(
     from checkpoint_eval_async import shutdown_checkpoint_eval_executor  # noqa: PLC0415
 
     shutdown_checkpoint_eval_executor(wait=True)
+    if unified_run:
+        _set_unified_weight_reporter(None)
 
     return summary, failed
 
@@ -5268,6 +5525,65 @@ def resolve_fabrary_deck_cards(deck_entry: dict, format_name: str) -> list[str]:
     return result
 
 
+def _secondary_talishar_deck_paths(deck_id: str) -> list[Path]:
+    """Extra on-disk deck sources checked before name-based fabrary resolution."""
+    return [REPO_ROOT / "assets" / "talishar_decks" / f"{deck_id}.txt"]
+
+
+def _resolve_playable_deck_asset(
+    deck_id: str,
+    assets_path: Path,
+) -> tuple[str, list[str]] | None:
+    """Return header/cards from the best existing playable deck asset for *deck_id*."""
+    from flesh_and_blood_rlbridge.talishar_deck_assets import (  # noqa: PLC0415
+        deck_asset_is_playable,
+        read_talishar_deck_asset,
+        resolve_canonical_sage_precon_stem,
+    )
+
+    candidates: list[Path] = []
+    canonical = resolve_canonical_sage_precon_stem(deck_id)
+    if canonical:
+        candidates.append(assets_path / f"{canonical}.txt")
+    candidates.append(assets_path / f"{deck_id}.txt")
+    candidates.extend(_secondary_talishar_deck_paths(deck_id))
+
+    seen: set[Path] = set()
+    for path in candidates:
+        if path in seen or not path.is_file():
+            continue
+        seen.add(path)
+        header, cards = read_talishar_deck_asset(path)
+        if deck_asset_is_playable(header, cards):
+            return header, cards
+    return None
+
+
+def _write_talishar_deck_asset(
+    out_path: Path,
+    *,
+    hero_id: str,
+    deck_stem: str,
+    assets_path: Path,
+    equipment_header: str,
+    card_ids: list[str],
+) -> None:
+    from flesh_and_blood_rlbridge.talishar_deck_assets import (  # noqa: PLC0415
+        ensure_full_equipment_header,
+    )
+
+    hero = hero_id.removeprefix("hero_")
+    header_text = (equipment_header or "").strip()
+    if len(header_text.split()) < 8:
+        header_text = ensure_full_equipment_header(
+            hero,
+            header_text,
+            assets_path,
+            deck_stem=deck_stem,
+        )
+    out_path.write_text(f"{header_text}\n{' '.join(card_ids)}\n", encoding="utf-8")
+
+
 def write_fabrary_deck_file(
     deck_entry: dict,
     assets_path: Path,
@@ -5276,21 +5592,54 @@ def write_fabrary_deck_file(
 ) -> Optional[str]:
     deck_id = str(deck_entry["id"])
     hero_id = str(deck_entry.get("hero_id", ""))
+    out_path = assets_path / f"{deck_id}.txt"
+
+    playable = _resolve_playable_deck_asset(deck_id, assets_path)
+    if playable is not None:
+        header, card_ids = playable
+        header = str(deck_entry.get("equipment_header") or header).strip() or header
+        _write_talishar_deck_asset(
+            out_path,
+            hero_id=hero_id,
+            deck_stem=deck_id,
+            assets_path=assets_path,
+            equipment_header=header,
+            card_ids=card_ids,
+        )
+        return deck_id
+
     from flesh_and_blood_rlbridge.talishar_deck_assets import (  # noqa: PLC0415
         resolve_equipment_header_line,
     )
 
-    hero_header = resolve_equipment_header_line(
-        hero_id.removeprefix("hero_"),
-        assets_path,
-        fallback=_get_hero_header(hero_id, assets_map),
-    )
+    hero_header = str(deck_entry.get("equipment_header") or "").strip()
+    if not hero_header:
+        hero_header = resolve_equipment_header_line(
+            hero_id.removeprefix("hero_"),
+            assets_path,
+            fallback=_get_hero_header(hero_id, assets_map),
+        )
     card_ids = resolve_fabrary_deck_cards(deck_entry, format_name)
+    min_size = FORMAT_DECK_RULES.get(format_name, FORMAT_DECK_RULES["silver_age"])[
+        "deck_size"
+    ]
     if not card_ids:
         print(f"  Error: deck {deck_id} resolved to zero cards; skipping.")
         return None
-    out_path = assets_path / f"{deck_id}.txt"
-    out_path.write_text(f"{hero_header}\n{' '.join(card_ids)}\n", encoding="utf-8")
+    if len(card_ids) < min_size:
+        print(
+            f"  Error: deck {deck_id} resolved to {len(card_ids)} cards "
+            f"(need {min_size}); skipping."
+        )
+        return None
+    _write_talishar_deck_asset(
+        out_path,
+        hero_id=hero_id,
+        deck_stem=deck_id,
+        assets_path=assets_path,
+        equipment_header=hero_header,
+        card_ids=card_ids,
+    )
     return deck_id
 
 

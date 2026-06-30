@@ -40,6 +40,24 @@ def talishar_url() -> str:
     return env_or_default("TALISHAR_URL", "http://localhost:8080/game")
 
 
+def talishar_eval_url() -> str:
+    """Dedicated eval backend when ``TALISHAR_EVAL_URL`` is set, else primary."""
+    from flesh_and_blood_rlbridge.talishar_backend_pool import (  # noqa: PLC0415
+        resolve_eval_backend_url,
+    )
+
+    return resolve_eval_backend_url(fallback_url=talishar_url())
+
+
+def talishar_render_url() -> str:
+    """Dedicated render backend when ``TALISHAR_RENDER_URL`` is set, else eval."""
+    from flesh_and_blood_rlbridge.talishar_backend_pool import (  # noqa: PLC0415
+        resolve_render_backend_url,
+    )
+
+    return resolve_render_backend_url(fallback_url=talishar_url())
+
+
 def talishar_backend_urls() -> tuple[str, ...]:
     from runtime_defaults import resolve_talishar_backend_urls  # noqa: PLC0415
 
@@ -102,18 +120,26 @@ def start_unified_random_matchups_eval_dashboard(
     *,
     assets: str | Path,
     talishar_url_value: str | None = None,
+    talishar_render_url_value: str | None = None,
+    cache_dir: str | Path | None = None,
     poll_seconds: float = RUNTIME.eval_dashboard.poll_seconds,
+    companion_to_training: bool = True,
+    live_render: bool | None = None,
+    debug_training: bool | None = None,
 ) -> subprocess.Popen[Any]:
     """Watch unified random matchup checkpoints on the latest trained matchup."""
     _eval = RUNTIME.eval_dashboard
-    return run_python_background(
-        SCRIPTS_EVAL / "eval_phase3_checkpoint.py",
+    _urm = RUNTIME.unified_random_matchups
+    render_enabled = (
+        _urm.optimal_policy_live_render if live_render is None else bool(live_render)
+    )
+    args = [
         "--results-dir",
         str(out_dir),
         "--assets-path",
         str(assets),
         "--talishar-url",
-        talishar_url_value or talishar_url(),
+        talishar_url_value or talishar_eval_url(),
         "--episodes",
         str(_eval.episodes),
         "--parallel-workers",
@@ -124,8 +150,33 @@ def start_unified_random_matchups_eval_dashboard(
         str(_eval.render_max_steps),
         "--poll-seconds",
         str(poll_seconds),
+        "--render-cycle-seconds",
+        str(_eval.render_cycle_seconds),
         "--watch",
         "--skip-parity",
+    ]
+    if render_enabled:
+        args.extend([
+            "--live-render",
+            "--talishar-render-url",
+            talishar_render_url_value or talishar_render_url(),
+        ])
+    else:
+        args.append("--no-live-render")
+    debug_enabled = (
+        _urm.debug_training if debug_training is None else bool(debug_training)
+    )
+    if debug_enabled:
+        args.append("--debug-training")
+    else:
+        args.append("--no-debug-training")
+    if cache_dir is not None:
+        args.extend(["--cache-dir", str(cache_dir)])
+    if companion_to_training:
+        args.append("--companion-to-training")
+    return run_python_background(
+        SCRIPTS_EVAL / "eval_phase3_checkpoint.py",
+        *args,
         cwd=REPO_ROOT,
     )
 

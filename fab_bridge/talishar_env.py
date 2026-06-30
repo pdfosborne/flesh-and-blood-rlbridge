@@ -12,7 +12,13 @@ DEFAULT_TALISHAR_URL = "http://localhost:8080/game"
 DEFAULT_SHARD_BASE_PORT = 8080
 DEFAULT_TALISHAR_FE_URL = "http://localhost:5173"
 _TRAINING_ENV_REL = Path("docker/talishar/talishar-training.local.env")
-_MANAGED_KEYS = ("TALISHAR_URL", "TALISHAR_URLS", "TALISHAR_FE_URL")
+_MANAGED_KEYS = (
+    "TALISHAR_URL",
+    "TALISHAR_URLS",
+    "TALISHAR_EVAL_URL",
+    "TALISHAR_RENDER_URL",
+    "TALISHAR_FE_URL",
+)
 
 
 def training_env_path() -> Path:
@@ -55,6 +61,8 @@ def build_training_env_values(
     base_port: int = DEFAULT_SHARD_BASE_PORT,
     fe_url: str = DEFAULT_TALISHAR_FE_URL,
     urls: list[str] | None = None,
+    reserve_eval_shard: bool = True,
+    reserve_render_shard: bool = False,
 ) -> dict[str, str]:
     if urls:
         from flesh_and_blood_rlbridge.talishar_backend_pool import (  # noqa: PLC0415
@@ -66,12 +74,26 @@ def build_training_env_values(
         backend_urls = list(shard_game_urls(shards=shards, base_port=base_port))
     if not backend_urls:
         backend_urls = [DEFAULT_TALISHAR_URL]
+
+    render_url: str | None = None
+    eval_url: str | None = None
+    if reserve_render_shard and len(backend_urls) >= 3:
+        render_url = backend_urls[-1]
+        backend_urls = backend_urls[:-1]
+    if reserve_eval_shard and len(backend_urls) >= 2:
+        eval_url = backend_urls[-1]
+        backend_urls = backend_urls[:-1]
+
     values: dict[str, str] = {
         "TALISHAR_URL": backend_urls[0],
         "TALISHAR_FE_URL": fe_url.rstrip("/"),
     }
     if len(backend_urls) > 1:
         values["TALISHAR_URLS"] = ",".join(backend_urls)
+    if eval_url:
+        values["TALISHAR_EVAL_URL"] = eval_url
+    if render_url:
+        values["TALISHAR_RENDER_URL"] = render_url
     return values
 
 
@@ -81,6 +103,8 @@ def write_training_env(
     base_port: int = DEFAULT_SHARD_BASE_PORT,
     fe_url: str = DEFAULT_TALISHAR_FE_URL,
     urls: list[str] | None = None,
+    reserve_eval_shard: bool = True,
+    reserve_render_shard: bool = False,
 ) -> dict[str, str]:
     """Write shard URLs for training scripts; returns the values written."""
     values = build_training_env_values(
@@ -88,6 +112,8 @@ def write_training_env(
         base_port=base_port,
         fe_url=fe_url,
         urls=urls,
+        reserve_eval_shard=reserve_eval_shard,
+        reserve_render_shard=reserve_render_shard,
     )
     path = training_env_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -98,6 +124,10 @@ def write_training_env(
     ]
     if "TALISHAR_URLS" in values:
         lines.append(_format_env_line("TALISHAR_URLS", values["TALISHAR_URLS"]))
+    if "TALISHAR_EVAL_URL" in values:
+        lines.append(_format_env_line("TALISHAR_EVAL_URL", values["TALISHAR_EVAL_URL"]))
+    if "TALISHAR_RENDER_URL" in values:
+        lines.append(_format_env_line("TALISHAR_RENDER_URL", values["TALISHAR_RENDER_URL"]))
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return values
 
@@ -114,8 +144,12 @@ def apply_training_env(*, override: bool = False) -> dict[str, str]:
     for key in _MANAGED_KEYS:
         if key in values and (override or key not in os.environ):
             os.environ[key] = values[key]
-        elif override and key not in values and key == "TALISHAR_URLS":
-            os.environ.pop("TALISHAR_URLS", None)
+        elif override and key not in values and key in {
+            "TALISHAR_URLS",
+            "TALISHAR_EVAL_URL",
+            "TALISHAR_RENDER_URL",
+        }:
+            os.environ.pop(key, None)
     return values
 
 
@@ -125,3 +159,7 @@ def apply_training_env_values(values: dict[str, str]) -> None:
         os.environ[key] = value
     if "TALISHAR_URLS" not in values:
         os.environ.pop("TALISHAR_URLS", None)
+    if "TALISHAR_EVAL_URL" not in values:
+        os.environ.pop("TALISHAR_EVAL_URL", None)
+    if "TALISHAR_RENDER_URL" not in values:
+        os.environ.pop("TALISHAR_RENDER_URL", None)

@@ -76,7 +76,13 @@ class MetaUnifiedRandomMatchups:
     checkpoint_eval_episodes: int = 100  # 0 = min(100, episodes // 100)
     workers: int = 0  # 0 = inherit META.workers
     parallel_matchups: int = 4
+    # Cap concurrent training games so each Talishar shard runs at most one session.
+    safe_parallel: bool = True
     skip_converged: bool = False
+    # Continuous optimal-policy PNG on the render shard during unified training.
+    optimal_policy_live_render: bool = True
+    # Write unified_training_debug.jsonl with connection/episode/deck/render details.
+    debug_training: bool = False
     # cpp engine is not implemented fully to match talishar engine, so we disable it by default
     build_cpp_engine: bool = False
     require_cpp_engine: bool = False
@@ -97,7 +103,7 @@ class MetaRuntime:
     parallel_seeds: int = 4  # independent seeds; best model used for eval
     parallel_seeds_until_first_checkpoint: bool = True
     sideboard_max_parallel: int = 0  # 0 = train all sideboard candidates at once
-    eval_parallel_workers: int = 4
+    eval_parallel_workers: int = 1
 
     # ── Training budget (episodes) ───────────────────────────────────────────
     play_episodes: int = 100  # Phase 3 play training (all workflows)
@@ -244,6 +250,7 @@ class EvalDashboardDefaults:
     max_steps: int = 0
     render_max_steps: int = 500
     poll_seconds: int = 30
+    render_cycle_seconds: float = 3.0
     gif_fps: int = 3
 
 
@@ -313,7 +320,10 @@ class UnifiedRandomMatchupsDefaults:
     checkpoint_eval_episodes: int
     workers: int
     parallel_matchups: int
+    safe_parallel: bool
     skip_converged: bool
+    optimal_policy_live_render: bool
+    debug_training: bool
     build_cpp_engine: bool
     require_cpp_engine: bool
     seed: int | None
@@ -563,7 +573,10 @@ def build_runtime(meta: MetaRuntime) -> RuntimeDefaults:
             checkpoint_eval_episodes=urm_checkpoint_eval,
             workers=urm_workers,
             parallel_matchups=max(1, int(urm.parallel_matchups)),
+            safe_parallel=bool(urm.safe_parallel),
             skip_converged=urm.skip_converged,
+            optimal_policy_live_render=urm.optimal_policy_live_render,
+            debug_training=urm.debug_training,
             build_cpp_engine=urm.build_cpp_engine,
             require_cpp_engine=urm.require_cpp_engine,
             seed=urm.seed,

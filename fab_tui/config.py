@@ -115,6 +115,21 @@ class EnvironmentSettings:
     talishar_urls: str = field(
         default_factory=lambda: os.environ.get("TALISHAR_URLS", "")
     )
+    talishar_eval_url: str = field(
+        default_factory=lambda: os.environ.get(
+            "TALISHAR_EVAL_URL",
+            os.environ.get("TALISHAR_URL", "http://localhost:8080/game"),
+        )
+    )
+    talishar_render_url: str = field(
+        default_factory=lambda: os.environ.get(
+            "TALISHAR_RENDER_URL",
+            os.environ.get(
+                "TALISHAR_EVAL_URL",
+                os.environ.get("TALISHAR_URL", "http://localhost:8080/game"),
+            ),
+        )
+    )
     talishar_fe_url: str = field(
         default_factory=lambda: os.environ.get("TALISHAR_FE_URL", "http://localhost:5173")
     )
@@ -133,6 +148,14 @@ class EnvironmentSettings:
             os.environ["TALISHAR_URLS"] = self.talishar_urls.strip()
         elif "TALISHAR_URLS" in os.environ:
             del os.environ["TALISHAR_URLS"]
+        if self.talishar_eval_url.strip():
+            os.environ["TALISHAR_EVAL_URL"] = self.talishar_eval_url.strip()
+        elif "TALISHAR_EVAL_URL" in os.environ:
+            del os.environ["TALISHAR_EVAL_URL"]
+        if self.talishar_render_url.strip():
+            os.environ["TALISHAR_RENDER_URL"] = self.talishar_render_url.strip()
+        elif "TALISHAR_RENDER_URL" in os.environ:
+            del os.environ["TALISHAR_RENDER_URL"]
         os.environ["TALISHAR_FE_URL"] = self.talishar_fe_url
         os.environ["TALISHAR_ASSETS_PATH"] = self.assets_path
         if self.fabrary_api_key:
@@ -357,8 +380,13 @@ class UnifiedRandomMatchupSpec:
     )
     checkpoint_interval_pct: float = RUNTIME.unified_random_matchups.checkpoint_interval_pct
     checkpoint_eval_episodes: int = RUNTIME.unified_random_matchups.checkpoint_eval_episodes
+    optimal_policy_live_render: bool = (
+        RUNTIME.unified_random_matchups.optimal_policy_live_render
+    )
+    debug_training: bool = RUNTIME.unified_random_matchups.debug_training
     workers: int = RUNTIME.unified_random_matchups.workers
     parallel_matchups: int = RUNTIME.unified_random_matchups.parallel_matchups
+    safe_parallel: bool = RUNTIME.unified_random_matchups.safe_parallel
     skip_converged: bool = RUNTIME.unified_random_matchups.skip_converged
     build_cpp_engine: bool = RUNTIME.unified_random_matchups.build_cpp_engine
     require_cpp_engine: bool = RUNTIME.unified_random_matchups.require_cpp_engine

@@ -116,6 +116,51 @@ def find_latest_merged_unified_bucket(
     }
 
 
+def find_unified_render_bucket(
+    run_dir: Path,
+    *,
+    matchup_dirs: list[Path] | None = None,
+) -> dict[Path, Path]:
+    """Return the latest P1 checkpoint per matchup for live optimal-policy render.
+
+    Unlike :func:`find_latest_merged_unified_bucket`, matchups do not need to
+    share the same training episode. Any matchup with at least one checkpoint
+    is eligible.
+    """
+    search_dirs = list(matchup_dirs or active_merged_matchup_dirs(run_dir))
+    if not search_dirs:
+        search_dirs = iter_unified_matchup_dirs(run_dir)
+    bucket: dict[Path, Path] = {}
+    for matchup_dir in search_dirs:
+        meta = find_latest_unified_checkpoint_metadata(
+            run_dir,
+            "p1",
+            matchup_dir=matchup_dir,
+        )
+        if meta is not None:
+            bucket[matchup_dir] = meta.parent
+    return bucket
+
+
+def iter_unified_render_matchup_dirs(run_dir: Path) -> list[Path]:
+    """Matchup folders eligible for unified live render (label and/or checkpoint)."""
+    seen: dict[str, Path] = {}
+    for matchup_dir in active_merged_matchup_dirs(run_dir):
+        seen[str(matchup_dir.resolve())] = matchup_dir
+    for matchup_dir in iter_unified_matchup_dirs(run_dir):
+        seen[str(matchup_dir.resolve())] = matchup_dir
+    eligible: list[Path] = []
+    for matchup_dir in seen.values():
+        if (matchup_dir / MATCHUP_LABEL).is_file():
+            eligible.append(matchup_dir)
+            continue
+        if find_latest_unified_checkpoint_metadata(
+            run_dir, "p1", matchup_dir=matchup_dir
+        ) is not None:
+            eligible.append(matchup_dir)
+    return sorted(eligible, key=lambda path: path.stat().st_mtime, reverse=True)
+
+
 def _episode_dir_sort_key(meta_path: Path) -> tuple[int, float]:
     episode_name = meta_path.parent.name.removeprefix("episode_")
     try:

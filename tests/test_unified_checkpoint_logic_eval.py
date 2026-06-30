@@ -154,7 +154,7 @@ def test_checkpoint_eval_tracker_records_vs_logic(monkeypatch, tmp_path: Path) -
 
     def _fake_self_play(*_args: object, **kwargs: object) -> dict:
         label = str(kwargs.get("eval_label", ""))
-        if "logic vs logic" in label.lower():
+        if "logic win% vs logic" in label.lower():
             nonlocal logic_calls
             logic_calls += 1
             return _sample_metrics(p1_wr=0.54, p2_wr=0.46)

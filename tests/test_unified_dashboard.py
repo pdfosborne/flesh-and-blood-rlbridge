@@ -16,6 +16,7 @@ from fab_bridge.unified_dashboard import (
     aggregate_checkpoint_points,
     collect_unified_run_state,
     count_completed_matchups,
+    record_policy_weight_update,
     render_unified_random_matchups_html,
     update_unified_matchup_live,
     write_unified_random_matchups_dashboard,
@@ -393,3 +394,93 @@ def test_merged_checkpoint_eval_dashboard(tmp_path: Path) -> None:
     html = render_unified_random_matchups_html(state)
     assert "Eval games" in html
     assert "50" in html
+
+
+def test_render_policy_weights_card(tmp_path: Path) -> None:
+    run_dir = _write_run(tmp_path)
+    record_policy_weight_update(
+        run_dir,
+        {
+            "initialized": True,
+            "obs_dim": 128,
+            "n_actions": 64,
+            "d_model": 64,
+            "n_layers": 2,
+            "n_heads": 4,
+            "param_count": 12345,
+            "l2_norm": 42.5,
+            "fingerprint": "abc123def456",
+            "update_count": 3,
+        },
+    )
+    record_policy_weight_update(
+        run_dir,
+        {
+            "initialized": True,
+            "obs_dim": 128,
+            "n_actions": 64,
+            "d_model": 64,
+            "n_layers": 2,
+            "n_heads": 4,
+            "param_count": 12345,
+            "l2_norm": 43.1,
+            "fingerprint": "def456abc789",
+            "update_count": 4,
+        },
+    )
+
+    state = collect_unified_run_state(run_dir)
+    html = render_unified_random_matchups_html(state)
+    assert "Agent weights" in html
+    assert "abc123def456" in html
+    assert "def456abc789" in html
+    assert "PPO updates" in html
+    assert "L2 norm trend" in html
+
+
+def test_dashboard_shows_logic_vs_logic_baseline_before_checkpoint(
+    tmp_path: Path,
+) -> None:
+    run_dir = _write_run(tmp_path)
+    matchup_dir = run_dir / "match_a"
+    matchup_dir.mkdir()
+    (matchup_dir / "matchup_label.json").write_text(
+        json.dumps({"name": "a-vs-b"}),
+        encoding="utf-8",
+    )
+    (matchup_dir / LOGIC_VS_LOGIC_BASELINE_NAME).write_text(
+        json.dumps({"episodes": 20, "p1_win_rate": 0.48, "timeout_rate": 0.0}),
+        encoding="utf-8",
+    )
+    (run_dir / UNIFIED_LIVE_STATE).write_text(
+        json.dumps(
+            {
+                "matchups_total": 1,
+                "matchups_completed": 0,
+                "target_episodes": 1000,
+                "status": "training",
+                "batch_index": 1,
+                "parallel_matchups": 1,
+                "active_matchups": {
+                    "match_a": {
+                        "name": "a-vs-b",
+                        "episodes_completed": 12,
+                        "status": "training",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    state = collect_unified_run_state(run_dir)
+    assert len(state["active_checkpoint_rows"]) == 1
+    row = state["active_checkpoint_rows"][0]
+    assert row["episode_label"] == "baseline"
+    assert row["logic_vs_logic_win_rate"] == pytest.approx(0.48)
+    assert row["eval_episodes"] == 20
+
+    html = render_unified_random_matchups_html(state)
+    assert "Logic win% vs logic" in html
+    assert "48.0%" in html
+    assert "baseline" in html

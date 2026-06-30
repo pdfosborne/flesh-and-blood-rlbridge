@@ -700,13 +700,19 @@ def run_unified_random_matchups(
         str(spec.workers),
         "--parallel-matchups",
         str(spec.parallel_matchups),
+    ]
+    if spec.safe_parallel:
+        cmd.append("--safe-parallel")
+    else:
+        cmd.append("--no-safe-parallel")
+    cmd.extend([
         "--run-dir",
         str(out_dir),
         "--cache-dir",
         cache_dir,
         "--talishar-url",
         env.talishar_url,
-    ]
+    ])
     if env.talishar_urls.strip():
         cmd.extend(["--talishar-urls", env.talishar_urls.strip()])
     if spec.seed is not None:
@@ -721,9 +727,17 @@ def run_unified_random_matchups(
         cmd.append("--require-cpp-engine")
     else:
         cmd.append("--no-require-cpp-engine")
+    if spec.optimal_policy_live_render:
+        cmd.append("--optimal-policy-live-render")
+    else:
+        cmd.append("--no-optimal-policy-live-render")
+    if spec.debug_training:
+        cmd.append("--debug-training")
+    else:
+        cmd.append("--no-debug-training")
     dashboard_proc = None
     try:
-        if spec.checkpoint_eval_episodes > 0:
+        if spec.optimal_policy_live_render:
             from runscripts._common import (  # noqa: PLC0415
                 start_unified_random_matchups_eval_dashboard,
                 stop_background_process,
@@ -732,7 +746,11 @@ def run_unified_random_matchups(
             dashboard_proc = start_unified_random_matchups_eval_dashboard(
                 out_dir,
                 assets=env.assets_path,
-                talishar_url_value=env.talishar_url,
+                talishar_url_value=env.talishar_eval_url,
+                talishar_render_url_value=env.talishar_render_url,
+                cache_dir=cache_dir,
+                live_render=True,
+                debug_training=spec.debug_training,
             )
         return run_streaming(cmd)
     finally:

@@ -328,7 +328,7 @@ def test_collect_eval_only_dashboard(tmp_path: Path) -> None:
     html = render_sideboard_compare_html(state, auto_refresh_seconds=5.0)
     assert "Sideboard evaluation dashboard" in html
     assert "1000 C++ games × 4 policy matchups/candidate" in html
-    assert "C++ eval — Logic vs logic" in html
+    assert "C++ eval — Logic win% vs logic" in html
     assert "Talishar final eval" in html
     assert "350/4000 games" in html
     assert "Training win rate" not in html
