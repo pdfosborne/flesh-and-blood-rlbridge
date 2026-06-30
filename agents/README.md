@@ -14,7 +14,7 @@ results/agent_cache/<format>/unified_agent.meta.json
 
 Supported format keys: `silver_age`, `classic_constructed`, `blitz`, `upf` (GUI `sage` maps to `silver_age`).
 
-**Note:** Legacy weights (`attention_v1`, schema v1, `unified_agent_v2.json`) are incompatible with the current `attention_v2_text` policy and obs schema v2 (626-dim). Run `fab-bridge agents ensure` to install a bootstrap v3 placeholder or sync an official release.
+**Note:** Legacy weights (`attention_v1`, schema v1/v2) are incompatible with the current `attention_v2_text` policy and obs schema v3 (818-dim). Run `fab-bridge agents ensure` to install a bootstrap placeholder or sync an official release.
 
 Card text embeddings (`card_text_embeddings_v1.npz`) ship in the Python package and on GitHub Releases. `fab-bridge agents sync/ensure` installs them into `results/agent_cache/shared/` so GUI eval works with custom decks via frozen MiniLM embeddings.
 
@@ -62,6 +62,6 @@ This creates a GitHub Release via `gh`, uploads weight + meta + text embedding a
 
 Top-level `text_embeddings` block: shared embedding asset URLs and SHA256.
 
-Each `agents[]` entry includes `weights_url`, `meta_url`, `sha256`, `obs_dim` (626), `obs_schema_version` (2), `architecture` (`attention_v2_text`), `requires_text_embed_version`, and `release` tag.
+Each `agents[]` entry includes `weights_url`, `meta_url`, `sha256`, `obs_dim` (818), `obs_schema_version` (3), `architecture` (`attention_v2_text`), `requires_text_embed_version`, and `release` tag.
 
 Release asset filenames use the pattern `{format}-unified_agent_v3.json`.

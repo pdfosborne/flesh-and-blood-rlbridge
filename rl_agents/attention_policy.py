@@ -12,8 +12,11 @@ from flesh_and_blood_rlbridge.card_vocab import hero_vocab_size, vocab_size
 from flesh_and_blood_rlbridge.obs_tokenizer import ObsTokenLayout, TokenBatch, build_token_features
 from flesh_and_blood_rlbridge.player_observation import (
     COMBAT_SCALAR_COUNT,
+    EFFECT_SLOT_DIM,
     HAND_SLOT_DIM,
+    LAYER_SLOT_DIM,
     PLAYER_OBS_DIM,
+    PLAYED_SLOT_DIM,
     SCALAR_COUNT,
     ZONE_SLOT_DIM,
     ZONE_SPECS,
@@ -80,6 +83,9 @@ class _AttentionPolicyValue(nn.Module):
         self.zone_proj = nn.Linear(ZONE_SLOT_DIM, d_model, dtype=_TORCH_DTYPE)
         self.combat_scalar_proj = nn.Linear(COMBAT_SCALAR_COUNT, d_model, dtype=_TORCH_DTYPE)
         self.combat_chain_proj = nn.Linear(2, d_model, dtype=_TORCH_DTYPE)
+        self.played_proj = nn.Linear(PLAYED_SLOT_DIM, d_model, dtype=_TORCH_DTYPE)
+        self.effect_proj = nn.Linear(EFFECT_SLOT_DIM, d_model, dtype=_TORCH_DTYPE)
+        self.layer_proj = nn.Linear(LAYER_SLOT_DIM, d_model, dtype=_TORCH_DTYPE)
 
         self.cross_attn = nn.MultiheadAttention(
             d_model,
@@ -154,8 +160,35 @@ class _AttentionPolicyValue(nn.Module):
         )
         chain_tok = chain_tok + self.card_embed(chain_ids)
 
+        played_tok = self.played_proj(batch.played_history)
+        played_ids = batch.played_history[..., 0].round().long().clamp(
+            min=0, max=self.card_embed.num_embeddings - 1
+        )
+        played_tok = played_tok + self.card_embed(played_ids)
+
+        effect_tok = self.effect_proj(batch.turn_effects)
+        effect_ids = batch.turn_effects[..., 0].round().long().clamp(
+            min=0, max=self.card_embed.num_embeddings - 1
+        )
+        effect_tok = effect_tok + self.card_embed(effect_ids)
+
+        layer_tok = self.layer_proj(batch.layers)
+        layer_ids = batch.layers[..., 1].round().long().clamp(
+            min=0, max=self.card_embed.num_embeddings - 1
+        )
+        layer_tok = layer_tok + self.card_embed(layer_ids)
+
         return torch.cat(
-            [scalar_tok, hand_tok, zone_tok, combat_scalar_tok, chain_tok],
+            [
+                scalar_tok,
+                hand_tok,
+                zone_tok,
+                combat_scalar_tok,
+                chain_tok,
+                played_tok,
+                effect_tok,
+                layer_tok,
+            ],
             dim=1,
         )
 

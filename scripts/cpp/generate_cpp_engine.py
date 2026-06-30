@@ -60,6 +60,7 @@ import requests
 
 from flesh_and_blood_rlbridge.card_db.talishar_card_ids import TalisharCardIdResolver
 from flesh_and_blood_rlbridge.talishar_deck_assets import resolve_talishar_deck_stem
+from flesh_and_blood_rlbridge.card_conditionals import HAND_CLAUSE_DIM  # noqa: E402
 from flesh_and_blood_rlbridge.player_observation import (  # noqa: E402
     ACTION_CAPACITY,
     COMBAT_CHAIN_SLOTS,
@@ -604,6 +605,7 @@ def _render_player_obs_cpp_impl() -> str:
     hand_off = CONTEXT_DIM + SCALAR_COUNT
     zone_off = hand_off + HAND_SLOTS * HAND_SLOT_DIM
     combat_off = zone_off + 2 * zones_per_player * ZONE_SLOT_DIM
+    played_off = combat_off + COMBAT_SCALAR_COUNT + COMBAT_CHAIN_SLOTS * COMBAT_CHAIN_SLOT_DIM
     zone_specs = ", ".join(str(n) for _, n in ZONE_SPECS)
 
     return f"""
@@ -613,11 +615,13 @@ constexpr int kContextDim = {CONTEXT_DIM};
 constexpr int kScalarCount = {SCALAR_COUNT};
 constexpr int kHandSlots = {HAND_SLOTS};
 constexpr int kHandSlotDim = {HAND_SLOT_DIM};
+constexpr int kHandClauseDim = {HAND_CLAUSE_DIM};
 constexpr int kZoneSlotDim = {ZONE_SLOT_DIM};
 constexpr int kDeckSlots = {DECK_SLOTS};
 constexpr int kHandOff = {hand_off};
 constexpr int kZoneOff = {zone_off};
 constexpr int kCombatOff = {combat_off};
+constexpr int kPlayedOff = {played_off};
 constexpr int kActionCapacity = {ACTION_CAPACITY};
 constexpr int kZoneMaxSlots[] = {{ {zone_specs} }};
 
@@ -739,6 +743,9 @@ std::vector<double> GameState::player_observation_vector(int legal_count) const 
             out[static_cast<size_t>(hand++)] = _scaled(c.defense, 5.0);
             out[static_cast<size_t>(hand++)] = playable ? 1.0 : 0.0;
             out[static_cast<size_t>(hand++)] = 1.0;  // conditional_active
+            for (int clause = 0; clause < kHandClauseDim; ++clause) {{
+                out[static_cast<size_t>(hand++)] = 0.0;
+            }}
         }} else {{
             hand += kHandSlotDim;
         }}
@@ -767,8 +774,9 @@ std::vector<double> GameState::player_observation_vector(int legal_count) const 
         }}
     }}
 
-    // Combat block left zero-padded (chain logic not implemented in C++ MVP).
+    // Combat + schema-v3 tail (play history, effects, layers) left zero-padded.
     (void)kCombatOff;
+    (void)kPlayedOff;
     return out;
 }}
 

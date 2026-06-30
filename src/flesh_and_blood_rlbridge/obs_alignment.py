@@ -18,6 +18,7 @@ from .player_observation import (
     COMBAT_CHAIN_END,
     COMBAT_SCALAR_OFF,
     PLAYER_OBS_DIM,
+    PLAYED_SELF_OFF,
     ZONE_END,
     ZONE_OFF,
     ZONE_SLOT_DIM,
@@ -26,6 +27,7 @@ from .player_observation import (
 # Slices the C++ fast engine does not populate faithfully yet.
 _CPP_NEUTRAL_SLICES: tuple[tuple[int, int], ...] = (
     (COMBAT_SCALAR_OFF, COMBAT_CHAIN_END),
+    (PLAYED_SELF_OFF, PLAYER_OBS_DIM),
 )
 
 
@@ -86,6 +88,9 @@ def merge_talishar_raw_state(
             "popup",
             "lastPlayed",
             "lastTurnPitched",
+            "playHistory",
+            "currentTurnEffects",
+            "layers",
         }:
             merged[key] = value
     return merged

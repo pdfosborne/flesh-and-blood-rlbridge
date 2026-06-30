@@ -14,15 +14,19 @@ from flesh_and_blood_rlbridge.obs_tokenizer import ObsTokenLayout, TokenBatch, b
 from flesh_and_blood_rlbridge.player_observation import (
     COMBAT_CHAIN_SLOT_DIM,
     COMBAT_SCALAR_COUNT,
+    EFFECT_SLOT_DIM,
+    HAND_CLAUSE_DIM,
     HAND_SLOT_DIM,
+    LAYER_SLOT_DIM,
     PLAYER_OBS_DIM,
+    PLAYED_SLOT_DIM,
     SCALAR_COUNT,
     ZONE_SLOT_DIM,
     ZONE_SPECS,
 )
 
 _TORCH_DTYPE = torch.float32
-_HAND_FEAT_DIM = HAND_SLOT_DIM - 1
+_HAND_FEAT_DIM = 6 + HAND_CLAUSE_DIM
 _ZONE_FEAT_DIM = ZONE_SLOT_DIM - 1
 _CHAIN_FEAT_DIM = COMBAT_CHAIN_SLOT_DIM - 1
 
@@ -97,6 +101,9 @@ class _AttentionPolicyValueV2(nn.Module):
         self.zone_proj = nn.Linear(_ZONE_FEAT_DIM, d_model, dtype=_TORCH_DTYPE)
         self.combat_scalar_proj = nn.Linear(COMBAT_SCALAR_COUNT, d_model, dtype=_TORCH_DTYPE)
         self.combat_chain_proj = nn.Linear(_CHAIN_FEAT_DIM, d_model, dtype=_TORCH_DTYPE)
+        self.played_proj = nn.Linear(PLAYED_SLOT_DIM, d_model, dtype=_TORCH_DTYPE)
+        self.effect_proj = nn.Linear(EFFECT_SLOT_DIM, d_model, dtype=_TORCH_DTYPE)
+        self.layer_proj = nn.Linear(LAYER_SLOT_DIM, d_model, dtype=_TORCH_DTYPE)
 
         self.cross_attn = nn.MultiheadAttention(
             d_model,
@@ -157,8 +164,11 @@ class _AttentionPolicyValueV2(nn.Module):
         scalar_tok = self.scalar_proj(batch.scalars).unsqueeze(1)
 
         hand_ids = denorm_card_index(batch.hand[..., 0])
-        hand_cond = batch.hand[..., -1]
-        hand_tok = self.hand_proj(batch.hand[..., :-1]) + self._text_tokens(hand_ids, hand_cond)
+        hand_cond = batch.hand[..., 6]
+        hand_stats = batch.hand[..., 1:7]
+        hand_clauses = batch.hand[..., 7:]
+        hand_tok = self.hand_proj(torch.cat([hand_stats, hand_clauses], dim=-1))
+        hand_tok = hand_tok + self._text_tokens(hand_ids, hand_cond)
 
         zone_flat = batch.zones.reshape(b * self.layout.zone_slots_total, ZONE_SLOT_DIM)
         zone_tok = self.zone_proj(zone_flat[..., :-1]).reshape(b, self.layout.zone_slots_total, d)
@@ -175,8 +185,30 @@ class _AttentionPolicyValueV2(nn.Module):
             chain_ids, chain_cond
         )
 
+        played_ids = denorm_card_index(batch.played_history[..., 0])
+        played_tok = self.played_proj(batch.played_history) + self._text_tokens(
+            played_ids, torch.ones_like(played_ids, dtype=_TORCH_DTYPE)
+        )
+        effect_ids = denorm_card_index(batch.turn_effects[..., 0])
+        effect_tok = self.effect_proj(batch.turn_effects) + self._text_tokens(
+            effect_ids, torch.ones_like(effect_ids, dtype=_TORCH_DTYPE)
+        )
+        layer_ids = denorm_card_index(batch.layers[..., 1])
+        layer_tok = self.layer_proj(batch.layers) + self._text_tokens(
+            layer_ids, batch.layers[..., -1]
+        )
+
         return torch.cat(
-            [scalar_tok, hand_tok, zone_tok, combat_scalar_tok, chain_tok],
+            [
+                scalar_tok,
+                hand_tok,
+                zone_tok,
+                combat_scalar_tok,
+                chain_tok,
+                played_tok,
+                effect_tok,
+                layer_tok,
+            ],
             dim=1,
         )
 

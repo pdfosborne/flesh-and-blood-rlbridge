@@ -14,12 +14,12 @@ from flesh_and_blood_rlbridge.player_observation import (
 )
 
 
-def test_schema_version_is_two() -> None:
-    assert PLAYER_OBS_SCHEMA_VERSION == 2
+def test_schema_version_is_three() -> None:
+    assert PLAYER_OBS_SCHEMA_VERSION == 3
 
 
-def test_observation_dim_is_626() -> None:
-    assert PLAYER_OBS_DIM == 626
+def test_observation_dim_is_818() -> None:
+    assert PLAYER_OBS_DIM == 818
 
 
 def test_unknown_card_index_is_zero() -> None:

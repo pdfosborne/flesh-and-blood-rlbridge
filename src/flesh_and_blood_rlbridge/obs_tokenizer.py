@@ -17,6 +17,10 @@ from .player_observation import (
     COMBAT_SCALAR_COUNT,
     CONTEXT_DIM,
     DECK_OFF,
+    EFFECT_END,
+    EFFECT_OFF,
+    EFFECT_SLOT_DIM,
+    EFFECT_SLOTS,
     FIRST_PLAYER_OFF,
     FORMAT_OFF,
     HAND_END,
@@ -25,7 +29,17 @@ from .player_observation import (
     HAND_SLOT_DIM,
     HERO_OPP_OFF,
     HERO_SELF_OFF,
+    LAYER_END,
+    LAYER_OFF,
+    LAYER_SLOT_DIM,
+    LAYER_SLOTS,
     PLAYER_OBS_DIM,
+    PLAYED_OPP_END,
+    PLAYED_OPP_OFF,
+    PLAYED_SELF_END,
+    PLAYED_SELF_OFF,
+    PLAYED_SLOT_DIM,
+    PLAYED_SLOTS,
     SCALAR_COUNT,
     SCALAR_OFF,
     ZONE_END,
@@ -48,16 +62,22 @@ class ObsTokenLayout:
     zone_slots_total: int = 2 * ZONE_SLOTS_PER_PLAYER
     zone_slot_dim: int = ZONE_SLOT_DIM
     combat_chain_slots: int = COMBAT_CHAIN_SLOTS
+    played_slots_total: int = 2 * PLAYED_SLOTS
+    effect_slots: int = EFFECT_SLOTS
+    layer_slots: int = LAYER_SLOTS
 
     @property
     def board_token_count(self) -> int:
-        """Scalars + hand + zones + combat scalars + combat chain slots."""
+        """Scalars + hand + zones + combat + play history + effects + layers."""
         return (
             1
             + self.hand_slots
             + self.zone_slots_total
             + 1
             + self.combat_chain_slots
+            + self.played_slots_total
+            + self.effect_slots
+            + self.layer_slots
         )
 
     @property
@@ -107,6 +127,9 @@ class TokenBatch:
     side_ids: torch.Tensor            # (zone_slots,)
     combat_scalars: torch.Tensor      # (B, COMBAT_SCALAR_COUNT)
     combat_chain: torch.Tensor        # (B, COMBAT_CHAIN_SLOTS, COMBAT_CHAIN_SLOT_DIM)
+    played_history: torch.Tensor      # (B, played_slots_total, PLAYED_SLOT_DIM)
+    turn_effects: torch.Tensor        # (B, EFFECT_SLOTS, EFFECT_SLOT_DIM)
+    layers: torch.Tensor              # (B, LAYER_SLOTS, LAYER_SLOT_DIM)
     board_padding_mask: torch.Tensor  # (B, board_token_count) True = ignore
 
 
@@ -136,12 +159,20 @@ def build_token_features(
     combat_chain = obs[:, COMBAT_CHAIN_OFF:COMBAT_CHAIN_END].reshape(
         b, COMBAT_CHAIN_SLOTS, COMBAT_CHAIN_SLOT_DIM
     )
+    played_history = obs[:, PLAYED_SELF_OFF:PLAYED_OPP_END].reshape(
+        b, layout.played_slots_total, PLAYED_SLOT_DIM
+    )
+    turn_effects = obs[:, EFFECT_OFF:EFFECT_END].reshape(b, EFFECT_SLOTS, EFFECT_SLOT_DIM)
+    layers = obs[:, LAYER_OFF:LAYER_END].reshape(b, LAYER_SLOTS, LAYER_SLOT_DIM)
 
     zone_type_ids, side_ids = _zone_type_side_ids(device)
 
     hand_pad = hand[..., 0] <= 0
     zone_pad = zones[..., 0] <= 0
     chain_pad = combat_chain[..., 0] <= 0
+    played_pad = played_history[..., 0] <= 0
+    effect_pad = turn_effects[..., 0] <= 0
+    layer_pad = layers[..., 1] <= 0
 
     board_padding_mask = torch.cat(
         [
@@ -150,6 +181,9 @@ def build_token_features(
             zone_pad,
             torch.zeros(b, 1, dtype=torch.bool, device=device),   # combat scalars
             chain_pad,
+            played_pad,
+            effect_pad,
+            layer_pad,
         ],
         dim=1,
     )
@@ -171,5 +205,8 @@ def build_token_features(
         side_ids=side_ids,
         combat_scalars=combat_scalars,
         combat_chain=combat_chain,
+        played_history=played_history,
+        turn_effects=turn_effects,
+        layers=layers,
         board_padding_mask=board_padding_mask,
     )

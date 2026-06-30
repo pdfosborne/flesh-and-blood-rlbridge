@@ -14,6 +14,7 @@ from flesh_and_blood_rlbridge.player_observation import (
     COMBAT_CHAIN_END,
     COMBAT_SCALAR_OFF,
     PLAYER_OBS_DIM,
+    PLAYED_SELF_OFF,
 )
 
 
@@ -21,6 +22,12 @@ def test_align_zeros_combat_block() -> None:
     vec = np.ones(PLAYER_OBS_DIM, dtype=np.float64)
     aligned = align_observation_for_cpp_training(vec)
     assert float(aligned[COMBAT_SCALAR_OFF:COMBAT_CHAIN_END].sum()) == 0.0
+
+
+def test_align_zeros_schema_v3_tail() -> None:
+    vec = np.ones(PLAYER_OBS_DIM, dtype=np.float64)
+    aligned = align_observation_for_cpp_training(vec)
+    assert float(aligned[PLAYED_SELF_OFF:].sum()) == 0.0
 
 
 def test_aligned_vectors_match_when_only_combat_differs() -> None:
@@ -33,7 +40,16 @@ def test_aligned_vectors_match_when_only_combat_differs() -> None:
 
 def test_merge_talishar_raw_state_prefers_http_zones() -> None:
     cpp = {"playerEquipment": [{"cardNumber": "cpp_card"}]}
-    tal = {"playerEquipment": [{"cardNumber": "tal_card"}], "combatChain": [{"cardID": "x"}]}
+    tal = {
+        "playerEquipment": [{"cardNumber": "tal_card"}],
+        "combatChain": [{"cardID": "x"}],
+        "playHistory": {"player": {"namesOfCardsPlayed": ["snatch_red"]}},
+        "currentTurnEffects": [{"effectId": "dominate_red", "player": 1}],
+        "layers": [{"layerType": "TRIGGER", "cardId": "snatch_red", "player": 1}],
+    }
     merged = merge_talishar_raw_state(cpp, tal)
     assert merged["playerEquipment"][0]["cardNumber"] == "tal_card"
     assert merged["combatChain"][0]["cardID"] == "x"
+    assert merged["playHistory"]["player"]["namesOfCardsPlayed"] == ["snatch_red"]
+    assert merged["currentTurnEffects"][0]["effectId"] == "dominate_red"
+    assert merged["layers"][0]["layerType"] == "TRIGGER"

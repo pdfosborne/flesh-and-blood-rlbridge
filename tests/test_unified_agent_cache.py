@@ -11,7 +11,7 @@ sys.path.insert(0, str(_REPO / "scripts" / "training"))
 sys.path.insert(0, str(_REPO / "src"))
 
 from agent_cache import AgentCacheStore, deck_content_fingerprint  # noqa: E402
-from flesh_and_blood_rlbridge.player_observation import PLAYER_OBS_DIM  # noqa: E402
+from flesh_and_blood_rlbridge.player_observation import PLAYER_OBS_DIM, PLAYER_OBS_SCHEMA_VERSION  # noqa: E402
 from rl_agents.ppo import ARCHITECTURE, PPOAgent, UNIFIED_AGENT_WEIGHT_VERSION  # noqa: E402
 
 
@@ -44,7 +44,7 @@ def test_unified_store_save_load_round_trip(tmp_path: Path) -> None:
     assert reloaded.obs_dim == PLAYER_OBS_DIM
 
     meta = store.load_meta()
-    assert meta["obs_schema_version"] == 2
+    assert meta["obs_schema_version"] == PLAYER_OBS_SCHEMA_VERSION
     assert meta["weight_version"] == UNIFIED_AGENT_WEIGHT_VERSION
     assert meta["architecture"] == ARCHITECTURE
     assert meta["total_episodes_trained"] == 10

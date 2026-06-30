@@ -11,9 +11,13 @@ from flesh_and_blood_rlbridge.obs_tokenizer import ObsTokenLayout, build_token_f
 from flesh_and_blood_rlbridge.player_observation import (
     CONTEXT_DIM,
     DECK_OFF,
+    EFFECT_OFF,
     HAND_OFF,
+    HAND_SLOT_DIM,
     HAND_SLOTS,
+    LAYER_OFF,
     PLAYER_OBS_DIM,
+    PLAYED_SELF_OFF,
     SCALAR_OFF,
     player_observation_vector,
 )
@@ -39,7 +43,9 @@ def _minimal_state() -> dict:
 def test_obs_layout_matches_player_obs_dim() -> None:
     layout = ObsTokenLayout()
     assert layout.obs_dim == PLAYER_OBS_DIM
-    assert layout.board_token_count == 1 + HAND_SLOTS + layout.zone_slots_total + 1 + 8
+    assert layout.board_token_count == (
+        1 + HAND_SLOTS + layout.zone_slots_total + 1 + 8 + layout.played_slots_total + layout.effect_slots + layout.layer_slots
+    )
 
 
 def test_tokenizer_slices_match_obs_vector() -> None:
@@ -57,13 +63,17 @@ def test_tokenizer_slices_match_obs_vector() -> None:
     assert batch.hero_opp_ids.shape == (1,)
     assert batch.deck_card_ids.shape[1] == CONTEXT_DIM - DECK_OFF
     assert batch.scalars.shape == (1, 26)
-    assert batch.hand.shape == (1, HAND_SLOTS, 7)
+    assert batch.hand.shape == (1, HAND_SLOTS, HAND_SLOT_DIM)
     assert batch.zones.shape[1] == ObsTokenLayout().zone_slots_total
     assert batch.combat_chain.shape == (1, 8, 3)
+    assert batch.played_history.shape == (1, 24, 2)
+    assert batch.turn_effects.shape == (1, 12, 4)
+    assert batch.layers.shape == (1, 8, 4)
     assert batch.board_padding_mask.shape == (1, ObsTokenLayout().board_token_count)
 
     assert float(obs[0, SCALAR_OFF].item()) == float(batch.scalars[0, 0].item())
-    assert torch.allclose(obs[0, HAND_OFF : HAND_OFF + 14], batch.hand[0, :2].reshape(-1))
+    hand_dims = HAND_SLOTS * HAND_SLOT_DIM
+    assert torch.allclose(obs[0, HAND_OFF : HAND_OFF + hand_dims], batch.hand[0].reshape(-1))
 
 
 def test_empty_hand_slots_are_padded() -> None:

@@ -48,6 +48,84 @@ function RLCard(
     return $card;
 }
 
+function _rlPlayHistoryForPlayer($playerID)
+{
+    global $CS_NumCardsPlayed, $CS_NamesOfCardsPlayed, $CS_NumRedPlayed, $CS_NumBluePlayed;
+
+    $names = GetClassState($playerID, $CS_NamesOfCardsPlayed);
+    $namesArr = [];
+    if ($names !== "-" && $names !== "") {
+        $namesArr = array_values(array_filter(explode(",", $names), function ($token) {
+            return $token !== "" && $token !== "-";
+        }));
+    }
+
+    $out = new stdClass();
+    $out->namesOfCardsPlayed = $namesArr;
+    $out->numCardsPlayed = intval(GetClassState($playerID, $CS_NumCardsPlayed));
+    $out->numRedPlayed = intval(GetClassState($playerID, $CS_NumRedPlayed));
+    $out->numBluePlayed = intval(GetClassState($playerID, $CS_NumBluePlayed));
+    return $out;
+}
+
+function _rlBuildLayers()
+{
+    global $layers;
+
+    $out = [];
+    $layerPieces = LayerPieces();
+    $layersCount = count($layers);
+    static $specialLayersSet = [
+        "LAYER" => true,
+        "TRIGGER" => true,
+        "MELD" => true,
+        "PRETRIGGER" => true,
+        "ABILITY" => true,
+        "ATTACK" => true,
+    ];
+    for ($i = $layersCount - $layerPieces; $i >= 0; $i -= $layerPieces) {
+        $layerType = $layers[$i];
+        $cardId = isset($specialLayersSet[$layerType]) ? ($layers[$i + 2] ?? "-") : $layerType;
+        $entry = new stdClass();
+        $entry->layerType = $layerType;
+        $entry->cardId = $cardId;
+        $entry->player = intval($layers[$i + 1] ?? 0);
+        $entry->parameter = $layers[$i + 2] ?? "-";
+        $entry->target = $layers[$i + 3] ?? "-";
+        $entry->layerIndex = $i;
+        $out[] = $entry;
+    }
+    return $out;
+}
+
+function _rlBuildTurnEffects()
+{
+    global $currentTurnEffects;
+
+    $out = [];
+    $pieces = CurrentTurnEffectsPieces();
+    $count = count($currentTurnEffects);
+    for ($i = 0; $i + $pieces - 1 < $count; $i += $pieces) {
+        $raw = $currentTurnEffects[$i];
+        $tmp = strstr($raw, '-', true);
+        $firstPart = $tmp !== false ? $tmp : $raw;
+        $tmp2 = strstr($firstPart, ',', true);
+        $cardID = $tmp2 !== false ? $tmp2 : $firstPart;
+        if (AdministrativeEffect($cardID) || $cardID === "luminaris_angels_glow-1" || $cardID === "luminaris_angels_glow-2") {
+            continue;
+        }
+        $entry = new stdClass();
+        $entry->effectId = $raw;
+        $entry->player = intval($currentTurnEffects[$i + 1] ?? 0);
+        $entry->appliesToUniqueId = $currentTurnEffects[$i + 2] ?? "-";
+        $entry->usesRemaining = intval($currentTurnEffects[$i + 3] ?? 0);
+        $entry->isCombatEffect = IsCombatEffectActive($raw) ? true : false;
+        $entry->index = $i;
+        $out[] = $entry;
+    }
+    return $out;
+}
+
 function BuildRLGameStateResponse($gameName, $playerID)
 {
     global $myHand, $myPitch, $myDeck, $myDiscard, $myBanish, $myArsenal, $myCharacter;
@@ -94,6 +172,11 @@ function BuildRLGameStateResponse($gameName, $playerID)
         $response->opponentAP = $actionPoints;
     }
 
+    $playHistory = new stdClass();
+    $playHistory->player = _rlPlayHistoryForPlayer($playerID);
+    $playHistory->opponent = _rlPlayHistoryForPlayer($otherPlayer);
+    $response->playHistory = $playHistory;
+
     $turnPhaseObj = new stdClass();
     $turnPhaseObj->turnPhase = $turnPhase;
     if ($layersCount > 0) {
@@ -102,6 +185,7 @@ function BuildRLGameStateResponse($gameName, $playerID)
     $isItMeOrThem = $currentPlayer == $playerID ? "Choose " : "Your opponent is choosing ";
     $turnPhaseObj->caption = $isItMeOrThem . TypeToPlay($turnPhase);
     $response->turnPhase = $turnPhaseObj;
+    $response->layers = _rlBuildLayers();
 
     // Combat chain (minimal)
     $activeChainLink = new stdClass();
@@ -309,6 +393,8 @@ function BuildRLGameStateResponse($gameName, $playerID)
     $permanentPieces = PermanentPieces();
     $response->playerPermanents = _rlBuildPermanentsZone(GetPermanents($playerID));
     $response->opponentPermanents = _rlBuildPermanentsZone(GetPermanents($otherPlayer));
+
+    $response->currentTurnEffects = _rlBuildTurnEffects();
 
     // Prompt + popup (required for legal actions)
     $playerPrompt = new stdClass();

@@ -16,6 +16,8 @@ from typing import Any, Callable, Mapping, Optional
 
 from rl_agents.ppo import ARCHITECTURE, PPOAgent, UNIFIED_AGENT_WEIGHT_VERSION
 
+from flesh_and_blood_rlbridge.player_observation import PLAYER_OBS_SCHEMA_VERSION
+
 UNIFIED_META_FILENAME = "unified_agent.meta.json"
 LEGACY_REGISTRY_FILENAME = "deck_matchup_registry.json"
 
@@ -162,7 +164,7 @@ class AgentCacheStore:
         cache_root: Path,
         game_format: str,
         *,
-        obs_schema_version: int = 2,
+        obs_schema_version: int = PLAYER_OBS_SCHEMA_VERSION,
     ) -> None:
         self.user_cache_root = cache_root
         self.cache_root = cache_root / _safe_key(game_format)

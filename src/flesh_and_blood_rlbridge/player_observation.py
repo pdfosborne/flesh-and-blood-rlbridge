@@ -12,7 +12,7 @@ from typing import Any, Optional
 
 import numpy as np
 
-from .card_conditionals import evaluate_conditional_active
+from .card_conditionals import HAND_CLAUSE_DIM, evaluate_clause_vector, evaluate_conditional_active
 from .card_vocab import (
     card_index_normalized,
     format_index_normalized,
@@ -21,14 +21,34 @@ from .card_vocab import (
 )
 from .deck_context import EpisodeContext, hero_from_equipment
 
-PLAYER_OBS_SCHEMA_VERSION = 2
+PLAYER_OBS_SCHEMA_VERSION = 3
 ACTION_CAPACITY = 128
 
 DECK_SLOTS = 80
 HAND_SLOTS = 8
-HAND_SLOT_DIM = 7  # card_idx, cost, pitch, power, defense, playable, conditional_active
+# card_idx, cost, pitch, power, defense, playable, conditional_active, + 8 clause dims
+HAND_SLOT_DIM = 7 + HAND_CLAUSE_DIM
 
 ZONE_SLOT_DIM = 5  # card_idx, counters, tapped, face_down, conditional_active
+
+PLAYED_SLOTS = 12
+PLAYED_SLOT_DIM = 2  # card_idx, play_order_norm
+
+EFFECT_SLOTS = 12
+EFFECT_SLOT_DIM = 4  # effect_card_idx, controller, uses_remaining, is_combat_effect
+
+LAYER_SLOTS = 8
+LAYER_SLOT_DIM = 4  # layer_type, card_idx, controller, is_trigger
+
+_LAYER_TYPE_TO_VALUE = {
+    "layer": 1,
+    "trigger": 2,
+    "meld": 3,
+    "pretrigger": 4,
+    "ability": 5,
+    "attack": 6,
+    "cardplay": 7,
+}
 
 # (zone_name, max_slots) per player perspective
 ZONE_SPECS: tuple[tuple[str, int], ...] = (
@@ -71,13 +91,28 @@ COMBAT_SCALAR_END = COMBAT_SCALAR_OFF + COMBAT_SCALAR_COUNT
 COMBAT_CHAIN_OFF = COMBAT_SCALAR_END
 COMBAT_CHAIN_END = COMBAT_CHAIN_OFF + COMBAT_CHAIN_SLOTS * COMBAT_CHAIN_SLOT_DIM
 
-PLAYER_OBS_DIM = (
+PLAYED_SELF_OFF = COMBAT_CHAIN_END
+PLAYED_SELF_END = PLAYED_SELF_OFF + PLAYED_SLOTS * PLAYED_SLOT_DIM
+PLAYED_OPP_OFF = PLAYED_SELF_END
+PLAYED_OPP_END = PLAYED_OPP_OFF + PLAYED_SLOTS * PLAYED_SLOT_DIM
+EFFECT_OFF = PLAYED_OPP_END
+EFFECT_END = EFFECT_OFF + EFFECT_SLOTS * EFFECT_SLOT_DIM
+LAYER_OFF = EFFECT_END
+LAYER_END = LAYER_OFF + LAYER_SLOTS * LAYER_SLOT_DIM
+
+_BASE_PLAYER_OBS_DIM = (
     CONTEXT_DIM
     + SCALAR_COUNT
     + HAND_SLOTS * HAND_SLOT_DIM
     + 2 * _ZONES_PER_PLAYER
     + COMBAT_SCALAR_COUNT
     + COMBAT_CHAIN_SLOTS * COMBAT_CHAIN_SLOT_DIM
+)
+
+PLAYER_OBS_DIM = _BASE_PLAYER_OBS_DIM + (
+    2 * PLAYED_SLOTS * PLAYED_SLOT_DIM
+    + EFFECT_SLOTS * EFFECT_SLOT_DIM
+    + LAYER_SLOTS * LAYER_SLOT_DIM
 )
 
 _PHASE_TO_VALUE = {
@@ -358,7 +393,7 @@ def _encode_hand_slot(
     if card is None:
         return [0.0] * HAND_SLOT_DIM
     cond = _conditional_active(card, state, zone="hand", side="self", phase=phase)
-    return [
+    base = [
         card_index_normalized(card.card_id) if card.card_id else 0.0,
         _scaled(card.cost, 10.0),
         _scaled(card.pitch, 4.0),
@@ -367,6 +402,96 @@ def _encode_hand_slot(
         1.0 if card.playable else 0.0,
         cond,
     ]
+    clauses = evaluate_clause_vector(
+        card.card_id,
+        state,
+        zone="hand",
+        side="self",
+        phase=phase,
+        card_visible=card.card_visible and bool(card.card_id),
+    )
+    base.extend(clauses)
+    return base
+
+
+def _play_history_names(state: dict[str, Any], *, side: str) -> list[str]:
+    history = state.get("playHistory")
+    if not isinstance(history, dict):
+        return []
+    key = "player" if side == "self" else "opponent"
+    block = history.get(key, {})
+    if not isinstance(block, dict):
+        return []
+    names = block.get("namesOfCardsPlayed", [])
+    if not isinstance(names, list):
+        return []
+    return [str(n).strip() for n in names if str(n).strip()]
+
+
+def _encode_play_history(state: dict[str, Any], *, side: str) -> list[float]:
+    names = _play_history_names(state, side=side)
+    out: list[float] = []
+    for slot in range(PLAYED_SLOTS):
+        if slot >= len(names):
+            out.extend([0.0] * PLAYED_SLOT_DIM)
+            continue
+        cid = names[slot]
+        out.append(card_index_normalized(cid))
+        out.append(float(slot + 1) / float(PLAYED_SLOTS))
+    return out
+
+
+def _extract_effect_card_id(effect_id: str) -> str:
+    raw = str(effect_id or "").strip()
+    if not raw:
+        return ""
+    first = raw.split("-", 1)[0]
+    return first.split(",", 1)[0].strip()
+
+
+def _encode_turn_effects(state: dict[str, Any]) -> list[float]:
+    effects = state.get("currentTurnEffects", [])
+    if not isinstance(effects, list):
+        effects = []
+    out: list[float] = []
+    for slot in range(EFFECT_SLOTS):
+        if slot >= len(effects) or not isinstance(effects[slot], dict):
+            out.extend([0.0] * EFFECT_SLOT_DIM)
+            continue
+        entry = effects[slot]
+        effect_id = str(entry.get("effectId", entry.get("effect_id", "")) or "")
+        card_id = _extract_effect_card_id(effect_id)
+        out.append(card_index_normalized(card_id) if card_id else 0.0)
+        out.append(float(_to_int(entry.get("player"))) / 2.0)
+        out.append(_scaled(entry.get("usesRemaining", entry.get("uses_remaining", 0)), 5.0))
+        combat = entry.get("isCombatEffect", entry.get("is_combat_effect", False))
+        out.append(1.0 if combat else 0.0)
+    return out
+
+
+def _layer_type_value(layer_type: str) -> float:
+    token = str(layer_type or "").strip().lower()
+    return float(_LAYER_TYPE_TO_VALUE.get(token, 0)) / 10.0
+
+
+def _encode_layers(state: dict[str, Any]) -> list[float]:
+    layers = state.get("layers", [])
+    if not isinstance(layers, list):
+        layers = []
+    out: list[float] = []
+    for slot in range(LAYER_SLOTS):
+        if slot >= len(layers) or not isinstance(layers[slot], dict):
+            out.extend([0.0] * LAYER_SLOT_DIM)
+            continue
+        entry = layers[slot]
+        layer_type = str(entry.get("layerType", entry.get("layer_type", "")) or "")
+        card_id = str(entry.get("cardId", entry.get("card_id", "")) or "")
+        out.append(_layer_type_value(layer_type))
+        out.append(card_index_normalized(card_id) if card_id else 0.0)
+        out.append(float(_to_int(entry.get("player"))) / 2.0)
+        is_trigger = layer_type.upper() in {"TRIGGER", "PRETRIGGER", "MELD"}
+        out.append(1.0 if is_trigger else 0.0)
+    return out
 
 
 def _encode_zone_block(
@@ -571,6 +696,10 @@ def player_observation_vector(
             )
 
     out.extend(_encode_combat(raw, phase=phase_str))
+    out.extend(_encode_play_history(raw, side="self"))
+    out.extend(_encode_play_history(raw, side="opp"))
+    out.extend(_encode_turn_effects(raw))
+    out.extend(_encode_layers(raw))
     if len(out) != PLAYER_OBS_DIM:
         raise RuntimeError(f"observation dim mismatch: {len(out)} != {PLAYER_OBS_DIM}")
     return np.asarray(out, dtype=np.float64)
