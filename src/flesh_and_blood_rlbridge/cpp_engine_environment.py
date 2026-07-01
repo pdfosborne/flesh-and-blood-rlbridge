@@ -1339,7 +1339,10 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         truncated = not terminated and self._steps >= self._max_turns
         macro_stall = self._check_macro_stall(self._legal_actions())
         if macro_stall.should_truncate and not terminated:
-            truncated = True
+            if macro_stall.mutual_stall_loss:
+                terminated = True  # both players lose; training injects -1 for each
+            else:
+                truncated = True
         repeat_pen = self._repeat_penalty(
             int(chosen_dict.get("action_code", 0) or 0),
             str(chosen_dict.get("button_input", "") or ""),
@@ -1347,7 +1350,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         reward = float(
             self._compute_reward(prev_p1, prev_p2, terminated, truncated, repeat_pen)
         )
-        if truncated and not terminated:
+        if (truncated and not terminated) or (terminated and macro_stall.mutual_stall_loss):
             reward = float(self._truncation_penalty)
         self._p1_hp = int(self._gs.p1_health)
         self._p2_hp = int(self._gs.p2_health)
@@ -1428,10 +1431,13 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         truncated = not terminated and self._steps >= self._max_turns
         macro_stall = self._check_macro_stall(self._legal_actions())
         if macro_stall.should_truncate and not terminated:
-            truncated = True
-        if terminated:
+            if macro_stall.mutual_stall_loss:
+                terminated = True
+            else:
+                truncated = True
+        if terminated and not macro_stall.mutual_stall_loss:
             reward = float(result.reward)
-        elif truncated:
+        elif truncated or (terminated and macro_stall.mutual_stall_loss):
             reward = float(self._truncation_penalty)
         else:
             p1_now = int(result.p1_health)
@@ -1771,6 +1777,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             "macro_stall_reason": result.reason,
             "turns_without_damage": result.turns_without_damage,
             "pass_only_main_streak": result.pass_only_main_streak,
+            "mutual_stall_loss": result.mutual_stall_loss,
         }
 
     def _pass_like_action_from_legal(self, legal: list[Any]) -> Any:
@@ -2562,7 +2569,11 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         new_legal = self._filter_legal_actions(self._legal_actions())
         macro_stall = self._check_macro_stall(self._legal_actions())
         if macro_stall.should_truncate and not terminated:
-            truncated = True
+            if macro_stall.mutual_stall_loss:
+                terminated = True
+                truncated = False
+            else:
+                truncated = True
             reward = float(self._truncation_penalty)
 
         obs = self._encode_observation(new_legal)

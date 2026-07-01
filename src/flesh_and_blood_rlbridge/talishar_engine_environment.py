@@ -106,7 +106,9 @@ from .player_observation import (
 from .legal_action_filter import (
     filter_legal_actions,
     is_mandatory_progress_phase,
+    is_pass_only,
     is_waiting_for_other_player,
+    MANDATORY_PROGRESS_PHASES,
     player_choosing_in_snapshot,
     player_must_wait,
 )
@@ -175,6 +177,9 @@ _FAST_PRIORITY_MAX_POLLS = 15
 _FAST_PRIORITY_DEADLOCK_POLLS = 6
 _FAST_PRIORITY_STEP_SYNC_POLLS = 8
 _HTTP_REQUEST_RETRIES = 6
+# Maximum consecutive priority-resync / player_must_wait returns before the
+# environment declares a technical truncation (priority deadlock).
+_PRIORITY_RESYNC_MAX = 10
 _HTTP_RETRY_BASE_SLEEP_S = 0.5
 _DISABLE_CARD_HOVER_STORAGE_KEY = "talishar-disable-card-hover"
 
@@ -455,6 +460,10 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         # pre-game equipment-selection phase, when Talishar returns
         # playerDeckCount=0 / empty playerHand before decks are shuffled.
         self._deck_nonzero_ever_seen: bool = False
+        # Consecutive priority-resync returns without a real action submitted.
+        # Resets to 0 after any successful action.  On reaching _PRIORITY_RESYNC_MAX,
+        # the environment returns a technical truncation (priority deadlock).
+        self._priority_resync_streak: int = 0
         # Multi-select popup tracking (mode=16 picks + mode=19 submit payload)
         self._multi_select_inputs: list[str] = []
         self._pending_chk_inputs: Optional[list[str]] = None
@@ -888,6 +897,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         self._opp_hp = int(self._last_state.get("opponentHealth", 20))
         self._steps = 0
         self._deck_nonzero_ever_seen = False
+        self._priority_resync_streak = 0
         self._loop_guard.reset()
         self._macro_stall_guard.reset()
         self._multi_select_inputs = []
@@ -966,6 +976,10 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             state,
         )
 
+        # Capture absolute P1/P2 health BEFORE the action (while acting player
+        # ID is still the pre-action value).  Used for P1-centric reward.
+        prev_p1_hp_abs, prev_p2_hp_abs = self._absolute_p1_p2_health(state)
+
         prev_player_hp = self._player_hp
         prev_opp_hp = self._opp_hp
         try:
@@ -978,22 +992,36 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                 new_state = self._submit_action_and_sync(99, "")
             except Exception:
                 new_state = self._sync_after_action()
+        # Reset priority-resync watchdog: a real submission was made.
+        self._priority_resync_streak = 0
         new_state = self._recover_from_gamestate_revert_if_needed(
             new_state,
             submitted_mode=mode,
             submitted_button=button_input,
         )
 
-        self._steps += 1
+        # Phase 5: auto-advance deterministic windows (pass-only / single
+        # mandatory action) without consuming additional policy calls.
+        new_state, auto_steps = self._fast_auto_advance(new_state)
+
+        self._steps += 1 + auto_steps
         new_player_hp = int(new_state.get("playerHealth", self._player_hp))
         new_opp_hp = int(new_state.get("opponentHealth", self._opp_hp))
+        # Absolute health after the action + any auto-advances.
+        new_p1_hp_abs, new_p2_hp_abs = self._absolute_p1_p2_health(new_state)
+
         terminated = self._is_game_over(new_state)
         truncated = not terminated and self._steps >= self._max_turns
 
         new_legal_raw = self._legal_actions(new_state)
         macro_stall = self._check_macro_stall(new_state, new_legal_raw)
         if macro_stall.should_truncate and not terminated:
-            truncated = True
+            if macro_stall.mutual_stall_loss:
+                # Both players stalling → definitive episode end; training
+                # loop injects -1.0 for each seat via mutual_stall_loss flag.
+                terminated = True
+            else:
+                truncated = True
 
         action_key = (mode, button_input)
         turn_no = int(new_state.get("turnNo", 0) or 0)
@@ -1011,28 +1039,40 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             )
 
         if terminated:
-            won = self._did_player_win(new_player_hp, new_opp_hp)
-            draw = self._is_draw(new_state)
-            exhausted_loss = self._is_resource_exhausted_loss(new_state)
-            if draw:
-                reward = 0.0
-            elif exhausted_loss:
-                reward = -1.0 if self._acting_player_id == 1 else 1.0
+            if macro_stall.mutual_stall_loss:
+                # Mutual stall: both players lose.  Training loop handles -1
+                # for each seat; use truncation_penalty here as the step reward.
+                reward = self._truncation_penalty
+                winner = -1
             else:
-                reward = 1.0 if won else -1.0
-            winner = self._absolute_p1_seat_winner(
-                new_state,
-                exhausted_loss=exhausted_loss,
-                draw=draw,
-            )
+                # P1-centric terminal reward using absolute seat health.
+                draw = self._is_draw(new_state)
+                exhausted_loss = self._is_resource_exhausted_loss(new_state)
+                winner = self._absolute_p1_seat_winner(
+                    new_state, exhausted_loss=exhausted_loss, draw=draw
+                )
+                if winner == 0:
+                    reward = 1.0   # P1 won
+                elif winner == 1:
+                    reward = -1.0  # P2 won
+                else:
+                    reward = 0.0   # draw
         elif truncated:
             reward = self._truncation_penalty
             winner = -1
         else:
-            dmg_dealt = max(0, prev_opp_hp - new_opp_hp)
-            dmg_taken = max(0, prev_player_hp - new_player_hp)
+            # P1-centric intermediate reward: positive when P2 takes damage.
+            # Uses absolute health across all steps (action + auto-advances) so
+            # the damage signal is correct regardless of which player is acting.
+            dmg_dealt = max(0, prev_p2_hp_abs - new_p2_hp_abs)
+            dmg_taken = max(0, prev_p1_hp_abs - new_p1_hp_abs)
             scale = self._damage_reward_scale
-            reward = dmg_dealt * scale - dmg_taken * scale + self._step_penalty
+            total_steps = 1 + auto_steps
+            reward = (
+                dmg_dealt * scale
+                - dmg_taken * scale
+                + self._step_penalty * total_steps
+            )
             winner = -1
         reward += repeat_penalty
 
@@ -1669,7 +1709,18 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         return self._resolve_priority_holder()
 
     def _return_priority_resync(self, state: dict[str, Any]) -> StepResult:
-        """Return an observation for the priority holder without submitting."""
+        """Return an observation for the priority holder without submitting.
+
+        Tracks consecutive resync returns.  After ``_PRIORITY_RESYNC_MAX``
+        consecutive calls without a real action submission, declares a
+        technical truncation (priority deadlock) to prevent the episode from
+        spinning forever on a broken Talishar state.
+        """
+        self._priority_resync_streak += 1
+        is_deadlock = self._priority_resync_streak >= _PRIORITY_RESYNC_MAX
+        if is_deadlock:
+            self._priority_resync_streak = 0
+
         self._player_hp = int(state.get("playerHealth", self._player_hp))
         self._opp_hp = int(state.get("opponentHealth", self._opp_hp))
         self._last_state = state
@@ -1685,15 +1736,17 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             "repeat_streak": self._repeat_tracker.repeat_streak,
             "repeat_penalty": 0.0,
             "priority_resync": True,
+            "priority_deadlock": is_deadlock,
             "combat_tracker": self._tracker_stub(),
         }
         if self._last_observation_vec is not None:
             step_info["observation_vec"] = self._last_observation_vec
+        is_over = self._is_game_over(state)
         return StepResult(
             observation=obs,
-            reward=self._step_penalty,
-            terminated=self._is_game_over(state),
-            truncated=False,
+            reward=self._truncation_penalty if is_deadlock else self._step_penalty,
+            terminated=is_over,
+            truncated=is_deadlock and not is_over,
             info=step_info,
         )
 
@@ -2224,7 +2277,65 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             "macro_stall_reason": result.reason,
             "turns_without_damage": result.turns_without_damage,
             "pass_only_main_streak": result.pass_only_main_streak,
+            "mutual_stall_loss": result.mutual_stall_loss,
         }
+
+    def _fast_auto_advance(
+        self,
+        state: dict[str, Any],
+        *,
+        max_iters: int = 32,
+    ) -> tuple[dict[str, Any], int]:
+        """Auto-advance deterministic windows without consuming a policy call.
+
+        Submits:
+        * Pass when all filtered legal actions are pass-like (e.g. end-of-turn
+          instant windows, confirm phases).
+        * The sole non-pass action in a mandatory chooser phase when exactly
+          one such action exists and the policy would have no real choice.
+
+        Stops immediately when a genuine multi-option choice appears, the game
+        ends, or the episode step budget is reached.
+
+        Returns ``(final_state, steps_advanced)``.  The caller must increment
+        ``self._steps`` by ``steps_advanced`` and account for health changes
+        in its own reward computation.
+        """
+        if not self._using_fast_talishar:
+            return state, 0
+
+        steps = 0
+        for _ in range(max_iters):
+            if self._is_game_over(state):
+                break
+            if self._steps + steps >= self._max_turns:
+                break
+
+            legal = self._legal_actions(state)
+            if not legal:
+                break
+
+            pass_only = is_pass_only(legal)
+            if pass_only:
+                mode, button_input = self._force_pass_submission(legal)
+            else:
+                # Single mandatory action in a chooser phase?
+                if not is_mandatory_progress_phase(state):
+                    break
+                non_pass = [a for a in legal if not _is_pass_action(a)]
+                if len(non_pass) != 1:
+                    break
+                a = non_pass[0]
+                mode = int(a["action_code"])
+                button_input = str(a.get("button_input", "") or "")
+
+            try:
+                state = self._submit_action_and_sync(mode, button_input)
+            except RuntimeError:
+                break
+            steps += 1
+
+        return state, steps
 
     def _force_loop_guard_submission(
         self,
@@ -2834,6 +2945,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         self._opp_hp = int(self._last_state.get("opponentHealth", 20))
         self._steps = 0
         self._deck_nonzero_ever_seen = False
+        self._priority_resync_streak = 0
         self._loop_guard.reset()
         self._macro_stall_guard.reset()
         self._multi_select_inputs = []
@@ -2937,6 +3049,9 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             button_input,
         )
 
+        # Capture absolute health before submit (acting player ID still pre-action).
+        prev_p1_hp_abs, prev_p2_hp_abs = self._absolute_p1_p2_health(state)
+
         if self._verbose:
             print(f"    [step {self._steps + 1}] P{self._acting_player_id} "
                   f"mode={mode} btn={button_input!r}  "
@@ -2951,6 +3066,8 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                 new_state = self._submit_action_and_sync(99, "")
             except Exception:
                 new_state = self._sync_after_action()
+        # Reset priority-resync watchdog: a real action was submitted.
+        self._priority_resync_streak = 0
         new_state = self._recover_from_gamestate_revert_if_needed(
             new_state,
             submitted_mode=mode,
@@ -2967,6 +3084,8 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                   f"terminated={self._is_game_over(new_state)}", flush=True)
         new_player_hp = int(new_state.get("playerHealth", self._player_hp))
         new_opp_hp = int(new_state.get("opponentHealth", self._opp_hp))
+        # Absolute health after action (acting player ID now updated by sync).
+        new_p1_hp_abs, new_p2_hp_abs = self._absolute_p1_p2_health(new_state)
         self._steps += 1
 
         terminated = self._is_game_over(new_state)
@@ -2975,7 +3094,10 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         new_legal_raw = self._legal_actions(new_state)
         macro_stall = self._check_macro_stall(new_state, new_legal_raw)
         if macro_stall.should_truncate and not terminated:
-            truncated = True
+            if macro_stall.mutual_stall_loss:
+                terminated = True  # definitive end; training injects -1 for both
+            else:
+                truncated = True
 
         action_key = (mode, button_input)
         turn_no = int(new_state.get("turnNo", 0) or 0)
@@ -2993,22 +3115,29 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             )
 
         if terminated:
-            won = self._did_player_win(new_player_hp, new_opp_hp)
-            draw = self._is_draw(new_state)
-            exhausted_loss = self._is_resource_exhausted_loss(new_state)
-            if draw:
-                reward = 0.0
-            elif exhausted_loss:
-                # Acting player ran out of cards — they lose.
-                # Reward is from P1's perspective: loss if P1 was acting, win if P2 was.
-                reward = -1.0 if self._acting_player_id == 1 else 1.0
+            if macro_stall.mutual_stall_loss:
+                reward = self._truncation_penalty
+                winner = -1
             else:
-                reward = 1.0 if won else -1.0
+                # P1-centric terminal reward via absolute seat health.
+                draw = self._is_draw(new_state)
+                exhausted_loss = self._is_resource_exhausted_loss(new_state)
+                winner = self._absolute_p1_seat_winner(
+                    new_state, exhausted_loss=exhausted_loss, draw=draw
+                )
+                if winner == 0:
+                    reward = 1.0   # P1 won
+                elif winner == 1:
+                    reward = -1.0  # P2 won
+                else:
+                    reward = 0.0   # draw
         elif truncated:
             reward = self._truncation_penalty
         else:
-            dmg_dealt = max(0, self._opp_hp - new_opp_hp)
-            dmg_taken = max(0, self._player_hp - new_player_hp)
+            # P1-centric intermediate reward using absolute P1/P2 health delta.
+            # Positive when P2 takes damage (good for P1), negative when P1 does.
+            dmg_dealt = max(0, prev_p2_hp_abs - new_p2_hp_abs)
+            dmg_taken = max(0, prev_p1_hp_abs - new_p1_hp_abs)
             scale = self._damage_reward_scale
             reward = dmg_dealt * scale - dmg_taken * scale + self._step_penalty
         reward += repeat_penalty

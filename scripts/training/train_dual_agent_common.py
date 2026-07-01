@@ -893,6 +893,38 @@ def _finalize_fast_episode_transitions(
         slot.truncated = True
     if not slot.terminated:
         return
+    if slot.mutual_stall_loss:
+        if slot.p1_trans:
+            last = slot.p1_trans[-1]
+            slot.p1_trans.append({
+                "obs_vec": last["next_obs_vec"],
+                "action": last["action"],
+                "reward": -1.0,
+                "value": 0.0,
+                "log_prob": last["log_prob"],
+                "done": 1.0,
+                "n_legal": last["n_legal"],
+                "next_obs_vec": np.zeros_like(last["next_obs_vec"]),
+                "step_order": slot.step_order,
+            })
+            slot.step_order += 1
+            slot.cur_p1_r -= 1.0
+        if slot.p2_trans:
+            last = slot.p2_trans[-1]
+            slot.p2_trans.append({
+                "obs_vec": last["next_obs_vec"],
+                "action": last["action"],
+                "reward": -1.0,
+                "value": 0.0,
+                "log_prob": last["log_prob"],
+                "done": 1.0,
+                "n_legal": last["n_legal"],
+                "next_obs_vec": np.zeros_like(last["next_obs_vec"]),
+                "step_order": slot.step_order,
+            })
+            slot.step_order += 1
+            slot.cur_p2_r -= 1.0
+        return
     if slot.final_p1_hp > slot.final_p2_hp and slot.p2_trans:
         last = slot.p2_trans[-1]
         slot.p2_trans.append({
@@ -1230,6 +1262,7 @@ class _FastRolloutSlot:
     active: bool = True
     terminated: bool = False
     truncated: bool = False
+    mutual_stall_loss: bool = False
     final_p1_hp: int = 0
     final_p2_hp: int = 0
     final_p1_deck: int = 0
@@ -1333,6 +1366,7 @@ def _reset_fast_rollout_slot(
     slot.active = True
     slot.terminated = False
     slot.truncated = False
+    slot.mutual_stall_loss = False
     slot.final_p1_hp = _int_fast_state(slot.state, "p1_health", 0)
     slot.final_p2_hp = _int_fast_state(slot.state, "p2_health", 0)
     slot.final_p1_deck = _int_fast_state(slot.state, "p1_deck", 0)
@@ -1586,6 +1620,7 @@ def _apply_fast_rollout_action(
     env_reward = float(next_state.get("reward", 0.0) or 0.0)
     slot.terminated = bool(next_state.get("terminated", False))
     slot.truncated = bool(next_state.get("truncated", False))
+    slot.mutual_stall_loss = bool(next_state.get("mutual_stall_loss", False))
     done = slot.terminated or slot.truncated
     slot.steps += 1
 
@@ -2126,6 +2161,7 @@ def _run_one_fast_episode(
     final_p1_deck = _int_state(state, "p1_deck", 0)
     final_p2_deck = _int_state(state, "p2_deck", 0)
     final_turn_no = _int_state(state, "turn_no", 0)
+    mutual_stall_loss = bool(state.get("mutual_stall_loss", False))
     step_order = 0
 
     for _ in range(max_steps):
@@ -2153,6 +2189,7 @@ def _run_one_fast_episode(
         env_reward = float(next_state.get("reward", 0.0) or 0.0)
         terminated = bool(next_state.get("terminated", False))
         truncated = bool(next_state.get("truncated", False))
+        mutual_stall_loss = bool(next_state.get("mutual_stall_loss", False))
         done = terminated or truncated
         steps_taken += 1
 
@@ -2190,7 +2227,38 @@ def _run_one_fast_episode(
         truncated = True
 
     if terminated:
-        if final_p1_hp > final_p2_hp and p2_trans:
+        if mutual_stall_loss:
+            if p1_trans:
+                last = p1_trans[-1]
+                p1_trans.append({
+                    "obs_vec": last["next_obs_vec"],
+                    "action": last["action"],
+                    "reward": -1.0,
+                    "value": 0.0,
+                    "log_prob": last["log_prob"],
+                    "done": 1.0,
+                    "n_legal": last["n_legal"],
+                    "next_obs_vec": np.zeros_like(last["next_obs_vec"]),
+                    "step_order": step_order,
+                })
+                step_order += 1
+                cur_p1_r -= 1.0
+            if p2_trans:
+                last = p2_trans[-1]
+                p2_trans.append({
+                    "obs_vec": last["next_obs_vec"],
+                    "action": last["action"],
+                    "reward": -1.0,
+                    "value": 0.0,
+                    "log_prob": last["log_prob"],
+                    "done": 1.0,
+                    "n_legal": last["n_legal"],
+                    "next_obs_vec": np.zeros_like(last["next_obs_vec"]),
+                    "step_order": step_order,
+                })
+                step_order += 1
+                cur_p2_r -= 1.0
+        elif final_p1_hp > final_p2_hp and p2_trans:
             last = p2_trans[-1]
             p2_trans.append({
                 "obs_vec": last["next_obs_vec"],
@@ -2228,6 +2296,7 @@ def _run_one_fast_episode(
         "p2_reward": cur_p2_r,
         "terminated": terminated,
         "truncated": truncated,
+        "mutual_stall_loss": mutual_stall_loss,
         "warmup": warmup,
         "steps": steps_taken,
         "p1_hp": final_p1_hp,
@@ -2273,6 +2342,7 @@ def _run_one_episode(
     steps_taken = 0
     final_p1_hp = final_p2_hp = final_turn_no = None
     final_p1_deck = final_p2_deck = None
+    mutual_stall_loss = bool(step_info.get("mutual_stall_loss", False))
     step_order = 0
 
     for _ in range(max_steps):
@@ -2303,6 +2373,7 @@ def _run_one_episode(
         done        = terminated or truncated
         next_obs    = _get(step_out, "observation", obs)
         step_info   = _get(step_out, "info", {})
+        mutual_stall_loss = bool(step_info.get("mutual_stall_loss", False))
         steps_taken += 1
         # Track final game state for diagnostics
         try:
@@ -2358,7 +2429,34 @@ def _run_one_episode(
     #   • the critic learns V(terminal) ≈ -1 for the loser's perspective
     #   • cur_p1_r / cur_p2_r correctly reflect the game outcome for reporting
     if terminated and final_p1_hp is not None and final_p2_hp is not None:
-        if final_p1_hp > final_p2_hp:
+        if mutual_stall_loss:
+            if p1_trans:
+                last = p1_trans[-1]
+                p1_trans.append({
+                    "obs_vec":      last["next_obs_vec"],
+                    "action":       last["action"],
+                    "reward":       -1.0,
+                    "value":        0.0,
+                    "log_prob":     last["log_prob"],
+                    "done":         1.0,
+                    "n_legal":      last["n_legal"],
+                    "next_obs_vec": np.zeros_like(last["next_obs_vec"]),
+                })
+                cur_p1_r -= 1.0
+            if p2_trans:
+                last = p2_trans[-1]
+                p2_trans.append({
+                    "obs_vec":      last["next_obs_vec"],
+                    "action":       last["action"],
+                    "reward":       -1.0,
+                    "value":        0.0,
+                    "log_prob":     last["log_prob"],
+                    "done":         1.0,
+                    "n_legal":      last["n_legal"],
+                    "next_obs_vec": np.zeros_like(last["next_obs_vec"]),
+                })
+                cur_p2_r -= 1.0
+        elif final_p1_hp > final_p2_hp:
             # P1 won → P2 never saw a terminal -1
             if p2_trans:
                 last = p2_trans[-1]
@@ -2396,6 +2494,7 @@ def _run_one_episode(
         "p2_reward":      cur_p2_r,
         "terminated":     terminated,
         "truncated":      truncated,
+        "mutual_stall_loss": mutual_stall_loss,
         "warmup":         warmup,
         "steps":          steps_taken,
         "p1_hp":          final_p1_hp,

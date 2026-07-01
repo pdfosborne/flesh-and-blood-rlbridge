@@ -121,3 +121,23 @@ def test_disabled_guard_never_truncates() -> None:
     for turn in range(1, 5):
         result = guard.observe(_state(turn_no=turn), pass_only, p1_hp=20, p2_hp=20)
     assert not result.should_truncate
+
+
+def test_mutual_pass_stall_sets_mutual_loss_flag() -> None:
+    guard = MacroStallGuard(
+        MacroStallConfig(
+            stall_no_damage_turns=99,
+            stall_pass_only_turns=99,
+            stall_mutual_pass_turns=2,
+        )
+    )
+    pass_only = [{"action_code": 99, "label": "Pass", "zone": "button"}]
+
+    guard.observe(_state(turn_no=1, acting=1), pass_only, p1_hp=20, p2_hp=20)
+    guard.observe(_state(turn_no=1, acting=2), pass_only, p1_hp=20, p2_hp=20)
+    guard.observe(_state(turn_no=2, acting=1), pass_only, p1_hp=20, p2_hp=20)
+    result = guard.observe(_state(turn_no=2, acting=2), pass_only, p1_hp=20, p2_hp=20)
+
+    assert result.should_truncate
+    assert result.reason == "mutual_pass_stall"
+    assert result.mutual_stall_loss is True

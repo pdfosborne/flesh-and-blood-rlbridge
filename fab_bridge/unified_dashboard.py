@@ -1851,9 +1851,12 @@ def render_unified_random_matchups_html(
     )
     colspan = len(header_cells)
     header_row = "".join(f"<th>{html.escape(label)}</th>" for label in header_cells)
+    empty_ckpt_row = (
+        f'<tr><td colspan="{colspan}" class="muted">No checkpoint eval yet</td></tr>'
+    )
     ckpt_table = (
         f'<table class="history"><thead><tr>{header_row}</tr></thead>'
-        f"<tbody>{ckpt_rows or f'<tr><td colspan=\"{colspan}\" class=\"muted\">No checkpoint eval yet</td></tr>'}</tbody></table>"
+        f"<tbody>{ckpt_rows or empty_ckpt_row}</tbody></table>"
     )
 
     return f"""<!DOCTYPE html>

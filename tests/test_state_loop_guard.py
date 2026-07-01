@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import flesh_and_blood_rlbridge.state_loop_guard as state_loop_guard_module
+
 from flesh_and_blood_rlbridge.state_loop_guard import (
     TurnLoopGuard,
     board_state_fingerprint,
@@ -271,3 +273,58 @@ def test_decision_loop_forces_non_pass_when_available() -> None:
     mode, button = resolve_forced_submission(legal, result)
     assert mode == 8
     assert button == "widowmaker_yellow"
+
+
+def test_decision_loop_uses_ranked_progress_action(monkeypatch) -> None:
+    guard = TurnLoopGuard(max_steps_per_turn=100, loop_repeat_threshold=2)
+    state = {
+        "turnPhase": {"turnPhase": "M"},
+        "turnNo": 5,
+        "playerPitchCount": 0,
+        "playerHand": [{"cardNumber": "WTR001"}],
+    }
+    legal = [
+        {
+            "action_code": 27,
+            "button_input": "attack_a",
+            "zone": "hand",
+            "label": "Attack A",
+        },
+        {
+            "action_code": 27,
+            "button_input": "attack_b",
+            "zone": "hand",
+            "label": "Attack B",
+        },
+        {
+            "action_code": 99,
+            "button_input": "",
+            "zone": "button",
+            "label": "Pass",
+        },
+    ]
+
+    observed: dict[str, object] = {}
+
+    def _fake_ranked_progress_action(
+        legal_actions: list[dict],
+        snapshot: dict,
+    ) -> dict:
+        observed["legal_actions"] = legal_actions
+        observed["snapshot"] = snapshot
+        return legal_actions[1]
+
+    monkeypatch.setattr(
+        state_loop_guard_module,
+        "ranked_progress_action",
+        _fake_ranked_progress_action,
+    )
+
+    guard.check(state, legal, turn_no=5, acting_player_id=1)
+    result = guard.check(state, legal, turn_no=5, acting_player_id=1)
+
+    assert result.force_pass
+    assert result.reason == "decision_loop"
+    assert result.forced_action == legal[1]
+    assert observed["legal_actions"] is legal
+    assert observed["snapshot"] is state

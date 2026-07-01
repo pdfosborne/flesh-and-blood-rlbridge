@@ -18,9 +18,11 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 from train_dual_agent_common import (  # noqa: E402
     Matchup,
     _FastRolloutSlot,
+    _apply_fast_rollout_action,
     _batched_fast_rollout_step,
     _batched_fast_rollout_step_concurrent,
     _EnvRolloutWorker,
+    _finalize_fast_episode_transitions,
     _run_parallel_batched_fast_episodes,
     _run_parallel_fast_episodes_threaded,
 )
@@ -252,3 +254,98 @@ def test_threaded_episodes_honors_swap_envs() -> None:
     assert results[0]["active_p2_hero"] == "hero_a"
     swap_env.fast_reset.assert_called_once()
     env.fast_reset.assert_not_called()
+
+
+def test_finalize_fast_episode_mutual_stall_injects_both_terminal_losses() -> None:
+    slot = _make_slot(delay=0.0)
+    obs = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float64)
+    next_obs = np.array([4.0, 3.0, 2.0, 1.0], dtype=np.float64)
+    slot.p1_trans = [{
+        "obs_vec": obs,
+        "action": 0,
+        "reward": 0.2,
+        "value": 0.0,
+        "log_prob": -0.1,
+        "done": 0.0,
+        "n_legal": 2,
+        "next_obs_vec": next_obs,
+        "step_order": 0,
+    }]
+    slot.p2_trans = [{
+        "obs_vec": obs,
+        "action": 1,
+        "reward": -0.3,
+        "value": 0.0,
+        "log_prob": -0.2,
+        "done": 0.0,
+        "n_legal": 2,
+        "next_obs_vec": next_obs,
+        "step_order": 1,
+    }]
+    slot.cur_p1_r = 0.2
+    slot.cur_p2_r = -0.3
+    slot.terminated = True
+    slot.mutual_stall_loss = True
+    slot.step_order = 2
+
+    _finalize_fast_episode_transitions(slot, max_steps=10)
+
+    assert len(slot.p1_trans) == 2
+    assert len(slot.p2_trans) == 2
+    assert slot.p1_trans[-1]["reward"] == -1.0
+    assert slot.p2_trans[-1]["reward"] == -1.0
+    assert slot.p1_trans[-1]["done"] == 1.0
+    assert slot.p2_trans[-1]["done"] == 1.0
+    np.testing.assert_array_equal(slot.p1_trans[-1]["next_obs_vec"], np.zeros_like(next_obs))
+    np.testing.assert_array_equal(slot.p2_trans[-1]["next_obs_vec"], np.zeros_like(next_obs))
+    assert slot.cur_p1_r == pytest.approx(-0.8)
+    assert slot.cur_p2_r == pytest.approx(-1.3)
+
+
+def test_apply_fast_rollout_action_tracks_mutual_stall_flag() -> None:
+    class _MutualStallFastEnv:
+        def fast_step_index(self, action_index: int) -> dict:
+            _ = action_index
+            return {
+                "obs_vec": np.zeros(4, dtype=np.float64),
+                "legal_count": 1,
+                "acting_player_id": 2,
+                "reward": 0.0,
+                "terminated": True,
+                "truncated": False,
+                "mutual_stall_loss": True,
+                "p1_health": 10,
+                "p2_health": 10,
+                "p1_deck": 30,
+                "p2_deck": 30,
+                "turn_no": 7,
+            }
+
+    slot = _FastRolloutSlot(
+        env=_MutualStallFastEnv(),  # type: ignore[arg-type]
+        state={
+            "obs_vec": np.zeros(4, dtype=np.float64),
+            "legal_count": 1,
+            "acting_player_id": 1,
+            "p1_health": 11,
+            "p2_health": 11,
+            "p1_deck": 31,
+            "p2_deck": 31,
+            "turn_no": 6,
+        },
+        p1_rng=np.random.default_rng(0),
+        p2_rng=np.random.default_rng(1),
+    )
+
+    _apply_fast_rollout_action(
+        slot,
+        action=0,
+        value=0.0,
+        log_prob=0.0,
+        acting=1,
+        max_steps=10,
+    )
+
+    assert slot.terminated is True
+    assert slot.mutual_stall_loss is True
+    assert slot.active is False

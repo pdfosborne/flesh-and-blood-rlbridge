@@ -1067,3 +1067,22 @@ def choose_talishar_action_index(
     # only offer Cancel (no-cost equipment still shows an empty pitch window), and
     # repeatedly trying to equip then Cancel creates an infinite loop.
     return pass_index
+
+
+def ranked_progress_action(
+    legal_actions: list[dict[str, Any]],
+    state: Optional[dict[str, Any]] = None,
+) -> Optional[dict[str, Any]]:
+    """Return the best progress-making action for loop/stall recovery.
+
+    Uses :func:`choose_talishar_action_index` phase-aware heuristics to prefer
+    mandatory progress actions, damage-dealing plays, and payment completion
+    over plain pass.  This replaces the simple ``first_non_pass_action``
+    fallback used in loop-guard recovery.
+
+    Returns ``None`` only when *legal_actions* is empty.
+    """
+    if not legal_actions:
+        return None
+    idx = choose_talishar_action_index(legal_actions, state)
+    return legal_actions[idx]

@@ -11,8 +11,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from .legal_action_filter import first_non_pass_action
-from .talishar_default_policy import _get_phase, _is_pass_action, _to_int
+from .talishar_default_policy import (
+    _get_phase,
+    _is_pass_action,
+    _to_int,
+    ranked_progress_action,
+)
 
 DEFAULT_MAX_STEPS_PER_TURN = 100
 DEFAULT_LOOP_REPEAT_THRESHOLD = 4
@@ -172,15 +176,15 @@ def _resolve_forced_action(
     legal_actions: list[dict[str, Any]],
     *,
     reason: str,
+    state: Optional[dict[str, Any]] = None,
 ) -> Optional[dict[str, Any]]:
-    """Pick the action environments should submit when breaking a loop."""
-    if reason == "decision_loop":
-        non_pass = first_non_pass_action(legal_actions)
-        if non_pass is not None:
-            return non_pass
-    return first_pass_action(legal_actions) or (
-        legal_actions[0] if legal_actions else None
-    )
+    """Pick the action environments should submit when breaking a loop.
+
+    Uses :func:`ranked_progress_action` (phase-aware tactical heuristics) so
+    the forced submission is the most likely to advance game state rather than
+    the first non-pass or first-listed action.
+    """
+    return ranked_progress_action(legal_actions, state or {})
 
 
 def resolve_forced_submission(
@@ -264,7 +268,9 @@ class TurnLoopGuard:
                 turn_steps=self._steps_this_turn,
                 loop_streak=self._loop_streak,
                 reason=reason,
-                forced_action=_resolve_forced_action(legal_actions, reason=reason),
+                forced_action=_resolve_forced_action(
+                    legal_actions, reason=reason, state=state
+                ),
             )
         if not self._board_history or board_fp != self._board_history[-1]:
             self._board_history.append(board_fp)
@@ -283,7 +289,9 @@ class TurnLoopGuard:
                 turn_steps=self._steps_this_turn,
                 loop_streak=self._loop_streak,
                 reason=reason,
-                forced_action=_resolve_forced_action(legal_actions, reason=reason),
+                forced_action=_resolve_forced_action(
+                    legal_actions, reason=reason, state=state
+                ),
             )
         if self._loop_streak >= self._loop_repeat_threshold:
             reason = "decision_loop"
@@ -292,7 +300,9 @@ class TurnLoopGuard:
                 turn_steps=self._steps_this_turn,
                 loop_streak=self._loop_streak,
                 reason=reason,
-                forced_action=_resolve_forced_action(legal_actions, reason=reason),
+                forced_action=_resolve_forced_action(
+                    legal_actions, reason=reason, state=state
+                ),
             )
         return LoopGuardResult(
             force_pass=False,

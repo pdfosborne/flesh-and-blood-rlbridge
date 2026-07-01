@@ -25,6 +25,8 @@ class MacroStallConfig:
     stall_low_hand_turns: int = 3
     stall_max_single_low_hand_turns: int = 5
     stall_min_attack_hand: int = 2
+    # Lower threshold for mutual stall (both players passing): clearer signal.
+    stall_mutual_pass_turns: int = 3
 
 
 @dataclass(frozen=True)
@@ -33,6 +35,9 @@ class MacroStallResult:
     reason: str = ""
     turns_without_damage: int = 0
     pass_only_main_streak: int = 0
+    # True when reason == "mutual_pass_stall": both seats are endlessly passing.
+    # Training loops inject terminal -1 for BOTH players in this case.
+    mutual_stall_loss: bool = False
 
 
 def _total_hp(
@@ -67,6 +72,9 @@ class MacroStallGuard:
     _pass_only_main_streak: int = field(default=0, init=False)
     _seen_main_markers: set[tuple[int, int]] = field(default_factory=set, init=False)
     _low_hand_turn_streak: dict[int, int] = field(default_factory=dict, init=False)
+    # Per-player consecutive pass-only main-phase turn counters.
+    _p1_pass_only_turns: int = field(default=0, init=False)
+    _p2_pass_only_turns: int = field(default=0, init=False)
 
     def reset(self) -> None:
         self._last_seen_turn_no = 0
@@ -75,6 +83,8 @@ class MacroStallGuard:
         self._pass_only_main_streak = 0
         self._seen_main_markers.clear()
         self._low_hand_turn_streak.clear()
+        self._p1_pass_only_turns = 0
+        self._p2_pass_only_turns = 0
 
     def observe(
         self,
@@ -116,8 +126,16 @@ class MacroStallGuard:
 
                 if is_pass_only(legal_actions):
                     self._pass_only_main_streak += 1
+                    if acting == 1:
+                        self._p1_pass_only_turns += 1
+                    else:
+                        self._p2_pass_only_turns += 1
                 else:
                     self._pass_only_main_streak = 0
+                    if acting == 1:
+                        self._p1_pass_only_turns = 0
+                    else:
+                        self._p2_pass_only_turns = 0
 
         reason = ""
         should_truncate = False
@@ -151,9 +169,24 @@ class MacroStallGuard:
             should_truncate = True
             reason = "pass_only_main"
 
+        # Mutual pass stall: both players have been passing their main phases
+        # consecutively at least stall_mutual_pass_turns times each.
+        # This uses a lower threshold than one-sided stalls because both players
+        # stalling simultaneously is an unambiguous deadlock.
+        mutual_threshold = self.config.stall_mutual_pass_turns
+        if (
+            not should_truncate
+            and mutual_threshold > 0
+            and self._p1_pass_only_turns >= mutual_threshold
+            and self._p2_pass_only_turns >= mutual_threshold
+        ):
+            should_truncate = True
+            reason = "mutual_pass_stall"
+
         return MacroStallResult(
             should_truncate=should_truncate,
             reason=reason,
             turns_without_damage=self._turns_without_damage,
             pass_only_main_streak=self._pass_only_main_streak,
+            mutual_stall_loss=(reason == "mutual_pass_stall"),
         )
