@@ -137,6 +137,30 @@ _CARD_RESOURCE_STATS: dict[str, tuple[int, int]] = _load_card_resource_stats()
 _ABILITY_COST_CASE_RE = re.compile(r'case\s+"([^"]+)"')
 _ABILITY_RETURN_INT_RE = re.compile(r"return\s+(\d+)\s*;")
 _EQUIPMENT_CARD_TYPES = frozenset({"utility_item", "equipment", "weapon"})
+# Card DB tags where Talishar ``HasCard()`` searches character, not hand.
+_HAS_CARD_CHARACTER_TYPES = _EQUIPMENT_CARD_TYPES | frozenset(
+    {"hero", "off_hand", "quiver"}
+)
+
+
+def _load_card_type_tags() -> dict[str, frozenset[str]]:
+    """Load card-type tags keyed by Talishar card-ID slug from cards.json."""
+    db_path = Path(__file__).parent / "card_db" / "cards.json"
+    try:
+        records = json.loads(db_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    out: dict[str, frozenset[str]] = {}
+    for rec in records:
+        cid = str(rec.get("id", "") or "")
+        if not cid:
+            continue
+        tags = frozenset(str(t).strip().lower() for t in (rec.get("card_types") or []))
+        out[cid] = tags
+    return out
+
+
+_CARD_TYPE_TAGS: dict[str, frozenset[str]] = _load_card_type_tags()
 
 
 def _activation_cost_from_text(text: str) -> Optional[int]:
@@ -427,6 +451,42 @@ def _card_id_from_action(action: dict[str, Any], card: Optional[dict[str, Any]])
     if not cid and isinstance(card, dict):
         cid = str(card.get("cardNumber", "")).strip()
     return cid
+
+
+def _card_type_tags(card_id: str) -> frozenset[str]:
+    return _CARD_TYPE_TAGS.get(str(card_id or "").strip(), frozenset())
+
+
+def has_card_for_arsenal_add(card_id: str, state: dict[str, Any]) -> bool:
+    """Return True when Talishar ``HasCard()`` would resolve *card_id* for mode-4 ARS."""
+    cid = str(card_id or "").strip()
+    if not cid:
+        return False
+    if _card_type_tags(cid) & _HAS_CARD_CHARACTER_TYPES:
+        for card in state.get("playerEquipment", []):
+            if isinstance(card, dict) and str(card.get("cardNumber", "")) == cid:
+                return True
+        return False
+    for card in state.get("playerHand", []):
+        if isinstance(card, dict) and str(card.get("cardNumber", "")) == cid:
+            return True
+    return False
+
+
+def is_valid_arsenal_hand_action(
+    action: dict[str, Any],
+    state: dict[str, Any],
+) -> bool:
+    """True when a hand mode-4 action can be submitted during Talishar phase ARS."""
+    if _normalize(action.get("zone", "")) != "hand":
+        return False
+    if _to_int(action.get("action_code", 0)) != 4:
+        return False
+    card = _match_action_card(action, state)
+    cid = _card_id_from_action(action, card)
+    if not cid:
+        cid = str(action.get("button_input", "") or "").strip()
+    return has_card_for_arsenal_add(cid, state)
 
 
 def _estimate_attack(
@@ -774,8 +834,7 @@ def choose_talishar_action_index(
     if phase == "ars":
         ars_candidates = [
             i for i in non_pass
-            if _normalize(legal_actions[i].get("zone", "")) == "hand"
-            and _to_int(legal_actions[i].get("action_code", 0)) == 4
+            if is_valid_arsenal_hand_action(legal_actions[i], state)
         ]
         if ars_candidates:
             zone_cache_ars: dict[str, list] = {

@@ -77,9 +77,9 @@ class MetaUnifiedRandomMatchups:
     warmup_episodes: int = 50
     checkpoint_interval_pct: float = 10.0
     checkpoint_eval_episodes: int = 100  # 0 = min(100, episodes // 100)
-    workers: int = 0  # 0 = inherit META.workers
+    workers: int = 0  # 0 = inherit META.workers; safe_parallel caps this to shard count.
     parallel_matchups: int = 4
-    # Cap concurrent training games so each Talishar shard runs at most one session.
+    # Keep one live training game per Talishar shard; raise shards to scale speed.
     safe_parallel: bool = True
     skip_converged: bool = False
     # Continuous optimal-policy PNG on the render shard during unified training.

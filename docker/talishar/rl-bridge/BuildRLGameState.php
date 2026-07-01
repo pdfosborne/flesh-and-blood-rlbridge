@@ -255,21 +255,26 @@ function BuildRLGameStateResponse($gameName, $playerID)
         $actionType = 16;
     }
     $myHandContents = [];
-    $handPieces = HandPieces();
-    $myHandCount = count($myHand);
+    $handPieces = max(1, intval(HandPieces()));
+    $myHandArr = is_array($myHand) ? $myHand : [];
+    $myHandCount = count($myHandArr);
     for ($i = 0; $i < $myHandCount; $i += $handPieces) {
+        if (!isset($myHandArr[$i])) {
+            continue;
+        }
+        $handCard = $myHandArr[$i];
         $playable = ($playerID == $currentPlayer)
-            ? ($turnPhase == "ARS" || IsPlayable($myHand[$i], $turnPhase, "HAND", -1, $restriction, pitchRestriction: $resourceRestrictedCard)
+            ? ($turnPhase == "ARS" || IsPlayable($handCard, $turnPhase, "HAND", -1, $restriction, pitchRestriction: $resourceRestrictedCard)
                 || ($actionType == 16 && strpos("," . ($turn[2] ?? "") . ",", "," . $i . ",") !== false && $restriction == ""))
             : false;
         $actionTypeOut = $currentPlayer == $playerID && $playable ? $actionType : 0;
-        $actionDataOverride = ($actionType == 16 || $actionType == 27) ? strval($i) : $myHand[$i];
+        $actionDataOverride = ($actionType == 16 || $actionType == 27) ? strval($i) : $handCard;
         $label = "";
-        if (isset($myHand[$i + $handPieces - 1])) {
-            $label = GetCardEffectLabel($myHand[$i + $handPieces - 1], $currentTurnEffects ?? []);
+        if (isset($myHandArr[$i + $handPieces - 1])) {
+            $label = GetCardEffectLabel($myHandArr[$i + $handPieces - 1], $currentTurnEffects ?? []);
         }
         $myHandContents[] = RLCard(
-            $myHand[$i],
+            $handCard,
             $actionTypeOut,
             $actionDataOverride,
             $label,

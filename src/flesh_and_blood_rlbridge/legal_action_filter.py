@@ -47,6 +47,7 @@ _PASS_FALLBACK: dict[str, Any] = {
 # Chooser/popup phases where Pass is accepted by Talishar but does not advance
 # the game when a real progression action (Top, pick, etc.) is available.
 _MANDATORY_PROGRESS_PHASES: frozenset[str] = frozenset({
+    "choosearsenal",
     "choosetop",
     "chooseoption",
     "handtopbottom",
@@ -65,7 +66,7 @@ MANDATORY_PROGRESS_PHASES = _MANDATORY_PROGRESS_PHASES
 # Phases where hand/arsenal/equipment plays use different semantics (pitch,
 # block, or mandatory zone selection) and must not use main-phase affordability.
 _SKIP_PLAY_AFFORDABILITY_PHASES: frozenset[str] = (
-    frozenset({"p"})
+    frozenset({"p", "ars"})
     | _BLOCK_PHASES
     | _DEFENSE_PHASES
     | _CHOOSE_HAND_PHASES
@@ -259,13 +260,38 @@ def prefer_non_pass_index(obs_data: dict[str, Any], fallback_action: Any) -> Any
     return non_pass[0]
 
 
-def _has_arsenal_from_hand_actions(actions: list[dict[str, Any]]) -> bool:
-    """True when hand cards can be moved into arsenal (end-of-turn ARS step)."""
-    return any(
-        _to_int(a.get("action_code", 0)) == 4
-        and str(a.get("zone", "") or "").strip().lower() == "hand"
-        for a in actions
-    )
+def _has_main_phase_play_actions(actions: list[dict[str, Any]]) -> bool:
+    """True when main phase still has affordable hand/arsenal/equipment plays."""
+    for action in actions:
+        if _is_pass_action(action) or _is_revert_action(action):
+            continue
+        zone = str(action.get("zone", "") or "").strip().lower()
+        code = _to_int(action.get("action_code", 0))
+        if zone == "hand" and code == 27:
+            return True
+        if zone == "arsenal" and code == 5:
+            return True
+        if zone == "equipment" and code == 3:
+            return True
+    return False
+
+
+def _strip_lazy_end_turn_pass(
+    state: dict[str, Any],
+    filtered: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Drop Pass when mandatory picks or main-phase plays should be taken instead."""
+    phase = _get_phase(state)
+    if phase in _MANDATORY_PROGRESS_PHASES:
+        no_pass = _strip_pass_actions(filtered)
+        if no_pass:
+            return no_pass
+        return filtered
+    if phase == "m" and _has_main_phase_play_actions(filtered):
+        no_pass = _strip_pass_actions(filtered)
+        if no_pass:
+            return no_pass
+    return filtered
 
 
 def _strip_pass_actions(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -340,8 +366,11 @@ def filter_legal_actions(
     **Mandatory-choice Pass removal** (``CanPassPhase=0``):
         Remove Pass whenever Talishar would ignore mode=99.
 
-    **End-of-turn arsenal (phase ``ARS``)**:
-        When hand cards can be added to arsenal, strip Pass.
+    **Mandatory progress / lazy end-turn Pass removal**:
+        In mandatory chooser phases (including ``CHOOSEARSENAL``), strip Pass
+        when a non-pass progression action exists.  Phase ``ARS`` keeps Pass
+        (optional skip of arsenaling).  In main phase ``M``, strip Pass while
+        affordable hand/arsenal/equipment plays remain.
 
     **Block/defense phases**:
         When no viable blockers remain, strip hand block plays so only pass
@@ -389,13 +418,7 @@ def filter_legal_actions(
         _CHOOSE_HAND_PHASES
         | _BUTTON_INPUT_PHASES
         | _POPUP_PHASES
-        | _MANDATORY_PROGRESS_PHASES
     ):
-        no_pass = _strip_pass_actions(filtered)
-        if no_pass:
-            filtered = no_pass
-
-    if phase == "ars" and _has_arsenal_from_hand_actions(filtered):
         no_pass = _strip_pass_actions(filtered)
         if no_pass:
             filtered = no_pass
@@ -404,6 +427,7 @@ def filter_legal_actions(
         filtered = _apply_block_phase_filter(state, filtered)
 
     filtered = _strip_revert_actions(phase, filtered)
+    filtered = _strip_lazy_end_turn_pass(state, filtered)
 
     if player_must_wait(state):
         return _pass_only_without_priority(state, filtered)

@@ -105,6 +105,7 @@ from .player_observation import (
 )
 from .legal_action_filter import (
     filter_legal_actions,
+    is_mandatory_progress_phase,
     is_waiting_for_other_player,
     player_choosing_in_snapshot,
     player_must_wait,
@@ -126,6 +127,7 @@ from .talishar_default_policy import (
     _is_pass_action,
     _is_revert_action,
     _match_action_card,
+    is_valid_arsenal_hand_action,
     _to_int as _dp_to_int,
     _CONFIRM_PHASES as _dp_confirm_phases,
     _CHOOSE_HAND_PHASES as _dp_choose_hand_phases,
@@ -861,6 +863,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             )
 
         _ = seed  # Talishar shuffles server-side; seed not wired yet.
+        self._cleanup_remote_game()
         self._session.cookies.clear()
         self._last_update = 0
         self._rl_parity_checked = False
@@ -1454,6 +1457,23 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         if player_id == 2:
             return self._p2_auth_key
         return self._p1_auth_key
+
+    def _cleanup_remote_game(self) -> None:
+        game_name = self._game_name
+        if not game_name:
+            return
+        auth_key = self._p1_auth_key or self._auth_key or self._p2_auth_key
+        try:
+            if self._fast_client is not None:
+                self._fast_client.cleanup_game(game_name, auth_key)
+            else:
+                self._http_post_json(
+                    "/APIs/RLCleanup.php",
+                    {"gameName": game_name, "authKey": auth_key},
+                    _retries=1,
+                )
+        except Exception:
+            pass
 
     def _fetch_state(
         self,
@@ -2615,8 +2635,11 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             return 99, ""
 
         phase = _dp_get_phase(self._last_state)
-        mandatory_choice_phase = phase in (
-            _dp_choose_hand_phases | _dp_button_input_phases | _dp_popup_phases
+        mandatory_choice_phase = (
+            phase in (
+                _dp_choose_hand_phases | _dp_button_input_phases | _dp_popup_phases
+            )
+            or is_mandatory_progress_phase(self._last_state)
         )
 
         if mandatory_choice_phase:
@@ -2683,6 +2706,47 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
 
         return mode, button_input
 
+    def _ars_pass_submission(
+        self,
+        legal_actions: list[dict[str, Any]],
+    ) -> tuple[int, str]:
+        for action in legal_actions:
+            if _is_pass_action(action):
+                return (
+                    _dp_to_int(action.get("action_code", 99)),
+                    str(action.get("button_input", "") or ""),
+                )
+        return 99, ""
+
+    def _coerce_ars_action(
+        self,
+        mode: int,
+        button_input: str,
+        legal_actions: list[dict[str, Any]],
+    ) -> tuple[int, str]:
+        """Skip invalid hand arsenals; Pass is the correct ARS decline action."""
+        if mode == 99:
+            return mode, button_input
+
+        action = {
+            "action_code": mode,
+            "button_input": button_input,
+            "card_id": "",
+            "zone": "",
+            "label": "",
+        }
+        for candidate in legal_actions:
+            if (
+                _dp_to_int(candidate.get("action_code", 0)) == mode
+                and str(candidate.get("button_input", "") or "") == str(button_input or "")
+            ):
+                action = candidate
+                break
+
+        if is_valid_arsenal_hand_action(action, self._last_state):
+            return mode, button_input
+        return self._ars_pass_submission(legal_actions)
+
     def _coerce_progress_action(
         self,
         mode: int,
@@ -2694,6 +2758,9 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             return mode, button_input
 
         phase = _dp_get_phase(self._last_state)
+        if phase == "ars":
+            return self._coerce_ars_action(mode, button_input, legal_actions)
+
         mandatory_choice_phase = phase in (
             _dp_choose_hand_phases | _dp_button_input_phases | _dp_popup_phases
         )
@@ -2728,6 +2795,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
 
         # Recycle the session's cookie store between episodes so connections
         # stay pooled (keep-alive) but stale cookies don't leak.
+        self._cleanup_remote_game()
         self._session.cookies.clear()
         self._last_update = 0
 
@@ -3183,6 +3251,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             self._combat_tracker.clear()
             return
         self._close_playwright_page()
+        self._cleanup_remote_game()
         try:
             self._session.close()
         except Exception:

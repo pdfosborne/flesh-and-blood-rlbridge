@@ -572,6 +572,16 @@ class TalisharBackendPool:
                 return DEFAULT_TALISHAR_URL
             return self.urls[int(worker_index) % len(self.urls)]
 
+    def urls_for_slots(self, start_slot: int, count: int) -> tuple[str, ...]:
+        """Return stable backend URLs for a contiguous range of global slots."""
+        with self._lock:
+            if not self.urls:
+                return tuple(DEFAULT_TALISHAR_URL for _ in range(max(0, count)))
+            return tuple(
+                self.urls[(int(start_slot) + offset) % len(self.urls)]
+                for offset in range(max(0, int(count)))
+            )
+
     def note_shard_success(self, url: str) -> None:
         """Reset the consecutive failure counter for a healthy backend."""
         normalized = normalize_talishar_url(url)
@@ -603,14 +613,18 @@ class TalisharBackendPool:
         failed_url: str,
         *,
         worker_index: int | None = None,
+        exclude_urls: Iterable[str] | None = None,
     ) -> str | None:
         """Return another healthy backend URL, or ``None`` when none remain."""
         failed = normalize_talishar_url(failed_url)
+        excluded = {failed}
+        if exclude_urls is not None:
+            excluded.update(normalize_talishar_url(url) for url in exclude_urls)
         with self._lock:
             candidates = [
                 url
                 for url in self.urls
-                if normalize_talishar_url(url) != failed
+                if normalize_talishar_url(url) not in excluded
             ]
             if not candidates:
                 return None

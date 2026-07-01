@@ -243,12 +243,12 @@ Run several independent Talishar backends to scale rollout throughput (PHP simul
 
 ```bash
 python start_talishar.py --backend-only --shards 4
-python scripts/training/train_unified_random_matchups.py --workers 32 --parallel-matchups 4
+python scripts/training/train_unified_random_matchups.py --workers 4 --parallel-matchups 4
 ```
 
 `start_talishar.py` writes `docker/talishar/talishar-training.local.env` with `TALISHAR_URL` / `TALISHAR_URLS`; training scripts, the TUI, and `fab-tui` load it automatically (shell env vars still take precedence). `python start_talishar.py --down` removes that file.
 
-Sizing: aim for roughly 20–40 concurrent games per shard. Set `workers` to at least `shards × games_per_shard`. Watch **Docker/WSL CPU** during training, not `python.exe` (workers block on HTTP).
+Sizing: keep `--safe-parallel` enabled and run at most one live training game per shard. Scale speed by increasing shard count first, then set `--workers` and `--parallel-matchups` no higher than the healthy training shard count. Watch **Docker/WSL CPU** during training, not `python.exe` (workers block on HTTP).
 
 Stop all shards: `python start_talishar.py --down`
 

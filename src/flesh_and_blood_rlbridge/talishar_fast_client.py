@@ -18,6 +18,7 @@ from urllib3.util.retry import Retry
 DEFAULT_TALISHAR_URL = "http://localhost:8080/game"
 
 _FAST_HTTP_RETRIES = 3
+DEFAULT_CLEANUP_TIMEOUT = 2.0
 
 
 def diagnose_talishar_http_failure(
@@ -124,17 +125,29 @@ class TalisharFastClient:
     """Low-latency Talishar HTTP helper for training rollouts."""
 
     RLSTEP_PATH = "/APIs/RLStep.php"
+    RLCLEANUP_PATH = "/APIs/RLCleanup.php"
 
     def __init__(
         self,
         base_url: str,
         *,
         request_timeout: float = 30.0,
+        cleanup_timeout: float | None = None,
         keep_alive: bool = True,
         pool_size: int | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.request_timeout = float(request_timeout)
+        if cleanup_timeout is None:
+            cleanup_env = os.environ.get("FAB_RLCLEANUP_TIMEOUT", "").strip()
+            if cleanup_env:
+                try:
+                    cleanup_timeout = float(cleanup_env)
+                except ValueError:
+                    cleanup_timeout = DEFAULT_CLEANUP_TIMEOUT
+            else:
+                cleanup_timeout = DEFAULT_CLEANUP_TIMEOUT
+        self.cleanup_timeout = max(0.1, float(cleanup_timeout))
         self.session = make_talishar_session(keep_alive=keep_alive, pool_size=pool_size)
         self._rlstep_available: Optional[bool] = None
 
@@ -165,13 +178,20 @@ class TalisharFastClient:
             self._log_client_error(path, exc)
             raise
 
-    def http_post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def http_post_json(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        *,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
         url = self.base_url + path
+        request_timeout = self.request_timeout if timeout is None else float(timeout)
         try:
             resp = self.session.post(
                 url,
                 json=payload,
-                timeout=self.request_timeout,
+                timeout=request_timeout,
             )
             return _parse_json_body(resp.text)
         except Exception as exc:
@@ -180,6 +200,24 @@ class TalisharFastClient:
 
     def post_rlstep(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self.http_post_json(self.RLSTEP_PATH, payload)
+
+    def cleanup_game(
+        self,
+        game_name: str,
+        auth_key: str = "",
+        *,
+        delete_files: bool = False,
+    ) -> dict[str, Any]:
+        payload = {"gameName": game_name}
+        if auth_key:
+            payload["authKey"] = auth_key
+        if delete_files:
+            payload["deleteFiles"] = True
+        return self.http_post_json(
+            self.RLCLEANUP_PATH,
+            payload,
+            timeout=self.cleanup_timeout,
+        )
 
     def _log_client_error(
         self,

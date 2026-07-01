@@ -1010,6 +1010,7 @@ def _retry_fast_episode_on_healthy_shards(
     swap_matchup: Matchup | None,
     game_format: str,
     worker_base_urls: list[str] | None = None,
+    active_base_urls: list[str] | None = None,
 ) -> dict[str, Any]:
     """Run one fast episode, rebind to another shard after connection failures."""
     max_attempts = max(1, len(talishar_pool.urls)) if talishar_pool else 1
@@ -1046,9 +1047,16 @@ def _retry_fast_episode_on_healthy_shards(
             )
             if can_rebind:
                 talishar_pool.note_shard_failure(failed_url)
+                exclude_urls = []
+                if active_base_urls is not None:
+                    exclude_urls = [
+                        url for idx, url in enumerate(active_base_urls)
+                        if idx != worker
+                    ]
                 replacement = talishar_pool.pick_replacement(
                     failed_url,
                     worker_index=worker,
+                    exclude_urls=exclude_urls,
                 )
                 if replacement and replacement != failed_url:
                     _rebind_worker_env(
@@ -1062,6 +1070,8 @@ def _retry_fast_episode_on_healthy_shards(
                         worker_index=worker,
                         worker_base_urls=worker_base_urls,
                     )
+                    if active_base_urls is not None:
+                        active_base_urls[worker] = replacement
                     continue
             break
 
@@ -1173,6 +1183,7 @@ def _safe_parallel_fast_episode_batch(
                 swap_matchup=swap_matchup,
                 game_format=game_format,
                 worker_base_urls=worker_base_urls,
+                active_base_urls=worker_base_urls,
             )
         )
     return results
@@ -2574,6 +2585,7 @@ def train_agents_from_both_perspectives_parallel(
     rollout_processes: Optional[int] = None,
     shared_buffer: Any = None,
     backend_pool: TalisharBackendPool | None = None,
+    global_worker_slot_start: int = 0,
 ) -> tuple[list[float], list[float], dict[str, Any]]:
     """Parallel rollout version of ``train_agents_from_both_perspectives``.
 
@@ -2687,8 +2699,12 @@ def train_agents_from_both_perspectives_parallel(
     worker_base_urls: list[str] = []
     swap_matchup = swapped_matchup(matchup)
     if not use_process_rollouts:
+        assigned_worker_urls = talishar_pool.urls_for_slots(
+            global_worker_slot_start,
+            batch_parallelism,
+        )
         for w in range(batch_parallelism):
-            worker_url = talishar_pool.url_for_worker(w)
+            worker_url = assigned_worker_urls[w]
             worker_base_urls.append(worker_url)
             envs.append(
                 make_env(
@@ -2709,6 +2725,7 @@ def train_agents_from_both_perspectives_parallel(
                     "Training worker bound to shard",
                     matchup=matchup.name,
                     worker=w,
+                    global_worker_slot=global_worker_slot_start + w,
                     shard=shard_label(worker_url),
                     base_url=worker_url,
                 )
@@ -3777,6 +3794,63 @@ def _combined_unified_training_progress(
     return _callback
 
 
+def _enrich_persist_payloads_from_coordinator(
+    persist_payloads: list[dict[str, Any]],
+    checkpoint_coordinator: Any,
+) -> None:
+    for payload in persist_payloads:
+        matchup_dir = str(payload.get("matchup_dir") or "")
+        if not matchup_dir:
+            continue
+        wr = checkpoint_coordinator.get_matchup_checkpoint_win_rate(matchup_dir)
+        if wr is not None:
+            payload["checkpoint_eval_win_rate"] = wr
+            payload["final_checkpoint_win_rate"] = wr
+        hist = checkpoint_coordinator.get_matchup_checkpoint_history(matchup_dir)
+        if hist:
+            stats = payload.get("training_stats")
+            if not isinstance(stats, dict):
+                stats = {}
+            stats["checkpoint_eval_history"] = hist
+            payload["training_stats"] = stats
+
+
+def _wait_for_unified_batch_checkpoint_evals(
+    out_dir: Path,
+    *,
+    batch_index: int,
+    matchups_completed_count: int,
+    matchups_total: int,
+    parallel_matchups: int,
+    checkpoint_coordinator: Optional[Any],
+    persist_payloads: list[dict[str, Any]],
+) -> None:
+    """Block until async checkpoint/baseline eval for this batch finishes."""
+    from checkpoint_eval_async import wait_for_checkpoint_evals  # noqa: PLC0415
+
+    print(
+        f"  Waiting for batch {batch_index} checkpoint eval to finish "
+        f"before next matchup batch...",
+        flush=True,
+    )
+    update_unified_training_live(
+        out_dir,
+        matchups_total=matchups_total,
+        matchups_completed=matchups_completed_count,
+        parallel_matchups=parallel_matchups,
+        batch_index=batch_index,
+        active_matchups={},
+        status="evaluating",
+    )
+    write_unified_random_matchups_dashboard(out_dir, auto_refresh_seconds=5.0)
+    wait_for_checkpoint_evals()
+    if checkpoint_coordinator is not None and persist_payloads:
+        _enrich_persist_payloads_from_coordinator(
+            persist_payloads,
+            checkpoint_coordinator,
+        )
+
+
 class _CheckpointEvalTracker:
     """Periodic head-to-head eval snapshots during unified self-play training."""
 
@@ -4336,6 +4410,7 @@ def train_matchup(
     _matchup_live_key: Optional[str] = None,
     _checkpoint_coordinator: Optional[Any] = None,
     backend_pool: TalisharBackendPool | None = None,
+    global_worker_slot_start: int = 0,
 ) -> dict:
     if matchup.p1_fabrary_entry and matchup.p2_fabrary_entry:
         from runtime_defaults import RUNTIME  # noqa: PLC0415
@@ -4675,6 +4750,7 @@ def train_matchup(
             rollout_processes=rollout_processes,
             shared_buffer=_shared_buffer,
             backend_pool=talishar_pool,
+            global_worker_slot_start=global_worker_slot_start,
         )
         p1_rewards.extend(rem_p1)
         p2_rewards.extend(rem_p2)
@@ -5368,6 +5444,11 @@ def run_matchup_training(
                     workers=workers_per_matchup if use_parallel_batch else n_workers,
                 )
             train_kwargs: dict[str, Any] = {}
+            try:
+                matchup_index = batch.index(matchup)
+            except ValueError:
+                matchup_index = 0
+            global_worker_slot_start = matchup_index * workers_per_matchup
             if not skip_converged:
                 train_kwargs["_force_train"] = True
             if unified_run:
@@ -5412,6 +5493,7 @@ def run_matchup_training(
                 rollout_mode=rollout_mode,
                 rollout_processes=rollout_processes,
                 backend_pool=talishar_pool,
+                global_worker_slot_start=global_worker_slot_start,
                 **train_kwargs,
             )
             payload = meta.get("_persist_summary")
@@ -5430,35 +5512,6 @@ def run_matchup_training(
             failed.extend(batch_failed)
             if shared_buffer is not None and shared_policy is not None:
                 shared_buffer.flush_remaining(shared_policy)
-            if checkpoint_coordinator is not None:
-                from checkpoint_eval_async import wait_for_checkpoint_evals  # noqa: PLC0415
-
-                wait_for_checkpoint_evals()
-                for payload in persist_payloads:
-                    matchup_dir = str(payload.get("matchup_dir") or "")
-                    if not matchup_dir:
-                        continue
-                    wr = checkpoint_coordinator.get_matchup_checkpoint_win_rate(
-                        matchup_dir
-                    )
-                    if wr is not None:
-                        payload["checkpoint_eval_win_rate"] = wr
-                        payload["final_checkpoint_win_rate"] = wr
-                    hist = checkpoint_coordinator.get_matchup_checkpoint_history(
-                        matchup_dir
-                    )
-                    if hist:
-                        stats = payload.get("training_stats")
-                        if not isinstance(stats, dict):
-                            stats = {}
-                        stats["checkpoint_eval_history"] = hist
-                        payload["training_stats"] = stats
-            if shared_policy is not None and persist_payloads:
-                persist_batch_to_cache(
-                    cache_store,
-                    shared_policy,
-                    persist_payloads,
-                )
         else:
             for matchup in batch:
                 try:
@@ -5471,6 +5524,23 @@ def run_matchup_training(
                 except Exception as exc:
                     print(f"\n  ERROR training {matchup.name}: {exc}")
                     failed.append(matchup.name)
+
+        if unified_run and checkpoint_eval_episodes > 0:
+            _wait_for_unified_batch_checkpoint_evals(
+                out_dir,
+                batch_index=batch_index,
+                matchups_completed_count=matchups_completed_count,
+                matchups_total=matchups_total,
+                parallel_matchups=len(batch),
+                checkpoint_coordinator=checkpoint_coordinator,
+                persist_payloads=persist_payloads,
+            )
+            if use_parallel_batch and shared_policy is not None and persist_payloads:
+                persist_batch_to_cache(
+                    cache_store,
+                    shared_policy,
+                    persist_payloads,
+                )
 
         if use_parallel_batch:
             matchups_completed_count += len(batch_summary)

@@ -7,8 +7,9 @@
  */
 
 error_reporting(E_ALL);
-@set_time_limit(5);
-@ini_set('max_execution_time', '5');
+// Action-stuck protection lives in the Python loop guard; do not abort long Talishar steps here.
+@set_time_limit(0);
+@ini_set('max_execution_time', '0');
 
 $fabRoot = dirname(__DIR__);
 $fabBridgeStubs = "/fab-bridge-stubs/rl-bridge";

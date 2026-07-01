@@ -1261,3 +1261,143 @@ def test_is_mandatory_progress_phase_choosetop() -> None:
 
     assert is_mandatory_progress_phase({"turnPhase": "CHOOSETOP"})
     assert not is_mandatory_progress_phase({"turnPhase": "INSTANT"})
+
+
+def test_is_mandatory_progress_phase_ars() -> None:
+    from flesh_and_blood_rlbridge.legal_action_filter import is_mandatory_progress_phase
+
+    assert not is_mandatory_progress_phase({"turnPhase": "ARS"})
+    assert is_mandatory_progress_phase({"turnPhase": "CHOOSEARSENAL"})
+
+
+def test_ars_keeps_pass_when_hand_mode4_available() -> None:
+    """ARS arsenaling is optional; Pass skips to end-of-turn finalize."""
+    state = {
+        "turnPhase": {"turnPhase": "ARS"},
+        "canPassPhase": True,
+        "playerHand": [{"cardNumber": "sink_below_red"}],
+    }
+    legal = [
+        {
+            "action_code": 4,
+            "button_input": "sink_below_red",
+            "zone": "hand",
+            "label": "sink_below_red",
+        },
+        {
+            "action_code": 99,
+            "button_input": "",
+            "zone": "button",
+            "label": "Pass",
+        },
+    ]
+
+    filtered = filter_legal_actions(state, legal)
+    codes = {a["action_code"] for a in filtered}
+
+    assert codes == {4, 99}
+
+
+def test_ars_keeps_pass_when_no_arsenal_actions() -> None:
+    state = {
+        "turnPhase": {"turnPhase": "ARS"},
+        "canPassPhase": True,
+        "playerHand": [],
+    }
+    legal = [
+        {
+            "action_code": 99,
+            "button_input": "",
+            "zone": "button",
+            "label": "Pass",
+        },
+    ]
+
+    filtered = filter_legal_actions(state, legal)
+
+    assert len(filtered) == 1
+    assert filtered[0]["action_code"] == 99
+
+
+def test_choosearsenal_strips_pass_when_pick_exists() -> None:
+    state = {
+        "turnPhase": {"turnPhase": "CHOOSEARSENAL"},
+        "canPassPhase": False,
+    }
+    legal = [
+        {
+            "action_code": 16,
+            "button_input": "0",
+            "zone": "arsenal",
+            "label": "arsenal_card",
+        },
+        {
+            "action_code": 99,
+            "button_input": "",
+            "zone": "button",
+            "label": "Pass",
+        },
+    ]
+
+    filtered = filter_legal_actions(state, legal)
+
+    assert len(filtered) == 1
+    assert filtered[0]["action_code"] == 16
+
+
+def test_main_strips_pass_when_hand_play_available() -> None:
+    state = {
+        "turnPhase": {"turnPhase": "M"},
+        "canPassPhase": True,
+        "playerPitchCount": 2,
+        "playerHand": [
+            {
+                "action": 27,
+                "actionDataOverride": "0",
+                "cardNumber": "nimblism_blue",
+                "cost": 0,
+            }
+        ],
+    }
+    legal = [
+        {
+            "action_code": 27,
+            "button_input": "0",
+            "zone": "hand",
+            "card_id": "nimblism_blue",
+            "label": "Nimblism",
+        },
+        {
+            "action_code": 99,
+            "button_input": "",
+            "zone": "button",
+            "label": "Pass",
+        },
+    ]
+
+    filtered = filter_legal_actions(state, legal)
+    codes = {a["action_code"] for a in filtered}
+
+    assert 27 in codes
+    assert 99 not in codes
+
+
+def test_main_keeps_pass_when_no_plays() -> None:
+    state = {
+        "turnPhase": {"turnPhase": "M"},
+        "canPassPhase": True,
+        "playerHand": [],
+    }
+    legal = [
+        {
+            "action_code": 99,
+            "button_input": "",
+            "zone": "button",
+            "label": "Pass",
+        },
+    ]
+
+    filtered = filter_legal_actions(state, legal)
+
+    assert len(filtered) == 1
+    assert filtered[0]["action_code"] == 99

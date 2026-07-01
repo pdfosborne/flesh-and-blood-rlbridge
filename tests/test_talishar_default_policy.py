@@ -381,3 +381,63 @@ def test_block_combined_filters_fall_through_to_pass() -> None:
     result = choose_talishar_action_index(legal, state, max_pitch_value=1)
     pass_idx = len(hand)
     assert result == pass_idx, f"Expected pass (index {pass_idx}) when all blockers filtered, got {result}"
+
+
+def test_has_card_for_arsenal_add_attack_in_hand() -> None:
+    from flesh_and_blood_rlbridge.talishar_default_policy import has_card_for_arsenal_add
+
+    state = {
+        "playerHand": [{"cardNumber": "nimblism_red", "action": 4}],
+        "playerEquipment": [],
+    }
+    assert has_card_for_arsenal_add("nimblism_red", state)
+
+
+def test_has_card_for_arsenal_add_utility_item_only_in_hand_is_invalid() -> None:
+    from flesh_and_blood_rlbridge.talishar_default_policy import has_card_for_arsenal_add
+
+    state = {
+        "playerHand": [
+            {"cardNumber": "swiftstrike_bracers", "action": 4},
+            {"cardNumber": "swiftstrike_bracers", "action": 4},
+        ],
+        "playerEquipment": [],
+    }
+    assert not has_card_for_arsenal_add("swiftstrike_bracers", state)
+
+
+def test_ars_policy_passes_when_only_invalid_arsenal_targets() -> None:
+    state = {
+        "turnPhase": {"turnPhase": "ARS"},
+        "playerHand": [
+            {
+                "cardNumber": "swiftstrike_bracers",
+                "action": 4,
+                "actionDataOverride": "swiftstrike_bracers",
+            },
+            {
+                "cardNumber": "swiftstrike_bracers",
+                "action": 4,
+                "actionDataOverride": "swiftstrike_bracers",
+            },
+        ],
+        "playerEquipment": [],
+    }
+    legal = [
+        {
+            "action_code": 4,
+            "button_input": "swiftstrike_bracers",
+            "zone": "hand",
+            "card_id": "swiftstrike_bracers",
+            "label": "Swiftstrike Bracers",
+        },
+        {
+            "action_code": 4,
+            "button_input": "swiftstrike_bracers",
+            "zone": "hand",
+            "card_id": "swiftstrike_bracers",
+            "label": "Swiftstrike Bracers",
+        },
+        {"action_code": 99, "button_input": "", "zone": "button", "label": "Pass"},
+    ]
+    assert choose_talishar_action_index(legal, state) == 2
