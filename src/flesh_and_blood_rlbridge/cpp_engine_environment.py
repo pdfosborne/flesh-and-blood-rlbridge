@@ -290,6 +290,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         stall_no_damage_turns: int = 6,
         stall_pass_only_turns: int = 6,
         stall_no_damage_requires_low_hand: bool = False,
+        stall_require_no_progress_for_no_damage: bool = True,
         stall_low_hand_turns: int = 3,
         stall_max_single_low_hand_turns: int = 5,
         stall_min_attack_hand: int = 2,
@@ -343,6 +344,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
                 stall_no_damage_turns=stall_no_damage_turns,
                 stall_pass_only_turns=stall_pass_only_turns,
                 stall_no_damage_requires_low_hand=stall_no_damage_requires_low_hand,
+                stall_require_no_progress_for_no_damage=stall_require_no_progress_for_no_damage,
                 stall_low_hand_turns=stall_low_hand_turns,
                 stall_max_single_low_hand_turns=stall_max_single_low_hand_turns,
                 stall_min_attack_hand=stall_min_attack_hand,
@@ -1735,7 +1737,15 @@ class CppEngineEnvironment(rlbridgeEnvironment):
 
         state = self._filter_state()
         legal_dicts = [self._action_to_dict(action) for action in working]
-        filtered_dicts = filter_legal_actions(state, legal_dicts)
+        loop_guard = getattr(self, "_loop_guard", None)
+        tried_no_op_equipment = (
+            loop_guard.confirmed_no_op_equipment_actions() if loop_guard is not None else None
+        )
+        filtered_dicts = filter_legal_actions(
+            state,
+            legal_dicts,
+            tried_no_op_equipment=tried_no_op_equipment,
+        )
         return materialize_filtered_actions(
             working,
             filtered_dicts,

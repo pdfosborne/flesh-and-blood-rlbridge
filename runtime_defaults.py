@@ -14,9 +14,10 @@ from dataclasses import dataclass, field, replace
 class MetaGameControls:
     """Stall detection — when to force-skip stuck eval / replay sessions."""
 
-    stall_no_damage_turns: int = 6
+    stall_no_damage_turns: int = 10
     stall_pass_only_turns: int = 6
     stall_no_damage_requires_low_hand: bool = False
+    stall_require_no_progress_for_no_damage: bool = True
     stall_low_hand_turns: int = 3
     stall_max_single_low_hand_turns: int = 5
     stall_min_attack_hand: int = 2
@@ -187,6 +188,7 @@ class GameControlsDefaults:
     stall_no_damage_turns: int
     stall_pass_only_turns: int
     stall_no_damage_requires_low_hand: bool
+    stall_require_no_progress_for_no_damage: bool
     stall_low_hand_turns: int
     stall_max_single_low_hand_turns: int
     stall_min_attack_hand: int
@@ -401,6 +403,7 @@ def game_env_kwargs(game: GameControlsDefaults | MetaGameControls) -> dict[str, 
             "stall_no_damage_turns": game.stall_no_damage_turns,
             "stall_pass_only_turns": game.stall_pass_only_turns,
             "stall_no_damage_requires_low_hand": game.stall_no_damage_requires_low_hand,
+            "stall_require_no_progress_for_no_damage": game.stall_require_no_progress_for_no_damage,
             "stall_low_hand_turns": game.stall_low_hand_turns,
             "stall_max_single_low_hand_turns": game.stall_max_single_low_hand_turns,
             "stall_min_attack_hand": game.stall_min_attack_hand,
@@ -410,6 +413,7 @@ def game_env_kwargs(game: GameControlsDefaults | MetaGameControls) -> dict[str, 
         "stall_no_damage_turns": game.stall_no_damage_turns,
         "stall_pass_only_turns": game.stall_pass_only_turns,
         "stall_no_damage_requires_low_hand": game.stall_no_damage_requires_low_hand,
+        "stall_require_no_progress_for_no_damage": game.stall_require_no_progress_for_no_damage,
         "stall_low_hand_turns": game.stall_low_hand_turns,
         "stall_max_single_low_hand_turns": game.stall_max_single_low_hand_turns,
         "stall_min_attack_hand": game.stall_min_attack_hand,
@@ -529,6 +533,7 @@ def _game_controls(meta: MetaRuntime) -> GameControlsDefaults:
         stall_no_damage_turns=g.stall_no_damage_turns,
         stall_pass_only_turns=g.stall_pass_only_turns,
         stall_no_damage_requires_low_hand=g.stall_no_damage_requires_low_hand,
+        stall_require_no_progress_for_no_damage=g.stall_require_no_progress_for_no_damage,
         stall_low_hand_turns=g.stall_low_hand_turns,
         stall_max_single_low_hand_turns=g.stall_max_single_low_hand_turns,
         stall_min_attack_hand=g.stall_min_attack_hand,
@@ -657,6 +662,7 @@ DEFAULT_WARMUP_BASELINE_EVAL_EPISODES = RUNTIME.play.warmup_baseline_eval_episod
 DEFAULT_STALL_NO_DAMAGE_TURNS = RUNTIME.game.stall_no_damage_turns
 DEFAULT_STALL_PASS_ONLY_TURNS = RUNTIME.game.stall_pass_only_turns
 DEFAULT_STALL_NO_DAMAGE_REQUIRES_LOW_HAND = RUNTIME.game.stall_no_damage_requires_low_hand
+DEFAULT_STALL_REQUIRE_NO_PROGRESS_FOR_NO_DAMAGE = RUNTIME.game.stall_require_no_progress_for_no_damage
 DEFAULT_STALL_LOW_HAND_TURNS = RUNTIME.game.stall_low_hand_turns
 DEFAULT_STALL_MAX_SINGLE_LOW_HAND_TURNS = RUNTIME.game.stall_max_single_low_hand_turns
 DEFAULT_STALL_MIN_ATTACK_HAND = RUNTIME.game.stall_min_attack_hand

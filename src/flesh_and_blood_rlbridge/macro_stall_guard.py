@@ -19,9 +19,14 @@ class MacroStallConfig:
     """Thresholds for cross-turn stall truncation."""
 
     enabled: bool = True
-    stall_no_damage_turns: int = 6
+    stall_no_damage_turns: int = 10
     stall_pass_only_turns: int = 6
     stall_no_damage_requires_low_hand: bool = False
+    # When True, a "no damage" turn only counts toward stall truncation if the
+    # acting side also had nothing but Pass legal that turn (is_pass_only).
+    # Without this gate, legitimately slow games (control decks, non-attack
+    # card types) with real plays every turn get falsely flagged as stalled.
+    stall_require_no_progress_for_no_damage: bool = True
     stall_low_hand_turns: int = 3
     stall_max_single_low_hand_turns: int = 5
     stall_min_attack_hand: int = 2
@@ -75,6 +80,9 @@ class MacroStallGuard:
     # Per-player consecutive pass-only main-phase turn counters.
     _p1_pass_only_turns: int = field(default=0, init=False)
     _p2_pass_only_turns: int = field(default=0, init=False)
+    # True once the turn currently in progress has seen a non-pass-only
+    # main-phase decision — gates the no-damage stall counter.
+    _last_turn_had_progress: bool = field(default=False, init=False)
 
     def reset(self) -> None:
         self._last_seen_turn_no = 0
@@ -85,6 +93,7 @@ class MacroStallGuard:
         self._low_hand_turn_streak.clear()
         self._p1_pass_only_turns = 0
         self._p2_pass_only_turns = 0
+        self._last_turn_had_progress = False
 
     def observe(
         self,
@@ -105,12 +114,18 @@ class MacroStallGuard:
 
         if turn_no > self._last_seen_turn_no:
             if self._last_seen_turn_no > 0:
-                if total_hp >= self._turn_start_total_hp:
+                no_damage = total_hp >= self._turn_start_total_hp
+                no_progress = no_damage and (
+                    not self.config.stall_require_no_progress_for_no_damage
+                    or not self._last_turn_had_progress
+                )
+                if no_progress:
                     self._turns_without_damage += 1
                 else:
                     self._turns_without_damage = 0
             self._turn_start_total_hp = total_hp
             self._last_seen_turn_no = turn_no
+            self._last_turn_had_progress = False
 
         if phase == "m":
             marker = (acting, turn_no)
@@ -136,6 +151,7 @@ class MacroStallGuard:
                         self._p1_pass_only_turns = 0
                     else:
                         self._p2_pass_only_turns = 0
+                    self._last_turn_had_progress = True
 
         reason = ""
         should_truncate = False

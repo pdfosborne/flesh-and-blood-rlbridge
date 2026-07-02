@@ -260,6 +260,20 @@ def prefer_non_pass_index(obs_data: dict[str, Any], fallback_action: Any) -> Any
     return non_pass[0]
 
 
+def is_equipment_activation_action(action: dict[str, Any]) -> bool:
+    """True when *action* activates an already-equipped item/hero ability."""
+    zone = str(action.get("zone", "") or "").strip().lower()
+    return zone == "equipment" and _to_int(action.get("action_code", 0)) == 3
+
+
+def equipment_action_key(action: dict[str, Any]) -> tuple[int, str]:
+    """Stable dedup key for an equipment-activation action."""
+    return (
+        _to_int(action.get("action_code", 0)),
+        str(action.get("button_input", "") or ""),
+    )
+
+
 def _has_main_phase_play_actions(actions: list[dict[str, Any]]) -> bool:
     """True when main phase still has affordable hand/arsenal/equipment plays."""
     for action in actions:
@@ -271,9 +285,33 @@ def _has_main_phase_play_actions(actions: list[dict[str, Any]]) -> bool:
             return True
         if zone == "arsenal" and code == 5:
             return True
-        if zone == "equipment" and code == 3:
+        if is_equipment_activation_action(action):
             return True
     return False
+
+
+def _strip_confirmed_no_op_equipment(
+    filtered: list[dict[str, Any]],
+    tried_no_op_equipment: "frozenset[tuple[int, str]] | None",
+) -> list[dict[str, Any]]:
+    """Drop equipment-activation actions already confirmed to be no-ops this turn.
+
+    Falls back to *filtered* unchanged if stripping would remove every
+    non-pass option (mirrors the fallback pattern used throughout this
+    module), and never touches equipment actions not yet confirmed.
+    """
+    if not tried_no_op_equipment:
+        return filtered
+    kept = [
+        a for a in filtered
+        if not (
+            is_equipment_activation_action(a)
+            and equipment_action_key(a) in tried_no_op_equipment
+        )
+    ]
+    if _strip_pass_actions(filtered) and not _strip_pass_actions(kept):
+        return filtered
+    return kept
 
 
 def _strip_lazy_end_turn_pass(
@@ -344,12 +382,18 @@ def materialize_filtered_actions(
 def filter_legal_actions(
     state: dict[str, Any],
     legal_actions: list[dict[str, Any]],
+    *,
+    tried_no_op_equipment: "frozenset[tuple[int, str]] | None" = None,
 ) -> list[dict[str, Any]]:
     """Remove invalid or impossible actions before presenting them to agents.
 
     Each rule falls back to the original filtered list if it would otherwise
     produce an empty set.  Decision loops are handled by
-    :class:`~flesh_and_blood_rlbridge.state_loop_guard.TurnLoopGuard`, not here.
+    :class:`~flesh_and_blood_rlbridge.state_loop_guard.TurnLoopGuard`, not here
+    — except *tried_no_op_equipment*, a set of ``(action_code, button_input)``
+    keys the loop guard has already confirmed resolve into an identical board
+    state this turn (equip→Cancel→equip-style loops); those are stripped here
+    so a real policy never sees them again this turn.
 
     **Affordability** (all phases except pitch, block/defense, and mandatory
         zone-selection windows):
@@ -428,6 +472,7 @@ def filter_legal_actions(
 
     filtered = _strip_revert_actions(phase, filtered)
     filtered = _strip_lazy_end_turn_pass(state, filtered)
+    filtered = _strip_confirmed_no_op_equipment(filtered, tried_no_op_equipment)
 
     if player_must_wait(state):
         return _pass_only_without_priority(state, filtered)

@@ -360,6 +360,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         stall_no_damage_turns: int = 6,
         stall_pass_only_turns: int = 6,
         stall_no_damage_requires_low_hand: bool = False,
+        stall_require_no_progress_for_no_damage: bool = True,
         stall_low_hand_turns: int = 3,
         stall_max_single_low_hand_turns: int = 5,
         stall_min_attack_hand: int = 2,
@@ -450,6 +451,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                 stall_no_damage_turns=stall_no_damage_turns,
                 stall_pass_only_turns=stall_pass_only_turns,
                 stall_no_damage_requires_low_hand=stall_no_damage_requires_low_hand,
+                stall_require_no_progress_for_no_damage=stall_require_no_progress_for_no_damage,
                 stall_low_hand_turns=stall_low_hand_turns,
                 stall_max_single_low_hand_turns=stall_max_single_low_hand_turns,
                 stall_min_attack_hand=stall_min_attack_hand,
@@ -517,6 +519,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
                             stall_no_damage_turns=stall_no_damage_turns,
                             stall_pass_only_turns=stall_pass_only_turns,
                             stall_no_damage_requires_low_hand=stall_no_damage_requires_low_hand,
+                            stall_require_no_progress_for_no_damage=stall_require_no_progress_for_no_damage,
                             stall_low_hand_turns=stall_low_hand_turns,
                             stall_max_single_low_hand_turns=stall_max_single_low_hand_turns,
                             stall_min_attack_hand=stall_min_attack_hand,
@@ -2267,8 +2270,21 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         state: dict[str, Any],
         legal_actions: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        """Delegate to :func:`legal_action_filter.filter_legal_actions`."""
-        return filter_legal_actions(state, legal_actions)
+        """Delegate to :func:`legal_action_filter.filter_legal_actions`.
+
+        Also strips equipment-activation actions the loop guard has already
+        confirmed (this turn) resolve into an identical board state, so a
+        real policy never gets to re-select a known equip→Cancel→equip loop.
+        """
+        loop_guard = getattr(self, "_loop_guard", None)
+        tried_no_op_equipment = (
+            loop_guard.confirmed_no_op_equipment_actions() if loop_guard is not None else None
+        )
+        return filter_legal_actions(
+            state,
+            legal_actions,
+            tried_no_op_equipment=tried_no_op_equipment,
+        )
 
     def _loop_guard_for_step(
         self,

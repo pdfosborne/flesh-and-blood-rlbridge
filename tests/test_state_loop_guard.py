@@ -42,10 +42,29 @@ def test_legal_actions_fingerprint_is_stable() -> None:
     assert legal_actions_fingerprint(legal) == legal_actions_fingerprint(list(legal))
 
 
+def _sample_legal_non_equipment() -> list[dict]:
+    """Non-equipment legal actions for tests that exercise the generic
+    decision_loop path independently of the equipment-specific fast path."""
+    return [
+        {
+            "action_code": 27,
+            "button_input": "0",
+            "zone": "hand",
+            "label": "Attack",
+        },
+        {
+            "action_code": 99,
+            "button_input": "",
+            "zone": "button",
+            "label": "Pass",
+        },
+    ]
+
+
 def test_loop_guard_detects_repeated_decision_point() -> None:
     guard = TurnLoopGuard(max_steps_per_turn=100, loop_repeat_threshold=4)
     state = _sample_state()
-    legal = _sample_legal()
+    legal = _sample_legal_non_equipment()
 
     for _ in range(3):
         result = guard.check(
@@ -65,7 +84,7 @@ def test_loop_guard_detects_repeated_decision_point() -> None:
 def test_loop_guard_resets_on_turn_change() -> None:
     guard = TurnLoopGuard(max_steps_per_turn=100, loop_repeat_threshold=3)
     state = _sample_state()
-    legal = _sample_legal()
+    legal = _sample_legal_non_equipment()
 
     for _ in range(2):
         guard.check(state, legal, turn_no=3, acting_player_id=1)
@@ -74,6 +93,35 @@ def test_loop_guard_resets_on_turn_change() -> None:
     result = guard.check(state, legal, turn_no=4, acting_player_id=1)
     assert not result.force_pass
     assert result.loop_streak == 2
+
+
+def test_loop_guard_equipment_only_repeat_forces_pass_faster() -> None:
+    """Equip/activate-only decision points with an unchanged board should be
+    force-passed on the 2nd repeat, not the generic decision_loop streak."""
+    guard = TurnLoopGuard(max_steps_per_turn=100, loop_repeat_threshold=4)
+    state = _sample_state()
+    legal = _sample_legal()
+
+    first = guard.check(state, legal, turn_no=3, acting_player_id=1)
+    assert not first.force_pass
+
+    second = guard.check(state, legal, turn_no=3, acting_player_id=1)
+    assert second.force_pass
+    assert second.reason == "equipment_no_op_loop"
+    assert second.forced_action is not None
+    assert second.forced_action["action_code"] == 99
+
+    assert (3, "0") in guard.confirmed_no_op_equipment_actions()
+
+
+def test_loop_guard_equipment_only_repeat_does_not_trigger_on_first_check() -> None:
+    guard = TurnLoopGuard(max_steps_per_turn=100, loop_repeat_threshold=4)
+    state = _sample_state()
+    legal = _sample_legal()
+
+    result = guard.check(state, legal, turn_no=3, acting_player_id=1)
+    assert not result.force_pass
+    assert guard.confirmed_no_op_equipment_actions() == frozenset()
 
 
 def test_loop_guard_enforces_per_turn_step_cap() -> None:

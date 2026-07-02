@@ -115,6 +115,43 @@ def test_low_hand_gate_blocks_no_damage_truncation() -> None:
     assert result.reason == "no_damage_turns"
 
 
+def test_no_damage_with_real_plays_does_not_truncate() -> None:
+    """Flat HP alone shouldn't stall-truncate when real non-pass plays existed
+    every turn — only genuinely pass-only flat-HP turns should count."""
+    guard = MacroStallGuard(
+        MacroStallConfig(stall_no_damage_turns=3, stall_pass_only_turns=99)
+    )
+    playable = [
+        {"action_code": 27, "label": "battalion_barque_red", "zone": "hand"},
+        {"action_code": 5, "label": "saltwater_swell_red", "zone": "arsenal"},
+        {"action_code": 99, "label": "Pass", "zone": "button"},
+    ]
+
+    for turn in range(1, 6):
+        result = guard.observe(
+            _state(turn_no=turn, acting=1 if turn % 2 else 2),
+            playable,
+            p1_hp=20,
+            p2_hp=20,
+        )
+        assert not result.should_truncate
+
+    # Contrast: the same flat HP with genuinely pass-only turns still truncates.
+    guard.reset()
+    pass_only = [{"action_code": 99, "label": "Pass", "zone": "button"}]
+    result = None
+    for turn in range(1, 5):
+        result = guard.observe(
+            _state(turn_no=turn, acting=1 if turn % 2 else 2),
+            pass_only,
+            p1_hp=20,
+            p2_hp=20,
+        )
+    assert result is not None
+    assert result.should_truncate
+    assert result.reason == "no_damage_turns"
+
+
 def test_disabled_guard_never_truncates() -> None:
     guard = MacroStallGuard(MacroStallConfig(enabled=False, stall_no_damage_turns=1))
     pass_only = [{"action_code": 99, "label": "Pass", "zone": "button"}]

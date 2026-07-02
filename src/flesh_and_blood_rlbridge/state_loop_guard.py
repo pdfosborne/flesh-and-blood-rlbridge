@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from .legal_action_filter import equipment_action_key, is_equipment_activation_action
 from .talishar_default_policy import (
     _get_phase,
     _is_pass_action,
@@ -239,6 +240,8 @@ class TurnLoopGuard:
         self._last_fingerprint: Optional[str] = None
         self._loop_streak: int = 0
         self._board_history: list[str] = []
+        self._last_equipment_only_board_fp: Optional[str] = None
+        self._confirmed_no_op_equipment: set[tuple[int, str]] = set()
 
     def _reset_turn_window(self, *, turn_no: int, acting_player_id: int) -> None:
         self._turn_no = turn_no
@@ -247,6 +250,13 @@ class TurnLoopGuard:
         self._last_fingerprint = None
         self._loop_streak = 0
         self._board_history = []
+        self._last_equipment_only_board_fp = None
+        self._confirmed_no_op_equipment = set()
+
+    def confirmed_no_op_equipment_actions(self) -> "frozenset[tuple[int, str]]":
+        """Equipment-activation ``(action_code, button_input)`` keys already
+        confirmed this turn to resolve into an identical board state."""
+        return frozenset(self._confirmed_no_op_equipment)
 
     def check(
         self,
@@ -269,6 +279,33 @@ class TurnLoopGuard:
         self._steps_this_turn += 1
 
         board_fp = board_state_fingerprint(state)
+
+        non_pass_actions = [a for a in legal_actions if not _is_pass_action(a)]
+        equipment_only = bool(non_pass_actions) and all(
+            is_equipment_activation_action(a) for a in non_pass_actions
+        )
+        if equipment_only:
+            if (
+                self._last_equipment_only_board_fp is not None
+                and board_fp == self._last_equipment_only_board_fp
+            ):
+                self._confirmed_no_op_equipment.update(
+                    equipment_action_key(a) for a in non_pass_actions
+                )
+                self._last_equipment_only_board_fp = board_fp
+                return LoopGuardResult(
+                    force_pass=True,
+                    turn_steps=self._steps_this_turn,
+                    loop_streak=self._loop_streak,
+                    reason="equipment_no_op_loop",
+                    forced_action=_resolve_forced_action(
+                        legal_actions, reason="equipment_no_op_loop", state=state
+                    ),
+                )
+            self._last_equipment_only_board_fp = board_fp
+        else:
+            self._last_equipment_only_board_fp = None
+
         if self._board_history and board_fp in self._board_history[:-1]:
             reason = "board_revert"
             forced_action = _resolve_forced_action(
