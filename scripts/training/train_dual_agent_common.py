@@ -369,6 +369,7 @@ def _ppo_update(agent: PPOAgent, buf: dict, next_obs_vec: np.ndarray) -> None:
     T = len(buf["obs"])
     if T == 0:
         return
+    _validate_training_buf(agent, buf, "PPO")
 
     if _TORCH_AVAILABLE and hasattr(agent._actor, "_net"):
         # ── GPU-native PPO update (all math stays on _TORCH_DEVICE) ──────────
@@ -527,6 +528,44 @@ def _empty_buf() -> dict:
     }
 
 
+def _clamped_legal_count(value: Any, n_actions: int) -> int:
+    capacity = max(1, int(n_actions or ACTION_CAPACITY))
+    try:
+        legal_count = int(value or capacity)
+    except (TypeError, ValueError):
+        legal_count = capacity
+    return min(max(1, legal_count), capacity)
+
+
+def _validate_training_buf(agent: PPOAgent, buf: dict, label: str) -> None:
+    n_actions = max(1, int(getattr(agent, "n_actions", 0) or ACTION_CAPACITY))
+    keys = ("obs", "actions", "rewards", "values", "log_probs", "dones", "n_legal")
+    lengths = {key: len(buf[key]) for key in keys}
+    if len(set(lengths.values())) != 1:
+        raise ValueError(f"Invalid {label} buffer lengths: {lengths}")
+    if lengths["actions"] == 0:
+        return
+
+    actions = np.asarray(buf["actions"], dtype=np.int64)
+    raw_nlegal = np.asarray(buf["n_legal"], dtype=np.int64)
+    nlegal = np.array(
+        [_clamped_legal_count(value, n_actions) for value in raw_nlegal],
+        dtype=np.int64,
+    )
+    invalid = (actions < 0) | (actions >= n_actions)
+    if getattr(agent, "_mask_actions", False):
+        invalid |= actions >= nlegal
+    if np.any(invalid):
+        bad_indices = np.flatnonzero(invalid)[:5]
+        examples = ", ".join(
+            f"idx={int(index)} action={int(actions[index])} "
+            f"n_legal={int(raw_nlegal[index])} cap={n_actions}"
+            for index in bad_indices
+        )
+        raise ValueError(f"Invalid {label} action targets before CUDA update: {examples}")
+    buf["n_legal"] = nlegal.tolist()
+
+
 def _sync_tier_agent_config(tier_agents: list[PPOAgent], n_actions: int, mask: bool) -> None:
     for agent in tier_agents:
         agent.n_actions = n_actions
@@ -564,6 +603,7 @@ def _bc_update(agent: PPOAgent, buf: dict, next_obs_vec: np.ndarray) -> None:
     T = len(buf["obs"])
     if T == 0:
         return
+    _validate_training_buf(agent, buf, "BC")
 
     if _TORCH_AVAILABLE and hasattr(agent._actor, "_net"):
         # ── GPU-native BC update ──────────────────────────────────────────────
@@ -1391,11 +1431,12 @@ def _batched_fast_rollout_step(
         for index in active_indices:
             slot = slots[index]
             state = slot.state
-            n_legal = max(
-                1,
-                int(state.get("legal_count", p1_policy.n_actions) or 1),
-            )
             acting = int(state["acting_player_id"])
+            policy = p1_policy if acting == 1 else p2_policy
+            n_legal = _clamped_legal_count(
+                state.get("legal_count", policy.n_actions),
+                policy.n_actions,
+            )
             rng = slot.p1_rng if acting == 1 else slot.p2_rng
             action = int(rng.integers(n_legal))
             value = 0.0
@@ -1435,7 +1476,10 @@ def _batched_fast_rollout_step(
 
     if p1_indices:
         p1_nlegal = np.array([
-            max(1, int(slots[index].state.get("legal_count", p1_policy.n_actions) or 1))
+            _clamped_legal_count(
+                slots[index].state.get("legal_count", p1_policy.n_actions),
+                p1_policy.n_actions,
+            )
             for index in p1_indices
         ], dtype=np.int64)
         p1_actions, p1_log_probs = _sample_actions_from_logits_batch(
@@ -1446,7 +1490,10 @@ def _batched_fast_rollout_step(
         )
     if p2_indices:
         p2_nlegal = np.array([
-            max(1, int(slots[index].state.get("legal_count", p2_policy.n_actions) or 1))
+            _clamped_legal_count(
+                slots[index].state.get("legal_count", p2_policy.n_actions),
+                p2_policy.n_actions,
+            )
             for index in p2_indices
         ], dtype=np.int64)
         p2_actions, p2_log_probs = _sample_actions_from_logits_batch(
@@ -1503,11 +1550,12 @@ def _batched_fast_rollout_step_concurrent(
             for index in active_indices:
                 slot = slots[index]
                 state = slot.state
-                n_legal = max(
-                    1,
-                    int(state.get("legal_count", p1_policy.n_actions) or 1),
-                )
                 acting = int(state["acting_player_id"])
+                policy = p1_policy if acting == 1 else p2_policy
+                n_legal = _clamped_legal_count(
+                    state.get("legal_count", policy.n_actions),
+                    policy.n_actions,
+                )
                 rng = slot.p1_rng if acting == 1 else slot.p2_rng
                 action = int(rng.integers(n_legal))
                 futures.append(
@@ -1542,7 +1590,10 @@ def _batched_fast_rollout_step_concurrent(
         ])
         p1_logits, p1_values = p1_policy.predict_batch(p1_obs)
         p1_nlegal = np.array([
-            max(1, int(slots[index].state.get("legal_count", p1_policy.n_actions) or 1))
+            _clamped_legal_count(
+                slots[index].state.get("legal_count", p1_policy.n_actions),
+                p1_policy.n_actions,
+            )
             for index in p1_indices
         ], dtype=np.int64)
         p1_actions, p1_log_probs = _sample_actions_from_logits_batch(
@@ -1558,7 +1609,10 @@ def _batched_fast_rollout_step_concurrent(
         ])
         p2_logits, p2_values = p2_policy.predict_batch(p2_obs)
         p2_nlegal = np.array([
-            max(1, int(slots[index].state.get("legal_count", p2_policy.n_actions) or 1))
+            _clamped_legal_count(
+                slots[index].state.get("legal_count", p2_policy.n_actions),
+                p2_policy.n_actions,
+            )
             for index in p2_indices
         ], dtype=np.int64)
         p2_actions, p2_log_probs = _sample_actions_from_logits_batch(
@@ -1612,9 +1666,9 @@ def _apply_fast_rollout_action(
     max_steps: int,
 ) -> None:
     obs_vec = np.asarray(slot.state["obs_vec"], dtype=np.float64)
-    n_legal = max(
-        1,
-        int(slot.state.get("legal_count", 32) or 1),
+    n_legal = _clamped_legal_count(
+        slot.state.get("legal_count", ACTION_CAPACITY),
+        ACTION_CAPACITY,
     )
     next_state = slot.env.fast_step_index(action)
     env_reward = float(next_state.get("reward", 0.0) or 0.0)
@@ -2169,7 +2223,10 @@ def _run_one_fast_episode(
         policy = p1_policy if acting == 1 else p2_policy
         rng = p1_rng if acting == 1 else p2_rng
         obs_vec = np.asarray(state["obs_vec"], dtype=np.float64)
-        n_legal = max(1, int(state.get("legal_count", policy.n_actions) or 1))
+        n_legal = _clamped_legal_count(
+            state.get("legal_count", policy.n_actions),
+            policy.n_actions,
+        )
 
         if warmup:
             action = int(rng.integers(n_legal))

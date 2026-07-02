@@ -105,6 +105,23 @@ def test_load_required_reads_unified_weights(tmp_path: Path) -> None:
     assert loaded.n_actions == 128
 
 
+def test_load_required_rejects_wrong_action_capacity(tmp_path: Path) -> None:
+    cache_root = tmp_path / "agent_cache"
+    store = AgentCacheStore(cache_root, "silver_age")
+
+    agent = PPOAgent()
+    agent.obs_dim = PLAYER_OBS_DIM
+    agent.n_actions = 128
+    agent._init_nets(PLAYER_OBS_DIM)
+    store.persist(agent, episodes_delta=1)
+
+    try:
+        store.load_required(obs_dim=PLAYER_OBS_DIM, n_actions=256)
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError as exc:
+        assert "n_actions mismatch" in str(exc)
+
+
 def test_load_required_raises_when_missing(tmp_path: Path) -> None:
     store = AgentCacheStore(tmp_path / "agent_cache", "silver_age")
     try:

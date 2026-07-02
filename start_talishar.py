@@ -10,6 +10,7 @@ Usage:
     python start_talishar.py --backend-only --shards 4
     python start_talishar.py --fe-only
     python start_talishar.py --down
+    python start_talishar.py --wipe                          # stop + remove all shard docker volumes
     python start_talishar.py --backend-only --no-training   # dev profile without training overlay
 """
 
@@ -70,6 +71,10 @@ def _mysql_container_name(shard_index: int) -> str:
 
 def _shard_mysql_volume_name(shard_index: int) -> str:
     return f"fabrlbridge_shard_{shard_index}_mysql"
+
+
+def _shard_hostfiles_volume_name(shard_index: int) -> str:
+    return f"fabrlbridge_shard_{shard_index}_hostfiles"
 
 
 def _header(msg: str) -> None:
@@ -463,15 +468,43 @@ def _start_backend_shard(
         print(f"  {label} did not respond within {wait_secs}s")
 
 
-def _stop_backend_shards(*, training: bool, n_shards: int) -> None:
+def _stop_backend_shards(
+    *,
+    training: bool,
+    n_shards: int,
+    base_port: int = DEFAULT_SHARD_BASE_PORT,
+) -> None:
     for shard_index in range(max(1, int(n_shards)) - 1, -1, -1):
         label = "shard 0 (primary)" if shard_index == 0 else f"shard {shard_index}"
         print(f"  Stopping {label}…")
-        cmd = _shard_compose_cmd(shard_index, "down", training=training)
+        cmd = _shard_compose_cmd(shard_index, "down", training=training, base_port=base_port)
+        # docker-compose.shard.yml interpolates TALISHAR_SHARD_INDEX/PORT/... into
+        # its volume names and mounts; without this env, `down` fails outright
+        # for every shard beyond 0 with "invalid spec: :/seed-hostfiles:ro:
+        # empty section between colons" instead of stopping the containers.
+        env = _shard_compose_env(shard_index, base_port=base_port)
         try:
-            _run_compose(cmd, cwd=REPO_ROOT)
+            _run_compose(cmd, cwd=REPO_ROOT, env=env)
         except subprocess.CalledProcessError as exc:
             print(f"  WARNING: docker compose down failed for {label} (exit {exc.returncode})")
+
+
+def _wipe_shard_volumes(n_shards: int) -> None:
+    """Remove docker-managed mysql/hostfiles volumes for shards 1..n_shards-1.
+
+    Shard 0 (primary) uses host bind mounts (Talishar/mysql-data, Talishar/
+    itself) via Talishar/docker-compose.yml, not docker-managed named
+    volumes, so there is nothing to remove there with `docker volume rm`.
+    """
+    for shard_index in range(1, max(1, int(n_shards))):
+        for volume in (
+            _shard_mysql_volume_name(shard_index),
+            _shard_hostfiles_volume_name(shard_index),
+        ):
+            if _remove_docker_volume(volume):
+                print(f"  Removed volume {volume}")
+            else:
+                print(f"  NOTE: volume {volume} was not removed (may already be absent).")
 
 
 def _install_rl_bridge_overlay_on_host(talishar_dir: Path) -> None:
@@ -582,25 +615,28 @@ def run(
     backend_only: bool = False,
     fe_only: bool = False,
     down: bool = False,
+    wipe: bool = False,
     training: bool = True,
     shards: int = 1,
     shard_base_port: int = DEFAULT_SHARD_BASE_PORT,
 ) -> int:
     n_shards = max(1, int(shards))
-    if down:
-        _header("Stopping Talishar backend containers")
+    if down or wipe:
+        _header("Wiping Talishar backend containers and volumes" if wipe else "Stopping Talishar backend containers")
         if not COMPOSE_FILE.is_file():
             print(f"ERROR: compose file not found: {COMPOSE_FILE}", file=sys.stderr)
             return 1
         stop_count = n_shards if n_shards > 1 else _read_shard_count()
-        _stop_backend_shards(training=training, n_shards=stop_count)
+        _stop_backend_shards(training=training, n_shards=stop_count, base_port=shard_base_port)
+        if wipe:
+            _wipe_shard_volumes(stop_count)
         clear_training_env()
         if SHARD_STATE_FILE.is_file():
             try:
                 SHARD_STATE_FILE.unlink()
             except OSError:
                 pass
-        print("Backend stopped.")
+        print("Backend wiped." if wipe else "Backend stopped.")
         return 0
 
     if not fe_only:
@@ -784,6 +820,7 @@ def run(
         print("Set TALISHAR_URL before training if the backend was started separately.")
     print()
     print("To stop the backend containers:  python start_talishar.py --down")
+    print("To stop and wipe all volumes:    python start_talishar.py --wipe")
     return 0
 
 
@@ -803,6 +840,15 @@ def main(argv: list[str] | None = None) -> int:
         "--down",
         action="store_true",
         help="stop backend containers",
+    )
+    parser.add_argument(
+        "--wipe",
+        action="store_true",
+        help=(
+            "stop backend containers and remove every shard's docker volumes "
+            "(mysql data, hostfiles) — shard 0's mysql data is a host bind "
+            "mount (Talishar/mysql-data) and is not touched"
+        ),
     )
     parser.add_argument(
         "--training",
@@ -827,13 +873,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    if sum([args.backend_only, args.fe_only, args.down]) > 1:
-        parser.error("use at most one of --backend-only, --fe-only, or --down")
+    if sum([args.backend_only, args.fe_only, args.down, args.wipe]) > 1:
+        parser.error("use at most one of --backend-only, --fe-only, --down, or --wipe")
 
     return run(
         backend_only=args.backend_only,
         fe_only=args.fe_only,
         down=args.down,
+        wipe=args.wipe,
         training=bool(args.training),
         shards=max(1, int(args.shards)),
         shard_base_port=int(args.shard_base_port),

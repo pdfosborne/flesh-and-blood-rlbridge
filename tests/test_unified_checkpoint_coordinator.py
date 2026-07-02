@@ -317,6 +317,79 @@ def test_merged_eval_attaches_logic_vs_logic_baseline(
     assert record["logic_vs_logic"]["p1_win_rate"] == pytest.approx(0.54)
 
 
+def test_merged_eval_logic_vs_logic_survives_self_play_failure(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Self-play failing for a matchup must not suppress its logic-vs-logic baseline."""
+    from fab_bridge.unified_dashboard import LOGIC_VS_LOGIC_BASELINE_NAME  # noqa: E402
+    from train_dual_agent_common import Matchup, PPOAgent  # noqa: E402
+
+    def failing_self_play(*_args, **_kwargs):
+        raise RuntimeError(
+            "('Connection aborted.', RemoteDisconnected('Remote end closed connection "
+            "without response'))"
+        )
+
+    monkeypatch.setattr(
+        "train_play._evaluate_p1_vs_fixed_opponent",
+        failing_self_play,
+    )
+    monkeypatch.setattr(
+        "train_dual_agent_common._save_unified_selfplay_checkpoint",
+        lambda **_: None,
+    )
+    monkeypatch.setattr(
+        "unified_checkpoint_eval.submit_checkpoint_eval",
+        lambda fn, **_: fn(),
+    )
+    monkeypatch.setattr(
+        "fab_bridge.unified_dashboard.maybe_refresh_unified_dashboard",
+        lambda *_args, **_kwargs: None,
+    )
+
+    policy = MagicMock(spec=PPOAgent)
+    snap = MagicMock(spec=PPOAgent)
+    snap._shared = object()
+    matchup = Matchup(
+        name="solo",
+        p1_deck="d1",
+        p2_deck="d2",
+        description="",
+        dir_name="solo_match",
+    )
+    baseline_path = tmp_path / "solo_match" / LOGIC_VS_LOGIC_BASELINE_NAME
+    baseline_path.parent.mkdir(parents=True)
+    baseline_path.write_text(
+        json.dumps({"episodes": 20, "p1_win_rate": 0.54, "p1_policy": "logic"}),
+        encoding="utf-8",
+    )
+
+    coord = UnifiedCheckpointCoordinator(
+        out_dir=tmp_path,
+        matchups={"solo_match": matchup},
+        base_url="http://localhost",
+        game_format="sage",
+        max_steps=100,
+        n_episodes=100,
+        warmup_episodes=10,
+        checkpoint_interval=50,
+        checkpoint_eval_episodes=20,
+        unified_policy=policy,
+        policy_snapshot_fn=lambda: (snap, snap),
+        seed=0,
+    )
+    coord.report_progress("solo_match", 10)
+
+    assert coord.log
+    merged = coord.log[0]
+    record = merged["per_matchup"]["solo_match"]
+    # Logic-vs-logic baseline is still attached even though self-play errored.
+    assert record["logic_vs_logic"]["p1_win_rate"] == pytest.approx(0.54)
+    assert "self_play" in record["errors"][0]
+    assert merged["failed_matchups"][0]["matchup"] == "solo"
+
+
 def test_bucket_dedup(monkeypatch) -> None:
     call_eps: list[int] = []
 

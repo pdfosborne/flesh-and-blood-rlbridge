@@ -26,11 +26,13 @@ if (!is_array($payload)) {
 $trainingMode = !empty($payload["trainingMode"]);
 $slimResponse = !empty($payload["slimResponse"]);
 $profileTimings = !empty($payload["profileTimings"]);
+$debugGamestate = !empty($payload["debugGamestate"]);
 $useRlGameState = !array_key_exists("useRlGameState", $payload) || !empty($payload["useRlGameState"]);
 $compareGameStateBuild = !empty($payload["compareGameStateBuild"]);
 
 $FAB_RL_TRAINING_MODE = $trainingMode;
 $FAB_RL_PROFILE = $profileTimings;
+$FAB_RL_DEBUG_GAMESTATE = $debugGamestate;
 $timingsMs = [];
 
 function _rlStepMarkTiming($label, $start)
@@ -40,6 +42,162 @@ function _rlStepMarkTiming($label, $start)
         return;
     }
     $timingsMs[$label] = round((microtime(true) - $start) * 1000, 2);
+}
+
+function _rlStepArrayStats($value, $sampleLimit = 8)
+{
+    $stats = [
+        "type" => gettype($value),
+        "count" => is_array($value) ? count($value) : -1,
+        "nonScalarSampled" => 0,
+        "maxScalarLenSampled" => 0,
+        "sampleTypes" => [],
+    ];
+    if (!is_array($value)) {
+        return $stats;
+    }
+    $sampled = 0;
+    foreach ($value as $entry) {
+        if ($sampled >= $sampleLimit) {
+            break;
+        }
+        $entryType = gettype($entry);
+        $stats["sampleTypes"][] = $entryType;
+        if (is_scalar($entry) || $entry === null) {
+            $entryLen = strlen((string)$entry);
+            if ($entryLen > $stats["maxScalarLenSampled"]) {
+                $stats["maxScalarLenSampled"] = $entryLen;
+            }
+        } else {
+            $stats["nonScalarSampled"] += 1;
+        }
+        $sampled += 1;
+    }
+    return $stats;
+}
+
+function _rlStepValidateTokenArray($label, $value, $maxCount, $maxScalarLen, &$failure)
+{
+    if (!is_array($value)) {
+        $failure = $label . " is not an array";
+        return false;
+    }
+    $count = count($value);
+    if ($count < 0 || $count > $maxCount) {
+        $failure = $label . " has suspicious count=" . strval($count);
+        return false;
+    }
+    $sampled = 0;
+    foreach ($value as $entry) {
+        if ($sampled >= 32) {
+            break;
+        }
+        if (!(is_scalar($entry) || $entry === null)) {
+            $failure = $label . " contains non-scalar entries";
+            return false;
+        }
+        if (is_string($entry) && strlen($entry) > $maxScalarLen) {
+            $failure = $label . " contains oversized scalar entry";
+            return false;
+        }
+        $sampled += 1;
+    }
+    return true;
+}
+
+function _rlStepPreWriteGuard(&$failure)
+{
+    global $p1Discard, $p2Discard, $p1Pitch, $p2Pitch;
+    global $decisionQueue, $dqVars, $dqState, $layers, $layerPriority;
+    global $events, $attackQueue, $chainLinks, $chainLinkSummary;
+    global $p1CardTurnLog, $p2CardTurnLog;
+
+    $checks = [
+        ["p1Discard", $p1Discard ?? null, 200000, 4096],
+        ["p2Discard", $p2Discard ?? null, 200000, 4096],
+        ["p1Pitch", $p1Pitch ?? null, 200000, 4096],
+        ["p2Pitch", $p2Pitch ?? null, 200000, 4096],
+        ["decisionQueue", $decisionQueue ?? null, 500000, 4096],
+        ["dqVars", $dqVars ?? null, 500000, 4096],
+        ["dqState", $dqState ?? null, 500000, 4096],
+        ["layers", $layers ?? null, 500000, 4096],
+        ["layerPriority", $layerPriority ?? null, 500000, 4096],
+        ["events", $events ?? null, 200000, 4096],
+        ["attackQueue", is_array($attackQueue ?? null) ? $attackQueue : [], 200000, 4096],
+        ["chainLinkSummary", $chainLinkSummary ?? null, 500000, 4096],
+    ];
+    foreach ($checks as $check) {
+        if (!_rlStepValidateTokenArray($check[0], $check[1], $check[2], $check[3], $failure)) {
+            return false;
+        }
+    }
+
+    if (!is_array($chainLinks ?? null)) {
+        $failure = "chainLinks is not an array";
+        return false;
+    }
+    if (count($chainLinks) > 50000) {
+        $failure = "chainLinks has suspicious count=" . strval(count($chainLinks));
+        return false;
+    }
+
+    if (!is_array($p1CardTurnLog ?? null) || !is_array($p2CardTurnLog ?? null)) {
+        $failure = "card turn logs are not arrays";
+        return false;
+    }
+    if (count($p1CardTurnLog) > 50000 || count($p2CardTurnLog) > 50000) {
+        $failure = "card turn logs have suspicious count";
+        return false;
+    }
+
+    return true;
+}
+
+function _rlStepDebugPreWrite($context = [])
+{
+    global $FAB_RL_DEBUG_GAMESTATE, $gameName, $playerID, $mode;
+    global $buttonInput, $cardID, $currentPlayer, $currentTurn;
+    global $p1Discard, $p2Discard, $p1Pitch, $p2Pitch;
+    global $decisionQueue, $dqVars, $dqState, $layers, $layerPriority;
+    global $events, $attackQueue, $chainLinks, $chainLinkSummary;
+    global $p1CardTurnLog, $p2CardTurnLog;
+
+    if (empty($FAB_RL_DEBUG_GAMESTATE)) {
+        return;
+    }
+    $payload = [
+        "tag" => "rlstep_pre_write",
+        "gameName" => (string)$gameName,
+        "playerID" => intval($playerID),
+        "mode" => intval($mode),
+        "currentPlayer" => intval($currentPlayer),
+        "currentTurn" => intval($currentTurn),
+        "buttonInputPreview" => substr((string)$buttonInput, 0, 64),
+        "cardIDPreview" => substr((string)$cardID, 0, 64),
+        "memUsageMB" => round(memory_get_usage(true) / 1024 / 1024, 2),
+        "memPeakMB" => round(memory_get_peak_usage(true) / 1024 / 1024, 2),
+        "stats" => [
+            "p1Discard" => _rlStepArrayStats($p1Discard ?? null),
+            "p2Discard" => _rlStepArrayStats($p2Discard ?? null),
+            "p1Pitch" => _rlStepArrayStats($p1Pitch ?? null),
+            "p2Pitch" => _rlStepArrayStats($p2Pitch ?? null),
+            "decisionQueue" => _rlStepArrayStats($decisionQueue ?? null),
+            "dqVars" => _rlStepArrayStats($dqVars ?? null),
+            "dqState" => _rlStepArrayStats($dqState ?? null),
+            "layers" => _rlStepArrayStats($layers ?? null),
+            "layerPriority" => _rlStepArrayStats($layerPriority ?? null),
+            "events" => _rlStepArrayStats($events ?? null),
+            "attackQueue" => _rlStepArrayStats(is_array($attackQueue ?? null) ? $attackQueue : []),
+            "chainLinks" => _rlStepArrayStats($chainLinks ?? null),
+            "chainLinkSummary" => _rlStepArrayStats($chainLinkSummary ?? null),
+            "p1CardTurnLog" => _rlStepArrayStats($p1CardTurnLog ?? null),
+            "p2CardTurnLog" => _rlStepArrayStats($p2CardTurnLog ?? null),
+        ],
+    ];
+    if (!empty($context) && is_array($context)) {
+        $payload["context"] = $context;
+    }
+    error_log("[RLSTEP_DEBUG] " . json_encode($payload));
 }
 
 include $fabRoot . "/HostFiles/Redirector.php";
@@ -203,6 +361,24 @@ if (!$skipWriteGamestate) {
         SetCachePiece($gameName, 12, "0");
         SetCachePiece($gameName, 2, $currentTime);
         SetCachePiece($gameName, 3, $currentTime);
+    }
+    if ($trainingMode) {
+        _rlStepDebugPreWrite(["phase" => "before_guard"]);
+        $guardFailure = "";
+        if (!_rlStepPreWriteGuard($guardFailure)) {
+            _rlStepDebugPreWrite([
+                "phase" => "guard_failed",
+                "failure" => $guardFailure,
+            ]);
+            echo json_encode([
+                "success" => false,
+                "error" => "Pre-write gamestate guard failed",
+                "details" => $guardFailure,
+                "currentPlayer" => intval($currentPlayer),
+                "playerID" => intval($playerID),
+            ]);
+            exit;
+        }
     }
     DoGamestateUpdate();
     include $fabRoot . "/WriteGamestate.php";

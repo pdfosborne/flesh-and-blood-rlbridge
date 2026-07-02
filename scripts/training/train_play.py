@@ -2109,54 +2109,104 @@ def _evaluate_fast_policy_matchup(
             ),
         )
 
-        while steps < max_steps:
-            acting = int(state.get("acting_player_id", 1) or 1)
-            seat_policy = p1_policy if acting == 1 else p2_policy
-            seat_rng = p1_rng if acting == 1 else p2_rng
-            obs_vec = np.asarray(state["obs_vec"], dtype=np.float64)
-            n_legal = max(1, int(state.get("legal_count", 1) or 1))
-            action = _fast_action_for_policy(
-                seat_policy,
-                active_env,
-                obs_vec=obs_vec,
-                n_legal=n_legal,
-                rng=seat_rng,
+        step_error: Optional[BaseException] = None
+        try:
+            while steps < max_steps:
+                acting = int(state.get("acting_player_id", 1) or 1)
+                seat_policy = p1_policy if acting == 1 else p2_policy
+                seat_rng = p1_rng if acting == 1 else p2_rng
+                obs_vec = np.asarray(state["obs_vec"], dtype=np.float64)
+                n_legal = max(1, int(state.get("legal_count", 1) or 1))
+                action = _fast_action_for_policy(
+                    seat_policy,
+                    active_env,
+                    obs_vec=obs_vec,
+                    n_legal=n_legal,
+                    rng=seat_rng,
+                )
+                is_pass = n_legal <= 1 or action >= n_legal - 1
+                if acting == 1:
+                    p1_actions += 1
+                    if is_pass:
+                        p1_pass_actions += 1
+                else:
+                    p2_actions += 1
+                    if is_pass:
+                        p2_pass_actions += 1
+                state = active_env.fast_step_index(action)
+                terminated = bool(state.get("terminated", False))
+                truncated = bool(state.get("truncated", False))
+                steps += 1
+                _touch_cpp_eval_live_replay(
+                    live_progress_path,
+                    active_env,
+                    episode=ep + 1,
+                    episodes_total=episodes,
+                    step=steps,
+                    action_index=action,
+                    eval_label=eval_label,
+                    p1_policy=p1_policy,
+                    p2_policy=p2_policy,
+                    aggregate=_cpp_eval_live_aggregate(
+                        episodes_completed=ep,
+                        wins=wins,
+                        losses=losses,
+                        draws=draws,
+                        timeouts=timeouts,
+                        errors=errors,
+                    ),
+                    episode_done=terminated or truncated,
+                )
+                if terminated or truncated:
+                    break
+        except Exception as exc:  # noqa: BLE001
+            from flesh_and_blood_rlbridge.talishar_backend_pool import (  # noqa: PLC0415
+                is_shard_connection_error,
             )
-            is_pass = n_legal <= 1 or action >= n_legal - 1
-            if acting == 1:
-                p1_actions += 1
-                if is_pass:
-                    p1_pass_actions += 1
-            else:
-                p2_actions += 1
-                if is_pass:
-                    p2_pass_actions += 1
-            state = active_env.fast_step_index(action)
-            terminated = bool(state.get("terminated", False))
-            truncated = bool(state.get("truncated", False))
-            steps += 1
-            _touch_cpp_eval_live_replay(
-                live_progress_path,
-                active_env,
-                episode=ep + 1,
-                episodes_total=episodes,
-                step=steps,
-                action_index=action,
-                eval_label=eval_label,
-                p1_policy=p1_policy,
-                p2_policy=p2_policy,
-                aggregate=_cpp_eval_live_aggregate(
-                    episodes_completed=ep,
-                    wins=wins,
-                    losses=losses,
-                    draws=draws,
-                    timeouts=timeouts,
-                    errors=errors,
-                ),
-                episode_done=terminated or truncated,
+
+            if not is_shard_connection_error(exc):
+                raise
+            step_error = exc
+
+        if step_error is not None:
+            msg = f"ep {ep + 1}: shard connection error mid-episode: {step_error!r}"
+            anomalies.append(msg)
+            if len(anomalies) <= 5:
+                print(f"  WARNING: {eval_label} {msg}")
+            if backend_pool is not None:
+                backend_pool.note_shard_failure(getattr(active_env, "_base_url", "") or "")
+            counters.record_seat_outcome(
+                OUTCOME_ERROR,
+                active_p1_hero=active_p1_hero,
+                active_p2_hero=active_p2_hero,
+                nominal_hero1=nominal_h1,
+                nominal_hero2=nominal_h2,
             )
-            if terminated or truncated:
-                break
+            if track_agent and agent_on_p1_seat is not None:
+                counters.record_agent_hero_outcome(
+                    OUTCOME_ERROR,
+                    agent_on_p1_seat=agent_on_p1_seat,
+                    use_swap=use_swap,
+                    nominal_hero1=nominal_h1,
+                    nominal_hero2=nominal_h2,
+                )
+            wins, losses, draws, timeouts, errors = _record_eval_outcome(
+                OUTCOME_ERROR,
+                wins=wins,
+                losses=losses,
+                draws=draws,
+                timeouts=timeouts,
+                errors=errors,
+            )
+            completed = ep + 1
+            if progress_interval > 0 and (
+                completed % progress_interval == 0 or completed == episodes
+            ):
+                print(
+                    f"  {eval_label}: {completed}/{episodes} games "
+                    f"(W={wins} L={losses} D={draws} T={timeouts} E={errors})"
+                )
+            continue
 
         max_steps_reached = not terminated and not truncated and steps >= max_steps
         outcome, anomaly = classify_and_record_fast_episode(

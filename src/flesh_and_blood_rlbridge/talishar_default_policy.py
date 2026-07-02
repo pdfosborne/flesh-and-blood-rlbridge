@@ -273,6 +273,8 @@ def _is_pass_action(action: dict[str, Any]) -> bool:
 
 def _is_revert_action(action: dict[str, Any]) -> bool:
     """Return True for Cancel / Undo actions that revert committed game state."""
+    if not action:
+        return False
     code = _to_int(action.get("action_code", 0))
     if code in _REVERT_MODE_CODES:
         return True
@@ -913,10 +915,10 @@ def choose_talishar_action_index(
         ]
         if hand16:
             return hand16[0]
-        # CHOOSEHANDCANCEL: if no eligible hand cards, Cancel (10000) is valid.
-        for i in non_pass:
-            if _to_int(legal_actions[i].get("action_code", 0)) == 10000:
-                return i
+        # CRITICAL: Never select Cancel (10000) here during loop recovery.
+        # During board_revert loops (e.g., Plasma Barrel steam counter increment),
+        # selecting Cancel perpetuates the loop instead of breaking it.
+        # Fall back to pass action code (99) which may be safer or trigger abort logic.
         return pass_index
 
     # ── 5. BUTTONINPUT phases (CanPassPhase=0, must press a mode-17 button) ──

@@ -14,6 +14,7 @@ from typing import Any, Optional
 from .talishar_default_policy import (
     _get_phase,
     _is_pass_action,
+    _is_revert_action,
     _to_int,
     ranked_progress_action,
 )
@@ -180,10 +181,17 @@ def _resolve_forced_action(
 ) -> Optional[dict[str, Any]]:
     """Pick the action environments should submit when breaking a loop.
 
-    Uses :func:`ranked_progress_action` (phase-aware tactical heuristics) so
-    the forced submission is the most likely to advance game state rather than
-    the first non-pass or first-listed action.
+    For repeated ARS loops and turn-step cap breaches in ARS, prefer explicit
+    ``Pass`` when available so we can exit end-of-turn oscillations
+    deterministically. For other reasons/phases, use
+    :func:`ranked_progress_action` (phase-aware tactical heuristics) so the
+    forced submission is likely to advance state.
     """
+    phase = _get_phase(state or {})
+    if reason in {"decision_loop", "turn_step_cap"} and phase == "ars":
+        pass_action = first_pass_action(legal_actions)
+        if pass_action is not None:
+            return pass_action
     return ranked_progress_action(legal_actions, state or {})
 
 
@@ -263,14 +271,25 @@ class TurnLoopGuard:
         board_fp = board_state_fingerprint(state)
         if self._board_history and board_fp in self._board_history[:-1]:
             reason = "board_revert"
+            forced_action = _resolve_forced_action(
+                legal_actions, reason=reason, state=state
+            )
+            # CRITICAL: If forced_action is a revert/Cancel action (undo/cancel),
+            # we cannot break the loop by selecting it. Truncate early instead.
+            if forced_action and _is_revert_action(forced_action):
+                return LoopGuardResult(
+                    force_pass=True,
+                    turn_steps=self._steps_this_turn,
+                    loop_streak=self._loop_streak,
+                    reason="board_revert_only_reverts_available_truncate",
+                    forced_action=None,  # Signal to truncate, not to force this action
+                )
             return LoopGuardResult(
                 force_pass=True,
                 turn_steps=self._steps_this_turn,
                 loop_streak=self._loop_streak,
                 reason=reason,
-                forced_action=_resolve_forced_action(
-                    legal_actions, reason=reason, state=state
-                ),
+                forced_action=forced_action,
             )
         if not self._board_history or board_fp != self._board_history[-1]:
             self._board_history.append(board_fp)

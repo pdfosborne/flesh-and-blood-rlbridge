@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO / "scripts" / "training"))
@@ -17,6 +18,7 @@ from train_dual_agent_common import (  # noqa: E402
     Matchup,
     _flush_unified_ppo_buffers,
     _merge_episode_transitions,
+    _validate_training_buf,
     _uses_unified_policy,
     swapped_matchup,
 )
@@ -71,6 +73,43 @@ def test_unified_ppo_flush_single_update(monkeypatch) -> None:
     _flush_unified_ppo_buffers(policy, p1_trans, p2_trans)
     assert len(calls) == 1
     assert calls[0] == id(policy)
+
+
+def test_training_buffer_guard_clamps_legal_count() -> None:
+    policy = PPOAgent(n_actions=8, obs_dim=PLAYER_OBS_DIM)
+    policy._mask_actions = True
+    obs = np.zeros(PLAYER_OBS_DIM, dtype=np.float64)
+    buf = {
+        "obs": [obs],
+        "actions": [7],
+        "rewards": [0.0],
+        "values": [0.0],
+        "log_probs": [0.0],
+        "dones": [0.0],
+        "n_legal": [999],
+    }
+
+    _validate_training_buf(policy, buf, "BC")
+
+    assert buf["n_legal"] == [8]
+
+
+def test_training_buffer_guard_rejects_invalid_action() -> None:
+    policy = PPOAgent(n_actions=8, obs_dim=PLAYER_OBS_DIM)
+    policy._mask_actions = True
+    obs = np.zeros(PLAYER_OBS_DIM, dtype=np.float64)
+    buf = {
+        "obs": [obs],
+        "actions": [8],
+        "rewards": [0.0],
+        "values": [0.0],
+        "log_probs": [0.0],
+        "dones": [0.0],
+        "n_legal": [999],
+    }
+
+    with pytest.raises(ValueError, match="before CUDA"):
+        _validate_training_buf(policy, buf, "BC")
 
 
 def test_unified_policy_bundle_shared_tiers() -> None:

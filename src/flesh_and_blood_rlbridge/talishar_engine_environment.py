@@ -670,6 +670,12 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         extras: dict[str, Any] = {}
         if os.environ.get("FAB_RLSTEP_PROFILE", "").strip().lower() in {"1", "true", "yes"}:
             extras["profileTimings"] = True
+        if os.environ.get("FAB_RLSTEP_DEBUG_GAMESTATE", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+        }:
+            extras["debugGamestate"] = True
         return extras
 
     def _legal_action_fingerprint(self, actions: list[dict[str, Any]]) -> set[tuple[Any, ...]]:
@@ -804,7 +810,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
         p1_hp, p2_hp = self._absolute_p1_p2_health(self._last_state)
         result: dict[str, Any] = {
             "obs_vec": obs_vec,
-            "legal_count": len(legal),
+            "legal_count": min(len(legal), ACTION_CAPACITY),
             "acting_player_id": self._acting_player_id,
             "reward": float(reward),
             "terminated": terminated,
@@ -963,80 +969,100 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
 
         legal_actions = self._legal_actions(state)
         loop_guard = self._loop_guard_for_step(state, legal_actions)
-        mode, button_input = self._parse_action(str(action_index), legal_actions)
-        if loop_guard.force_pass:
-            mode, button_input = self._force_loop_guard_submission(
-                legal_actions,
-                loop_guard,
-            )
-        mode, button_input = self._sanitize_revert_submission(
-            mode,
-            button_input,
-            legal_actions,
-            state,
-        )
-
-        # Capture absolute P1/P2 health BEFORE the action (while acting player
-        # ID is still the pre-action value).  Used for P1-centric reward.
-        prev_p1_hp_abs, prev_p2_hp_abs = self._absolute_p1_p2_health(state)
-
-        prev_player_hp = self._player_hp
-        prev_opp_hp = self._opp_hp
-        try:
-            new_state = self._submit_action_and_sync(mode, button_input)
-        except RuntimeError as exc:
-            msg = str(exc)
-            if "ProcessInput.php" not in msg and "RLStep.php" not in msg:
-                raise
-            try:
-                new_state = self._submit_action_and_sync(99, "")
-            except Exception:
-                new_state = self._sync_after_action()
-        # Reset priority-resync watchdog: a real submission was made.
-        self._priority_resync_streak = 0
-        new_state = self._recover_from_gamestate_revert_if_needed(
-            new_state,
-            submitted_mode=mode,
-            submitted_button=button_input,
-        )
-
-        # Phase 5: auto-advance deterministic windows (pass-only / single
-        # mandatory action) without consuming additional policy calls.
-        new_state, auto_steps = self._fast_auto_advance(new_state)
-
-        self._steps += 1 + auto_steps
-        new_player_hp = int(new_state.get("playerHealth", self._player_hp))
-        new_opp_hp = int(new_state.get("opponentHealth", self._opp_hp))
-        # Absolute health after the action + any auto-advances.
-        new_p1_hp_abs, new_p2_hp_abs = self._absolute_p1_p2_health(new_state)
-
-        terminated = self._is_game_over(new_state)
-        truncated = not terminated and self._steps >= self._max_turns
-
-        new_legal_raw = self._legal_actions(new_state)
-        macro_stall = self._check_macro_stall(new_state, new_legal_raw)
-        if macro_stall.should_truncate and not terminated:
-            if macro_stall.mutual_stall_loss:
-                # Both players stalling → definitive episode end; training
-                # loop injects -1.0 for each seat via mutual_stall_loss flag.
-                terminated = True
-            else:
-                truncated = True
-
-        action_key = (mode, button_input)
-        turn_no = int(new_state.get("turnNo", 0) or 0)
-        if terminated or truncated:
-            self._reset_repeat_tracking(
-                turn_no=turn_no,
-                acting_player_id=self._acting_player_id,
-            )
+        
+        # CRITICAL: If loop guard detects board_revert with only revert actions available,
+        # truncate episode immediately instead of wasting steps trying to recover.
+        if (
+            loop_guard.reason == "board_revert_only_reverts_available_truncate"
+            and loop_guard.forced_action is None
+        ):
+            # Record the truncation without submitting any action
+            new_state = state
+            new_player_hp = self._player_hp
+            new_opp_hp = self._opp_hp
+            prev_p1_hp_abs, prev_p2_hp_abs = self._absolute_p1_p2_health(state)
+            new_p1_hp_abs, new_p2_hp_abs = prev_p1_hp_abs, prev_p2_hp_abs
+            terminated = False
+            truncated = True
+            auto_steps = 0
+            macro_stall = MacroStallResult()  # Default: no stall issues
             repeat_penalty = 0.0
+            action_key = (99, "")  # Dummy key for pass
         else:
-            repeat_penalty = self._compute_repeat_action_penalty(
-                action_key,
-                turn_no=turn_no,
-                acting_player_id=self._acting_player_id,
+            mode, button_input = self._parse_action(str(action_index), legal_actions)
+            if loop_guard.force_pass:
+                mode, button_input = self._force_loop_guard_submission(
+                    legal_actions,
+                    loop_guard,
+                )
+            mode, button_input = self._sanitize_revert_submission(
+                mode,
+                button_input,
+                legal_actions,
+                state,
             )
+
+            # Capture absolute P1/P2 health BEFORE the action (while acting player
+            # ID is still the pre-action value).  Used for P1-centric reward.
+            prev_p1_hp_abs, prev_p2_hp_abs = self._absolute_p1_p2_health(state)
+
+            prev_player_hp = self._player_hp
+            prev_opp_hp = self._opp_hp
+            try:
+                new_state = self._submit_action_and_sync(mode, button_input)
+            except RuntimeError as exc:
+                msg = str(exc)
+                if "ProcessInput.php" not in msg and "RLStep.php" not in msg:
+                    raise
+                try:
+                    new_state = self._submit_action_and_sync(99, "")
+                except Exception:
+                    new_state = self._sync_after_action()
+            # Reset priority-resync watchdog: a real submission was made.
+            self._priority_resync_streak = 0
+            new_state = self._recover_from_gamestate_revert_if_needed(
+                new_state,
+                submitted_mode=mode,
+                submitted_button=button_input,
+            )
+
+            # Phase 5: auto-advance deterministic windows (pass-only / single
+            # mandatory action) without consuming additional policy calls.
+            new_state, auto_steps = self._fast_auto_advance(new_state)
+
+            self._steps += 1 + auto_steps
+            new_player_hp = int(new_state.get("playerHealth", self._player_hp))
+            new_opp_hp = int(new_state.get("opponentHealth", self._opp_hp))
+            # Absolute health after the action + any auto-advances.
+            new_p1_hp_abs, new_p2_hp_abs = self._absolute_p1_p2_health(new_state)
+
+            terminated = self._is_game_over(new_state)
+            truncated = not terminated and self._steps >= self._max_turns
+
+            new_legal_raw = self._legal_actions(new_state)
+            macro_stall = self._check_macro_stall(new_state, new_legal_raw)
+            if macro_stall.should_truncate and not terminated:
+                if macro_stall.mutual_stall_loss:
+                    # Both players stalling → definitive episode end; training
+                    # loop injects -1.0 for each seat via mutual_stall_loss flag.
+                    terminated = True
+                else:
+                    truncated = True
+
+            action_key = (mode, button_input)
+            turn_no = int(new_state.get("turnNo", 0) or 0)
+            if terminated or truncated:
+                self._reset_repeat_tracking(
+                    turn_no=turn_no,
+                    acting_player_id=self._acting_player_id,
+                )
+                repeat_penalty = 0.0
+            else:
+                repeat_penalty = self._compute_repeat_action_penalty(
+                    action_key,
+                    turn_no=turn_no,
+                    acting_player_id=self._acting_player_id,
+                )
 
         if terminated:
             if macro_stall.mutual_stall_loss:
@@ -1135,7 +1161,7 @@ class TalisharEngineEnvironment(rlbridgeEnvironment):
             "player_deck_count": int(state.get("playerDeckCount", 0) or 0),
             "opponent_deck_count": int(state.get("opponentDeckCount", 0) or 0),
             "player_pitch_count": int(state.get("playerPitchCount", 0) or 0),
-            "legal_count": len(legal_actions),
+            "legal_count": min(len(legal_actions), ACTION_CAPACITY),
         }
 
     def _tracker_action_dict(self, action: dict[str, Any]) -> dict[str, Any]:

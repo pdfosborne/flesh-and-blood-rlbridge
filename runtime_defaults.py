@@ -148,7 +148,7 @@ class MetaRuntime:
     gif_fps_matchup_sim: float = 2.0
 
     # ── Eval/render anti-stuck diagnostics ───────────────────────────────────
-    anti_stuck_logging: bool = False
+    anti_stuck_logging: bool = True
     anti_stuck_pass_streak: int = 8
     anti_stuck_no_progress_steps: int = 6
     anti_stuck_repeat_streak: int = 5

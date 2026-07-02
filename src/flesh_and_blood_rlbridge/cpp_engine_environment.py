@@ -452,6 +452,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             return None
         if legal_count is None:
             legal_count = len(self._filter_legal_actions(self._legal_actions()))
+        legal_count = min(max(0, int(legal_count)), ACTION_CAPACITY)
         try:
             raw = fn(int(legal_count))
             vec = np.asarray(raw, dtype=np.float64).reshape(-1)
@@ -1259,7 +1260,10 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         )
         self._loop_guard.reset()
         self._macro_stall_guard.reset()
-        legal_count = len(self._filter_legal_actions(self._legal_actions()))
+        legal_count = min(
+            len(self._filter_legal_actions(self._legal_actions())),
+            ACTION_CAPACITY,
+        )
         obs_vec = self._obs_vec_for_fast_path()
         self._last_observation_vec = obs_vec
         legal = self._filter_legal_actions(self._legal_actions())
@@ -1382,7 +1386,10 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             )
         return {
             "obs_vec": obs_vec,
-            "legal_count": len(self._filter_legal_actions(self._legal_actions())),
+            "legal_count": min(
+                len(self._filter_legal_actions(self._legal_actions())),
+                ACTION_CAPACITY,
+            ),
             "acting_player_id": self._acting_player,
             "reward": reward,
             "terminated": terminated,
@@ -1478,7 +1485,10 @@ class CppEngineEnvironment(rlbridgeEnvironment):
         self._sync_flow_phase_from_cpp()
         fast_result: dict[str, Any] = {
             "obs_vec": obs_vec,
-            "legal_count": len(self._filter_legal_actions(self._legal_actions())),
+            "legal_count": min(
+                len(self._filter_legal_actions(self._legal_actions())),
+                ACTION_CAPACITY,
+            ),
             "acting_player_id": self._acting_player,
             "reward": reward,
             "terminated": terminated,
@@ -2236,7 +2246,7 @@ class CppEngineEnvironment(rlbridgeEnvironment):
             "player_deck_count": int(gs.p1_deck_size if acting == 1 else gs.p2_deck_size),
             "opponent_deck_count": int(gs.p2_deck_size if acting == 1 else gs.p1_deck_size),
             "player_pitch_count": int(self._pitch_count()),
-            "legal_count": len(legal),
+            "legal_count": min(len(legal), ACTION_CAPACITY),
         }
 
     def _append_synthetic_log(

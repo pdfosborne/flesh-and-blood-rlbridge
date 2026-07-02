@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 from flesh_and_blood_rlbridge.talishar_engine_environment import TalisharEngineEnvironment
+from flesh_and_blood_rlbridge.talishar_oracle import TalisharConnectionError
 
 
 def test_rlstep_payload_extras_profile_flag(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -16,6 +17,13 @@ def test_rlstep_payload_extras_profile_flag(monkeypatch: pytest.MonkeyPatch) -> 
     env = TalisharEngineEnvironment.__new__(TalisharEngineEnvironment)
     extras = env._rlstep_payload_extras()
     assert extras.get("profileTimings") is True
+
+
+def test_rlstep_payload_extras_debug_gamestate_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FAB_RLSTEP_DEBUG_GAMESTATE", "1")
+    env = TalisharEngineEnvironment.__new__(TalisharEngineEnvironment)
+    extras = env._rlstep_payload_extras()
+    assert extras.get("debugGamestate") is True
 
 
 def test_rlstep_training_payload_includes_training_mode() -> None:
@@ -91,5 +99,7 @@ def test_rlstep_training_live_parity_smoke() -> None:
         with patch.dict(os.environ, {"FAB_RLSTEP_PARITY_CHECK": "1"}):
             env.fast_reset()
             env.fast_step_index(0)
+    except TalisharConnectionError as exc:
+        pytest.skip(f"Talishar server not reachable: {exc}")
     finally:
         env.close()

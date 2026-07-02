@@ -135,6 +135,51 @@ def test_batched_concurrent_faster_than_sequential_for_multiple_slots() -> None:
     assert concurrent_elapsed < sequential_elapsed * 0.75
 
 
+def test_fast_warmup_clamps_legal_count_to_policy_capacity() -> None:
+    class _OverwideLegalFastEnv:
+        def __init__(self) -> None:
+            self.actions: list[int] = []
+
+        def fast_step_index(self, action_index: int) -> dict:
+            self.actions.append(int(action_index))
+            return {
+                "obs_vec": np.zeros(8, dtype=np.float64),
+                "legal_count": 999,
+                "acting_player_id": 2,
+                "reward": 0.0,
+                "terminated": False,
+                "truncated": False,
+                "p1_health": 20,
+                "p2_health": 20,
+                "p1_deck": 40,
+                "p2_deck": 40,
+                "turn_no": 1,
+            }
+
+    env = _OverwideLegalFastEnv()
+    slot = _FastRolloutSlot(
+        env=env,  # type: ignore[arg-type]
+        state={
+            "obs_vec": np.zeros(8, dtype=np.float64),
+            "legal_count": 999,
+            "acting_player_id": 1,
+            "p1_health": 20,
+            "p2_health": 20,
+            "p1_deck": 40,
+            "p2_deck": 40,
+            "turn_no": 1,
+        },
+        p1_rng=np.random.default_rng(0),
+        p2_rng=np.random.default_rng(1),
+    )
+    policy = _mock_policy()
+
+    _batched_fast_rollout_step([slot], policy, policy, warmup=True, max_steps=10)
+
+    assert env.actions
+    assert 0 <= env.actions[0] < policy.n_actions
+
+
 def test_run_parallel_batched_fast_episodes_respects_rollout_mode(monkeypatch) -> None:
     calls: list[str] = []
 

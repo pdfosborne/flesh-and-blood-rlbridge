@@ -14,8 +14,8 @@ from flesh_and_blood_rlbridge.player_observation import (
 )
 
 
-def test_schema_version_is_three() -> None:
-    assert PLAYER_OBS_SCHEMA_VERSION == 3
+def test_schema_version_is_four() -> None:
+    assert PLAYER_OBS_SCHEMA_VERSION == 4
 
 
 def test_observation_dim_is_818() -> None:

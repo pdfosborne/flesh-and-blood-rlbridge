@@ -45,7 +45,7 @@ _TORCH_DTYPE = torch.float32
 from flesh_and_blood_rlbridge.card_text import TEXT_EMBED_VERSION
 
 ARCHITECTURE = _AttentionPolicyValueV2.ARCHITECTURE
-UNIFIED_AGENT_WEIGHT_VERSION = 3
+UNIFIED_AGENT_WEIGHT_VERSION = 4
 _LEGACY_ARCHITECTURES = frozenset({"mlp", "", "attention_v1"})
 
 

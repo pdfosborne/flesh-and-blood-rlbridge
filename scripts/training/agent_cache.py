@@ -281,6 +281,12 @@ class AgentCacheStore:
                 f"Unified agent obs_dim mismatch at {path}: "
                 f"loaded={agent.obs_dim}, meta={cached}, expected={obs_dim}"
             )
+        if agent.n_actions != n_actions:
+            cached = int(meta.get("n_actions", agent.n_actions))
+            raise RuntimeError(
+                f"Unified agent n_actions mismatch at {path}: "
+                f"loaded={agent.n_actions}, meta={cached}, expected={n_actions}"
+            )
         agent.n_actions = n_actions
         agent._mask_actions = mask_actions
         return agent
@@ -319,6 +325,10 @@ class AgentCacheStore:
             if int(meta.get("obs_schema_version", -1)) not in (-1, self.obs_schema_version):
                 agent = None
             elif int(meta.get("obs_dim", agent.obs_dim)) not in (0, obs_dim):
+                agent = None
+            elif int(meta.get("n_actions", agent.n_actions)) not in (0, n_actions):
+                agent = None
+            elif agent.n_actions != n_actions:
                 agent = None
         if agent is not None:
             agent.n_actions = n_actions

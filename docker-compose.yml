@@ -29,6 +29,9 @@ services:
         if [ -d /fab-bridge-stubs/rl-bridge/APIs ]; then
           cp -f /fab-bridge-stubs/rl-bridge/APIs/*.php /var/www/html/game/APIs/
         fi
+        if [ -d /fab-bridge-stubs/rl-bridge/Libraries ]; then
+          cp -f /fab-bridge-stubs/rl-bridge/Libraries/*.php /var/www/html/game/Libraries/
+        fi
         if [ -d /fab-bridge-stubs/rl-bridge ]; then
           for f in /fab-bridge-stubs/rl-bridge/*.php; do
             if [ -f "$$f" ]; then

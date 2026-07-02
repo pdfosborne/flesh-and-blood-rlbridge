@@ -120,15 +120,22 @@ def run_batch_logic_vs_logic_baselines(
             eval_seed = (
                 (seed + index * 10_000) if seed is not None else None
             )
-            results[matchup_key] = run_matchup_logic_vs_logic_baseline(
-                matchup,
-                out_dir=out_dir,
-                base_url=base_url,
-                game_format=game_format,
-                max_steps=max_steps,
-                episodes=eval_eps,
-                seed=eval_seed,
-            )
+            try:
+                results[matchup_key] = run_matchup_logic_vs_logic_baseline(
+                    matchup,
+                    out_dir=out_dir,
+                    base_url=base_url,
+                    game_format=game_format,
+                    max_steps=max_steps,
+                    episodes=eval_eps,
+                    seed=eval_seed,
+                )
+            except Exception as exc:
+                print(
+                    f"  Logic win% vs logic baseline: skipped matchup "
+                    f"'{matchup.name}' due to error: {exc!r}",
+                    flush=True,
+                )
         return results
 
     submit_checkpoint_eval(_run_batch, label="logic win% vs logic baselines", run_dir=out_dir)

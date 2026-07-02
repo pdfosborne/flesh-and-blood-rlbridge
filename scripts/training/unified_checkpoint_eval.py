@@ -270,25 +270,36 @@ class UnifiedCheckpointCoordinator:
             seed=alloc_seed,
         )
         per_matchup: dict[str, dict[str, Any]] = {}
+        failed_matchups: list[dict[str, Any]] = []
         matchups_total = len(keys)
         total_self_play_games = sum(schedule_counts.values())
 
-        try:
-            for index, (matchup_key, matchup) in enumerate(self.matchups.items()):
-                eval_eps = schedule_counts.get(matchup_key, 0)
-                if eval_eps <= 0:
-                    continue
-                eval_seed = (
-                    (self.seed + episodes_completed + index * 10_000)
-                    if self.seed is not None
-                    else None
-                )
-                live_progress_extra = {
-                    "matchup": matchup.name,
-                    "matchup_dir": matchup_key,
-                    "merged_eval_index": index + 1,
-                    "matchups_total": matchups_total,
-                }
+        for index, (matchup_key, matchup) in enumerate(self.matchups.items()):
+            eval_eps = schedule_counts.get(matchup_key, 0)
+            if eval_eps <= 0:
+                continue
+            eval_seed = (
+                (self.seed + episodes_completed + index * 10_000)
+                if self.seed is not None
+                else None
+            )
+            live_progress_extra = {
+                "matchup": matchup.name,
+                "matchup_dir": matchup_key,
+                "merged_eval_index": index + 1,
+                "matchups_total": matchups_total,
+            }
+            record: dict[str, Any] = {
+                "matchup": matchup.name,
+                "matchup_dir": _resolve_matchup_subdir(self.out_dir, matchup),
+                "episodes_completed": episodes_completed,
+                "target_episodes": self.n_episodes,
+                "eval_episodes": eval_eps,
+                "eval_mode": "self_play",
+            }
+            stage_errors: list[str] = []
+
+            try:
                 metrics = _evaluate_p1_vs_fixed_opponent(
                     matchup,
                     eval_p1,
@@ -304,16 +315,17 @@ class UnifiedCheckpointCoordinator:
                     live_progress_extra=live_progress_extra,
                     backend_pool=self.eval_backend_pool,
                 )
-                record = {
-                    "matchup": matchup.name,
-                    "matchup_dir": _resolve_matchup_subdir(self.out_dir, matchup),
-                    "episodes_completed": episodes_completed,
-                    "target_episodes": self.n_episodes,
-                    "eval_episodes": eval_eps,
-                    "eval_mode": "self_play",
-                    **metrics,
-                }
-                if self.eval_agent_vs_logic and eval_eps > 0:
+                record.update(metrics)
+            except Exception as exc:
+                stage_errors.append(f"self_play: {exc!r}")
+                print(
+                    f"  Merged checkpoint eval: self-play failed for matchup "
+                    f"'{matchup.name}': {exc!r}",
+                    flush=True,
+                )
+
+            if self.eval_agent_vs_logic and eval_eps > 0:
+                try:
                     vs_logic = evaluate_agent_vs_logic_both_seats(
                         matchup,
                         eval_p1,
@@ -331,22 +343,39 @@ class UnifiedCheckpointCoordinator:
                         backend_pool=self.eval_backend_pool,
                     )
                     record["vs_logic"] = vs_logic
-                if self.eval_logic_vs_logic:
+                except Exception as exc:
+                    stage_errors.append(f"vs_logic: {exc!r}")
+                    print(
+                        f"  Merged checkpoint eval: vs-logic failed for matchup "
+                        f"'{matchup.name}': {exc!r}",
+                        flush=True,
+                    )
+
+            if self.eval_logic_vs_logic:
+                try:
                     baseline = load_logic_vs_logic_baseline(self.out_dir, matchup)
                     if baseline is not None:
                         record["logic_vs_logic"] = baseline
-                per_matchup[matchup_key] = record
-                self._write_per_matchup_artifacts(matchup, episodes_completed, record)
-        except Exception as exc:
-            self._append_failed_merged_record(
-                episodes_completed=episodes_completed,
-                bucket_kind=bucket_kind,
-                error=str(exc),
-                per_matchup=per_matchup,
-                eval_episodes_total=self.checkpoint_eval_episodes,
-            )
-            maybe_refresh_unified_dashboard(self.out_dir, min_interval_seconds=0.0)
-            raise
+                except Exception as exc:
+                    stage_errors.append(f"logic_vs_logic: {exc!r}")
+                    print(
+                        f"  Merged checkpoint eval: logic-vs-logic baseline load failed "
+                        f"for matchup '{matchup.name}': {exc!r}",
+                        flush=True,
+                    )
+
+            if stage_errors:
+                record["errors"] = stage_errors
+            per_matchup[matchup_key] = record
+            self._write_per_matchup_artifacts(matchup, episodes_completed, record)
+            if stage_errors:
+                failed_matchups.append(
+                    {
+                        "matchup": matchup.name,
+                        "matchup_dir": matchup_key,
+                        "error": "; ".join(stage_errors),
+                    }
+                )
 
         aggregate = _build_aggregate(per_matchup)
         merged_record = {
@@ -360,6 +389,9 @@ class UnifiedCheckpointCoordinator:
             "aggregate": aggregate,
             "per_matchup": per_matchup,
         }
+        if failed_matchups:
+            merged_record["status"] = "partial_error"
+            merged_record["failed_matchups"] = failed_matchups
         self._append_merged_record(merged_record)
         wr = aggregate.get("self_play_win_rate_mean")
         if wr is not None:
@@ -367,12 +399,21 @@ class UnifiedCheckpointCoordinator:
                 self.first_win_rate = float(wr)
             self.final_win_rate = float(wr)
         self._write_merged_scope()
-        print(
-            f"  Merged checkpoint eval @ ep {episodes_completed} ({bucket_kind}): "
-            f"self-play mean={float(wr or 0.0):.1%} "
-            f"({len(per_matchup)} matchup(s), "
-            f"{total_self_play_games} self-play game(s) total)"
-        )
+        if failed_matchups:
+            print(
+                f"  Merged checkpoint eval @ ep {episodes_completed} ({bucket_kind}): "
+                f"self-play mean={float(wr or 0.0):.1%} "
+                f"({len(per_matchup)} matchup(s) ok, {len(failed_matchups)} failed, "
+                f"{total_self_play_games} self-play game(s) total)",
+                flush=True,
+            )
+        else:
+            print(
+                f"  Merged checkpoint eval @ ep {episodes_completed} ({bucket_kind}): "
+                f"self-play mean={float(wr or 0.0):.1%} "
+                f"({len(per_matchup)} matchup(s), "
+                f"{total_self_play_games} self-play game(s) total)"
+            )
         maybe_refresh_unified_dashboard(self.out_dir, min_interval_seconds=0.0)
 
     def _write_per_matchup_artifacts(

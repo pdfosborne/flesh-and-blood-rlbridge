@@ -21,8 +21,8 @@ from .card_vocab import (
 )
 from .deck_context import EpisodeContext, hero_from_equipment
 
-PLAYER_OBS_SCHEMA_VERSION = 3
-ACTION_CAPACITY = 128
+PLAYER_OBS_SCHEMA_VERSION = 4
+ACTION_CAPACITY = 256
 
 DECK_SLOTS = 80
 HAND_SLOTS = 8
@@ -628,7 +628,7 @@ def player_observation_vector(
     )
 
     resources_avail, resources_required = _parse_pitch_resources(raw, phase_str)
-    legal_count = len(legal_actions or [])
+    legal_count = min(len(legal_actions or []), ACTION_CAPACITY)
 
     if episode_context is not None and not episode_context.self_hero_id:
         episode_context = EpisodeContext(

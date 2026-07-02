@@ -102,6 +102,9 @@ include = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "talishar: integration tests that require a live Talishar server",
+]
 pythonpath = [
     "scripts",
     "scripts/training",

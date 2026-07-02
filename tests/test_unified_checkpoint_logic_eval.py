@@ -81,6 +81,82 @@ def test_evaluate_logic_vs_logic(monkeypatch) -> None:
     assert result["p2_policy"] == "logic"
 
 
+class _CrashOnceFastEnv:
+    """Fast-training env stub whose first episode dies mid-step like a segfaulted shard."""
+
+    def __init__(self) -> None:
+        self.supports_fast_training = True
+        self._episode = -1
+
+    def fast_reset(self, *, seed=None, starting_player_id: int = 1) -> dict:
+        del seed
+        self._episode += 1
+        self._crashed_this_episode = False
+        return self._state(acting=starting_player_id, terminated=False, truncated=False)
+
+    def fast_step_index(self, action: int) -> dict:
+        del action
+        if self._episode == 0 and not self._crashed_this_episode:
+            self._crashed_this_episode = True
+            raise ConnectionError(
+                "('Connection aborted.', RemoteDisconnected("
+                "'Remote end closed connection without response'))"
+            )
+        return self._state(
+            acting=1,
+            terminated=True,
+            truncated=False,
+            p1_health=20,
+            p2_health=0,
+            winner=1,
+        )
+
+    @staticmethod
+    def _state(
+        *,
+        acting: int,
+        terminated: bool,
+        truncated: bool,
+        p1_health: int = 20,
+        p2_health: int = 20,
+        winner: int = -1,
+    ) -> dict:
+        return {
+            "obs_vec": np.zeros(PLAYER_OBS_DIM, dtype=np.float64),
+            "legal_count": 2,
+            "acting_player_id": acting,
+            "terminated": terminated,
+            "truncated": truncated,
+            "p1_health": p1_health,
+            "p2_health": p2_health,
+            "winner": winner,
+        }
+
+
+def test_fast_policy_matchup_isolates_mid_episode_shard_crash() -> None:
+    """A segfault-style connection error mid-episode must cost one episode, not the batch."""
+    from train_play import _evaluate_fast_policy_matchup  # noqa: PLC0415
+
+    env = _CrashOnceFastEnv()
+    policy = PPOAgent(n_actions=8, obs_dim=PLAYER_OBS_DIM)
+    policy._init_nets(PLAYER_OBS_DIM)
+
+    metrics = _evaluate_fast_policy_matchup(
+        env,
+        policy,
+        p2_policy=policy,
+        max_steps=10,
+        episodes=2,
+        seed=0,
+        eval_label="test",
+    )
+
+    assert metrics is not None
+    assert metrics["errors"] == 1
+    assert metrics["episodes"] == 2
+    assert metrics["p1_wins"] == 1
+
+
 def test_evaluate_agent_vs_logic_both_seats(monkeypatch) -> None:
     from train_play import evaluate_agent_vs_logic_both_seats  # noqa: PLC0415
 
